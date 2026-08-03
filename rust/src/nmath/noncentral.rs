@@ -688,9 +688,9 @@ fn pnbeta_raw(x: f64, o_x: f64, a: f64, b: f64, ncp: f64) -> f64 {
     let a0 = a + x0;
     let l_beta = lbeta_scalar(a0, b);
     let (mut temp, _tmp_c, _ierr) = bratio(a0, b, x, o_x, false);
-    let mut gx = (a0 * x.ln() + b * (if x < 0.5 { (-x).ln_1p() } else { o_x.ln() }) - l_beta
-        - a0.ln())
-    .exp();
+    let mut gx =
+        (a0 * x.ln() + b * (if x < 0.5 { (-x).ln_1p() } else { o_x.ln() }) - l_beta - a0.ln())
+            .exp();
     let mut q = if a0 > a {
         (-c + x0 * c.ln() - lgammafn(x0 + 1.0)).exp()
     } else {
@@ -730,7 +730,14 @@ fn pnbeta2(x: f64, o_x: f64, a: f64, b: f64, ncp: f64, lower_tail: bool, log_p: 
     }
 }
 
-pub(crate) fn pnbeta_scalar(x: f64, a: f64, b: f64, ncp: f64, lower_tail: bool, log_p: bool) -> f64 {
+pub(crate) fn pnbeta_scalar(
+    x: f64,
+    a: f64,
+    b: f64,
+    ncp: f64,
+    lower_tail: bool,
+    log_p: bool,
+) -> f64 {
     if x.is_nan() || a.is_nan() || b.is_nan() || ncp.is_nan() {
         return x + a + b + ncp;
     }
@@ -809,7 +816,14 @@ pub(crate) fn dnbeta_scalar(x: f64, a: f64, b: f64, ncp: f64, give_log: bool) ->
     }
 }
 
-pub(crate) fn qnbeta_scalar(p: f64, a: f64, b: f64, ncp: f64, lower_tail: bool, log_p: bool) -> f64 {
+pub(crate) fn qnbeta_scalar(
+    p: f64,
+    a: f64,
+    b: f64,
+    ncp: f64,
+    lower_tail: bool,
+    log_p: bool,
+) -> f64 {
     let accu = 1e-15;
     let eps = 1e-14;
     if p.is_nan() || a.is_nan() || b.is_nan() || ncp.is_nan() {
@@ -872,7 +886,14 @@ pub(crate) fn qnbeta_scalar(p: f64, a: f64, b: f64, ncp: f64, lower_tail: bool, 
 }
 
 // === pnf / dnf / qnf =========================================================
-pub(crate) fn pnf_scalar(x: f64, df1: f64, df2: f64, ncp: f64, lower_tail: bool, log_p: bool) -> f64 {
+pub(crate) fn pnf_scalar(
+    x: f64,
+    df1: f64,
+    df2: f64,
+    ncp: f64,
+    lower_tail: bool,
+    log_p: bool,
+) -> f64 {
     if x.is_nan() || df1.is_nan() || df2.is_nan() || ncp.is_nan() {
         return x + df2 + df1 + ncp;
     }
@@ -946,7 +967,14 @@ pub(crate) fn dnf_scalar(x: f64, df1: f64, df2: f64, ncp: f64, give_log: bool) -
     }
 }
 
-pub(crate) fn qnf_scalar(p: f64, df1: f64, df2: f64, ncp: f64, lower_tail: bool, log_p: bool) -> f64 {
+pub(crate) fn qnf_scalar(
+    p: f64,
+    df1: f64,
+    df2: f64,
+    ncp: f64,
+    lower_tail: bool,
+    log_p: bool,
+) -> f64 {
     if p.is_nan() || df1.is_nan() || df2.is_nan() || ncp.is_nan() {
         return p + df1 + df2 + ncp;
     }

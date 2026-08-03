@@ -12,6 +12,7 @@ therefore check that the RNG draws match R's ``sample.int`` stream and that the
 achieved ``tot.withinss`` matches (tolerance), not that a near-tied partition is
 reproduced. Same long-double-vs-double reason makes ``totss`` tolerance-bound.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -45,11 +46,13 @@ def _assert_centers(got, exp):
 # Three well-separated blobs; explicit centres make every run deterministic.
 def _blobs():
     rng = np.random.default_rng(2026)
-    return np.vstack([
-        rng.normal(0, 0.5, (8, 2)),
-        rng.normal(5, 0.5, (8, 2)),
-        rng.normal([0, 5], 0.5, (8, 2)),
-    ])
+    return np.vstack(
+        [
+            rng.normal(0, 0.5, (8, 2)),
+            rng.normal(5, 0.5, (8, 2)),
+            rng.normal([0, 5], 0.5, (8, 2)),
+        ]
+    )
 
 
 _CENTERS = np.array([[0.2, 0.1], [4.8, 5.1], [0.1, 4.9]])
@@ -68,8 +71,12 @@ def _r_kmeans_explicit(x, centers, algo):
         'cat(sprintf("%.17g",z$withinss),sep=" ");cat("\\n##\\n");cat(z$iter)'
     )
     out = subprocess.run(
-        ["Rscript", "-e", rexpr], stdin=subprocess.DEVNULL, check=True,
-        capture_output=True, text=True, timeout=120,
+        ["Rscript", "-e", rexpr],
+        stdin=subprocess.DEVNULL,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
     ).stdout
     cl, ce, ws, it = out.split("\n##\n")
     return (
@@ -120,16 +127,23 @@ def test_totss_is_sum_of_within_plus_between():
 # nstart RNG seam: draws + achieved cost match R
 # --------------------------------------------------------------------------- #
 @pytest.mark.skipif(not have_rscript(), reason="Rscript not on PATH (install R)")
-@pytest.mark.parametrize("algo,seed,k,nstart", [
-    ("Hartigan-Wong", 42, 3, 5),
-    ("Lloyd", 1, 4, 3),
-    ("MacQueen", 99, 3, 4),
-])
+@pytest.mark.parametrize(
+    "algo,seed,k,nstart",
+    [
+        ("Hartigan-Wong", 42, 3, 5),
+        ("Lloyd", 1, 4, 3),
+        ("MacQueen", 99, 3, 4),
+    ],
+)
 def test_kmeans_nstart_cost_vs_R(algo, seed, k, nstart):
     rng = np.random.default_rng(7)
-    x = np.vstack([rng.normal(0, 1, (15, 3)),
-                   rng.normal(4, 1, (15, 3)),
-                   rng.normal(-3, 1, (15, 3))])
+    x = np.vstack(
+        [
+            rng.normal(0, 1, (15, 3)),
+            rng.normal(4, 1, (15, 3)),
+            rng.normal(-3, 1, (15, 3)),
+        ]
+    )
     n, p = x.shape
     set_seed(seed)
     z = kmeans(x, k, nstart=nstart, algorithm=algo)
@@ -140,8 +154,12 @@ def test_kmeans_nstart_cost_vs_R(algo, seed, k, nstart):
         'cat(sprintf("%.17g",z$tot.withinss))'
     )
     out = subprocess.run(
-        ["Rscript", "-e", rexpr], stdin=subprocess.DEVNULL, check=True,
-        capture_output=True, text=True, timeout=120,
+        ["Rscript", "-e", rexpr],
+        stdin=subprocess.DEVNULL,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
     ).stdout
     # achieved within-cluster cost matches R (long-double vs double sum tolerance)
     np.testing.assert_allclose(z.tot_withinss, float(out), rtol=1e-12)
@@ -151,12 +169,19 @@ def test_kmeans_nstart_cost_vs_R(algo, seed, k, nstart):
 def test_kmeans_nstart_draws_match_R():
     # the RNG seam: hea's sample_int must reproduce R's sample.int(mm, k) stream.
     from hea.R.distributions import _r_rng
+
     set_seed(99)
     draws = np.concatenate([_r_rng().sample_int(45, 3) for _ in range(4)]) + 1
     out = subprocess.run(
-        ["Rscript", "-e",
-         "set.seed(99);cat(as.vector(replicate(4, sample.int(45,3))),sep=' ')"],
-        stdin=subprocess.DEVNULL, check=True, capture_output=True, text=True,
+        [
+            "Rscript",
+            "-e",
+            "set.seed(99);cat(as.vector(replicate(4, sample.int(45,3))),sep=' ')",
+        ],
+        stdin=subprocess.DEVNULL,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout
     r_draws = np.array([int(v) for v in out.split()])
     assert np.array_equal(draws, r_draws)
@@ -228,12 +253,14 @@ _HAS_RS_KMNS = hasattr(_rs_mod, "kmns")
 
 def _hw_fixture():
     rng = np.random.default_rng(2026)
-    x = np.vstack([
-        rng.normal(0, 0.5, (15, 4)),
-        rng.normal(5, 0.5, (15, 4)),
-        rng.normal([0, 5, 0, 5], 0.5, (15, 4)),
-        rng.normal(-4, 0.6, (15, 4)),
-    ])
+    x = np.vstack(
+        [
+            rng.normal(0, 0.5, (15, 4)),
+            rng.normal(5, 0.5, (15, 4)),
+            rng.normal([0, 5, 0, 5], 0.5, (15, 4)),
+            rng.normal(-4, 0.6, (15, 4)),
+        ]
+    )
     centers = np.array([x[0], x[16], x[31], x[46]])
     return x, centers, 4
 
@@ -242,16 +269,18 @@ def _hw_fixture():
 @pytest.mark.parametrize("iter_max", [10, 50])
 def test_rs_kmns_matches_python(iter_max):
     from hea.R.clustering import _kmns
+
     x, centers, k = _hw_fixture()
     py = _kmns(x, centers, k, iter_max)
     ifault, cluster, cen_flat, nc, wss, it = _rs_mod.kmns(
-        np.ascontiguousarray(x), np.ascontiguousarray(centers), k, iter_max)
+        np.ascontiguousarray(x), np.ascontiguousarray(centers), k, iter_max
+    )
     assert int(ifault) == py["ifault"]
     assert np.array_equal(np.asarray(cluster), py["cluster"])
     assert np.array_equal(np.asarray(nc), py["nc"])
     assert int(it) == py["iter"]
     cen = np.asarray(cen_flat, dtype=float).reshape(k, x.shape[1])
-    assert _bits_equal(cen, py["centers"])      # 0-ulp (pure arithmetic)
+    assert _bits_equal(cen, py["centers"])  # 0-ulp (pure arithmetic)
     assert _bits_equal(np.asarray(wss), py["wss"])
 
 
@@ -266,19 +295,24 @@ def test_rs_kmns_ifault3_k_out_of_range():
 
 
 @pytest.mark.skipif(not hasattr(_rs_mod, "lloyd"), reason="hea._rs.lloyd not built")
-@pytest.mark.parametrize("algo,rs_name,py_name", [
-    ("Lloyd", "lloyd", "_kmeans_lloyd"),
-    ("MacQueen", "macqueen", "_kmeans_macqueen"),
-])
+@pytest.mark.parametrize(
+    "algo,rs_name,py_name",
+    [
+        ("Lloyd", "lloyd", "_kmeans_lloyd"),
+        ("MacQueen", "macqueen", "_kmeans_macqueen"),
+    ],
+)
 def test_rs_lloyd_macqueen_matches_python(algo, rs_name, py_name):
     # A/B: Rust Lloyd/MacQueen vs the pure-Python kernels. Pure IEEE arithmetic
     # (no transcendentals) -> 0-ulp on every platform.
     import hea.R.clustering as C
+
     x, centers, k = _hw_fixture()
     py_kernel = getattr(C, py_name)
     cl, cen, nc, wss, it = py_kernel(x, centers, k, 50)
     r_cl, r_cen, r_nc, r_wss, r_it = getattr(_rs_mod, rs_name)(
-        np.ascontiguousarray(x), np.ascontiguousarray(centers), k, 50)
+        np.ascontiguousarray(x), np.ascontiguousarray(centers), k, 50
+    )
     assert np.array_equal(np.asarray(r_cl), cl)
     assert np.array_equal(np.asarray(r_nc), nc)
     assert int(r_it) == it

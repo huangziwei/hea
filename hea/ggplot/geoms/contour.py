@@ -50,12 +50,14 @@ class GeomContour(Geom):
     # Mirrors ggplot2's ``GeomContour$default_aes`` (R/geom-contour.R):
     # ``colour = accent = "#3366FF"`` — the same blue ``geom_smooth``
     # uses, NOT pure black.
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "#3366FF",
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "#3366FF",
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+        }
+    )
     required_aes: tuple = ("x", "y", "z")
     key_glyph: str = "path"
 
@@ -69,7 +71,9 @@ class GeomContour(Geom):
         bins = data["bins"][0] if "bins" in data.columns else None
         n = bins if isinstance(bins, int) else 10
         ax.contour(
-            X, Y, Z,
+            X,
+            Y,
+            Z,
             levels=n,
             colors=r_color(_first(data, "colour", "black") or "black"),
             linewidths=float(_first(data, "size", 0.5) or 0.5) * _PT_PER_MM,
@@ -80,10 +84,12 @@ class GeomContour(Geom):
 
 @dataclass
 class GeomContourFilled(Geom):
-    default_aes: dict = field(default_factory=lambda: {
-        "fill": None,  # auto via colormap when unset
-        "alpha": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "fill": None,  # auto via colormap when unset
+            "alpha": 1.0,
+        }
+    )
     required_aes: tuple = ("x", "y", "z")
     key_glyph: str = "polygon"
 
@@ -94,7 +100,9 @@ class GeomContourFilled(Geom):
         bins = data["bins"][0] if "bins" in data.columns else None
         n = bins if isinstance(bins, int) else 10
         ax.contourf(
-            X, Y, Z,
+            X,
+            Y,
+            Z,
             levels=n,
             alpha=float(_first(data, "alpha", 1.0) or 1.0),
         )
@@ -107,8 +115,9 @@ def _first(df, col, default):
     return default if val is None else val
 
 
-def geom_contour(mapping=None, data=None, *, stat="identity",
-                 position="identity", bins=10, **kwargs):
+def geom_contour(
+    mapping=None, data=None, *, stat="identity", position="identity", bins=10, **kwargs
+):
     """Iso-lines on a regular ``(x, y)`` grid of ``z`` values.
 
     Pass ``bins=`` for the number of contour levels (default 10).
@@ -130,8 +139,9 @@ def geom_contour(mapping=None, data=None, *, stat="identity",
     )
 
 
-def geom_contour_filled(mapping=None, data=None, *, stat="identity",
-                        position="identity", bins=10, **kwargs):
+def geom_contour_filled(
+    mapping=None, data=None, *, stat="identity", position="identity", bins=10, **kwargs
+):
     """Filled bands between successive iso-levels on a regular ``(x, y)``
     grid of ``z`` values.
     """

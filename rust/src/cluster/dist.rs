@@ -124,10 +124,12 @@ fn r_canberra(x: &[f64], nc: usize, i1: usize, i2: usize) -> f64 {
             if sum > DBL_MIN || diff > DBL_MIN {
                 let mut dev = diff / sum;
                 // accept if dev is finite, OR the Inf/Inf limit (diff==sum) -> 1
-                if !dev.is_nan() || (!diff.is_finite() && diff == sum && {
-                    dev = 1.0;
-                    true
-                }) {
+                if !dev.is_nan()
+                    || (!diff.is_finite() && diff == sum && {
+                        dev = 1.0;
+                        true
+                    })
+                {
                     dist += dev;
                     count += 1;
                 }
@@ -195,7 +197,11 @@ fn r_pow_nonneg(x: f64, y: f64) -> f64 {
         return if x <= 11.0 { x * x * x } else { x.powf(3.0) };
     }
     if y == 4.0 {
-        return if x <= 11.0 { x * x * x * x } else { x.powf(4.0) };
+        return if x <= 11.0 {
+            x * x * x * x
+        } else {
+            x.powf(4.0)
+        };
     }
     x.powf(y)
 }

@@ -11,17 +11,32 @@ from .bar import GeomBar
 from .path import GeomPath
 
 
-def geom_histogram(mapping=None, data=None, *, stat="bin", bins=None, binwidth=None,
-                   boundary=None, center=None, closed="right",
-                   position="stack", **kwargs):
+def geom_histogram(
+    mapping=None,
+    data=None,
+    *,
+    stat="bin",
+    bins=None,
+    binwidth=None,
+    boundary=None,
+    center=None,
+    closed="right",
+    position="stack",
+    **kwargs,
+):
     from ..layer import Layer
     from ..positions import resolve_position
     from ..stats import resolve_stat
     from ..stats.bin import StatBin
 
     if stat == "bin":
-        stat_obj = StatBin(bins=bins, binwidth=binwidth, boundary=boundary,
-                           center=center, closed=closed)
+        stat_obj = StatBin(
+            bins=bins,
+            binwidth=binwidth,
+            boundary=boundary,
+            center=center,
+            closed=closed,
+        )
     elif isinstance(stat, str):
         stat_obj = resolve_stat(stat)
     else:
@@ -40,9 +55,20 @@ def geom_histogram(mapping=None, data=None, *, stat="bin", bins=None, binwidth=N
     )
 
 
-def geom_freqpoly(mapping=None, data=None, *, stat="bin", bins=None, binwidth=None,
-                  boundary=None, center=None, closed="right", pad=True,
-                  position="identity", **kwargs):
+def geom_freqpoly(
+    mapping=None,
+    data=None,
+    *,
+    stat="bin",
+    bins=None,
+    binwidth=None,
+    boundary=None,
+    center=None,
+    closed="right",
+    pad=True,
+    position="identity",
+    **kwargs,
+):
     """``geom_freqpoly()`` — frequency polygon.
 
     Same statistic as :func:`geom_histogram` (:class:`StatBin`) but
@@ -70,8 +96,14 @@ def geom_freqpoly(mapping=None, data=None, *, stat="bin", bins=None, binwidth=No
     from ..stats.bin import StatBin
 
     if stat == "bin":
-        stat_obj = StatBin(bins=bins, binwidth=binwidth, boundary=boundary,
-                           center=center, closed=closed, pad=pad)
+        stat_obj = StatBin(
+            bins=bins,
+            binwidth=binwidth,
+            boundary=boundary,
+            center=center,
+            closed=closed,
+            pad=pad,
+        )
     elif isinstance(stat, str):
         stat_obj = resolve_stat(stat)
     else:

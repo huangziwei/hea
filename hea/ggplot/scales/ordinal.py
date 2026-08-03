@@ -51,8 +51,7 @@ class ScaleOrdinal(Scale):
             if data.dtype.is_numeric() and self.levels:
                 return
             if data.dtype in (pl.Categorical, pl.Enum):
-                new_levels = [str(v)
-                              for v in data.cat.get_categories().to_list()]
+                new_levels = [str(v) for v in data.cat.get_categories().to_list()]
             else:
                 new_levels = sorted(
                     str(v) for v in data.drop_nulls().unique().to_list()
@@ -169,19 +168,23 @@ class ScaleOrdinal(Scale):
         return (0.6, 0.6)
 
 
-def scale_x_ordinal(*, name=_NAME_MISSING, breaks="default", labels="default",
-                    limits=None, expand=None):
-    kwargs = dict(aesthetics=("x",), name=name, breaks=breaks,
-                  labels=labels, limits=limits)
+def scale_x_ordinal(
+    *, name=_NAME_MISSING, breaks="default", labels="default", limits=None, expand=None
+):
+    kwargs = dict(
+        aesthetics=("x",), name=name, breaks=breaks, labels=labels, limits=limits
+    )
     if expand is not None:
         kwargs["expand"] = expand
     return ScaleOrdinal(**kwargs)
 
 
-def scale_y_ordinal(*, name=_NAME_MISSING, breaks="default", labels="default",
-                    limits=None, expand=None):
-    kwargs = dict(aesthetics=("y",), name=name, breaks=breaks,
-                  labels=labels, limits=limits)
+def scale_y_ordinal(
+    *, name=_NAME_MISSING, breaks="default", labels="default", limits=None, expand=None
+):
+    kwargs = dict(
+        aesthetics=("y",), name=name, breaks=breaks, labels=labels, limits=limits
+    )
     if expand is not None:
         kwargs["expand"] = expand
     return ScaleOrdinal(**kwargs)

@@ -61,6 +61,7 @@ This package is the result of splitting the legacy ``hea/tidy.py`` (one
   (``_resolve_lazy_factors``, ``_kwargs_to_exprs``, name cleaning,
   :class:`_TidyRange` / ``cols_between``).
 """
+
 from __future__ import annotations
 
 # Order matters: _shared and basics are foundational; dataframe pulls them
@@ -268,19 +269,49 @@ del _name
 
 __all__ = [
     # core classes
-    "DataFrame", "GroupBy", "LazyFrame", "Series", "Summary",
+    "DataFrame",
+    "GroupBy",
+    "LazyFrame",
+    "Series",
+    "Summary",
     # dplyr verbs / mutate helpers
-    "case_when", "desc", "drop", "if_else", "n", "n_distinct", "tbl",
+    "case_when",
+    "desc",
+    "drop",
+    "if_else",
+    "n",
+    "n_distinct",
+    "tbl",
     # dplyr rank family
-    "row_number", "min_rank", "dense_rank", "percent_rank", "cume_dist", "ntile",
+    "row_number",
+    "min_rank",
+    "dense_rank",
+    "percent_rank",
+    "cume_dist",
+    "ntile",
     # dplyr window / numeric helpers
-    "lag", "lead", "between", "na_if", "near",
+    "lag",
+    "lead",
+    "between",
+    "na_if",
+    "near",
     # dplyr positional pickers (shadow polars pl.first / pl.last / pl.nth)
-    "first", "last", "nth",
+    "first",
+    "last",
+    "nth",
     # dplyr cumulative + run-length
-    "cummean", "cumall", "cumany", "consecutive_id",
+    "cummean",
+    "cumall",
+    "cumany",
+    "consecutive_id",
     # dplyr two-table verb helpers (chapter 19)
-    "join_by", "closest", "overlaps", "within",
+    "join_by",
+    "closest",
+    "overlaps",
+    "within",
     # readr / stringr / tibble
-    "parse_double", "parse_number", "str_wrap", "glimpse",
+    "parse_double",
+    "parse_number",
+    "str_wrap",
+    "glimpse",
 ]

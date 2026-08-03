@@ -20,13 +20,15 @@ class GeomViolin(Geom):
     # Mirrors ggplot2's ``GeomViolin$default_aes`` (R/geom-violin.R):
     # ``colour = col_mix(ink, paper, 0.2)`` ≈ ``"grey20"`` for the violin
     # outline (NOT pure black).
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "grey20",
-        "fill": "white",
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "grey20",
+            "fill": "white",
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+        }
+    )
     required_aes: tuple = ("x", "y", "violinwidth")
     key_glyph: str = "polygon"
 
@@ -60,8 +62,9 @@ class GeomViolin(Geom):
         edge = r_color(_first(sub, "colour", "black"))
         alpha = float(_first(sub, "alpha", 1.0))
 
-        ax.fill(poly_x, poly_y, facecolor=fill, edgecolor=edge,
-                alpha=alpha, linewidth=0.5)
+        ax.fill(
+            poly_x, poly_y, facecolor=fill, edgecolor=edge, alpha=alpha, linewidth=0.5
+        )
 
 
 def _first(df, col, default):
@@ -71,8 +74,16 @@ def _first(df, col, default):
     return default if val is None else val
 
 
-def geom_violin(mapping=None, data=None, *, stat="ydensity", bw="nrd0", n=512,
-                position="dodge", **kwargs):
+def geom_violin(
+    mapping=None,
+    data=None,
+    *,
+    stat="ydensity",
+    bw="nrd0",
+    n=512,
+    position="dodge",
+    **kwargs,
+):
     from ..layer import Layer
     from ..positions import resolve_position
     from ..stats import resolve_stat

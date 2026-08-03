@@ -13,6 +13,7 @@ imports inside the functions that need them.
 * Column-range placeholder — :class:`_TidyRange` and the public
   :func:`cols_between` constructor.
 """
+
 from __future__ import annotations
 
 import re
@@ -85,6 +86,7 @@ def _disambiguate_clean_names(names: list[str]) -> list[str]:
 
 # ---- verb-shared helpers --------------------------------------------
 
+
 def _split_arrange(cols: tuple) -> tuple[list[str], list[bool]]:
     """Split ``arrange`` args into (column names, descending flags)."""
     names: list[str] = []
@@ -112,7 +114,9 @@ def _resolve_anchor(
     dplyr's ``.before = 1`` semantics — "before the first column").
     """
     if isinstance(anchor, bool):  # bool is an int subclass; reject explicitly
-        raise TypeError(f"{verb}(): _before/_after must be a column name or position, not bool.")
+        raise TypeError(
+            f"{verb}(): _before/_after must be a column name or position, not bool."
+        )
     if isinstance(anchor, int):
         n = len(ref_columns)
         if not (1 <= anchor <= n):
@@ -224,6 +228,7 @@ def _resolve_lazy_factors(
 
 
 # ---- column-range placeholder ---------------------------------------
+
 
 class _TidyRange:
     """Frame-less placeholder for dplyr's ``a:b`` column range.

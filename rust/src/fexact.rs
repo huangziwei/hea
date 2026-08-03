@@ -123,7 +123,14 @@ fn f9xact(n: i64, ntot: i64, ir: &[i64], fact: &FV) -> f64 {
 
 /// f10act — shortest path length for special tables (`irow`/`icol` 0-based).
 /// Returns `(xmin, val)`.
-fn f10act(nrow: i64, irow: &[i64], ncol: i64, icol: &[i64], mut val: f64, fact: &FV) -> (bool, f64) {
+fn f10act(
+    nrow: i64,
+    irow: &[i64],
+    ncol: i64,
+    icol: &[i64],
+    mut val: f64,
+    fact: &FV,
+) -> (bool, f64) {
     let nr = nrow as usize;
     let nc = ncol as usize;
     let mut nd = vec![0i64; nr];
@@ -540,7 +547,8 @@ impl Fexact {
                     pastp = self.stp[ipn + ikstp];
                     ifreq = self.ifrq[ipn + ikstp];
                     if k1 > 1 {
-                        obs2 = obs - self.fact[self.ico[kb + 1]] - self.fact[self.ico[kb + 2]] - ddf;
+                        obs2 =
+                            obs - self.fact[self.ico[kb + 1]] - self.fact[self.ico[kb + 2]] - ddf;
                         for i in 3..=k1 {
                             obs2 -= self.fact[self.ico[kb + i]];
                         }
@@ -550,7 +558,8 @@ impl Fexact {
                                 self.irn.0[nrb as usize..(nrb + nro2) as usize].to_vec();
                             let icol_s: Vec<i64> =
                                 self.ico.0[(kb + 1) as usize..(kb + 1 + k1) as usize].to_vec();
-                            let lpv = self.f3xact(nro2, &irow_s, k1, &icol_s, ntot, self.n2_stack)?;
+                            let lpv =
+                                self.f3xact(nro2, &irow_s, k1, &icol_s, ntot, self.n2_stack)?;
                             self.lp[itp] = lpv;
                             if self.lp[itp] > 0.0 {
                                 self.lp[itp] = 0.0;
@@ -814,8 +823,7 @@ impl Fexact {
                     nr1 = nro - 1;
                     let nrt = iro[irl];
                     let nct = ico[1];
-                    lb[1] = (((nrt + 1) as f64 * (nct + 1) as f64)
-                        / (nn + nr1 * nc1s + 1) as f64
+                    lb[1] = (((nrt + 1) as f64 * (nct + 1) as f64) / (nn + nr1 * nc1s + 1) as f64
                         - TOL) as i64
                         - 1;
                     nu[1] = ((nrt + nc1s) as f64 * (nct + nr1) as f64 / (nn + nr1 + nc1s) as f64)
@@ -849,9 +857,9 @@ impl Fexact {
                         lev += 1;
                         let nc1 = nco - lev;
                         let nct = ico[lev];
-                        lb[lev] =
-                            ((nrt + 1) as f64 * (nct + 1) as f64 / (nn1 + nr1 * nc1 + 1) as f64
-                                - TOL) as i64;
+                        lb[lev] = ((nrt + 1) as f64 * (nct + 1) as f64
+                            / (nn1 + nr1 * nc1 + 1) as f64
+                            - TOL) as i64;
                         nu[lev] = ((nrt + nc1) as f64 * (nct + nr1) as f64
                             / (nn1 + nr1 + nc1) as f64
                             - lb[lev] as f64
@@ -877,7 +885,9 @@ impl Fexact {
                         let ic2 = ico[2] - lb[2];
                         let n11 = (iro[irl + 1] + 1) * (ic1 + 1) / nn1;
                         let n12 = iro[irl + 1] - n11;
-                        v += self.fact[n11] + self.fact[n12] + self.fact[ic1 - n11]
+                        v += self.fact[n11]
+                            + self.fact[n12]
+                            + self.fact[ic1 - n11]
                             + self.fact[ic2 - n12];
                         if vmn > v {
                             vmn = v;
@@ -895,11 +905,9 @@ impl Fexact {
                             dkey = it[i] as f64 + dkey * dky;
                         }
                         if dkey > INT_MAX as f64 {
-                            return Err(
-                                "FEXACT[f3xact] hash key exceeds INT_MAX; use \
+                            return Err("FEXACT[f3xact] hash key exceeds INT_MAX; use \
                                  simulate_p_value=True"
-                                    .into(),
-                            );
+                                .into());
                         }
                         let key = dkey as i64;
                         let ipn = key % ldst + 1;
@@ -975,16 +983,28 @@ impl Fexact {
                         }
                         let mut xmin;
                         if iro[nro] <= iro[irl] + nco {
-                            let (x, v) =
-                                f10act(nro, &iro.0[irl as usize..], nco, &ico.0[1..], val, &self.fact);
+                            let (x, v) = f10act(
+                                nro,
+                                &iro.0[irl as usize..],
+                                nco,
+                                &ico.0[1..],
+                                val,
+                                &self.fact,
+                            );
                             xmin = x;
                             val = v;
                         } else {
                             xmin = false;
                         }
                         if !xmin && ico[nco] <= ico[1] + nro {
-                            let (x, v) =
-                                f10act(nco, &ico.0[1..], nro, &iro.0[irl as usize..], val, &self.fact);
+                            let (x, v) = f10act(
+                                nco,
+                                &ico.0[1..],
+                                nro,
+                                &iro.0[irl as usize..],
+                                val,
+                                &self.fact,
+                            );
                             xmin = x;
                             val = v;
                         }

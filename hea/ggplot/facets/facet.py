@@ -60,8 +60,5 @@ class Facet:
 
         Default — comma-joined facet values as a single top label
         (matches facet_wrap)."""
-        text = ", ".join(
-            f"{panel_row[v]}" for v in self.facet_vars()
-            if v in panel_row
-        )
+        text = ", ".join(f"{panel_row[v]}" for v in self.facet_vars() if v in panel_row)
         return {"top": text} if text else {}

@@ -209,8 +209,8 @@ pub fn hclust<'py>(
                     } else if iopt == 3 {
                         d[ind1] = d[ind1].max(d[ind2]);
                     } else if iopt == 4 {
-                        d[ind1] = rfma(membr[i2], d[ind1], membr[j2] * d[ind2])
-                            / (membr[i2] + membr[j2]);
+                        d[ind1] =
+                            rfma(membr[i2], d[ind1], membr[j2] * d[ind2]) / (membr[i2] + membr[j2]);
                     } else if iopt == 5 {
                         d[ind1] = (d[ind1] + d[ind2]) / 2.0;
                     } else if iopt == 6 {
@@ -264,10 +264,10 @@ pub fn hclust<'py>(
         // merge-sequence -> R merge columns + leaf order (was pure-Python O(n^2)).
         let (iorder, iia, iib) = hcass2(n, &ia, &ib);
         (
-            iia[1..n].to_vec(),       // merge_a, length n-1
-            iib[1..n].to_vec(),       // merge_b, length n-1
-            crit[1..n].to_vec(),      // height,  length n-1
-            iorder[1..=n].to_vec(),   // order,   length n
+            iia[1..n].to_vec(),     // merge_a, length n-1
+            iib[1..n].to_vec(),     // merge_b, length n-1
+            crit[1..n].to_vec(),    // height,  length n-1
+            iorder[1..=n].to_vec(), // order,   length n
         )
     });
 

@@ -16,13 +16,15 @@ from .geom import Geom
 
 @dataclass
 class GeomDensity(Geom):
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
-        "fill": None,
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "black",
+            "fill": None,
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+        }
+    )
     required_aes: tuple = ("x", "y")
     key_glyph: str = "polygon"
 
@@ -60,8 +62,14 @@ class GeomDensity(Geom):
             poly = ax.fill_between(xs, 0, ys, color=fill, alpha=alpha, linewidth=0)
             polar_arc_interp(ax, poly)
 
-        lines = ax.plot(xs, ys, color=colour, linewidth=size * 2.83,
-                        linestyle=r_lty(linetype), alpha=alpha)
+        lines = ax.plot(
+            xs,
+            ys,
+            color=colour,
+            linewidth=size * 2.83,
+            linestyle=r_lty(linetype),
+            alpha=alpha,
+        )
         polar_arc_interp(ax, *lines)
 
 
@@ -72,8 +80,17 @@ def _first(df, col, *, default):
     return default if val is None else val
 
 
-def geom_density(mapping=None, data=None, *, stat="density", bw="nrd0", n=512,
-                 trim=False, position="identity", **kwargs):
+def geom_density(
+    mapping=None,
+    data=None,
+    *,
+    stat="density",
+    bw="nrd0",
+    n=512,
+    trim=False,
+    position="identity",
+    **kwargs,
+):
     from ..layer import Layer
     from ..positions import resolve_position
     from ..stats import resolve_stat

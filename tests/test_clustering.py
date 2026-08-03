@@ -8,6 +8,7 @@ On arm64 macOS R's gfortran fuses the Lance-Williams update to ``fmadd`` (hea
 mirrors it per-arch via ``_rfma``), so fma-affected committed heights use a
 small arm64 pin branch (``_HEIGHT_ARM64``); see that table.
 """
+
 from __future__ import annotations
 
 import platform
@@ -32,38 +33,62 @@ from hea.R.distance import dist
 _STRICT = sys.platform == "darwin"
 _ARM64 = platform.machine().lower() in ("arm64", "aarch64")
 _RTOL = 1e-13
-_METHODS = ["ward.D", "single", "complete", "average", "mcquitty",
-            "median", "centroid", "ward.D2"]
+_METHODS = [
+    "ward.D",
+    "single",
+    "complete",
+    "average",
+    "mcquitty",
+    "median",
+    "centroid",
+    "ward.D2",
+]
 
 # X <- matrix(c(0,0, 1,0, 0,1, 5,5, 6,5, 5,6), nrow=6, byrow=TRUE); d <- dist(X)
 _X = np.array([[0, 0], [1, 0], [0, 1], [5, 5], [6, 5], [5, 6]], dtype=float)
 
 # merge is column-major (R as.vector(h$merge)); height; order.
 _PINS = {
-    "ward.D": ([-1, -4, -3, -6, 3, -2, -5, 1, 2, 4],
-               [1, 1, 1.2761423749153966, 1.2761423749153966, 19.077909746461739],
-               [3, 1, 2, 6, 4, 5]),
-    "single": ([-1, -3, -4, -6, 2, -2, 1, -5, 3, 4],
-               [1, 1, 1, 1, 6.4031242374328485],
-               [3, 1, 2, 6, 4, 5]),
-    "complete": ([-1, -4, -3, -6, 3, -2, -5, 1, 2, 4],
-                 [1, 1, 1.4142135623730951, 1.4142135623730951, 7.810249675906654],
-                 [3, 1, 2, 6, 4, 5]),
-    "average": ([-1, -4, -3, -6, 3, -2, -5, 1, 2, 4],
-                [1, 1, 1.2071067811865475, 1.2071067811865475, 7.1180173737923766],
-                [3, 1, 2, 6, 4, 5]),
-    "mcquitty": ([-1, -4, -3, -6, 3, -2, -5, 1, 2, 4],
-                 [1, 1, 1.2071067811865475, 1.2071067811865475, 7.1194336759327044],
-                 [3, 1, 2, 6, 4, 5]),
-    "median": ([-1, -3, -4, -6, 2, -2, 1, -5, 3, 4],
-               [1, 0.95710678118654746, 1, 0.95710678118654746, 6.3908802853394313],
-               [3, 1, 2, 6, 4, 5]),
-    "centroid": ([-1, -3, -4, -6, 2, -2, 1, -5, 3, 4],
-                 [1, 0.95710678118654746, 1, 0.95710678118654746, 6.3593032488205781],
-                 [3, 1, 2, 6, 4, 5]),
-    "ward.D2": ([-1, -4, -3, -6, 3, -2, -5, 1, 2, 4],
-                [1, 1, 1.2909944487358058, 1.2909944487358058, 12.247448713915889],
-                [3, 1, 2, 6, 4, 5]),
+    "ward.D": (
+        [-1, -4, -3, -6, 3, -2, -5, 1, 2, 4],
+        [1, 1, 1.2761423749153966, 1.2761423749153966, 19.077909746461739],
+        [3, 1, 2, 6, 4, 5],
+    ),
+    "single": (
+        [-1, -3, -4, -6, 2, -2, 1, -5, 3, 4],
+        [1, 1, 1, 1, 6.4031242374328485],
+        [3, 1, 2, 6, 4, 5],
+    ),
+    "complete": (
+        [-1, -4, -3, -6, 3, -2, -5, 1, 2, 4],
+        [1, 1, 1.4142135623730951, 1.4142135623730951, 7.810249675906654],
+        [3, 1, 2, 6, 4, 5],
+    ),
+    "average": (
+        [-1, -4, -3, -6, 3, -2, -5, 1, 2, 4],
+        [1, 1, 1.2071067811865475, 1.2071067811865475, 7.1180173737923766],
+        [3, 1, 2, 6, 4, 5],
+    ),
+    "mcquitty": (
+        [-1, -4, -3, -6, 3, -2, -5, 1, 2, 4],
+        [1, 1, 1.2071067811865475, 1.2071067811865475, 7.1194336759327044],
+        [3, 1, 2, 6, 4, 5],
+    ),
+    "median": (
+        [-1, -3, -4, -6, 2, -2, 1, -5, 3, 4],
+        [1, 0.95710678118654746, 1, 0.95710678118654746, 6.3908802853394313],
+        [3, 1, 2, 6, 4, 5],
+    ),
+    "centroid": (
+        [-1, -3, -4, -6, 2, -2, 1, -5, 3, 4],
+        [1, 0.95710678118654746, 1, 0.95710678118654746, 6.3593032488205781],
+        [3, 1, 2, 6, 4, 5],
+    ),
+    "ward.D2": (
+        [-1, -4, -3, -6, 3, -2, -5, 1, 2, 4],
+        [1, 1, 1.2909944487358058, 1.2909944487358058, 12.247448713915889],
+        [3, 1, 2, 6, 4, 5],
+    ),
 }
 
 
@@ -76,8 +101,7 @@ _PINS = {
 # is ``test_hclust_vs_live_R`` (live R on whatever machine runs); only the
 # always-run committed pin needs the branch. Only ward.D2 differs for ``_X``.
 _HEIGHT_ARM64 = {
-    "ward.D2": [1.0, 1.0, 1.2909944487358058, 1.2909944487358058,
-                12.24744871391589],
+    "ward.D2": [1.0, 1.0, 1.2909944487358058, 1.2909944487358058, 12.24744871391589],
 }
 
 
@@ -150,21 +174,27 @@ def test_hclust_object_shapes():
 # --------------------------------------------------------------------------- #
 # cutree
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("k,expected", [
-    (2, [1, 1, 1, 2, 2, 2]),
-    (3, [1, 1, 1, 2, 2, 3]),
-    (1, [1, 1, 1, 1, 1, 1]),
-    (6, [1, 2, 3, 4, 5, 6]),
-])
+@pytest.mark.parametrize(
+    "k,expected",
+    [
+        (2, [1, 1, 1, 2, 2, 2]),
+        (3, [1, 1, 1, 2, 2, 3]),
+        (1, [1, 1, 1, 1, 1, 1]),
+        (6, [1, 2, 3, 4, 5, 6]),
+    ],
+)
 def test_cutree_by_k(k, expected):
     h = hclust(dist(_X), method="complete")
     assert cutree(h, k=k).tolist() == expected
 
 
-@pytest.mark.parametrize("hcut,expected", [
-    (2, [1, 1, 1, 2, 2, 2]),
-    (5, [1, 1, 1, 2, 2, 2]),
-])
+@pytest.mark.parametrize(
+    "hcut,expected",
+    [
+        (2, [1, 1, 1, 2, 2, 2]),
+        (5, [1, 1, 1, 2, 2, 2]),
+    ],
+)
 def test_cutree_by_h(hcut, expected):
     h = hclust(dist(_X), method="complete")
     assert cutree(h, h=hcut).tolist() == expected
@@ -175,14 +205,50 @@ def test_cutree_matrix_multi_k():
     got = cutree(h, k=[2, 3, 4])
     assert got.shape == (6, 3)
     assert got.ravel(order="F").tolist() == [
-        1, 1, 1, 2, 2, 2, 1, 1, 1, 2, 2, 3, 1, 1, 2, 3, 3, 4]
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+        1,
+        1,
+        1,
+        2,
+        2,
+        3,
+        1,
+        1,
+        2,
+        3,
+        3,
+        4,
+    ]
 
 
 def test_cutree_matrix_multi_h():
     h = hclust(dist(_X), method="complete")
     got = cutree(h, h=[1.5, 3, 8])
     assert got.ravel(order="F").tolist() == [
-        1, 1, 1, 2, 2, 2, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1, 1]
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+    ]
 
 
 def test_cutree_requires_k_or_h():
@@ -214,14 +280,18 @@ def test_cutree_vs_live_R(method):
     # build the same hclust in R, then cut by a range of k and h.
     elems = ",".join(float(v).hex() for v in d.data)
     rexpr = (
-        f'd<-structure(c({elems}),Size={d.Size}L,Diag=FALSE,Upper=FALSE,'
+        f"d<-structure(c({elems}),Size={d.Size}L,Diag=FALSE,Upper=FALSE,"
         f'method="euclidean",class="dist");h<-hclust(d,method="{method}");'
         'cat(as.integer(cutree(h,k=c(2,5,8))),sep=" ");cat("\\n##\\n");'
         'cat(as.integer(cutree(h,h=stats::median(h$height))),sep=" ")'
     )
     out = subprocess.run(
-        ["Rscript", "-e", rexpr], stdin=subprocess.DEVNULL, check=True,
-        capture_output=True, text=True, timeout=120,
+        ["Rscript", "-e", rexpr],
+        stdin=subprocess.DEVNULL,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
     ).stdout
     ksec, hsec = out.split("\n##\n")
     kmat = np.array([int(v) for v in ksec.split()]).reshape(d.Size, 3, order="F")
@@ -234,14 +304,40 @@ def test_cutree_vs_live_R(method):
 # cophenetic
 # --------------------------------------------------------------------------- #
 _COPH_PINS = {
-    "complete": [1, 1.4142135623730951, 7.810249675906654, 7.810249675906654,
-                 7.810249675906654, 1.4142135623730951, 7.810249675906654,
-                 7.810249675906654, 7.810249675906654, 7.810249675906654,
-                 7.810249675906654, 7.810249675906654, 1, 1.4142135623730951,
-                 1.4142135623730951],
-    "single": [1, 1, 6.4031242374328485, 6.4031242374328485, 6.4031242374328485,
-               1, 6.4031242374328485, 6.4031242374328485, 6.4031242374328485,
-               6.4031242374328485, 6.4031242374328485, 6.4031242374328485, 1, 1, 1],
+    "complete": [
+        1,
+        1.4142135623730951,
+        7.810249675906654,
+        7.810249675906654,
+        7.810249675906654,
+        1.4142135623730951,
+        7.810249675906654,
+        7.810249675906654,
+        7.810249675906654,
+        7.810249675906654,
+        7.810249675906654,
+        7.810249675906654,
+        1,
+        1.4142135623730951,
+        1.4142135623730951,
+    ],
+    "single": [
+        1,
+        1,
+        6.4031242374328485,
+        6.4031242374328485,
+        6.4031242374328485,
+        1,
+        6.4031242374328485,
+        6.4031242374328485,
+        6.4031242374328485,
+        6.4031242374328485,
+        6.4031242374328485,
+        6.4031242374328485,
+        1,
+        1,
+        1,
+    ],
 }
 
 
@@ -270,13 +366,17 @@ def test_cophenetic_vs_live_R(method):
     h = hclust(d, method=method)
     elems = ",".join(float(v).hex() for v in d.data)
     rexpr = (
-        f'd<-structure(c({elems}),Size={d.Size}L,Diag=FALSE,Upper=FALSE,'
+        f"d<-structure(c({elems}),Size={d.Size}L,Diag=FALSE,Upper=FALSE,"
         f'method="euclidean",class="dist");h<-hclust(d,method="{method}");'
         'cat(sprintf("%.17g",as.vector(cophenetic(h))),sep="\\n")'
     )
     out = subprocess.run(
-        ["Rscript", "-e", rexpr], stdin=subprocess.DEVNULL, check=True,
-        capture_output=True, text=True, timeout=120,
+        ["Rscript", "-e", rexpr],
+        stdin=subprocess.DEVNULL,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
     ).stdout
     expected = np.array([float(s) for s in out.split()])
     _assert_height(cophenetic(h), expected)
@@ -292,10 +392,13 @@ def _r_hclust(packed, n, method, members=None):
     the exact same dissimilarities are clustered.
     """
     elems = ",".join(float(v).hex() for v in packed)
-    mem = (f"members=c({','.join(float(v).hex() for v in members)})"
-           if members is not None else "")
+    mem = (
+        f"members=c({','.join(float(v).hex() for v in members)})"
+        if members is not None
+        else ""
+    )
     rexpr = (
-        f'd<-structure(c({elems}),Size={n}L,Diag=FALSE,Upper=FALSE,'
+        f"d<-structure(c({elems}),Size={n}L,Diag=FALSE,Upper=FALSE,"
         f'method="euclidean",class="dist");'
         f'h<-hclust(d,method="{method}"{("," + mem) if mem else ""});'
         'cat(as.integer(h$merge),sep=" ");cat("\\n##\\n");'
@@ -303,8 +406,12 @@ def _r_hclust(packed, n, method, members=None):
         'cat(as.integer(h$order),sep=" ")'
     )
     out = subprocess.run(
-        ["Rscript", "-e", rexpr], stdin=subprocess.DEVNULL, check=True,
-        capture_output=True, text=True, timeout=120,
+        ["Rscript", "-e", rexpr],
+        stdin=subprocess.DEVNULL,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
     ).stdout
     msec, hsec, osec = out.split("\n##\n")
     merge = np.array([int(v) for v in msec.split()]).reshape(n - 1, 2, order="F")
@@ -353,10 +460,15 @@ def _py_hclust_cols(n, data, iopt, members):
     """Pure-Python reference: ``_hclust_fortran`` + ``_hcass2`` -> the same
     ``(merge_a, merge_b, height, order)`` columns the Rust kernel returns."""
     from hea.R.clustering import _hclust_fortran, _hcass2
+
     ia, ib, crit = _hclust_fortran(n, data, iopt, members)
     iorder, iia, iib = _hcass2(n, ia, ib)
-    return (list(iia[1:n]), list(iib[1:n]),
-            np.asarray(crit[1:n], dtype=float), list(iorder[1:n + 1]))
+    return (
+        list(iia[1:n]),
+        list(iib[1:n]),
+        np.asarray(crit[1:n], dtype=float),
+        list(iorder[1 : n + 1]),
+    )
 
 
 @pytest.mark.skipif(not _HAS_RS_HCLUST, reason="hea._rs.hclust not built")
@@ -381,6 +493,7 @@ def test_rs_hclust_matches_python(method):
 def test_rs_cutree_matches_python():
     # A/B: Rust cutree (C_cutree port) vs pure-Python _cutree_c. Integer-exact.
     from hea.R.clustering import _cutree_c
+
     rng = np.random.default_rng(11)
     x = rng.standard_normal((60, 4))
     h = hclust(dist(x), method="average")

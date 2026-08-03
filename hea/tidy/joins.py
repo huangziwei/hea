@@ -9,6 +9,7 @@ verbs unpack into the appropriate ``polars.join_where`` / ``join`` call.
 The natural-join message helper here mirrors dplyr's ``Joining with by``
 auto-detect signal.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -24,10 +25,10 @@ _BIN_OPS = {"Eq", "Lt", "LtEq", "Gt", "GtEq"}
 # delivers dplyr's closest() semantics.
 _CLOSEST_STRATEGY = {
     "GtEq": "backward",  # left >= right: pick largest right ≤ left
-    "Gt":   "backward",
-    "LtEq": "forward",   # left <= right: pick smallest right ≥ left
-    "Lt":   "forward",
-    "Eq":   "nearest",
+    "Gt": "backward",
+    "LtEq": "forward",  # left <= right: pick smallest right ≥ left
+    "Lt": "forward",
+    "Eq": "nearest",
 }
 
 
@@ -54,6 +55,7 @@ def _parse_join_binary(expr: pl.Expr) -> tuple[str, str, str] | None:
     polars doesn't otherwise expose on the public Expr API).
     """
     import json
+
     if not isinstance(expr, pl.Expr):
         return None
     try:
@@ -78,7 +80,8 @@ def _parse_join_binary(expr: pl.Expr) -> tuple[str, str, str] | None:
 @dataclass(frozen=True)
 class _Closest:
     """Marker that asks ``join_by`` to route through ``join_asof``."""
-    op: str    # one of _CLOSEST_STRATEGY's keys
+
+    op: str  # one of _CLOSEST_STRATEGY's keys
     left: str
     right: str
 
@@ -139,6 +142,7 @@ def within(x_lower: Any, x_upper: Any, y_lower: Any, y_upper: Any) -> pl.Expr:
 @dataclass
 class _JoinBy:
     """Normalized join specification produced by :func:`join_by`."""
+
     # Parallel lists: equi-key columns on the left and right.
     equi_left: list[str] = field(default_factory=list)
     equi_right: list[str] = field(default_factory=list)
@@ -211,9 +215,9 @@ def _consume_join_by_arg(spec: _JoinBy, a: Any) -> None:
 # Map "Lt"/"LtEq"/"Gt"/"GtEq" → corresponding Expr builder for non-equi
 # predicates (used to reconstitute inequalities with suffixed right refs).
 _INEQ_BUILDERS: dict[str, Callable[[pl.Expr, pl.Expr], pl.Expr]] = {
-    "Lt":   lambda left, r: left < r,
+    "Lt": lambda left, r: left < r,
     "LtEq": lambda left, r: left <= r,
-    "Gt":   lambda left, r: left > r,
+    "Gt": lambda left, r: left > r,
     "GtEq": lambda left, r: left >= r,
 }
 
@@ -279,7 +283,6 @@ def _emit_natural_join_message(shared: list[str]) -> None:
     Jupyter and REPL output but doesn't pollute stdout-piped scripts.
     """
     import sys
+
     quoted = ", ".join(repr(c) for c in shared)
     print(f"Joining with `by = join_by({quoted})`", file=sys.stderr)
-
-

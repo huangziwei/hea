@@ -16,8 +16,13 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
-__all__ = ["significance_code", "format_df",
-           "format_signif", "format_signif_jointly", "format_pval"]
+__all__ = [
+    "significance_code",
+    "format_df",
+    "format_signif",
+    "format_signif_jointly",
+    "format_pval",
+]
 
 
 _MAX_DECIMALS = 6
@@ -80,10 +85,7 @@ def format_df(df: pl.DataFrame, align: dict[str, str] | None = None) -> str:
     for c in headers:
         s = df[c]
         if s.dtype.is_integer():
-            cells = [
-                "" if v is None else str(int(v))
-                for v in s.to_list()
-            ]
+            cells = ["" if v is None else str(int(v)) for v in s.to_list()]
             default_align = "right"
         elif s.dtype.is_numeric():
             cells = _format_numeric_column(s.to_list())
@@ -95,8 +97,7 @@ def format_df(df: pl.DataFrame, align: dict[str, str] | None = None) -> str:
         aligns.append(align.get(c, default_align))
 
     widths = [
-        max([len(c)] + [len(x) for x in formatted[j]])
-        for j, c in enumerate(headers)
+        max([len(c)] + [len(x) for x in formatted[j]]) for j, c in enumerate(headers)
     ]
 
     def pad(s: str, w: int, a: str) -> str:
@@ -109,7 +110,9 @@ def format_df(df: pl.DataFrame, align: dict[str, str] | None = None) -> str:
     ]
     lines = [sep.join(header_cells).rstrip()]
     for i in range(n_rows):
-        row = sep.join(pad(formatted[j][i], widths[j], aligns[j]) for j in range(len(headers)))
+        row = sep.join(
+            pad(formatted[j][i], widths[j], aligns[j]) for j in range(len(headers))
+        )
         lines.append(row.rstrip())
     return "\n".join(lines)
 
@@ -131,7 +134,9 @@ def significance_code(p_values) -> list[str]:
     return out
 
 
-_MACHINE_EPS = float(np.finfo(float).eps)  # ≈ 2.22e-16, matches R's `.Machine$double.eps`
+_MACHINE_EPS = float(
+    np.finfo(float).eps
+)  # ≈ 2.22e-16, matches R's `.Machine$double.eps`
 
 # Magnitudes |x| < 10^_FIXED_LOWER print as scientific; otherwise fixed.
 # Matches R's ``format()`` rule of switching to scientific when ``expo < -4``.
@@ -200,8 +205,7 @@ def format_signif(values, digits: int = 4, *, min_decimals: int = 0) -> list[str
     R's ``format()`` per-element fixed-vs-scientific switch.
     ``None`` → ``""``; non-finite → ``"NaN"``/``"Inf"``/``"-Inf"``.
     """
-    decimals = max(min_decimals,
-                   min(_signif_column_decimals(values, digits), 15))
+    decimals = max(min_decimals, min(_signif_column_decimals(values, digits), 15))
     return _format_with_decimals(values, decimals, digits)
 
 
@@ -253,7 +257,8 @@ def format_pval(values, digits: int = 4, eps: float | None = None) -> list[str]:
     if eps is None:
         eps = _MACHINE_EPS
     big = [
-        float(v) for v in values
+        float(v)
+        for v in values
         if v is not None and np.isfinite(float(v)) and float(v) >= eps
     ]
     big_strs = format_signif(big, digits=digits) if big else []

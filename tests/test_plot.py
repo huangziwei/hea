@@ -8,6 +8,7 @@ regression tool, not unit tests."""
 from __future__ import annotations
 
 import matplotlib
+
 matplotlib.use("Agg")  # noqa: E402
 
 import matplotlib.axes
@@ -27,19 +28,23 @@ def numeric_df():
     rng = np.random.RandomState(0)
     # z carries its own noise so it isn't perfectly collinear with x
     # (linspace(-5, 5) = linspace(0, 10) - 5 → would alias to (Intercept) + x).
-    return pl.DataFrame({
-        "x": np.linspace(0, 10, 50),
-        "y": np.linspace(0, 10, 50) + rng.randn(50),
-        "z": np.linspace(-5, 5, 50) + rng.randn(50),
-    })
+    return pl.DataFrame(
+        {
+            "x": np.linspace(0, 10, 50),
+            "y": np.linspace(0, 10, 50) + rng.randn(50),
+            "z": np.linspace(-5, 5, 50) + rng.randn(50),
+        }
+    )
 
 
 @pytest.fixture
 def factor_df():
-    df = pl.DataFrame({
-        "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-        "g": [0, 0, 0, 1, 1, 1],
-    })
+    df = pl.DataFrame(
+        {
+            "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "g": [0, 0, 0, 1, 1, 1],
+        }
+    )
     return df.with_columns(factor(df["g"], labels={0: "A", 1: "B"}))
 
 
@@ -307,6 +312,7 @@ def test_qqline_through_quartiles():
     n = len(vals)
     probs = (np.arange(1, n + 1) - 0.5) / n
     from scipy.stats import norm
+
     q = norm.ppf(probs)
     ax.scatter(q, np.sort(vals))
     lmplot.qqline(vals, ax=ax)
@@ -511,6 +517,7 @@ def test_plot_leverage_constant_swaps_to_factor_levels():
     panel 5 from 'Residuals vs Leverage' to 'Constant Leverage: Residuals
     vs Factor Levels'. Match that."""
     from hea import data
+
     pg = data("PlantGrowth")
     m = lm("weight ~ group", data=pg)
     fig, ax = plt.subplots()
@@ -549,10 +556,10 @@ def test_pairs_perimeter_tick_labels_alternate(numeric_df):
         xt = ax.xaxis.get_major_ticks()[0] if ax.xaxis.get_major_ticks() else None
         yt = ax.yaxis.get_major_ticks()[0] if ax.yaxis.get_major_ticks() else None
         return {
-            "top":    bool(xt and xt.label2.get_visible()),
+            "top": bool(xt and xt.label2.get_visible()),
             "bottom": bool(xt and xt.label1.get_visible()),
-            "left":   bool(yt and yt.label1.get_visible()),
-            "right":  bool(yt and yt.label2.get_visible()),
+            "left": bool(yt and yt.label1.get_visible()),
+            "right": bool(yt and yt.label2.get_visible()),
         }
 
     for i in range(n):
@@ -572,8 +579,9 @@ def test_pairs_columns_share_x_limits(numeric_df):
     n = axes.shape[0]
     for j in range(n):
         col_xlims = [axes[i, j].get_xlim() for i in range(n)]
-        assert all(xl == col_xlims[0] for xl in col_xlims), \
+        assert all(xl == col_xlims[0] for xl in col_xlims), (
             f"col {j} xlims diverge: {col_xlims}"
+        )
     plt.close("all")
 
 
@@ -585,8 +593,7 @@ def test_pairs_rows_share_y_limits_off_diag_under_hist(numeric_df):
     n = axes.shape[0]
     for i in range(n):
         off = [axes[i, j].get_ylim() for j in range(n) if j != i]
-        assert all(yl == off[0] for yl in off), \
-            f"row {i} off-diag ylims diverge: {off}"
+        assert all(yl == off[0] for yl in off), f"row {i} off-diag ylims diverge: {off}"
     plt.close("all")
 
 
@@ -594,6 +601,7 @@ def test_interaction_plot_matches_r_cell_means():
     """interaction_plot cell means match R's tapply on Pinheiro & Bates'
     Machines data — Worker on trace, Machine on x, score on y."""
     from hea import data
+
     m = data("Machines", "nlme")
     ax = lmplot.interaction_plot("Machine", "Worker", "score", data=m)
     assert ax.get_xlabel() == "Machine"
@@ -618,6 +626,7 @@ def test_interaction_plot_matches_r_cell_means():
 def test_interaction_plot_series_input_form():
     """Series form: pass each Series directly without data=."""
     from hea import data
+
     m = data("Machines", "nlme")
     ax = lmplot.interaction_plot(m["Machine"], m["Worker"], m["score"])
     assert len(ax.lines) == 6

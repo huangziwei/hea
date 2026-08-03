@@ -35,8 +35,12 @@ def boxplot(
         raise TypeError("boxplot(): pass at least one vector.")
 
     # ``boxplot([x, y, z])`` — flatten a single list-of-vectors arg.
-    if len(args) == 1 and isinstance(args[0], (list, tuple)) and args[0] \
-            and not isinstance(args[0][0], (int, float, np.integer, np.floating)):
+    if (
+        len(args) == 1
+        and isinstance(args[0], (list, tuple))
+        and args[0]
+        and not isinstance(args[0][0], (int, float, np.integer, np.floating))
+    ):
         groups = list(args[0])
     else:
         groups = list(args)

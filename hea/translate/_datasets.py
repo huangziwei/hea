@@ -45,6 +45,7 @@ def _bundled_registry() -> dict[str, tuple[str, ...]]:
     # Local import: ``hea.translate`` is loaded after ``hea.io``, but
     # ``_datasets`` itself may be imported at any time, so we defer.
     from hea.io import _bundled_index
+
     return {n: tuple(sorted(pkgs)) for n, pkgs in _bundled_index().items()}
 
 
@@ -70,31 +71,90 @@ def dataset_registry() -> dict[str, tuple[str, ...]]:
 # Names that should never trigger an autoload lookup even if they match
 # a rdatasets entry. Mix of Python builtins, hea / polars surface, and
 # common short variable names that would cause noisy false positives.
-DATASET_REF_EXCLUSIONS: frozenset[str] = frozenset({
-    # Python builtins
-    "True", "False", "None",
-    "print", "len", "range", "list", "dict", "set", "tuple", "int",
-    "float", "str", "bool", "type", "object",
-    # hea / polars surface
-    "hea", "pl", "col", "n", "desc", "selectors",
-    "DataFrame", "LazyFrame", "Series", "Expr",
-    # Common R-side names that map back via the FUNCTION_TABLE
-    "case_when", "if_else", "coalesce", "data", "first", "last",
-    # Single-letter / very-short names — common variable names that
-    # happen to collide with datasets (e.g. ``x`` is a Sloan Digital
-    # Sky Survey dataset; we don't want that triggering).
-    "x", "y", "z", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k",
-    "p", "q", "p1", "p2", "p3", "p4",
-    "df", "dat", "obj", "out", "tmp", "res", "ans",
-})
+DATASET_REF_EXCLUSIONS: frozenset[str] = frozenset(
+    {
+        # Python builtins
+        "True",
+        "False",
+        "None",
+        "print",
+        "len",
+        "range",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "int",
+        "float",
+        "str",
+        "bool",
+        "type",
+        "object",
+        # hea / polars surface
+        "hea",
+        "pl",
+        "col",
+        "n",
+        "desc",
+        "selectors",
+        "DataFrame",
+        "LazyFrame",
+        "Series",
+        "Expr",
+        # Common R-side names that map back via the FUNCTION_TABLE
+        "case_when",
+        "if_else",
+        "coalesce",
+        "data",
+        "first",
+        "last",
+        # Single-letter / very-short names — common variable names that
+        # happen to collide with datasets (e.g. ``x`` is a Sloan Digital
+        # Sky Survey dataset; we don't want that triggering).
+        "x",
+        "y",
+        "z",
+        "a",
+        "b",
+        "c",
+        "d",
+        "e",
+        "f",
+        "g",
+        "h",
+        "i",
+        "j",
+        "k",
+        "p",
+        "q",
+        "p1",
+        "p2",
+        "p3",
+        "p4",
+        "df",
+        "dat",
+        "obj",
+        "out",
+        "tmp",
+        "res",
+        "ans",
+    }
+)
 
 
 # R's default-loaded packages. ``library()`` for these is redundant; we
 # omit them from autoload preambles even when a dataset resolves there.
-R_DEFAULT_PACKAGES: frozenset[str] = frozenset({
-    "base", "datasets", "graphics", "grDevices",
-    "methods", "stats", "utils",
-})
+R_DEFAULT_PACKAGES: frozenset[str] = frozenset(
+    {
+        "base",
+        "datasets",
+        "graphics",
+        "grDevices",
+        "methods",
+        "stats",
+        "utils",
+    }
+)
 
 
 def resolve_dataset(

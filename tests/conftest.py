@@ -36,8 +36,9 @@ def assert_fp_equiv(a, b):
     (measured ≤3e-14 relative). rtol=1e-11 still pins code-path
     equivalence: a genuine intake/model split sits orders of magnitude
     above it."""
-    np.testing.assert_allclose(np.asarray(a, dtype=float),
-                               np.asarray(b, dtype=float), rtol=1e-11)
+    np.testing.assert_allclose(
+        np.asarray(a, dtype=float), np.asarray(b, dtype=float), rtol=1e-11
+    )
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
@@ -73,6 +74,7 @@ def _apply_schema(df: pl.DataFrame, pkg: str, name: str) -> pl.DataFrame:
     on CSV round-trip just like the source datasets do.
     """
     from hea.io import _apply_dataset_schema
+
     schema_path = DATA_ROOT / _pkg_subdir(pkg) / f"{name}.schema.json"
     return _apply_dataset_schema(df, schema_path)
 
@@ -109,6 +111,7 @@ def load_dataset(pkg: str, name: str) -> pl.DataFrame:
     like the Galápagos island IDs in ``faraway::gala``.
     """
     from hea import data as _data
+
     key = (pkg, name)
     if key not in _data_cache:
         df = _data(name, _pkg_subdir(pkg))
@@ -135,8 +138,6 @@ def _reset_ordered_cols():
     yield
     _current_ordered_cols.clear()
     set_ordered_cols(frozenset())
-
-
 
 
 def fixture_meta(fx_id: str) -> tuple[dict, dict]:
@@ -194,8 +195,12 @@ def r_scalar_values(exprs):
     compare with tolerance instead)."""
     body = "".join(f'cat(sprintf("%.17g\\n", as.double({e})))\n' for e in exprs)
     out = subprocess.run(
-        ["Rscript", "-e", body], stdin=subprocess.DEVNULL, check=True,
-        capture_output=True, text=True, timeout=120,
+        ["Rscript", "-e", body],
+        stdin=subprocess.DEVNULL,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
     ).stdout
     return dict(zip(exprs, (float(x) for x in out.split())))
 
@@ -217,7 +222,8 @@ def run_rs_r_oracle(cases, workdir) -> dict:
         for i, a in enumerate(arrays):
             fname = f"{name}__{i}.bin"
             np.ascontiguousarray(a, dtype="<f8").ravel().tofile(
-                os.path.join(workdir, fname))
+                os.path.join(workdir, fname)
+            )
             argfiles.append(fname)
         flagstr = ",".join("TRUE" if b else "FALSE" for b in flags)
         spec_lines.append(f"{name}|{fn}|{','.join(argfiles)}|{flagstr}")
@@ -225,14 +231,16 @@ def run_rs_r_oracle(cases, workdir) -> dict:
 
     subprocess.run(
         ["Rscript", str(_NMATH_R_ORACLE), workdir],
-        stdin=subprocess.DEVNULL, check=True, timeout=300,
-        capture_output=True, text=True,
+        stdin=subprocess.DEVNULL,
+        check=True,
+        timeout=300,
+        capture_output=True,
+        text=True,
     )
 
     out = {}
     for name, fn, arrays, flags in cases:
-        out[name] = np.fromfile(
-            os.path.join(workdir, f"{name}.out.bin"), dtype="<f8")
+        out[name] = np.fromfile(os.path.join(workdir, f"{name}.out.bin"), dtype="<f8")
     return out
 
 
@@ -261,16 +269,21 @@ def run_rng_r_oracle(seed, cases, workdir) -> dict:
         name, rcall, params = case[0], case[1], case[2]
         for i, a in enumerate(params):
             np.ascontiguousarray(a, dtype="<f8").ravel().tofile(
-                os.path.join(workdir, f"{name}__{i}.bin"))
+                os.path.join(workdir, f"{name}__{i}.bin")
+            )
         spec_lines.append(f"{name}|{rcall}|{len(params)}")
     (Path(workdir) / "spec.txt").write_text("\n".join(spec_lines) + "\n")
 
     subprocess.run(
         ["Rscript", str(_RNG_R_ORACLE), workdir],
-        stdin=subprocess.DEVNULL, check=True, timeout=300,
-        capture_output=True, text=True,
+        stdin=subprocess.DEVNULL,
+        check=True,
+        timeout=300,
+        capture_output=True,
+        text=True,
     )
 
-    return {case[0]: np.fromfile(os.path.join(workdir, f"{case[0]}.out.bin"),
-                                 dtype="<f8")
-            for case in cases}
+    return {
+        case[0]: np.fromfile(os.path.join(workdir, f"{case[0]}.out.bin"), dtype="<f8")
+        for case in cases
+    }

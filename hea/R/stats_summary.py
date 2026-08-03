@@ -4,6 +4,7 @@
 All default ``na_rm=True`` (diverges from R's ``na.rm=FALSE`` to match
 polars' null-skip convention — hea's house default).
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -100,16 +101,16 @@ def sd(x, na_rm=True):
 # R's ``quantile(..., type=k)`` maps to numpy's ``method=`` argument.
 # Indexed 1-9 to match R; index 0 is unused.
 _R_QUANTILE_METHOD = (
-    None,                          # 0 — unused (R types are 1..9)
-    "inverted_cdf",                 # 1
-    "averaged_inverted_cdf",        # 2
-    "closest_observation",          # 3
-    "interpolated_inverted_cdf",    # 4
-    "hazen",                        # 5
-    "weibull",                      # 6
-    "linear",                       # 7 — R default
-    "median_unbiased",              # 8
-    "normal_unbiased",              # 9
+    None,  # 0 — unused (R types are 1..9)
+    "inverted_cdf",  # 1
+    "averaged_inverted_cdf",  # 2
+    "closest_observation",  # 3
+    "interpolated_inverted_cdf",  # 4
+    "hazen",  # 5
+    "weibull",  # 6
+    "linear",  # 7 — R default
+    "median_unbiased",  # 8
+    "normal_unbiased",  # 9
 )
 
 
@@ -156,9 +157,8 @@ def IQR(x, na_rm=True, type=7):
                 "interpolation (type=7) for Expr/Series. Materialize the "
                 "column (.to_list() or .to_numpy()) for other types."
             )
-        diff = (
-            x.quantile(0.75, interpolation="linear")
-            - x.quantile(0.25, interpolation="linear")
+        diff = x.quantile(0.75, interpolation="linear") - x.quantile(
+            0.25, interpolation="linear"
         )
         if na_rm:
             return diff
@@ -171,9 +171,8 @@ def IQR(x, na_rm=True, type=7):
             )
         if not na_rm and x.null_count() > 0:
             return None
-        return (
-            x.quantile(0.75, interpolation="linear")
-            - x.quantile(0.25, interpolation="linear")
+        return x.quantile(0.75, interpolation="linear") - x.quantile(
+            0.25, interpolation="linear"
         )
 
     arr = np.asarray(x, dtype=float)
@@ -228,11 +227,19 @@ def cor(x, y=None, na_rm=True):
         return np.corrcoef(arr, rowvar=False)
     # Binary form. Expr/Series dispatch routes to pl.corr.
     if isinstance(x, (pl.Expr, pl.Series)) or isinstance(y, (pl.Expr, pl.Series)):
-        a = x if isinstance(x, pl.Expr) else (
-            x.to_frame().to_series() if isinstance(x, pl.Series) else pl.Series(x)
+        a = (
+            x
+            if isinstance(x, pl.Expr)
+            else (
+                x.to_frame().to_series() if isinstance(x, pl.Series) else pl.Series(x)
+            )
         )
-        b = y if isinstance(y, pl.Expr) else (
-            y.to_frame().to_series() if isinstance(y, pl.Series) else pl.Series(y)
+        b = (
+            y
+            if isinstance(y, pl.Expr)
+            else (
+                y.to_frame().to_series() if isinstance(y, pl.Series) else pl.Series(y)
+            )
         )
         # na_rm: drop pairs where either is null
         if na_rm and isinstance(a, pl.Expr) and isinstance(b, pl.Expr):

@@ -9,6 +9,7 @@ Also hosts the formula-update bookkeeping (``terms`` / :class:`Terms`,
 ``update``, ``_merge_formula_vars_from_caller``) and the single-model
 ``AIC`` / ``BIC`` accessors plus their multi-model comparison-table forms.
 """
+
 from __future__ import annotations
 
 import inspect
@@ -24,9 +25,7 @@ def _bhat_to_named_vector(model):
     """Build a ``NamedVector`` from a fitted model's ``.bhat`` row."""
 
     if not hasattr(model, "bhat") or not isinstance(model.bhat, pl.DataFrame):
-        raise TypeError(
-            f"{model.__class__.__name__} has no .bhat DataFrame"
-        )
+        raise TypeError(f"{model.__class__.__name__} has no .bhat DataFrame")
     return NamedVector(model.bhat.columns, model.bhat.row(0))
 
 
@@ -68,11 +67,8 @@ def ranef(model, condVar=False, postVar=False, drop=False, whichel=None):
     conditional-covariance arrays under ``.postVar``; ``drop=`` returns a
     level-named vector for scalar bars; ``whichel=`` selects grouping factors."""
     if hasattr(model, "ranef"):
-        return model.ranef(condVar=condVar, postVar=postVar, drop=drop,
-                           whichel=whichel)
-    raise TypeError(
-        f"ranef(): {model.__class__.__name__} has no random effects"
-    )
+        return model.ranef(condVar=condVar, postVar=postVar, drop=drop, whichel=whichel)
+    raise TypeError(f"ranef(): {model.__class__.__name__} has no random effects")
 
 
 def refitML(model):
@@ -86,13 +82,14 @@ def refitML(model):
     (the reason ``anova`` / AIC need ML).
     """
     from ..models.gmm import gmm
+
     if not isinstance(model, gmm):
         raise TypeError(
             "refitML(): only mixed models (gmm) have a REML/ML distinction; "
             f"got {model.__class__.__name__}"
         )
     if not model.REML:
-        return model                       # already ML (ML-LMM or any GLMM)
+        return model  # already ML (ML-LMM or any GLMM)
     return gmm(model.formula, model.data, family=model.family, REML=False)
 
 
@@ -108,6 +105,7 @@ def refit(model, newresp=None):
     column (``cbind()`` / transformed LHS isn't supported yet).
     """
     from ..models.gmm import gmm
+
     if not isinstance(model, gmm):
         raise TypeError(
             f"refit(): only mixed models (gmm) are supported; "
@@ -118,8 +116,7 @@ def refit(model, newresp=None):
         resp = np.asarray(newresp, dtype=float).ravel()
         if resp.shape != (model.n,):
             raise ValueError(
-                f"refit(): newresp must have length {model.n}; "
-                f"got {resp.shape}"
+                f"refit(): newresp must have length {model.n}; got {resp.shape}"
             )
         lhs = model.formula.split("~", 1)[0].strip()
         if lhs not in data.columns:
@@ -152,17 +149,16 @@ def resid(model, type=None, scaled=False):
     """
     is_gmm = model.__class__.__name__ == "gmm"
     if scaled and not is_gmm:
-        raise TypeError(
-            "resid(): scaled= is only supported for mixed models (gmm)")
+        raise TypeError("resid(): scaled= is only supported for mixed models (gmm)")
     if hasattr(model, "residuals_of"):
         if type is None:
             # lme4 default: LMM "response", GLMM (and glm/gam/bam) "deviance".
             is_glmm_fn = getattr(model, "_is_glmm", None)
-            is_lmm = (is_gmm and is_glmm_fn is not None and not is_glmm_fn())
+            is_lmm = is_gmm and is_glmm_fn is not None and not is_glmm_fn()
             type = "response" if is_lmm else "deviance"
         if is_gmm:
             arr = np.asarray(model.residuals_of(type, scaled=scaled))
-            pad = getattr(model, "_na_pad", None)     # na.exclude → pad to full len
+            pad = getattr(model, "_na_pad", None)  # na.exclude → pad to full len
             return pad(arr) if pad is not None else arr
         return model.residuals_of(type)
     r = getattr(model, "residuals", None)
@@ -173,9 +169,7 @@ def resid(model, type=None, scaled=False):
     elif isinstance(r, pl.Series):
         raw = r.to_numpy()
     else:
-        raise TypeError(
-            f"resid(): {model.__class__.__name__} has no usable residuals"
-        )
+        raise TypeError(f"resid(): {model.__class__.__name__} has no usable residuals")
     is_lm = hasattr(model, "_w")  # lm carries the prior-weight vector
     if type in (None, "response") or (is_lm and type == "working"):
         arr = raw
@@ -188,8 +182,11 @@ def resid(model, type=None, scaled=False):
         # not a 1-D vector — so return early, padding handled inside.
         return _lm_partial_residuals(model, raw)
     else:
-        allowed = ("'response' / None, 'working', 'pearson', 'deviance', "
-                   "'partial'" if is_lm else "'response' / None")
+        allowed = (
+            "'response' / None, 'working', 'pearson', 'deviance', 'partial'"
+            if is_lm
+            else "'response' / None"
+        )
         raise ValueError(
             f"resid(): type={type!r} not supported for "
             f"{model.__class__.__name__} (only {allowed})"
@@ -228,6 +225,7 @@ def _lm_partial_residuals(model, raw):
         partial = raw + terms[c].to_numpy().astype(float)
         cols[c] = pad(partial) if pad is not None else partial
     from ..tidy import DataFrame as _DF  # local: avoid import cycle
+
     out = _DF(cols)
     out.constant = getattr(terms, "constant", 0.0)
     return out
@@ -276,9 +274,7 @@ def predict(model, *args, **kwargs):
     the bound method.
     """
     if not hasattr(model, "predict"):
-        raise TypeError(
-            f"predict(): {model.__class__.__name__} has no .predict()"
-        )
+        raise TypeError(f"predict(): {model.__class__.__name__} has no .predict()")
     return model.predict(*args, **kwargs)
 
 
@@ -299,16 +295,18 @@ def confint(model, level=0.95, **kwargs):
     """
     # Profile objects + gmm expose their own ``confint`` — use it (and pass the
     # lme4 keyword surface through for gmm). Mirrors R's S3 confint dispatch.
-    if hasattr(model, "confint") and not hasattr(model, "ci_bhat") \
-            and not hasattr(model, "compute_ci_bhat"):
+    if (
+        hasattr(model, "confint")
+        and not hasattr(model, "ci_bhat")
+        and not hasattr(model, "compute_ci_bhat")
+    ):
         return model.confint(level=level, **kwargs)
     if not kwargs and level == 0.95 and hasattr(model, "ci_bhat"):
         return model.ci_bhat
     if not kwargs and hasattr(model, "compute_ci_bhat"):
         return model.compute_ci_bhat(alpha=1 - level)
     raise NotImplementedError(
-        f"confint(): level={level} not supported for "
-        f"{model.__class__.__name__}"
+        f"confint(): level={level} not supported for {model.__class__.__name__}"
     )
 
 
@@ -321,7 +319,8 @@ def profile(model, **kwargs):
     if not hasattr(model, "profile"):
         raise TypeError(
             f"profile(): {model.__class__.__name__} has no profile method "
-            f"(only mixed models / gmm)")
+            f"(only mixed models / gmm)"
+        )
     return model.profile(**kwargs)
 
 
@@ -334,8 +333,7 @@ def bootMer(x, FUN, **kwargs):
     ``.confint(type=...)`` gives perc/basic/norm intervals.
     """
     if not hasattr(x, "bootMer"):
-        raise TypeError(
-            f"bootMer(): {x.__class__.__name__} is not a mixed model (gmm)")
+        raise TypeError(f"bootMer(): {x.__class__.__name__} is not a mixed model (gmm)")
     return x.bootMer(FUN, **kwargs)
 
 
@@ -350,8 +348,7 @@ def vcov(model, correlation=False, full=False, use_hessian=None):
     mixed-model only.
     """
     if model.__class__.__name__ == "gmm":
-        return model.vcov(correlation=correlation, full=full,
-                          use_hessian=use_hessian)
+        return model.vcov(correlation=correlation, full=full, use_hessian=use_hessian)
     if correlation or full:
         raise TypeError(
             "vcov(): correlation=/full= are only supported for mixed models (gmm)"
@@ -360,9 +357,7 @@ def vcov(model, correlation=False, full=False, use_hessian=None):
         return model.Vp
     if hasattr(model, "V_bhat"):  # lm / glm
         return model.V_bhat
-    raise TypeError(
-        f"vcov(): {model.__class__.__name__} not supported"
-    )
+    raise TypeError(f"vcov(): {model.__class__.__name__} not supported")
 
 
 def logLik(model, REML=None):
@@ -376,16 +371,12 @@ def logLik(model, REML=None):
     if model.__class__.__name__ == "gmm":
         return model.logLik(REML=REML)
     if REML is not None:
-        raise TypeError(
-            "logLik(): REML= is only meaningful for mixed models (gmm)"
-        )
+        raise TypeError("logLik(): REML= is only meaningful for mixed models (gmm)")
     if hasattr(model, "loglike"):
         return float(model.loglike)
     if hasattr(model, "REML_criterion"):
         return -float(model.REML_criterion) / 2.0
-    raise TypeError(
-        f"logLik(): {model.__class__.__name__} has no log-likelihood"
-    )
+    raise TypeError(f"logLik(): {model.__class__.__name__} has no log-likelihood")
 
 
 def _require_gmm(model, fn):
@@ -480,9 +471,7 @@ def deviance(model):
         return float(model.deviance)
     if hasattr(model, "rss"):  # lm
         return float(model.rss)
-    raise TypeError(
-        f"deviance(): {model.__class__.__name__} has no deviance"
-    )
+    raise TypeError(f"deviance(): {model.__class__.__name__} has no deviance")
 
 
 def nobs(model):
@@ -557,20 +546,21 @@ def simulate(model, nsim=1, seed=None, **kwargs):
     var0 = float(deviance(model)) / float(df_residual(model))
     w = weights(model)
     sd_vec = (
-        np.full(n, np.sqrt(var0)) if w is None
+        np.full(n, np.sqrt(var0))
+        if w is None
         else np.sqrt(var0 / np.asarray(w, dtype=float))
     )
     if seed is None:
         import random
+
         seed = random.Random().randint(0, 2**31 - 1)
     rng = RMersenneTwister(int(seed))
     # R draws rnorm(n·nsim) column-major, recycling the per-row sd across cols.
     z = rng.rnorm(int(n * nsim))
     draws = z * np.tile(sd_vec, int(nsim))
-    return pl.DataFrame({
-        f"sim_{i + 1}": ftd + draws[i * n:(i + 1) * n]
-        for i in range(int(nsim))
-    })
+    return pl.DataFrame(
+        {f"sim_{i + 1}": ftd + draws[i * n : (i + 1) * n] for i in range(int(nsim))}
+    )
 
 
 def df_residual(model):
@@ -579,9 +569,7 @@ def df_residual(model):
         v = getattr(model, attr, None)
         if v is not None:
             return float(v)
-    raise TypeError(
-        f"df_residual(): {model.__class__.__name__} has no residual df"
-    )
+    raise TypeError(f"df_residual(): {model.__class__.__name__} has no residual df")
 
 
 def formula(model):
@@ -764,7 +752,9 @@ def update(model, formula=None, **kwargs):
     return cls(f, data, **kwargs)
 
 
-def _merge_formula_vars_from_caller(formula: str, data: pl.DataFrame, frame) -> pl.DataFrame:
+def _merge_formula_vars_from_caller(
+    formula: str, data: pl.DataFrame, frame
+) -> pl.DataFrame:
     """Find identifier-shaped names in ``formula`` that aren't columns of
     ``data``; pull each from ``frame``'s locals/globals if a length-match
     vector is bound there; return ``data`` augmented with those columns.
@@ -810,11 +800,13 @@ def AIC(*models):
     if len(models) == 1:
         return float(models[0].AIC)
     names = _caller_names(models, inspect.currentframe().f_back)
-    return pl.DataFrame({
-        "":    names,
-        "df":  [m.npar for m in models],
-        "AIC": [float(m.AIC) for m in models],
-    })
+    return pl.DataFrame(
+        {
+            "": names,
+            "df": [m.npar for m in models],
+            "AIC": [float(m.AIC) for m in models],
+        }
+    )
 
 
 def BIC(*models):
@@ -827,8 +819,10 @@ def BIC(*models):
     if len(models) == 1:
         return float(models[0].BIC)
     names = _caller_names(models, inspect.currentframe().f_back)
-    return pl.DataFrame({
-        "":    names,
-        "df":  [m.npar for m in models],
-        "BIC": [float(m.BIC) for m in models],
-    })
+    return pl.DataFrame(
+        {
+            "": names,
+            "df": [m.npar for m in models],
+            "BIC": [float(m.BIC) for m in models],
+        }
+    )

@@ -49,6 +49,7 @@ class Layer:
         if not self.geom_params:
             return
         from .aes import _ALL_AES_NAMES
+
         moved = {}
         keep = {}
         for k, v in self.geom_params.items():

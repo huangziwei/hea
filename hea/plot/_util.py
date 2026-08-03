@@ -121,9 +121,7 @@ def to_value_series(x, fname: str) -> pl.Series:
         )
     arr = np.asarray(x)
     if arr.ndim != 1:
-        raise TypeError(
-            f"{fname}(): expected a 1-D vector, got ndim={arr.ndim}."
-        )
+        raise TypeError(f"{fname}(): expected a 1-D vector, got ndim={arr.ndim}.")
     return pl.Series(arr)
 
 
@@ -134,8 +132,14 @@ def r_lty(lty):
         return "-"
     if isinstance(lty, str):
         return lty
-    return {1: "-", 2: "--", 3: ":", 4: "-.", 5: (0, (10, 3)),
-            6: (0, (5, 1, 1, 1))}.get(int(lty), "-")
+    return {
+        1: "-",
+        2: "--",
+        3: ":",
+        4: "-.",
+        5: (0, (10, 3)),
+        6: (0, (5, 1, 1, 1)),
+    }.get(int(lty), "-")
 
 
 def draw_points(ax, x, y, *, pch=None, cex=None, col=None):
@@ -172,6 +176,9 @@ def draw_points(ax, x, y, *, pch=None, cex=None, col=None):
         else:
             kw["edgecolor"] = col_codes
     if pch_codes is not None:
-        kw["marker"] = _R_MARKERS[int(pch_codes) % len(_R_MARKERS)] \
-            if isinstance(pch_codes, (int, np.integer)) else "o"
+        kw["marker"] = (
+            _R_MARKERS[int(pch_codes) % len(_R_MARKERS)]
+            if isinstance(pch_codes, (int, np.integer))
+            else "o"
+        )
     ax.scatter(xa, ya, **kw)

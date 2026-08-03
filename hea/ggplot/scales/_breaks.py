@@ -66,7 +66,7 @@ def extended_breaks(
                 z = int(np.ceil(np.log10(delta))) if delta > 0 else -300
 
                 while z < 300:
-                    step = j * q * 10.0 ** z
+                    step = j * q * 10.0**z
                     cm = _coverage_max(dmin, dmax, step * (k - 1))
                     if (w[0] * sm + w[1] * cm + w[2] * dm + w[3]) < best_score:
                         break
@@ -114,11 +114,17 @@ def extended_breaks(
 # scoring components — direct ports of labeling::extended internals
 # ---------------------------------------------------------------------------
 
-def _simplicity(qi: int, n_Q: int, j: int, lmin: float, lmax: float, lstep: float) -> float:
+
+def _simplicity(
+    qi: int, n_Q: int, j: int, lmin: float, lmax: float, lstep: float
+) -> float:
     eps = 1e-10
     # +1 if zero is inside the labeled range and the break grid passes through it
-    v = 1.0 if (abs(lmin - lstep * np.round(lmin / lstep)) < eps
-                and lmin <= 0 <= lmax) else 0.0
+    v = (
+        1.0
+        if (abs(lmin - lstep * np.round(lmin / lstep)) < eps and lmin <= 0 <= lmax)
+        else 0.0
+    )
     return 1.0 - qi / (n_Q - 1) - j + v
 
 
@@ -128,20 +134,20 @@ def _simplicity_max(qi: int, n_Q: int, j: int) -> float:
 
 def _coverage(dmin: float, dmax: float, lmin: float, lmax: float) -> float:
     range_ = dmax - dmin
-    return 1.0 - 0.5 * (
-        (dmax - lmax) ** 2 + (dmin - lmin) ** 2
-    ) / (0.1 * range_) ** 2
+    return 1.0 - 0.5 * ((dmax - lmax) ** 2 + (dmin - lmin) ** 2) / (0.1 * range_) ** 2
 
 
 def _coverage_max(dmin: float, dmax: float, span: float) -> float:
     range_ = dmax - dmin
     if span > range_:
         half = (span - range_) / 2.0
-        return 1.0 - 0.5 * (half ** 2 + half ** 2) / (0.1 * range_) ** 2
+        return 1.0 - 0.5 * (half**2 + half**2) / (0.1 * range_) ** 2
     return 1.0
 
 
-def _density(k: int, m: int, dmin: float, dmax: float, lmin: float, lmax: float) -> float:
+def _density(
+    k: int, m: int, dmin: float, dmax: float, lmin: float, lmax: float
+) -> float:
     r = (k - 1) / (lmax - lmin)
     rt = (m - 1) / (max(lmax, dmax) - min(dmin, lmin))
     return 2.0 - max(r / rt, rt / r)

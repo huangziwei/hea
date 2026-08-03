@@ -10,6 +10,7 @@
   null-handling defaults.
 * ``glimpse`` — ``tibble::glimpse`` (one-line-per-column transpose-view).
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -152,6 +153,7 @@ n_distinct = pl.n_unique
 
 # ---- conditionals (dplyr) -------------------------------------------
 
+
 def if_else(condition, true_value, false_value, missing=None) -> pl.Expr:
     """dplyr's ``if_else()`` — vectorized conditional.
 
@@ -177,6 +179,7 @@ def if_else(condition, true_value, false_value, missing=None) -> pl.Expr:
         Value emitted when ``condition`` is null. Defaults to ``None``
         (null), matching dplyr's ``NA`` default.
     """
+
     # Polars' .then("x") interprets a bare string as a column name; dplyr's
     # if_else treats strings as literals. Lift any non-Expr non-Series value
     # to pl.lit so "5" stays "5".
@@ -186,8 +189,10 @@ def if_else(condition, true_value, false_value, missing=None) -> pl.Expr:
     t, f = _lit(true_value), _lit(false_value)
     if isinstance(condition, (pl.Expr, pl.Series)):
         return (
-            pl.when(condition.is_null()).then(pl.lit(missing))
-            .when(condition).then(t)
+            pl.when(condition.is_null())
+            .then(pl.lit(missing))
+            .when(condition)
+            .then(t)
             .otherwise(f)
         )
     return pl.when(condition).then(t).otherwise(f)
@@ -230,9 +235,7 @@ def case_when(*pairs, default=None) -> pl.Expr:
     ... ))  # doctest: +SKIP
     """
     if not pairs:
-        raise TypeError(
-            "case_when() requires at least one (condition, value) pair"
-        )
+        raise TypeError("case_when() requires at least one (condition, value) pair")
 
     def _lit(v):
         return v if isinstance(v, (pl.Expr, pl.Series)) else pl.lit(v)
@@ -241,8 +244,7 @@ def case_when(*pairs, default=None) -> pl.Expr:
     for i, pair in enumerate(pairs):
         if not (isinstance(pair, tuple) and len(pair) == 2):
             raise TypeError(
-                f"case_when() pair {i} must be a (condition, value) "
-                f"tuple, got {pair!r}"
+                f"case_when() pair {i} must be a (condition, value) tuple, got {pair!r}"
             )
         cond, val = pair
         val = _lit(val)

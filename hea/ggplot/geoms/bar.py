@@ -28,22 +28,24 @@ _PT_PER_MM = 72.27 / 25.4
 
 @dataclass
 class GeomBar(Geom):
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": None,
-        "fill": "grey35",
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-        # ggplot2's GeomBar/GeomCol default. Realized as a per-row
-        # column so polar's ``rescale_theta`` reaches it — without
-        # the column, ``draw_panel``'s scalar fallback (0.9) goes
-        # straight to ``ax.bar(width=0.9)`` and matplotlib polar
-        # interprets that as 0.9 RADIANS per bar (e.g. 60 bars × 0.9
-        # rad = ~8.6 full circles' worth of overlap). With the
-        # column, ``rescale_theta`` multiplies by ``2π / x_range``
-        # so 0.9 ends up as 0.9 × slot-width per bar.
-        "width": 0.9,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": None,
+            "fill": "grey35",
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+            # ggplot2's GeomBar/GeomCol default. Realized as a per-row
+            # column so polar's ``rescale_theta`` reaches it — without
+            # the column, ``draw_panel``'s scalar fallback (0.9) goes
+            # straight to ``ax.bar(width=0.9)`` and matplotlib polar
+            # interprets that as 0.9 RADIANS per bar (e.g. 60 bars × 0.9
+            # rad = ~8.6 full circles' worth of overlap). With the
+            # column, ``rescale_theta`` multiplies by ``2π / x_range``
+            # so 0.9 ends up as 0.9 × slot-width per bar.
+            "width": 0.9,
+        }
+    )
     required_aes: tuple = ("x", "y")
     key_glyph: str = "polygon"
 
@@ -90,10 +92,8 @@ class GeomBar(Geom):
         # Per-row fill / edge: scalar when uniform, list when varied
         # (matplotlib's ``ax.bar`` accepts either). Lets dodge / stack /
         # ``aes(colour=class)`` colour each bar individually.
-        fill = _row_colour(data, "fill", when_all_none="none",
-                           when_missing="grey35")
-        edge = _row_colour(data, "colour", when_all_none="none",
-                           when_missing="none")
+        fill = _row_colour(data, "fill", when_all_none="none", when_missing="grey35")
+        edge = _row_colour(data, "colour", when_all_none="none", when_missing="none")
         alpha = float(_scalar(data, "alpha", default=1.0))
         # Border thickness — the layer's ``size`` aes is ggplot2-style mm;
         # matplotlib wants pt. Default ``size=0.5 mm`` becomes ~1.42 pt,
@@ -105,11 +105,29 @@ class GeomBar(Geom):
         # ``data["y"]`` (== ``height`` here) holds the *positions* (originally
         # x). Use ax.barh so bars extend along the visible x axis.
         if getattr(ax, "_hea_coord_flipped", False):
-            ax.barh(height, width=x, height=width, left=bottom, color=fill,
-                    edgecolor=edge, alpha=alpha, linewidth=linewidth, align="center")
+            ax.barh(
+                height,
+                width=x,
+                height=width,
+                left=bottom,
+                color=fill,
+                edgecolor=edge,
+                alpha=alpha,
+                linewidth=linewidth,
+                align="center",
+            )
         else:
-            ax.bar(x, height, width=width, bottom=bottom, color=fill,
-                   edgecolor=edge, alpha=alpha, linewidth=linewidth, align="center")
+            ax.bar(
+                x,
+                height,
+                width=width,
+                bottom=bottom,
+                color=fill,
+                edgecolor=edge,
+                alpha=alpha,
+                linewidth=linewidth,
+                align="center",
+            )
 
 
 def _scalar(df, col, *, default):
@@ -139,6 +157,7 @@ def _row_colour(df, col, *, when_all_none, when_missing):
     if col not in df.columns or len(df) == 0:
         return r_color(when_missing) if when_missing != "none" else "none"
     vals = df[col].to_list()
+
     # Treat NaN floats the same as None — matches R's ``NA_real_``.
     def _is_na(v):
         if v is None:
@@ -146,6 +165,7 @@ def _row_colour(df, col, *, when_all_none, when_missing):
         if isinstance(v, float) and np.isnan(v):
             return True
         return False
+
     if all(_is_na(v) for v in vals):
         return when_all_none if when_all_none == "none" else r_color(when_all_none)
     distinct = {v for v in vals if not _is_na(v)}

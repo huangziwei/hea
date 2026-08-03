@@ -167,14 +167,14 @@ def _build_r_driver(user_script: Path, out_csv: Path, out_schema: Path) -> str:
     driver contains many ``{`` / ``}`` (function bodies, ``tryCatch``)
     that would confuse ``format``-style placeholders.
     """
+
     def _r_escape(p: Path) -> str:
         # R double-quoted strings need ``\\`` and ``"`` escaped. Paths
         # under macOS / Linux won't contain either; defend regardless.
         return str(p).replace("\\", "\\\\").replace('"', '\\"')
 
     return (
-        _R_DRIVER_TEMPLATE
-        .replace("@@USER_SCRIPT@@", _r_escape(user_script))
+        _R_DRIVER_TEMPLATE.replace("@@USER_SCRIPT@@", _r_escape(user_script))
         .replace("@@OUT_CSV@@", _r_escape(out_csv))
         .replace("@@OUT_SCHEMA@@", _r_escape(out_schema))
     )
@@ -246,8 +246,12 @@ def run_py(script_path: Path, out_dir: Path, *, timeout: float = 60.0) -> RunRes
 
     proc = subprocess.run(
         [
-            sys.executable, "-m", "hea.translate._py_capture",
-            str(script_path), str(out_csv), str(out_schema),
+            sys.executable,
+            "-m",
+            "hea.translate._py_capture",
+            str(script_path),
+            str(out_csv),
+            str(out_schema),
         ],
         capture_output=True,
         text=True,
@@ -273,17 +277,17 @@ def run_py(script_path: Path, out_dir: Path, *, timeout: float = 60.0) -> RunRes
 # enforce exact dtype equality (Int64 vs Float64 round-trip noise is real);
 # instead, we group both sides and compare the group.
 _R_DTYPE_GROUP = {
-    "integer":   "numeric",
-    "numeric":   "numeric",
-    "double":    "numeric",
-    "complex":   "numeric",
+    "integer": "numeric",
+    "numeric": "numeric",
+    "double": "numeric",
+    "complex": "numeric",
     "character": "string",
-    "factor":    "factor",
-    "ordered":   "factor",
-    "logical":   "bool",
-    "Date":      "date",
-    "POSIXct":   "datetime",
-    "POSIXlt":   "datetime",
+    "factor": "factor",
+    "ordered": "factor",
+    "logical": "bool",
+    "Date": "date",
+    "POSIXct": "datetime",
+    "POSIXlt": "datetime",
 }
 
 
@@ -332,12 +336,14 @@ def diff_frames(
 
     # --- Schema: columns ---
     if list(r_df.columns) != list(py_df.columns):
-        out.append(Gap(
-            kind="result_diff_schema",
-            subject="columns",
-            source=source_label,
-            notes=f"R columns: {list(r_df.columns)}\nhea columns: {list(py_df.columns)}",
-        ))
+        out.append(
+            Gap(
+                kind="result_diff_schema",
+                subject="columns",
+                source=source_label,
+                notes=f"R columns: {list(r_df.columns)}\nhea columns: {list(py_df.columns)}",
+            )
+        )
         return out  # can't compare further if columns disagree
 
     # --- Schema: dtype groups ---
@@ -345,22 +351,26 @@ def diff_frames(
         r_grp = _R_DTYPE_GROUP.get(r_meta["dtypes"].get(col, ""), "?")
         py_grp = _pl_dtype_group(py_meta["dtypes"].get(col, ""))
         if r_grp != py_grp:
-            out.append(Gap(
-                kind="result_diff_schema",
-                subject=f"dtype:{col}",
-                source=source_label,
-                notes=f"R dtype: {r_meta['dtypes'].get(col)} → {r_grp}; "
-                      f"hea dtype: {py_meta['dtypes'].get(col)} → {py_grp}",
-            ))
+            out.append(
+                Gap(
+                    kind="result_diff_schema",
+                    subject=f"dtype:{col}",
+                    source=source_label,
+                    notes=f"R dtype: {r_meta['dtypes'].get(col)} → {r_grp}; "
+                    f"hea dtype: {py_meta['dtypes'].get(col)} → {py_grp}",
+                )
+            )
 
     # --- Row count ---
     if r_df.height != py_df.height:
-        out.append(Gap(
-            kind="result_diff_row_count",
-            subject="height",
-            source=source_label,
-            notes=f"R rows: {r_df.height}; hea rows: {py_df.height}",
-        ))
+        out.append(
+            Gap(
+                kind="result_diff_row_count",
+                subject="height",
+                source=source_label,
+                notes=f"R rows: {r_df.height}; hea rows: {py_df.height}",
+            )
+        )
         return out  # value diff requires aligned shapes
 
     # --- Factor levels ---
@@ -370,12 +380,14 @@ def diff_frames(
         r_lev = r_factors.get(col, {}).get("levels", [])
         py_lev = py_factors.get(col, {}).get("levels", [])
         if r_lev != py_lev:
-            out.append(Gap(
-                kind="result_diff_factor",
-                subject=col,
-                source=source_label,
-                notes=f"R levels: {r_lev}\nhea levels: {py_lev}",
-            ))
+            out.append(
+                Gap(
+                    kind="result_diff_factor",
+                    subject=col,
+                    source=source_label,
+                    notes=f"R levels: {r_lev}\nhea levels: {py_lev}",
+                )
+            )
 
     # --- Values ---
     for col in r_df.columns:
@@ -386,12 +398,14 @@ def diff_frames(
         if r_grp == "numeric":
             diff = _numeric_diff(r_col, py_col, rel_tol=rel_tol, abs_tol=abs_tol)
             if diff:
-                out.append(Gap(
-                    kind="result_diff_values",
-                    subject=col,
-                    source=source_label,
-                    notes=diff,
-                ))
+                out.append(
+                    Gap(
+                        kind="result_diff_values",
+                        subject=col,
+                        source=source_label,
+                        notes=diff,
+                    )
+                )
         else:
             # Cast both to string for exact compare. CSV round-trip
             # normalizes most representational quirks.
@@ -402,12 +416,14 @@ def diff_frames(
             both_null = r_str.is_null() & py_str.is_null()
             mismatches = mismatches - int(both_null.sum())
             if mismatches:
-                out.append(Gap(
-                    kind="result_diff_values",
-                    subject=col,
-                    source=source_label,
-                    notes=f"{mismatches} non-numeric mismatches in {col!r}",
-                ))
+                out.append(
+                    Gap(
+                        kind="result_diff_values",
+                        subject=col,
+                        source=source_label,
+                        notes=f"{mismatches} non-numeric mismatches in {col!r}",
+                    )
+                )
 
     return out
 
@@ -436,7 +452,9 @@ def _numeric_diff(r_col, py_col, *, rel_tol: float, abs_tol: float) -> str:
     parts = []
     if n_violators:
         max_diff = float(diff_series.max() or 0.0)
-        parts.append(f"{n_violators} values exceed tolerance (max abs diff {max_diff:.6g})")
+        parts.append(
+            f"{n_violators} values exceed tolerance (max abs diff {max_diff:.6g})"
+        )
     if n_one_null:
         parts.append(f"{n_one_null} cells null on one side only")
     return "; ".join(parts)
@@ -474,8 +492,11 @@ def parity(
         )
         if log:
             _gaps.log_gap(
-                kind=gap.kind, subject=gap.subject, source=gap.source,
-                snippet=gap.snippet, notes=gap.notes,
+                kind=gap.kind,
+                subject=gap.subject,
+                source=gap.source,
+                snippet=gap.snippet,
+                notes=gap.notes,
             )
         return ParityResult(
             r_script=r_script_path,
@@ -495,35 +516,47 @@ def parity(
 
         observed: list[Gap] = []
         if not r_run.ok:
-            observed.append(Gap(
-                kind="runtime_error_r",
-                subject=r_script_path.name,
-                source=str(r_script_path),
-                notes=r_run.stderr[:1000],
-            ))
+            observed.append(
+                Gap(
+                    kind="runtime_error_r",
+                    subject=r_script_path.name,
+                    source=str(r_script_path),
+                    notes=r_run.stderr[:1000],
+                )
+            )
         if not py_run.ok:
-            observed.append(Gap(
-                kind="runtime_error_py",
-                subject=r_script_path.name,
-                source=str(r_script_path),
-                snippet=r_source[:200],
-                translation=py_source[:200],
-                notes=py_run.stderr[:1000],
-            ))
+            observed.append(
+                Gap(
+                    kind="runtime_error_py",
+                    subject=r_script_path.name,
+                    source=str(r_script_path),
+                    snippet=r_source[:200],
+                    translation=py_source[:200],
+                    notes=py_run.stderr[:1000],
+                )
+            )
         if r_run.ok and py_run.ok:
-            observed.extend(diff_frames(
-                r_run.out_csv, r_run.out_schema,
-                py_run.out_csv, py_run.out_schema,
-                rel_tol=rel_tol,
-                abs_tol=abs_tol,
-                source_label=str(r_script_path),
-            ))
+            observed.extend(
+                diff_frames(
+                    r_run.out_csv,
+                    r_run.out_schema,
+                    py_run.out_csv,
+                    py_run.out_schema,
+                    rel_tol=rel_tol,
+                    abs_tol=abs_tol,
+                    source_label=str(r_script_path),
+                )
+            )
 
         if log:
             for g in observed:
                 _gaps.log_gap(
-                    kind=g.kind, subject=g.subject, source=g.source,
-                    snippet=g.snippet, translation=g.translation, notes=g.notes,
+                    kind=g.kind,
+                    subject=g.subject,
+                    source=g.source,
+                    snippet=g.snippet,
+                    translation=g.translation,
+                    notes=g.notes,
                 )
 
         return ParityResult(

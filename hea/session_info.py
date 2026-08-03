@@ -206,7 +206,7 @@ def _fmt_pkg_list(pkgs: dict[str, str], *, width: int = 80) -> list[str]:
     per_line = max(1, (text_w + 1) // (pad + 1))
     out: list[str] = []
     for i in range(0, n, per_line):
-        chunk = entries[i:i + per_line]
+        chunk = entries[i : i + per_line]
         padded = [e.ljust(pad) for e in chunk]
         idx = f"[{i + 1}]".rjust(idx_col)
         out.append(f"{idx} {' '.join(padded)}".rstrip())

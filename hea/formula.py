@@ -78,10 +78,23 @@ class ParseError(ValueError):
 
 
 _SINGLE_OPS = {
-    "~": "TILDE", "+": "PLUS", "-": "MINUS", "*": "STAR", "/": "SLASH",
-    "^": "CARET", ":": "COLON", "(": "LPAREN", ")": "RPAREN", ",": "COMMA",
-    "=": "EQUALS", "$": "DOLLAR", "[": "LBRACKET", "]": "RBRACKET",
-    "<": "LT", ">": "GT", "!": "BANG",
+    "~": "TILDE",
+    "+": "PLUS",
+    "-": "MINUS",
+    "*": "STAR",
+    "/": "SLASH",
+    "^": "CARET",
+    ":": "COLON",
+    "(": "LPAREN",
+    ")": "RPAREN",
+    ",": "COMMA",
+    "=": "EQUALS",
+    "$": "DOLLAR",
+    "[": "LBRACKET",
+    "]": "RBRACKET",
+    "<": "LT",
+    ">": "GT",
+    "!": "BANG",
 }
 
 
@@ -116,9 +129,9 @@ def tokenize(src: str) -> list[Token]:
             continue
 
         # Two-char comparisons: ==, !=, <=, >=. Check before single-char ops.
-        if i + 1 < n and src[i:i + 2] in ("==", "!=", "<=", ">="):
-            kind = {"==": "EQEQ", "!=": "NEQ", "<=": "LE", ">=": "GE"}[src[i:i + 2]]
-            out.append(Token(kind, src[i:i + 2], i))
+        if i + 1 < n and src[i : i + 2] in ("==", "!=", "<=", ">="):
+            kind = {"==": "EQEQ", "!=": "NEQ", "<=": "LE", ">=": "GE"}[src[i : i + 2]]
+            out.append(Token(kind, src[i : i + 2], i))
             i += 2
             continue
 
@@ -127,7 +140,7 @@ def tokenize(src: str) -> list[Token]:
             j = src.find("%", i + 1)
             if j == -1:
                 raise ParseError(f"unterminated %op% at {i}")
-            out.append(Token("PERCENT_OP", src[i:j + 1], i))
+            out.append(Token("PERCENT_OP", src[i : j + 1], i))
             i = j + 1
             continue
 
@@ -165,7 +178,7 @@ def tokenize(src: str) -> list[Token]:
                 j += 2 if src[j] == "\\" and j + 1 < n else 1
             if j >= n:
                 raise ParseError(f"unterminated string at {i}")
-            out.append(Token("STRING", src[i + 1:j], i))
+            out.append(Token("STRING", src[i + 1 : j], i))
             i = j + 1
             continue
 
@@ -176,7 +189,7 @@ def tokenize(src: str) -> list[Token]:
                 j += 1
             if j >= n:
                 raise ParseError(f"unterminated backtick at {i}")
-            out.append(Token("IDENT", src[i + 1:j], i))
+            out.append(Token("IDENT", src[i + 1 : j], i))
             i = j + 1
             continue
 
@@ -190,8 +203,7 @@ def tokenize(src: str) -> list[Token]:
                 j += 1
             ident = src[i:j]
             out.append(
-                Token("DOT", ident, i) if ident == "."
-                else Token("IDENT", ident, i)
+                Token("DOT", ident, i) if ident == "." else Token("IDENT", ident, i)
             )
             i = j
             continue
@@ -256,6 +268,7 @@ class Paren:
 @dataclass(slots=True)
 class Subscript:
     """`x[i]` — single-bracket indexing. Multi-index (`x[i, j]`) stored in `idx` as a list."""
+
     obj: "Node"
     idx: list["Node"]
 
@@ -280,22 +293,22 @@ Node = Union[Name, Literal, Dot, Empty, UnaryOp, BinOp, Call, Paren, Subscript]
 # bracketed arg list for `[`), so keeping them out of the generic BinOp loop
 # also gives us the correct left-to-right chaining for `a$b[1]`.
 _BINOPS: dict[str, tuple[int, bool]] = {
-    "TILDE":      (1, False),
-    "BAR":        (2, False),
+    "TILDE": (1, False),
+    "BAR": (2, False),
     "DOUBLE_BAR": (2, False),
-    "EQEQ":       (3, False),
-    "NEQ":        (3, False),
-    "LT":         (3, False),
-    "GT":         (3, False),
-    "LE":         (3, False),
-    "GE":         (3, False),
-    "PLUS":       (4, False),
-    "MINUS":      (4, False),
-    "STAR":       (5, False),
-    "SLASH":      (5, False),
-    "COLON":      (7, False),
+    "EQEQ": (3, False),
+    "NEQ": (3, False),
+    "LT": (3, False),
+    "GT": (3, False),
+    "LE": (3, False),
+    "GE": (3, False),
+    "PLUS": (4, False),
+    "MINUS": (4, False),
+    "STAR": (5, False),
+    "SLASH": (5, False),
+    "COLON": (7, False),
     "PERCENT_OP": (7, False),
-    "CARET":      (8, True),
+    "CARET": (8, True),
 }
 
 
@@ -411,7 +424,9 @@ class _Parser:
         if t.kind == "NUMBER":
             self.advance()
             v = t.value
-            return Literal(float(v) if ("." in v or "e" in v or "E" in v) else int(v), "num")
+            return Literal(
+                float(v) if ("." in v or "e" in v or "E" in v) else int(v), "num"
+            )
         if t.kind == "STRING":
             self.advance()
             return Literal(t.value, "str")
@@ -457,7 +472,9 @@ class _Parser:
             if self.peek().kind == "RPAREN":
                 break
             t = self.peek()
-            raise ParseError(f"expected , or ) in call to {fn!r}, got {t.kind} at {t.pos}")
+            raise ParseError(
+                f"expected , or ) in call to {fn!r}, got {t.kind} at {t.pos}"
+            )
 
         self.expect("RPAREN")
         return Call(fn, args, kwargs)
@@ -571,15 +588,16 @@ class Term:
     # compare/hash so the dataclass machinery treats it as a pure cache. We
     # still override __hash__/__eq__ below to use it explicitly.
     _key: frozenset = field(
-        init=False, repr=False, compare=False, hash=False,
+        init=False,
+        repr=False,
+        compare=False,
+        hash=False,
         default_factory=frozenset,
     )
 
     def __post_init__(self) -> None:
         # Frozen + slots: bypass __setattr__ to populate the cache once.
-        object.__setattr__(
-            self, "_key", frozenset(_deparse(a) for a in self.atoms)
-        )
+        object.__setattr__(self, "_key", frozenset(_deparse(a) for a in self.atoms))
 
     def __hash__(self) -> int:
         return hash(self._key)
@@ -622,6 +640,7 @@ class ExpandedFormula:
     contribute to the design matrix but are added directly to the linear
     predictor at fit time.
     """
+
     intercept: bool
     terms: list[Term] = field(default_factory=list)
     bars: list[BinOp] = field(default_factory=list)
@@ -636,7 +655,11 @@ class ExpandedFormula:
 def _is_bar(node) -> bool:
     if isinstance(node, BinOp) and node.op in ("|", "||"):
         return True
-    return isinstance(node, Paren) and isinstance(node.expr, BinOp) and node.expr.op in ("|", "||")
+    return (
+        isinstance(node, Paren)
+        and isinstance(node.expr, BinOp)
+        and node.expr.op in ("|", "||")
+    )
 
 
 def _bar_node(node) -> BinOp:
@@ -889,7 +912,7 @@ def _source_var_order(node) -> dict[str, int]:
                 return
             if n.op == "^":
                 if isinstance(n.right, Literal) and n.right.kind == "num":
-                    walk(n.left)        # power expansion: only base vars appear
+                    walk(n.left)  # power expansion: only base vars appear
                     return
                 # non-literal exponent: whole node is one atom (see expansion)
         order.setdefault(_deparse(n), len(order))
@@ -953,7 +976,8 @@ def expand(
     # before `x2`. Affects column labels/order only — the column set is unchanged.
     var_order = _source_var_order(rhs)
     kept = [
-        t if len(t.atoms) <= 1
+        t
+        if len(t.atoms) <= 1
         else Term(tuple(sorted(t.atoms, key=lambda a: var_order[_deparse(a)])))
         for t in kept
     ]
@@ -963,7 +987,10 @@ def expand(
     kept.sort(key=lambda t: len(t.atoms))
 
     return ExpandedFormula(
-        intercept=intercept, terms=kept, bars=bars, offsets=offsets,
+        intercept=intercept,
+        terms=kept,
+        bars=bars,
+        offsets=offsets,
         smooths=smooths,
     )
 
@@ -1139,7 +1166,8 @@ def set_ordered_cols(cols):
 # ``C(...)`` wrapping has already set ``forced_contrast``, the mapped contrast
 # is applied. R semantics: in-formula ``C(...)`` wins over the argument.
 _CONTRASTS_CV: contextvars.ContextVar[dict] = contextvars.ContextVar(
-    "_hea_contrasts", default={},
+    "_hea_contrasts",
+    default={},
 )
 
 
@@ -1164,12 +1192,14 @@ def with_contrasts(mapping):
 # ``contrasts.arg`` override. Defaults match R: treatment for unordered, poly
 # for ordered.
 _DEFAULT_CONTRASTS_CV: contextvars.ContextVar[tuple[str, str]] = contextvars.ContextVar(
-    "_hea_default_contrasts", default=("contr.treatment", "contr.poly"),
+    "_hea_default_contrasts",
+    default=("contr.treatment", "contr.poly"),
 )
 
 
-def set_default_contrasts(unordered: str = "contr.treatment",
-                          ordered: str = "contr.poly") -> None:
+def set_default_contrasts(
+    unordered: str = "contr.treatment", ordered: str = "contr.poly"
+) -> None:
     """Set the default contrasts — R's ``options(contrasts = c(unordered,
     ordered))``. Applies to factors with no ``C(...)`` wrap or per-factor
     override. No restore-on-exit; use :func:`with_default_contrasts` for that."""
@@ -1177,8 +1207,9 @@ def set_default_contrasts(unordered: str = "contr.treatment",
 
 
 @contextlib.contextmanager
-def with_default_contrasts(unordered: str = "contr.treatment",
-                           ordered: str = "contr.poly"):
+def with_default_contrasts(
+    unordered: str = "contr.treatment", ordered: str = "contr.poly"
+):
     """Context manager form of :func:`set_default_contrasts` (R's
     ``options(contrasts=...)`` scoped to the ``with`` block)."""
     token = _DEFAULT_CONTRASTS_CV.set((unordered, ordered))
@@ -1212,6 +1243,7 @@ _R_CONSTANTS = {
 @dataclass(slots=True)
 class _NumBlock:
     """Numeric atom: 2-D values (n, k), one suffix per col, single atom label."""
+
     values: np.ndarray
     suffixes: list[str]  # what gets appended to `label` per column
     label: str
@@ -1220,10 +1252,11 @@ class _NumBlock:
 @dataclass(slots=True)
 class _FactorBlock:
     """Categorical atom: integer codes into `levels`, with optional forced contrast."""
-    codes: np.ndarray         # (n,) int, each in range(len(levels))
-    levels: list              # ordered list of level values
+
+    codes: np.ndarray  # (n,) int, each in range(len(levels))
+    levels: list  # ordered list of level values
     ordered: bool
-    label: str                # e.g. "Species" or "C(Species, contr.sum)"
+    label: str  # e.g. "Species" or "C(Species, contr.sum)"
     forced_contrast: Optional[str] = None  # override for default treatment/poly
     how_many: Optional[int] = None  # C(f, _, how.many): truncate contrast cols
 
@@ -1258,7 +1291,9 @@ def _is_categorical(series: pl.Series) -> bool:
     return False
 
 
-def _factor_from_series(series: pl.Series, label: str, ordered_hint: bool = False) -> _FactorBlock:
+def _factor_from_series(
+    series: pl.Series, label: str, ordered_hint: bool = False
+) -> _FactorBlock:
     dt = series.dtype
     if dt == pl.Boolean:
         # R's factor(logical): fixed levels "FALSE" < "TRUE" (uppercase, the
@@ -1270,9 +1305,13 @@ def _factor_from_series(series: pl.Series, label: str, ordered_hint: bool = Fals
             codes = np.where(null_mask, -1, codes)
         ordered = ordered_hint or (label in _ORDERED_COLS_CV.get())
         forced = _CONTRASTS_CV.get().get(label)
-        return _FactorBlock(codes=codes.astype(int, copy=False),
-                            levels=["FALSE", "TRUE"], ordered=ordered,
-                            label=label, forced_contrast=forced)
+        return _FactorBlock(
+            codes=codes.astype(int, copy=False),
+            levels=["FALSE", "TRUE"],
+            ordered=ordered,
+            label=label,
+            forced_contrast=forced,
+        )
     if dt in (pl.Categorical, pl.Enum):
         # polars 1.40+ gives all pl.Categorical columns in one DataFrame a merged
         # string pool, so cat.get_categories() returns every category seen across
@@ -1299,8 +1338,13 @@ def _factor_from_series(series: pl.Series, label: str, ordered_hint: bool = Fals
             present_max = int(valid.max())
             # Fast path: all declared levels are present. np.bincount with
             # minlength=k_full is O(n) and avoids the np.unique sort.
-            if present_max < k_full and valid.size >= k_full and \
-                    np.all(np.bincount(valid.astype(np.intp, copy=False), minlength=k_full) > 0):
+            if (
+                present_max < k_full
+                and valid.size >= k_full
+                and np.all(
+                    np.bincount(valid.astype(np.intp, copy=False), minlength=k_full) > 0
+                )
+            ):
                 levels = full
                 codes = codes_raw.astype(np.int64, copy=False)
             else:
@@ -1320,8 +1364,13 @@ def _factor_from_series(series: pl.Series, label: str, ordered_hint: bool = Fals
         # the call site already knows (e.g. `ordered(x)` in a formula).
         ordered = ordered_hint or (label in _ORDERED_COLS_CV.get())
         forced = _CONTRASTS_CV.get().get(label)
-        return _FactorBlock(codes=codes, levels=levels, ordered=ordered,
-                            label=label, forced_contrast=forced)
+        return _FactorBlock(
+            codes=codes,
+            levels=levels,
+            ordered=ordered,
+            label=label,
+            forced_contrast=forced,
+        )
     # R's factor() uses locale-aware sort(unique(x)) on strings, but numeric
     # columns sort numerically (factor() first coerces to character and R's
     # sort on numerics is numeric when the input was numeric).
@@ -1338,15 +1387,19 @@ def _factor_from_series(series: pl.Series, label: str, ordered_hint: bool = Fals
     code_map = {lv: i for i, lv in enumerate(levels)}
     if null_mask is not None:
         codes = np.array(
-            [-1 if null_mask[i] else code_map.get(values[i], -1) for i in range(len(values))],
+            [
+                -1 if null_mask[i] else code_map.get(values[i], -1)
+                for i in range(len(values))
+            ],
             dtype=int,
         )
     else:
         codes = np.array([code_map.get(v, -1) for v in values], dtype=int)
     ordered = ordered_hint or (label in _ORDERED_COLS_CV.get())
     forced = _CONTRASTS_CV.get().get(label)
-    return _FactorBlock(codes=codes, levels=levels, ordered=ordered,
-                        label=label, forced_contrast=forced)
+    return _FactorBlock(
+        codes=codes, levels=levels, ordered=ordered, label=label, forced_contrast=forced
+    )
 
 
 def _eval_maybe_string(node, data: pl.DataFrame) -> np.ndarray:
@@ -1434,21 +1487,29 @@ def _eval_numeric(node, data: pl.DataFrame) -> np.ndarray:
         if op == "/":
             return lhs / r
         if op == "^":
-            return lhs ** r
+            return lhs**r
         raise TypeError(f"unsupported binop {op!r} in numeric context")
     if isinstance(node, Call):
         block = _eval_call(node, data)
         if isinstance(block, _FactorBlock):
-            raise TypeError(f"factor-producing call {node.fn!r} used in numeric context")
+            raise TypeError(
+                f"factor-producing call {node.fn!r} used in numeric context"
+            )
         if block.values.shape[1] != 1:
             raise TypeError(f"multi-column call {node.fn!r} used in numeric context")
         return block.values[:, 0]
     if isinstance(node, Subscript):
         base = _eval_numeric(node.obj, data)
         # Only single integer-literal index supported for now (e.g. `b.d[1]`).
-        if len(node.idx) == 1 and isinstance(node.idx[0], Literal) and node.idx[0].kind == "num":
+        if (
+            len(node.idx) == 1
+            and isinstance(node.idx[0], Literal)
+            and node.idx[0].kind == "num"
+        ):
             i = int(node.idx[0].value) - 1  # R is 1-indexed
-            return np.full(len(data), float(base[i]) if base.ndim == 1 else float(base[i, 0]))
+            return np.full(
+                len(data), float(base[i]) if base.ndim == 1 else float(base[i, 0])
+            )
         raise TypeError("complex subscripts not yet supported")
     raise TypeError(f"cannot numerically evaluate {type(node).__name__}")
 
@@ -1469,8 +1530,9 @@ def _is_logical_node(node) -> bool:
     return isinstance(node, UnaryOp) and node.op == "!"
 
 
-def _apply_factor_levels_labels(blk: "_FactorBlock", call: Call,
-                                s: pl.Series, label: str) -> "_FactorBlock":
+def _apply_factor_levels_labels(
+    blk: "_FactorBlock", call: Call, s: pl.Series, label: str
+) -> "_FactorBlock":
     """Apply R's factor()/ordered() ``levels=`` (recode order) and ``labels=``
     (rename) kwargs to an already-built factor block.
 
@@ -1492,13 +1554,12 @@ def _apply_factor_levels_labels(blk: "_FactorBlock", call: Call,
         codes = blk.codes
     if has_labels:
         labels = [str(v) for v in _eval_level_list(call.kwargs["labels"])]
-        if len(labels) == 1 and len(keys) > 1:        # R: single label → prefix
+        if len(labels) == 1 and len(keys) > 1:  # R: single label → prefix
             labels = [f"{labels[0]}{i + 1}" for i in range(len(keys))]
         display = labels
     else:
         display = keys
-    return _FactorBlock(codes=codes, levels=display,
-                        ordered=blk.ordered, label=label)
+    return _FactorBlock(codes=codes, levels=display, ordered=blk.ordered, label=label)
 
 
 def _logical_factor_block(node, data: pl.DataFrame, label: str) -> "_FactorBlock":
@@ -1509,7 +1570,7 @@ def _logical_factor_block(node, data: pl.DataFrame, label: str) -> "_FactorBlock
     reference), so naming (`…TRUE`) and no-intercept full coding (`…FALSE`,
     `…TRUE`) match R for free.
     """
-    v = _eval_numeric(node, data)        # 0.0 / 1.0 for comparisons and `!`
+    v = _eval_numeric(node, data)  # 0.0 / 1.0 for comparisons and `!`
     s = pl.Series(np.asarray(v).astype(bool))
     return _factor_from_series(s, label=label)
 
@@ -1528,7 +1589,19 @@ def _eval_call(call: Call, data: pl.DataFrame):
         v = _eval_numeric(call.args[0], data)
         return _NumBlock(values=v.reshape(-1, 1), suffixes=[""], label=label)
 
-    if fn in ("log", "exp", "sqrt", "abs", "cos", "sin", "tan", "expm1", "log1p", "log2", "log10"):
+    if fn in (
+        "log",
+        "exp",
+        "sqrt",
+        "abs",
+        "cos",
+        "sin",
+        "tan",
+        "expm1",
+        "log1p",
+        "log2",
+        "log10",
+    ):
         v = _eval_numeric(call.args[0], data)
         if fn == "log":
             # R's log(x, base): base is the 2nd positional arg OR base= kwarg
@@ -1536,21 +1609,30 @@ def _eval_call(call: Call, data: pl.DataFrame):
             base_node = call.kwargs.get("base")
             if base_node is None and len(call.args) >= 2:
                 base_node = call.args[1]
-            out = (np.log(v) if base_node is None
-                   else np.log(v) / np.log(_eval_numeric(base_node, data)))
+            out = (
+                np.log(v)
+                if base_node is None
+                else np.log(v) / np.log(_eval_numeric(base_node, data))
+            )
             return _NumBlock(values=out.reshape(-1, 1), suffixes=[""], label=label)
         f = {
-            "exp": np.exp, "sqrt": np.sqrt, "abs": np.abs,
-            "cos": np.cos, "sin": np.sin, "tan": np.tan,
-            "expm1": np.expm1, "log1p": np.log1p,
-            "log2": np.log2, "log10": np.log10,
+            "exp": np.exp,
+            "sqrt": np.sqrt,
+            "abs": np.abs,
+            "cos": np.cos,
+            "sin": np.sin,
+            "tan": np.tan,
+            "expm1": np.expm1,
+            "log1p": np.log1p,
+            "log2": np.log2,
+            "log10": np.log10,
         }[fn]
         return _NumBlock(values=f(v).reshape(-1, 1), suffixes=[""], label=label)
 
     if fn == "scale":
         v = _eval_numeric(call.args[0], data)
         store, st = _basis_capture_replay(label)
-        if st is not None:                              # replay training center/scale
+        if st is not None:  # replay training center/scale
             out = v.copy()
             if st["center"] is not None:
                 out = out - st["center"]
@@ -1559,8 +1641,16 @@ def _eval_call(call: Call, data: pl.DataFrame):
             return _NumBlock(values=out.reshape(-1, 1), suffixes=[""], label=label)
         center = call.kwargs.get("center")
         scale_ = call.kwargs.get("scale")
-        c = True if center is None else (isinstance(center, Literal) and center.value is True)
-        s = True if scale_ is None else (isinstance(scale_, Literal) and scale_.value is True)
+        c = (
+            True
+            if center is None
+            else (isinstance(center, Literal) and center.value is True)
+        )
+        s = (
+            True
+            if scale_ is None
+            else (isinstance(scale_, Literal) and scale_.value is True)
+        )
         out = v.copy()
         center_val = scale_val = None
         if c:
@@ -1572,11 +1662,11 @@ def _eval_call(call: Call, data: pl.DataFrame):
             # With center=TRUE this equals the sd; with center=FALSE it's the
             # RMS about zero, NOT the sd about the mean (the divergence fixed).
             n = out.shape[0]
-            rms = float(np.sqrt(np.sum(out ** 2) / max(1, n - 1)))
+            rms = float(np.sqrt(np.sum(out**2) / max(1, n - 1)))
             if rms != 0:
                 scale_val = rms
                 out = out / rms
-        if store is not None:                           # capture (R's scaled:center/scale)
+        if store is not None:  # capture (R's scaled:center/scale)
             store[label] = {"center": center_val, "scale": scale_val}
         return _NumBlock(values=out.reshape(-1, 1), suffixes=[""], label=label)
 
@@ -1591,20 +1681,30 @@ def _eval_call(call: Call, data: pl.DataFrame):
         if "ordered" in call.kwargs:
             ok = call.kwargs["ordered"]
             ordered = isinstance(ok, Literal) and ok.value is True
-        blk = _factor_from_series(s, label=label, ordered_hint=ordered or (fn == "ordered"))
+        blk = _factor_from_series(
+            s, label=label, ordered_hint=ordered or (fn == "ordered")
+        )
         return _apply_factor_levels_labels(blk, call, s, label)
 
     if fn == "ordered":
         # Same as factor() but ordered=TRUE, and default contrast becomes poly.
         src = call.args[0]
-        s = _series(data, src.ident) if isinstance(src, Name) else pl.Series(_eval_numeric(src, data))
+        s = (
+            _series(data, src.ident)
+            if isinstance(src, Name)
+            else pl.Series(_eval_numeric(src, data))
+        )
         blk = _factor_from_series(s, label=label, ordered_hint=True)
         return _apply_factor_levels_labels(blk, call, s, label)
 
     if fn == "dummy":
         # lme4's dummy(f, level) → 0/1 indicator for `f == level`.
         src = call.args[0]
-        s = _series(data, src.ident) if isinstance(src, Name) else pl.Series(_eval_numeric(src, data))
+        s = (
+            _series(data, src.ident)
+            if isinstance(src, Name)
+            else pl.Series(_eval_numeric(src, data))
+        )
         level_node = call.args[1] if len(call.args) >= 2 else call.kwargs.get("level")
         if isinstance(level_node, Literal):
             level = level_node.value
@@ -1621,7 +1721,8 @@ def _eval_call(call: Call, data: pl.DataFrame):
         if not isinstance(inner, _FactorBlock):
             if isinstance(call.args[0], Name):
                 inner = _factor_from_series(
-                    _series(data, call.args[0].ident), label=label,
+                    _series(data, call.args[0].ident),
+                    label=label,
                 )
             else:
                 raise TypeError("relevel() requires a factor-like first argument")
@@ -1643,7 +1744,10 @@ def _eval_call(call: Call, data: pl.DataFrame):
             dtype=int,
         )
         return _FactorBlock(
-            codes=new_codes, levels=new_levels, ordered=inner.ordered, label=label,
+            codes=new_codes,
+            levels=new_levels,
+            ordered=inner.ordered,
+            label=label,
         )
 
     if fn == "cut":
@@ -1652,11 +1756,15 @@ def _eval_call(call: Call, data: pl.DataFrame):
         x = _eval_numeric(call.args[0], data)
         breaks_node = call.args[1] if len(call.args) >= 2 else call.kwargs.get("breaks")
         if isinstance(breaks_node, Call) and breaks_node.fn == "c":
-            breaks = np.array([
-                float(a.value) if isinstance(a, Literal)
-                else float(_eval_numeric(a, data)[0])
-                for a in breaks_node.args
-            ], dtype=float)
+            breaks = np.array(
+                [
+                    float(a.value)
+                    if isinstance(a, Literal)
+                    else float(_eval_numeric(a, data)[0])
+                    for a in breaks_node.args
+                ],
+                dtype=float,
+            )
         elif isinstance(breaks_node, Literal) and breaks_node.kind == "num":
             # cut(x, n): n equal-width intervals. R seeds the breaks evenly
             # between the *original* min and max, then widens only the two
@@ -1688,10 +1796,14 @@ def _eval_call(call: Call, data: pl.DataFrame):
         # digits=dig, width=1, format="g") with dig increasing from dig.lab
         # until adjacent breakpoint labels are distinct (matches Python ".g").
         labels_node = call.kwargs.get("labels")
-        if isinstance(labels_node, Literal) and labels_node.kind == "bool" \
-                and labels_node.value is False:
-            raise NotImplementedError("cut(labels=FALSE) (integer codes) "
-                                      "is not supported in a formula term")
+        if (
+            isinstance(labels_node, Literal)
+            and labels_node.kind == "bool"
+            and labels_node.value is False
+        ):
+            raise NotImplementedError(
+                "cut(labels=FALSE) (integer codes) is not supported in a formula term"
+            )
         if labels_node is not None:
             level_labels = [str(v) for v in _eval_level_list(labels_node)]
         else:
@@ -1702,12 +1814,16 @@ def _eval_call(call: Call, data: pl.DataFrame):
                 if all(ch[i] != ch[i + 1] for i in range(len(ch) - 1)):
                     break
             if right:
-                level_labels = [f"({ch[i]},{ch[i+1]}]" for i in range(len(breaks) - 1)]
+                level_labels = [
+                    f"({ch[i]},{ch[i + 1]}]" for i in range(len(breaks) - 1)
+                ]
                 if include_lowest and level_labels:
                     # close the first interval's open left bracket: (a,b] → [a,b]
                     level_labels[0] = "[" + level_labels[0][1:]
             else:
-                level_labels = [f"[{ch[i]},{ch[i+1]})" for i in range(len(breaks) - 1)]
+                level_labels = [
+                    f"[{ch[i]},{ch[i + 1]})" for i in range(len(breaks) - 1)
+                ]
                 if include_lowest and level_labels:
                     # close the last interval's open right bracket: [a,b) → [a,b]
                     level_labels[-1] = level_labels[-1][:-1] + "]"
@@ -1723,15 +1839,21 @@ def _eval_call(call: Call, data: pl.DataFrame):
         # Values outside breaks become NA (code -1)
         mask = (idx < 0) | (idx >= len(level_labels))
         idx = np.where(mask, -1, idx)
-        return _FactorBlock(codes=idx.astype(int), levels=level_labels,
-                            ordered=ordered_result, label=label)
+        return _FactorBlock(
+            codes=idx.astype(int),
+            levels=level_labels,
+            ordered=ordered_result,
+            label=label,
+        )
 
     if fn == "C":
         # C(f, contrast, how.many) — wrap factor with explicit contrast choice.
         inner = _eval_atom(call.args[0], data)
         if not isinstance(inner, _FactorBlock):
             if isinstance(call.args[0], Name):
-                inner = _factor_from_series(_series(data, call.args[0].ident), label=_deparse(call.args[0]))
+                inner = _factor_from_series(
+                    _series(data, call.args[0].ident), label=_deparse(call.args[0])
+                )
             else:
                 raise TypeError("C() requires a factor-like first argument")
         forced = None
@@ -1742,35 +1864,51 @@ def _eval_call(call: Call, data: pl.DataFrame):
                 forced = c.ident  # contr.treatment → "contr.treatment", etc.
             elif isinstance(c, Literal) and c.kind == "str":
                 forced = str(c.value)
-        if base_kw is not None and isinstance(base_kw, Literal) and base_kw.kind == "num":
+        if (
+            base_kw is not None
+            and isinstance(base_kw, Literal)
+            and base_kw.kind == "num"
+        ):
             # C(f, base=2) chooses the 2nd level as reference (1-indexed in R).
             forced = f"contr.treatment:base={int(base_kw.value)}"
         how_many = None
         hm_kw = call.kwargs.get("how.many")
         if hm_kw is not None and isinstance(hm_kw, Literal) and hm_kw.kind == "num":
             how_many = int(hm_kw.value)
-        elif len(call.args) >= 3 and isinstance(call.args[2], Literal) and call.args[2].kind == "num":
+        elif (
+            len(call.args) >= 3
+            and isinstance(call.args[2], Literal)
+            and call.args[2].kind == "num"
+        ):
             how_many = int(call.args[2].value)
         return _FactorBlock(
-            codes=inner.codes, levels=inner.levels, ordered=inner.ordered,
-            label=label, forced_contrast=forced, how_many=how_many,
+            codes=inner.codes,
+            levels=inner.levels,
+            ordered=inner.ordered,
+            label=label,
+            forced_contrast=forced,
+            how_many=how_many,
         )
 
     if fn == "poly":
         # Raw polynomials only for now — matches `poly(x, n, raw = TRUE)`.
         v = _eval_numeric(call.args[0], data)
-        degree = int(call.args[1].value) if len(call.args) >= 2 and isinstance(call.args[1], Literal) \
-            else int(call.kwargs["degree"].value) if "degree" in call.kwargs \
+        degree = (
+            int(call.args[1].value)
+            if len(call.args) >= 2 and isinstance(call.args[1], Literal)
+            else int(call.kwargs["degree"].value)
+            if "degree" in call.kwargs
             else 1
+        )
         raw_k = call.kwargs.get("raw")
         is_raw = isinstance(raw_k, Literal) and raw_k.value is True
         if is_raw:
-            cols = np.stack([v ** d for d in range(1, degree + 1)], axis=1)
+            cols = np.stack([v**d for d in range(1, degree + 1)], axis=1)
         else:
             store, st = _basis_capture_replay(label)
-            if st is not None:                          # replay training basis
+            if st is not None:  # replay training basis
                 cols = _poly_orthogonal(v, degree, state=st)
-            elif store is not None:                     # capture
+            elif store is not None:  # capture
                 st = {}
                 cols = _poly_orthogonal(v, degree, state=st)
                 store[label] = st
@@ -1789,7 +1927,7 @@ def _eval_call(call: Call, data: pl.DataFrame):
         intercept_kw = call.kwargs.get("intercept")
         intercept = isinstance(intercept_kw, Literal) and intercept_kw.value is True
         store, st = _basis_capture_replay(label)
-        if st is not None:                              # replay training knots/boundary
+        if st is not None:  # replay training knots/boundary
             interior, bnd = st["interior"], st["bnd"]
         else:
             interior = _parse_knots(knots_node, data)
@@ -1815,7 +1953,7 @@ def _eval_call(call: Call, data: pl.DataFrame):
         intercept_kw = call.kwargs.get("intercept")
         intercept = isinstance(intercept_kw, Literal) and intercept_kw.value is True
         store, st = _basis_capture_replay(label)
-        if st is not None:                              # replay training knots/boundary
+        if st is not None:  # replay training knots/boundary
             interior, bnd = st["interior"], st["bnd"]
         else:
             # ns(x, df=k): interior knots at evenly-spaced quantiles of x.
@@ -1841,26 +1979,32 @@ def _eval_call(call: Call, data: pl.DataFrame):
         # period must be a positive scalar (e.g. 12 or 2*pi); hea has no ts
         # frequency to infer it from, so it has no default.
         v = _eval_numeric(call.args[0], data)
-        k_node = (call.args[1] if len(call.args) >= 2
-                  else call.kwargs.get("k", call.kwargs.get("K")))
-        if not (isinstance(k_node, Literal) and k_node.kind == "num") \
-                or float(k_node.value) != int(k_node.value) \
-                or int(k_node.value) < 1:
+        k_node = (
+            call.args[1]
+            if len(call.args) >= 2
+            else call.kwargs.get("k", call.kwargs.get("K"))
+        )
+        if (
+            not (isinstance(k_node, Literal) and k_node.kind == "num")
+            or float(k_node.value) != int(k_node.value)
+            or int(k_node.value) < 1
+        ):
             got = None if k_node is None else getattr(k_node, "value", k_node)
-            raise ValueError(
-                f"harmonic(): k must be a positive integer, got {got!r}")
+            raise ValueError(f"harmonic(): k must be a positive integer, got {got!r}")
         K = int(k_node.value)
         p_node = call.args[2] if len(call.args) >= 3 else call.kwargs.get("period")
         if p_node is None:
             raise ValueError(
                 "harmonic(): a positive `period=` is required "
-                "(hea has no ts frequency to infer it from)")
-        period = (float(p_node.value)
-                  if isinstance(p_node, Literal) and p_node.kind == "num"
-                  else float(_eval_numeric(p_node, data)[0]))
+                "(hea has no ts frequency to infer it from)"
+            )
+        period = (
+            float(p_node.value)
+            if isinstance(p_node, Literal) and p_node.kind == "num"
+            else float(_eval_numeric(p_node, data)[0])
+        )
         if period <= 0:
-            raise ValueError(
-                f"harmonic(): `period=` must be positive, got {period}")
+            raise ValueError(f"harmonic(): `period=` must be positive, got {period}")
         cols, suffixes = _harmonic_basis(v, K, period)
         return _NumBlock(values=cols, suffixes=suffixes, label=label)
 
@@ -1881,10 +2025,15 @@ def _parse_knots(node, data):
     if node is None:
         return np.array([], dtype=float)
     if isinstance(node, Call) and node.fn == "c":
-        return np.array([
-            float(a.value) if isinstance(a, Literal) else float(_eval_numeric(a, data)[0])
-            for a in node.args
-        ], dtype=float)
+        return np.array(
+            [
+                float(a.value)
+                if isinstance(a, Literal)
+                else float(_eval_numeric(a, data)[0])
+                for a in node.args
+            ],
+            dtype=float,
+        )
     if isinstance(node, Literal) and node.kind == "num":
         return np.array([float(node.value)], dtype=float)
     return np.array([], dtype=float)
@@ -1894,8 +2043,12 @@ def _parse_boundary(node, data, x):
     if node is None:
         return (float(x.min()), float(x.max()))
     if isinstance(node, Call) and node.fn == "c":
-        vals = [float(a.value) if isinstance(a, Literal) else float(_eval_numeric(a, data)[0])
-                for a in node.args]
+        vals = [
+            float(a.value)
+            if isinstance(a, Literal)
+            else float(_eval_numeric(a, data)[0])
+            for a in node.args
+        ]
         return (vals[0], vals[1])
     return (float(x.min()), float(x.max()))
 
@@ -1906,6 +2059,7 @@ def _bs_basis(x, degree, boundary, interior_knots, df, intercept):
     NOT mgcv's `s(x, bs="bs")` smoother — that's `_build_bs_smooth` below.
     """
     from scipy.interpolate import BSpline as _BSpline
+
     ord = degree + 1
     # If df given and no explicit knots, place interior knots at quantiles.
     if df is not None and len(interior_knots) == 0:
@@ -1913,11 +2067,13 @@ def _bs_basis(x, degree, boundary, interior_knots, df, intercept):
         if n_interior > 0:
             probs = np.linspace(0, 1, n_interior + 2)[1:-1]
             interior_knots = np.quantile(x, probs)
-    Aknots = np.concatenate([
-        np.repeat(boundary[0], ord),
-        np.sort(np.asarray(interior_knots, dtype=float)),
-        np.repeat(boundary[1], ord),
-    ])
+    Aknots = np.concatenate(
+        [
+            np.repeat(boundary[0], ord),
+            np.sort(np.asarray(interior_knots, dtype=float)),
+            np.repeat(boundary[1], ord),
+        ]
+    )
     n_basis = len(Aknots) - ord
     out = np.zeros((len(x), n_basis))
     # R's bs() extrapolates the boundary polynomial piece for x beyond
@@ -1951,6 +2107,7 @@ def _ns_basis(x, boundary, interior_knots, df, intercept):
     first column dropped if intercept=FALSE.
     """
     from scipy.interpolate import BSpline as _BSpline
+
     if df is not None and len(interior_knots) == 0:
         n_interior = df - 1 - (1 if intercept else 0)
         if n_interior > 0:
@@ -1959,12 +2116,15 @@ def _ns_basis(x, boundary, interior_knots, df, intercept):
     degree = 3
     ord = 4
     interior_knots = np.sort(np.asarray(interior_knots, dtype=float))
-    Aknots = np.concatenate([
-        np.repeat(boundary[0], ord),
-        interior_knots,
-        np.repeat(boundary[1], ord),
-    ])
+    Aknots = np.concatenate(
+        [
+            np.repeat(boundary[0], ord),
+            interior_knots,
+            np.repeat(boundary[1], ord),
+        ]
+    )
     n_basis = len(Aknots) - ord
+
     # Evaluate basis at x and at boundaries for 2nd derivative constraint.
     def _B(xe):
         xc = np.clip(xe, boundary[0], boundary[1])
@@ -1999,7 +2159,9 @@ def _ns_basis(x, boundary, interior_knots, df, intercept):
             c = np.zeros(n_basis)
             c[i] = 1.0
             out[:, i] = np.nan_to_num(
-                _BSpline(Aknots, c, degree, extrapolate=False).derivative(1)(xc), nan=0.0)
+                _BSpline(Aknots, c, degree, extrapolate=False).derivative(1)(xc),
+                nan=0.0,
+            )
         return out
 
     lo, hi = boundary
@@ -2075,7 +2237,9 @@ def _eval_level_list(node) -> list:
     raise TypeError(f"level list expected, got {type(node).__name__}")
 
 
-def _poly_orthogonal(x: np.ndarray, degree: int, state: dict | None = None) -> np.ndarray:
+def _poly_orthogonal(
+    x: np.ndarray, degree: int, state: dict | None = None
+) -> np.ndarray:
     """Orthogonal polynomials matching R's `poly(x, degree)` (non-raw).
 
     R's algorithm: QR on outer(x - mean(x), 0:degree, "^"). The returned
@@ -2088,16 +2252,16 @@ def _poly_orthogonal(x: np.ndarray, degree: int, state: dict | None = None) -> n
     the basis is computed fresh with no capture (the one-shot path).
     """
     x = np.asarray(x, dtype=float)
-    if state and "Rinv" in state:                       # replay (predict)
+    if state and "Rinv" in state:  # replay (predict)
         xc = x - state["mean"]
-        Xn = np.column_stack([xc ** d for d in range(degree + 1)])
+        Xn = np.column_stack([xc**d for d in range(degree + 1)])
         return ((Xn @ state["Rinv"]) * state["signs"])[:, 1:]
     mean = x.mean()
     xc = x - mean
-    X = np.column_stack([xc ** d for d in range(degree + 1)])
+    X = np.column_stack([xc**d for d in range(degree + 1)])
     Q, R_mat = np.linalg.qr(X)
     signs = np.sign(np.diag(R_mat))
-    if state is not None:                               # capture (fit)
+    if state is not None:  # capture (fit)
         state["mean"] = mean
         state["Rinv"] = np.linalg.inv(R_mat)
         state["signs"] = signs
@@ -2120,15 +2284,21 @@ def _eval_atom(node, data: pl.DataFrame, cache: dict | None = None):
         if _is_categorical(s):
             blk = _factor_from_series(s, label=node.ident)
         else:
-            blk = _NumBlock(values=_as_float(s.to_numpy()).reshape(-1, 1),
-                            suffixes=[""], label=node.ident)
+            blk = _NumBlock(
+                values=_as_float(s.to_numpy()).reshape(-1, 1),
+                suffixes=[""],
+                label=node.ident,
+            )
         if cache is not None:
             cache[node.ident] = blk
         return blk
     if isinstance(node, Literal):
         if node.kind == "num":
-            return _NumBlock(values=np.full((len(data), 1), float(node.value)),
-                             suffixes=[""], label=_deparse(node))
+            return _NumBlock(
+                values=np.full((len(data), 1), float(node.value)),
+                suffixes=[""],
+                label=_deparse(node),
+            )
         raise TypeError(f"literal atom not supported: {node!r}")
     if isinstance(node, Paren):
         return _eval_atom(node.expr, data, cache)
@@ -2136,7 +2306,9 @@ def _eval_atom(node, data: pl.DataFrame, cache: dict | None = None):
         return _eval_call(node, data)
     if isinstance(node, BinOp) and node.op == "$":
         if isinstance(node.left, Name) and isinstance(node.right, Name):
-            key = ("$", node.left.ident, node.right.ident) if cache is not None else None
+            key = (
+                ("$", node.left.ident, node.right.ident) if cache is not None else None
+            )
             if cache is not None:
                 hit = cache.get(key)
                 if hit is not None:
@@ -2145,8 +2317,11 @@ def _eval_atom(node, data: pl.DataFrame, cache: dict | None = None):
             if _is_categorical(s):
                 blk = _factor_from_series(s, label=_deparse(node))
             else:
-                blk = _NumBlock(values=_as_float(s.to_numpy()).reshape(-1, 1),
-                                suffixes=[""], label=_deparse(node))
+                blk = _NumBlock(
+                    values=_as_float(s.to_numpy()).reshape(-1, 1),
+                    suffixes=[""],
+                    label=_deparse(node),
+                )
             if cache is not None:
                 cache[key] = blk
             return blk
@@ -2164,6 +2339,7 @@ def _eval_atom(node, data: pl.DataFrame, cache: dict | None = None):
 # ---------------------------------------------------------------------------
 # Contrast matrices — map k levels onto either k columns (full) or k-1 (reduced).
 # ---------------------------------------------------------------------------
+
 
 def _contrast_full(k: int) -> np.ndarray:
     return np.eye(k)
@@ -2213,10 +2389,10 @@ CONTRAST_FN_NAMES = (
 
 _CONTRAST_FNS = {
     "contr.treatment": _contrast_treatment,
-    "contr.SAS":       _contrast_SAS,
-    "contr.sum":       _contrast_sum,
-    "contr.helmert":   _contrast_helmert,
-    "contr.poly":      _contrast_poly,
+    "contr.SAS": _contrast_SAS,
+    "contr.sum": _contrast_sum,
+    "contr.helmert": _contrast_helmert,
+    "contr.poly": _contrast_poly,
 }
 
 
@@ -2236,17 +2412,27 @@ def _contrast_matrix(fb: _FactorBlock, reduced: bool) -> tuple[np.ndarray, list[
         # (k, m) ndarray used verbatim, or a (matrix, column_names) tuple.
         # Unnamed columns get R's 1..m suffixes; named columns use the names.
         if isinstance(name, np.ndarray) or (
-            isinstance(name, tuple) and len(name) == 2 and isinstance(name[0], np.ndarray)
+            isinstance(name, tuple)
+            and len(name) == 2
+            and isinstance(name[0], np.ndarray)
         ):
             if isinstance(name, tuple):
-                M_in, colnames = np.asarray(name[0], dtype=float), [str(c) for c in name[1]]
+                M_in, colnames = (
+                    np.asarray(name[0], dtype=float),
+                    [str(c) for c in name[1]],
+                )
             else:
                 M_in, colnames = np.asarray(name, dtype=float), None
             if M_in.ndim != 2 or M_in.shape[0] != k:
                 raise ValueError(
                     f"custom contrast matrix for {fb.label!r} must be "
-                    f"({k}, m); got shape {M_in.shape}")
-            suffs = colnames if colnames is not None else [str(i + 1) for i in range(M_in.shape[1])]
+                    f"({k}, m); got shape {M_in.shape}"
+                )
+            suffs = (
+                colnames
+                if colnames is not None
+                else [str(i + 1) for i in range(M_in.shape[1])]
+            )
             return _truncate_contrast(M_in, suffs, fb.how_many)
         if name is None:
             unordered_default, ordered_default = _DEFAULT_CONTRASTS_CV.get()
@@ -2363,9 +2549,13 @@ def _encode_term(
     """
     if not term.atoms:
         # Intercept
-        return _NumBlock(values=np.ones((len(data), 1)), suffixes=["(Intercept)"], label="")
+        return _NumBlock(
+            values=np.ones((len(data), 1)), suffixes=["(Intercept)"], label=""
+        )
 
-    atom_blocks: list[_NumBlock | _FactorBlock] = [_eval_atom(a, data, cache) for a in term.atoms]
+    atom_blocks: list[_NumBlock | _FactorBlock] = [
+        _eval_atom(a, data, cache) for a in term.atoms
+    ]
 
     encoded_blocks: list[_NumBlock] = []
     for i, blk in enumerate(atom_blocks):
@@ -2457,9 +2647,14 @@ def referenced_columns(expanded: ExpandedFormula) -> set[str]:
     return referenced
 
 
-def materialize(expanded: ExpandedFormula, data: pl.DataFrame,
-                return_assign: bool = False, *, drop_na: bool = True,
-                basis_state: dict | None = None):
+def materialize(
+    expanded: ExpandedFormula,
+    data: pl.DataFrame,
+    return_assign: bool = False,
+    *,
+    drop_na: bool = True,
+    basis_state: dict | None = None,
+):
     """Turn an expanded formula + data frame into a design matrix X.
 
     NA handling: with ``drop_na=True`` (default, R's `na.omit`), rows with
@@ -2482,7 +2677,8 @@ def materialize(expanded: ExpandedFormula, data: pl.DataFrame,
     construction (columns are emitted term block by term block).
     """
     values, all_names, assign = _build_design(
-        expanded, data, drop_na=drop_na, basis_state=basis_state)
+        expanded, data, drop_na=drop_na, basis_state=basis_state
+    )
     if values is None:
         # Polars can't represent (n, 0); return an empty frame and let
         # callers use ``len(input_data)`` if they need the row count.
@@ -2496,9 +2692,13 @@ def materialize(expanded: ExpandedFormula, data: pl.DataFrame,
     return (X, assign) if return_assign else X
 
 
-def _build_design(expanded: ExpandedFormula, data: pl.DataFrame, *,
-                  drop_na: bool = True, basis_state: dict | None = None,
-                  ) -> tuple[Optional[np.ndarray], list[str], list[int]]:
+def _build_design(
+    expanded: ExpandedFormula,
+    data: pl.DataFrame,
+    *,
+    drop_na: bool = True,
+    basis_state: dict | None = None,
+) -> tuple[Optional[np.ndarray], list[str], list[int]]:
     """Core design assembly shared by ``materialize`` and ``prepare_design``.
 
     Returns ``(values, names, assign)`` where ``values`` is an **F-contiguous**
@@ -2521,7 +2721,7 @@ def _build_design(expanded: ExpandedFormula, data: pl.DataFrame, *,
                 data = data.drop_nulls(subset=ref_list)
 
         blocks: list[_NumBlock] = []
-        block_term_idx: list[int] = []          # R assign value per block
+        block_term_idx: list[int] = []  # R assign value per block
         # Covered margins for R's marginality coding (see `_encode_term`). Seeded
         # with the empty term iff there's an intercept; each term joins after it
         # is encoded so later terms reduce against it.
@@ -2551,7 +2751,7 @@ def _build_design(expanded: ExpandedFormula, data: pl.DataFrame, *,
         c = 0
         for b in blocks:
             w = b.values.shape[1]
-            values[:, c:c + w] = b.values
+            values[:, c : c + w] = b.values
             c += w
         return values, all_names, assign
     finally:
@@ -2576,6 +2776,7 @@ class ReTerms:
       * ``flist_names`` / ``flist_levels`` / ``cnms`` / ``Gp`` — bookkeeping
         that mirrors lme4's ``reTrms`` fields for downstream consumers.
     """
+
     Z: np.ndarray
     Lambdat: np.ndarray
     theta: np.ndarray
@@ -2590,7 +2791,9 @@ def _bar_lhs_to_ef(lhs_node) -> ExpandedFormula:
     return expand(Formula(lhs=None, rhs=lhs_node))
 
 
-def _materialize_re_lhs(lhs_ef: ExpandedFormula, data: pl.DataFrame) -> tuple[np.ndarray, list[str]]:
+def _materialize_re_lhs(
+    lhs_ef: ExpandedFormula, data: pl.DataFrame
+) -> tuple[np.ndarray, list[str]]:
     """Materialize a bar's LHS as a dense (n, c) matrix + component names.
 
     Uses the same code path as the fixed-effect materializer: contrast-coded
@@ -2651,10 +2854,15 @@ def _eval_group(node, data: pl.DataFrame) -> tuple[np.ndarray, list, str]:
                 seen.add((int(lc[i]), int(rc[i])))
         ordered = sorted(seen)
         pair_to_idx = {p: i for i, p in enumerate(ordered)}
-        codes = np.array([
-            pair_to_idx.get((int(lc[i]), int(rc[i])), -1) if lc[i] >= 0 and rc[i] >= 0 else -1
-            for i in range(n)
-        ], dtype=int)
+        codes = np.array(
+            [
+                pair_to_idx.get((int(lc[i]), int(rc[i])), -1)
+                if lc[i] >= 0 and rc[i] >= 0
+                else -1
+                for i in range(n)
+            ],
+            dtype=int,
+        )
         levels = [f"{lv[a]}:{rv[b]}" for a, b in ordered]
         return codes, levels, label
     if isinstance(node, Call):
@@ -2690,9 +2898,9 @@ def materialize_bars(expanded: ExpandedFormula, data: pl.DataFrame) -> ReTerms:
     # nested `a/b` split group into [a, b:a].
     @dataclass
     class _SimpleBar:
-        Z_lhs: np.ndarray         # (n, c)
-        cnames: list[str]         # component names (length c)
-        g_codes: np.ndarray       # (n,) int codes into g_levels
+        Z_lhs: np.ndarray  # (n, c)
+        cnames: list[str]  # component names (length c)
+        g_codes: np.ndarray  # (n,) int codes into g_levels
         g_levels: list
         g_label: str
 
@@ -2709,13 +2917,23 @@ def materialize_bars(expanded: ExpandedFormula, data: pl.DataFrame) -> ReTerms:
             # another (with intercept=False so it stays a single component).
             lhs_parts: list[ExpandedFormula] = []
             if lhs_ef.intercept:
-                lhs_parts.append(ExpandedFormula(
-                    intercept=True, terms=[], bars=[], offsets=[],
-                ))
+                lhs_parts.append(
+                    ExpandedFormula(
+                        intercept=True,
+                        terms=[],
+                        bars=[],
+                        offsets=[],
+                    )
+                )
             for t in lhs_ef.terms:
-                lhs_parts.append(ExpandedFormula(
-                    intercept=False, terms=[t], bars=[], offsets=[],
-                ))
+                lhs_parts.append(
+                    ExpandedFormula(
+                        intercept=False,
+                        terms=[t],
+                        bars=[],
+                        offsets=[],
+                    )
+                )
         else:
             lhs_parts = [lhs_ef]
         for g_node in group_nodes:
@@ -2724,17 +2942,22 @@ def materialize_bars(expanded: ExpandedFormula, data: pl.DataFrame) -> ReTerms:
                 Z_lhs, cnames = _materialize_re_lhs(lef, data)
                 if Z_lhs.shape[1] == 0:
                     continue
-                simple.append(_SimpleBar(
-                    Z_lhs=Z_lhs, cnames=cnames,
-                    g_codes=g_codes, g_levels=g_levels, g_label=g_label,
-                ))
+                simple.append(
+                    _SimpleBar(
+                        Z_lhs=Z_lhs,
+                        cnames=cnames,
+                        g_codes=g_codes,
+                        g_levels=g_levels,
+                        g_label=g_label,
+                    )
+                )
 
     # Sort by descending #levels of the grouping factor (stable).
     simple.sort(key=lambda sb: -len(sb.g_levels))
 
     # Build Z, Lambdat, theta per-bar.
     Z_blocks: list[np.ndarray] = []
-    Lt_sizes: list[int] = []        # per-bar q contribution
+    Lt_sizes: list[int] = []  # per-bar q contribution
     Lt_templates: list[np.ndarray] = []  # per-bar full (k*c, k*c) template
     theta_parts: list[np.ndarray] = []
     theta_offset = 0
@@ -2770,7 +2993,7 @@ def materialize_bars(expanded: ExpandedFormula, data: pl.DataFrame) -> ReTerms:
                 tmpl[i, j] = theta_offset + idx
         Ltb = np.zeros((k * c, k * c), dtype=int)
         for b in range(k):
-            Ltb[b*c:(b+1)*c, b*c:(b+1)*c] = tmpl
+            Ltb[b * c : (b + 1) * c, b * c : (b + 1) * c] = tmpl
         Lt_templates.append(Ltb)
         Lt_sizes.append(k * c)
 
@@ -2811,14 +3034,18 @@ def materialize_bars(expanded: ExpandedFormula, data: pl.DataFrame) -> ReTerms:
         off = 0
         for blk in Lt_templates:
             s = blk.shape[0]
-            Lambdat[off:off+s, off:off+s] = blk
+            Lambdat[off : off + s, off : off + s] = blk
             off += s
         theta = np.concatenate(theta_parts)
 
     return ReTerms(
-        Z=Z, Lambdat=Lambdat, theta=theta,
-        flist_names=flist_names, flist_levels=flist_levels,
-        cnms=cnms, Gp=Gp,
+        Z=Z,
+        Lambdat=Lambdat,
+        theta=theta,
+        flist_names=flist_names,
+        flist_levels=flist_levels,
+        cnms=cnms,
+        Gp=Gp,
     )
 
 
@@ -2853,12 +3080,13 @@ class SmoothBlock:
     rebuilds the design rows for new x in the same parameterization the fit
     used.
     """
-    label: str                      # e.g. "s(x)", "s(Machine,Worker)"
-    term: list[str]                 # variable names referenced
-    cls: str                        # class name (e.g. "re.smooth.spec")
-    X: np.ndarray                   # basis matrix, (n, k)
-    S: list[np.ndarray]             # penalty matrices, each (k, k)
-    spec: Optional["BasisSpec"] = None   # predict-time replay state
+
+    label: str  # e.g. "s(x)", "s(Machine,Worker)"
+    term: list[str]  # variable names referenced
+    cls: str  # class name (e.g. "re.smooth.spec")
+    X: np.ndarray  # basis matrix, (n, k)
+    S: list[np.ndarray]  # penalty matrices, each (k, k)
+    spec: Optional["BasisSpec"] = None  # predict-time replay state
     # mgcv ``sm$S.scale``, parallel to ``S``: the ``maS`` factor
     # ``_scale_penalty`` divided each penalty by (1.0 where the rescale
     # didn't apply). ``gam.vcomp(rescale=TRUE)`` divides sp by it.
@@ -2890,6 +3118,7 @@ class _RawBasis:
     in ``object$xt`` (knots, eigenvectors, scale factors, …) so the same
     basis can be evaluated on new data.
     """
+
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         raise NotImplementedError
 
@@ -2901,6 +3130,7 @@ class _RenamedRawBasis(_RawBasis):
     cloned smooth keeps the base smooth's basis state (knots, anchors)
     but reads its *own* columns. ``rename`` maps member name → base name.
     """
+
     raw: _RawBasis
     rename: dict[str, str]
 
@@ -2921,6 +3151,7 @@ class _AbsorbTransform:
         rotated by ``Z_sub``, the result placed back at ``indi[:nz]``, then
         the dropped column is removed via ``keep_mask``.
     """
+
     full_Z: Optional[np.ndarray] = None
     indi: Optional[np.ndarray] = None
     Z_sub: Optional[np.ndarray] = None
@@ -2953,6 +3184,7 @@ class _SweepDropTransform:
 
     Predict-time replay does the same drop + subtraction on new-data rows.
     """
+
     drop_idx: int
     C_minus: np.ndarray  # (p-1,) — colMeans(X) with the dropped col removed
 
@@ -2967,8 +3199,9 @@ class _ByMask:
     """Replay ``by=`` masking. Factor: indicator ``by_col == level``. Numeric:
     multiply by ``by_col`` value.
     """
+
     expr: str
-    kind: str        # "factor" | "numeric"
+    kind: str  # "factor" | "numeric"
     level: object = None  # for factor; None for numeric
 
     def apply(self, X: np.ndarray, data: pl.DataFrame) -> np.ndarray:
@@ -3008,6 +3241,7 @@ class BasisSpec:
     out-of-sample). Mirrors mgcv's ``G$P`` post-fit transform in
     ``estimate.gam`` (smooth.r:264-267).
     """
+
     raw: _RawBasis
     by: Optional[_ByMask] = None
     absorb: Optional[Union[_AbsorbTransform, _SweepDropTransform]] = None
@@ -3080,6 +3314,7 @@ class BasisSpec:
 @dataclass(slots=True)
 class _CRRawBasis(_RawBasis):
     """`smooth.construct.cr.smooth.spec` — natural cubic regression spline."""
+
     term: str
     knots: np.ndarray
 
@@ -3091,6 +3326,7 @@ class _CRRawBasis(_RawBasis):
 @dataclass(slots=True)
 class _CCRawBasis(_RawBasis):
     """`smooth.construct.cc.smooth.spec` — cyclic cubic regression spline."""
+
     term: str
     knots: np.ndarray
     BD: np.ndarray
@@ -3103,6 +3339,7 @@ class _CCRawBasis(_RawBasis):
 @dataclass(slots=True)
 class _PSRawBasis(_RawBasis):
     """`smooth.construct.ps.smooth.spec` — Eilers & Marx P-spline."""
+
     term: str
     knots: np.ndarray
     m0: int
@@ -3115,6 +3352,7 @@ class _PSRawBasis(_RawBasis):
 @dataclass(slots=True)
 class _BSRawBasis(_RawBasis):
     """`smooth.construct.bs.smooth.spec` — mgcv's B-spline (NOT splines::bs)."""
+
     term: str
     knots: np.ndarray
     m0: int
@@ -3127,6 +3365,7 @@ class _BSRawBasis(_RawBasis):
 @dataclass(slots=True)
 class _CPRawBasis(_RawBasis):
     """`smooth.construct.cp.smooth.spec` — cyclic P-spline."""
+
     term: str
     knots: np.ndarray
     ord_: int
@@ -3145,6 +3384,7 @@ class _GPRawBasis(_RawBasis):
     rebuilds [E(x_c, xu_c) @ UZ | T(x_c)] using the same defn so rho is
     fixed at fit time.
     """
+
     term: list[str]
     shift: np.ndarray
     xu_c: np.ndarray
@@ -3153,9 +3393,7 @@ class _GPRawBasis(_RawBasis):
     stationary: bool
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
-        x_full = np.column_stack(
-            [data[v].to_numpy().astype(float) for v in self.term]
-        )
+        x_full = np.column_stack([data[v].to_numpy().astype(float) for v in self.term])
         x_c = x_full - self.shift
         E_x = _gp_E_with_defn(x_c, self.xu_c, self.defn)
         X_radial = E_x @ self.UZ
@@ -3170,20 +3408,19 @@ class _TPRawBasis(_RawBasis):
     Predict is `[η(||x_c - Xu_c||) | T(x_c)] @ UZ`, with column-norm
     rescaling `w` reapplied after — same chain as `_tp_raw` builds at fit.
     """
+
     term: list[str]
     shift: np.ndarray
-    Xu: np.ndarray   # unique, centered knot grid (nu, d)
+    Xu: np.ndarray  # unique, centered knot grid (nu, d)
     m: int
     d: int
     M: int
     k: int
-    UZ: np.ndarray   # (nu + M, k)
-    w: np.ndarray    # column-norm rescaling, length k
+    UZ: np.ndarray  # (nu + M, k)
+    w: np.ndarray  # column-norm rescaling, length k
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
-        x_full = np.column_stack(
-            [data[v].to_numpy().astype(float) for v in self.term]
-        )
+        x_full = np.column_stack([data[v].to_numpy().astype(float) for v in self.term])
         x_c = x_full - self.shift
         eta0 = _tp_eta_const(self.m, self.d)
         # X_raw = [η(||x_i - Xu_j||) | T(x_i)] @ UZ, built row-chunked (mgcv's
@@ -3199,6 +3436,7 @@ class _TPDropNullRawBasis(_RawBasis):
     means — the centering mgcv applies in this branch (mgcv: smooth.r,
     `if (object$m[2]==0)`).
     """
+
     inner: _RawBasis
     keep: int
     col_means: np.ndarray  # fit-time column means, shape (keep,)
@@ -3216,15 +3454,14 @@ class _ADRawBasis(_RawBasis):
     adaptive part lives entirely in S, so predict re-evaluates the ps basis
     at new x.
     """
+
     term: list[str]
     knots_per_term: list[np.ndarray]
     m0: int
     k_per_term: list[int]
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
-        cols = [
-            data[t].to_numpy().astype(float) for t in self.term
-        ]
+        cols = [data[t].to_numpy().astype(float) for t in self.term]
         bases = [
             _ps_basis(cols[i], self.knots_per_term[i], self.m0)
             for i in range(len(self.term))
@@ -3248,6 +3485,7 @@ class _RERawBasis(_RawBasis):
     the tuple of factor values defining column j (single-element tuple for
     1D re; multi-element for `s(f1, f2, bs="re")`-style interactions).
     """
+
     term: list[str]
     combos: list[tuple]
 
@@ -3258,7 +3496,7 @@ class _RERawBasis(_RawBasis):
         for j, combo in enumerate(self.combos):
             mask = np.ones(n, dtype=bool)
             for ci, lev in zip(cols, combo):
-                mask &= (ci == lev)
+                mask &= ci == lev
             out[:, j] = mask.astype(float)
         return out
 
@@ -3273,6 +3511,7 @@ class _MRFRawBasis(_RawBasis):
     re-evaluates the indicator on new data's region labels and, for a low-rank
     fit, post-multiplies by the reparameterization matrix ``P``.
     """
+
     term: str
     levels: list
     P: Optional[np.ndarray] = None
@@ -3281,7 +3520,7 @@ class _MRFRawBasis(_RawBasis):
         col = data[self.term].to_numpy()
         out = np.zeros((len(col), len(self.levels)))
         for j, lev in enumerate(self.levels):
-            out[:, j] = (col == lev)
+            out[:, j] = col == lev
         if self.P is not None:
             out = out @ self.P
         return out
@@ -3297,13 +3536,14 @@ class _FSRawBasis(_RawBasis):
       3. block-wise duplicate across factor levels, masking by `data[fterm]`
     The full result has shape ``(n, p * nf)`` matching the fit-time block.
     """
+
     fterm: str
     flev: list
     p: int
     rank: int
     null_d: int
     base_raw: _RawBasis  # the inner tp/etc. raw basis
-    P: np.ndarray   # nat.param transform: Xr = Xb @ P
+    P: np.ndarray  # nat.param transform: Xr = Xb @ P
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         Xb = self.base_raw.eval(data)
@@ -3326,6 +3566,7 @@ class _LinearTransformRawBasis(_RawBasis):
     Used by ti's centered margins (M = sum-to-zero Z) and te/ti's np=TRUE
     SVD reparameterization (M = XP).
     """
+
     inner: _RawBasis
     M: np.ndarray
 
@@ -3343,6 +3584,7 @@ class _TensorRawBasis(_RawBasis):
     on the new data and tensor-multiplies, identical to
     `_tensor_prod_X([m.eval(data) for m in margins])`.
     """
+
     margins: list[_RawBasis]
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
@@ -3367,6 +3609,7 @@ class _T2RawBasis(_RawBasis):
         ``null_dim >= 2`` (else None — null_dim 0 needs no constraint, null_dim 1
         drops the last column).
     """
+
     margins: list[_RawBasis]
     P_per_margin: list[np.ndarray]
     ranks: list[int]
@@ -3374,10 +3617,7 @@ class _T2RawBasis(_RawBasis):
     Zn: Optional[np.ndarray]
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
-        Xm_np = [
-            m.eval(data) @ P
-            for m, P in zip(self.margins, self.P_per_margin)
-        ]
+        Xm_np = [m.eval(data) @ P for m, P in zip(self.margins, self.P_per_margin)]
         X, sub_cols = _t2_model_matrix(Xm_np, self.ranks)
         nup = sum(sub_cols)
         if self.null_dim == 0:
@@ -3402,16 +3642,14 @@ class _T2PredictRawBasis(_RawBasis):
     direction from the *full* tensor column span. ``Z_p`` is computed at
     fit time from ``colSums(X_raw_full)`` so it is independent of new data.
     """
+
     margins: list[_RawBasis]
     P_per_margin: list[np.ndarray]
     ranks: list[int]
     Z_p: np.ndarray
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
-        Xm_np = [
-            m.eval(data) @ P
-            for m, P in zip(self.margins, self.P_per_margin)
-        ]
+        Xm_np = [m.eval(data) @ P for m, P in zip(self.margins, self.P_per_margin)]
         X, _ = _t2_model_matrix(Xm_np, self.ranks)
         return X @ self.Z_p
 
@@ -3428,6 +3666,7 @@ class _SZRawBasis(_RawBasis):
     Stored state matches `_build_sz_smooth`: factor terms + their levels in
     schema order, the base raw evaluator, and the per-factor sizes for XZKr.
     """
+
     term_full: list[str]
     ftermlist: list[str]
     flev: list[list]
@@ -3610,9 +3849,7 @@ def _clone_smooth_spec(base: Call, member: Call) -> Call:
     """
     if len(member.args) != len(base.args):
         # mgcv's exact message (mgcv.r:735).
-        raise ValueError(
-            "`id' linked smooths must have same number of arguments"
-        )
+        raise ValueError("`id' linked smooths must have same number of arguments")
     kwargs = dict(base.kwargs)
     kwargs.pop("by", None)
     if "by" in member.kwargs:
@@ -3661,7 +3898,8 @@ def _smooth_arg_expr_map(expanded: "ExpandedFormula") -> dict[str, "Node"]:
 
 
 def _apply_smooth_arg_exprs(
-    data: pl.DataFrame, expr_map: dict[str, "Node"],
+    data: pl.DataFrame,
+    expr_map: dict[str, "Node"],
 ) -> pl.DataFrame:
     """Materialise smooth-arg expressions into columns of ``data``.
 
@@ -3685,9 +3923,9 @@ def _apply_smooth_arg_exprs(
             ) from e
         additions[synth_name] = np.asarray(v, dtype=float)
     if additions:
-        data = data.with_columns([
-            pl.Series(name, vals) for name, vals in additions.items()
-        ])
+        data = data.with_columns(
+            [pl.Series(name, vals) for name, vals in additions.items()]
+        )
     return data
 
 
@@ -3786,7 +4024,13 @@ def _eval_by_col(by_expr: str, data: pl.DataFrame) -> pl.Series | np.ndarray:
         expr,
     )
     if m:
-        col_name, op, s_dq, s_sq, num = m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
+        col_name, op, s_dq, s_sq, num = (
+            m.group(1),
+            m.group(2),
+            m.group(3),
+            m.group(4),
+            m.group(5),
+        )
         if col_name not in data.columns:
             raise KeyError(f"by=: column {col_name!r} not in data")
         col = data[col_name]
@@ -3894,7 +4138,8 @@ def _defer_matrix_block(
         label = f"{base_label}:{by_expr}"
     spec = (
         BasisSpec(raw=raw_basis, by=by_mask, absorb=None)
-        if raw_basis is not None else None
+        if raw_basis is not None
+        else None
     )
     return [SmoothBlock(label=label, term=term, cls=cls, X=X, S=S_list, spec=spec)]
 
@@ -3981,12 +4226,8 @@ def _apply_by_and_absorb(
                 f"pc= must supply one value per smooth covariate: {base_label} "
                 f"has {len(term)} covariate(s) but pc= has {len(pc_vals)}"
             )
-        pc_frame = pl.DataFrame(
-            {t: [float(v)] for t, v in zip(term, pc_vals)}
-        )
-        pc_C = np.asarray(raw_basis.eval(pc_frame), dtype=float).reshape(
-            1, X.shape[1]
-        )
+        pc_frame = pl.DataFrame({t: [float(v)] for t, v in zip(term, pc_vals)})
+        pc_C = np.asarray(raw_basis.eval(pc_frame), dtype=float).reshape(1, X.shape[1])
 
     if by_expr is None:
         if sparse_cons == -1:
@@ -3998,14 +4239,26 @@ def _apply_by_and_absorb(
             X2, S2, T = _absorb_sweep_drop(X, S_list)
         else:
             X2, S2, T = _absorb_sumzero(
-                X, S_list, C_source=pc_C if pc_C is not None else C_source,
+                X,
+                S_list,
+                C_source=pc_C if pc_C is not None else C_source,
             )
         spec = (
             BasisSpec(raw=raw_basis, by=None, absorb=T)
-            if raw_basis is not None else None
+            if raw_basis is not None
+            else None
         )
-        return [SmoothBlock(label=base_label, term=term, cls=cls,
-                            X=X2, S=S2, spec=spec, S_scale=S_scale)]
+        return [
+            SmoothBlock(
+                label=base_label,
+                term=term,
+                cls=cls,
+                X=X2,
+                S=S2,
+                spec=spec,
+                S_scale=S_scale,
+            )
+        ]
 
     by_col = _eval_by_col(by_expr, data)
     if _is_factor_like(by_col):
@@ -4036,22 +4289,23 @@ def _apply_by_and_absorb(
                 f"pc= point constraint with the sweep-drop constraint "
                 f"(bs with sparse.cons=-1) on {base_label} is not supported"
             )
-        sd_shared = (_absorb_sweep_drop(X, S_list)
-                     if sparse_cons == -1 else None)
+        sd_shared = _absorb_sweep_drop(X, S_list) if sparse_cons == -1 else None
         blocks: list[SmoothBlock] = []
         for lev in levels:
             mask = (by_arr == lev).astype(float)
             if sparse_cons == -1:
                 X2_sh, S2, T = sd_shared
-                X2 = X2_sh * mask[:, None]   # by.dum * constrained shared X
+                X2 = X2_sh * mask[:, None]  # by.dum * constrained shared X
             else:
                 X_lev = X * mask[:, None]
                 # pc= shares one always-applied constraint across by-levels
                 # (smooth.r: point.con's C is on the unmasked basis).
                 X2, S2, T = _absorb_sumzero(
-                    X_lev, S_list,
+                    X_lev,
+                    S_list,
                     C_source=(
-                        pc_C if pc_C is not None
+                        pc_C
+                        if pc_C is not None
                         else (C_source if C_source is not None else X)
                     ),
                 )
@@ -4062,11 +4316,20 @@ def _apply_by_and_absorb(
                     by=_ByMask(expr=by_expr, kind="factor", level=lev),
                     absorb=T,
                 )
-                if raw_basis is not None else None
+                if raw_basis is not None
+                else None
             )
-            blocks.append(SmoothBlock(label=label, term=term, cls=cls,
-                                      X=X2, S=S2, spec=spec,
-                                      S_scale=S_scale))
+            blocks.append(
+                SmoothBlock(
+                    label=label,
+                    term=term,
+                    cls=cls,
+                    X=X2,
+                    S=S2,
+                    spec=spec,
+                    S_scale=S_scale,
+                )
+            )
         return blocks
 
     # Numeric by: multiply X by by-column, skip absorb.cons.
@@ -4086,16 +4349,25 @@ def _apply_by_and_absorb(
             by=_ByMask(expr=by_expr, kind="numeric"),
             absorb=None,
         )
-        if raw_basis is not None else None
+        if raw_basis is not None
+        else None
     )
-    return [SmoothBlock(
-        label=f"{base_label}:{by_expr}",
-        term=term, cls=cls, X=X2, S=S_list, spec=spec, S_scale=S_scale,
-    )]
+    return [
+        SmoothBlock(
+            label=f"{base_label}:{by_expr}",
+            term=term,
+            cls=cls,
+            X=X2,
+            S=S_list,
+            spec=spec,
+            S_scale=S_scale,
+        )
+    ]
 
 
 def _scale_penalty(
-    X: np.ndarray, S_list: list[np.ndarray],
+    X: np.ndarray,
+    S_list: list[np.ndarray],
 ) -> tuple[list[np.ndarray], list[float]]:
     """Match mgcv's `scale.penalty=TRUE` rescaling.
 
@@ -4110,8 +4382,7 @@ def _scale_penalty(
     ``gam.vcomp``'s default ``rescale=TRUE`` divides each sp by it.
     """
     if X.size == 0 or not S_list:
-        return ([np.asarray(s, dtype=float) for s in S_list],
-                [1.0] * len(S_list))
+        return ([np.asarray(s, dtype=float) for s in S_list], [1.0] * len(S_list))
     maXX = float(np.abs(X).sum(axis=1).max()) ** 2
     out = []
     scales: list[float] = []
@@ -4173,10 +4444,17 @@ def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
             combos.append(tuple(arr[r] for arr in fac_arrs))
     raw = _RERawBasis(term=list(term_vars), combos=combos)
     if by_expr is None:
-        return [SmoothBlock(label=base_label, term=term_vars,
-                            cls="re.smooth.spec", X=X, S=S_list,
-                            spec=BasisSpec(raw=raw, by=None, absorb=None),
-                            S_scale=S_scale)]
+        return [
+            SmoothBlock(
+                label=base_label,
+                term=term_vars,
+                cls="re.smooth.spec",
+                X=X,
+                S=S_list,
+                spec=BasisSpec(raw=raw, by=None, absorb=None),
+                S_scale=S_scale,
+            )
+        ]
     by_col = _eval_by_col(by_expr, data)
     if _is_factor_like(by_col):
         levels = _factor_levels(by_col)
@@ -4185,7 +4463,8 @@ def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         by_arr = by_col.to_numpy()
         return [
             SmoothBlock(
-                label=f"{base_label}:{by_expr}{lev}", term=term_vars,
+                label=f"{base_label}:{by_expr}{lev}",
+                term=term_vars,
                 cls="re.smooth.spec",
                 X=X * (by_arr == lev).astype(float)[:, None],
                 S=S_list,
@@ -4202,15 +4481,21 @@ def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         by_arr = by_col.to_numpy().astype(float)
     else:
         by_arr = np.asarray(by_col, dtype=float)
-    return [SmoothBlock(
-        label=f"{base_label}:{by_expr}", term=term_vars,
-        cls="re.smooth.spec",
-        X=X * by_arr[:, None], S=S_list,
-        spec=BasisSpec(
-            raw=raw, by=_ByMask(expr=by_expr, kind="numeric"), absorb=None,
-        ),
-        S_scale=S_scale,
-    )]
+    return [
+        SmoothBlock(
+            label=f"{base_label}:{by_expr}",
+            term=term_vars,
+            cls="re.smooth.spec",
+            X=X * by_arr[:, None],
+            S=S_list,
+            spec=BasisSpec(
+                raw=raw,
+                by=_ByMask(expr=by_expr, kind="numeric"),
+                absorb=None,
+            ),
+            S_scale=S_scale,
+        )
+    ]
 
 
 def _pol2nb(polys: Mapping) -> dict[str, list[str]]:
@@ -4241,20 +4526,24 @@ def _pol2nb(polys: Mapping) -> dict[str, list[str]]:
             raise ValueError(
                 f"mrf polys[{names[i]!r}] must be a 2-column vertex matrix"
             )
-        m = m[~np.isnan(m).any(axis=1)]      # strip NA separator rows (rowSums NA)
+        m = m[~np.isnan(m).any(axis=1)]  # strip NA separator rows (rowSums NA)
         lo1[i], hi1[i] = m[:, 0].min(), m[:, 0].max()
         lo2[i], hi2[i] = m[:, 1].min(), m[:, 1].max()
-        verts.append(_mgcv_ordered_unique(m))   # strip duplicate vertices
+        verts.append(_mgcv_ordered_unique(m))  # strip duplicate vertices
     nb: dict[str, list[str]] = {name: [] for name in names}
     for k in range(n_poly):
-        ol1 = (((lo1[k] <= hi1) & (lo1[k] >= lo1))
-               | ((hi1[k] <= hi1) & (hi1[k] >= lo1))
-               | ((lo1 <= hi1[k]) & (lo1 >= lo1[k]))
-               | ((hi1 <= hi1[k]) & (hi1 >= lo1[k])))
-        ol2 = (((lo2[k] <= hi2) & (lo2[k] >= lo2))
-               | ((hi2[k] <= hi2) & (hi2[k] >= lo2))
-               | ((lo2 <= hi2[k]) & (lo2 >= lo2[k]))
-               | ((hi2 <= hi2[k]) & (hi2 >= lo2[k])))
+        ol1 = (
+            ((lo1[k] <= hi1) & (lo1[k] >= lo1))
+            | ((hi1[k] <= hi1) & (hi1[k] >= lo1))
+            | ((lo1 <= hi1[k]) & (lo1 >= lo1[k]))
+            | ((hi1 <= hi1[k]) & (hi1 >= lo1[k]))
+        )
+        ol2 = (
+            ((lo2[k] <= hi2) & (lo2[k] >= lo2))
+            | ((hi2[k] <= hi2) & (hi2[k] >= lo2))
+            | ((lo2 <= hi2[k]) & (lo2 >= lo2[k]))
+            | ((hi2 <= hi2[k]) & (hi2 >= lo2[k]))
+        )
         ol = ol1 & ol2
         ol[k] = False
         cok = verts[k]
@@ -4297,7 +4586,9 @@ def _mrf_penalty_from_nb(nb: Mapping, levels: list) -> np.ndarray:
 
 
 def _build_mrf_smooth(
-    call: Call, data: pl.DataFrame, xt: Mapping | None = None,
+    call: Call,
+    data: pl.DataFrame,
+    xt: Mapping | None = None,
 ) -> list[SmoothBlock]:
     """`bs="mrf"` — Markov random field smooth (smooth.construct.mrf.smooth.spec,
     smooth.r:2726-2866).
@@ -4322,20 +4613,23 @@ def _build_mrf_smooth(
         )
 
     col = data[term]
-    k_levels = _factor_levels(col)          # mgcv: as.factor; knots = levels(x)
+    k_levels = _factor_levels(col)  # mgcv: as.factor; knots = levels(x)
     nlev = len(k_levels)
     k_node = call.kwargs.get("k")
-    bs_dim = (int(k_node.value)
-              if isinstance(k_node, Literal) and k_node.kind == "num" else -1)
+    bs_dim = (
+        int(k_node.value)
+        if isinstance(k_node, Literal) and k_node.kind == "num"
+        else -1
+    )
     if bs_dim < 0:
-        bs_dim = nlev                       # default knots = all regions
+        bs_dim = nlev  # default knots = all regions
     if bs_dim > nlev:
         raise ValueError("MRF basis dimension set too high")
 
     vals = col.to_numpy()
     X = np.zeros((len(vals), nlev))
     for j, lev in enumerate(k_levels):
-        X[:, j] = (vals == lev)
+        X[:, j] = vals == lev
 
     if spec.get("penalty") is not None:
         S = np.asarray(spec["penalty"], dtype=float)
@@ -4366,20 +4660,31 @@ def _build_mrf_smooth(
                 dummy[r, int(c)] = 1.0
             Xn = np.vstack([dummy, X])
         Xr, D, Pmat, rp_rank = _nat_param(
-            Xn, S, rank=None, type_=0, unit_fnorm=True, return_rank=True,
+            Xn,
+            S,
+            rank=None,
+            type_=0,
+            unit_fnorm=True,
+            return_rank=True,
         )
-        ind = np.arange(nlev - bs_dim, nlev)   # final bs.dim (least-penalized) cols
-        Xr_data = Xr[len(mi):, :] if len(mi) > 0 else Xr
+        ind = np.arange(nlev - bs_dim, nlev)  # final bs.dim (least-penalized) cols
+        Xr_data = Xr[len(mi) :, :] if len(mi) > 0 else Xr
         X = Xr_data[:, ind]
         P = Pmat[:, ind]
         in_range = ind[ind < rp_rank]
-        S = np.diag(np.concatenate(
-            [D[in_range], np.zeros(int(np.sum(ind >= rp_rank)))]
-        ))
+        S = np.diag(
+            np.concatenate([D[in_range], np.zeros(int(np.sum(ind >= rp_rank)))])
+        )
 
     raw = _MRFRawBasis(term=term, levels=list(k_levels), P=P)
     return _apply_by_and_absorb(
-        call, data, X, [S], "mrf.smooth", term_vars, raw_basis=raw,
+        call,
+        data,
+        X,
+        [S],
+        "mrf.smooth",
+        term_vars,
+        raw_basis=raw,
     )
 
 
@@ -4449,13 +4754,20 @@ def _absorb_sumzero(
             ZSZ[:, indi[:nz]] = ZSZ[:, indi] @ Z_sub
         ZSZ = ZSZ[:, keep_mask]
         S_new.append(ZSZ)
-    return X_new, S_new, _AbsorbTransform(
-        indi=indi, Z_sub=Z_sub, keep_mask=keep_mask,
+    return (
+        X_new,
+        S_new,
+        _AbsorbTransform(
+            indi=indi,
+            Z_sub=Z_sub,
+            keep_mask=keep_mask,
+        ),
     )
 
 
 def _absorb_sweep_drop(
-    X: np.ndarray, S_list: list[np.ndarray],
+    X: np.ndarray,
+    S_list: list[np.ndarray],
 ) -> tuple[np.ndarray, list[np.ndarray], _SweepDropTransform]:
     """Apply mgcv's ``sparse.cons = -1`` constraint absorption (sweep-drop).
 
@@ -4480,8 +4792,13 @@ def _absorb_sweep_drop(
     """
     n, p = X.shape
     if p == 0:
-        return X, list(S_list), _SweepDropTransform(
-            drop_idx=0, C_minus=np.empty(0),
+        return (
+            X,
+            list(S_list),
+            _SweepDropTransform(
+                drop_idx=0,
+                C_minus=np.empty(0),
+            ),
         )
     C = X.mean(axis=0)
     vcol = X.var(axis=0, ddof=1) if n > 1 else np.zeros(p)
@@ -4514,7 +4831,7 @@ def _cr_F_matrix(knots: np.ndarray) -> np.ndarray:
         D[i, i + 1] = -1.0 / h[i] - 1.0 / h[i + 1]
         D[i, i + 2] = 1.0 / h[i + 1]
     F = np.zeros((nk, nk))
-    F[1:nk - 1, :] = np.linalg.solve(B, D)
+    F[1 : nk - 1, :] = np.linalg.solve(B, D)
     return F
 
 
@@ -4533,8 +4850,8 @@ def _cr_basis(x: np.ndarray, knots: np.ndarray) -> np.ndarray:
     hj = h[j]
     a_r = (x - knots[j]) / hj
     a_l = 1.0 - a_r
-    c_l = (a_l ** 3 - a_l) * hj ** 2 / 6.0
-    c_r = (a_r ** 3 - a_r) * hj ** 2 / 6.0
+    c_l = (a_l**3 - a_l) * hj**2 / 6.0
+    c_r = (a_r**3 - a_r) * hj**2 / 6.0
     nx = len(x)
     X = np.zeros((nx, nk))
     idx_n = np.arange(nx)
@@ -4585,7 +4902,9 @@ def _cr_is_fixed(call: Call) -> bool:
 
 
 def _cr_raw(
-    call: Call, data: pl.DataFrame, term: list[str] | None = None,
+    call: Call,
+    data: pl.DataFrame,
+    term: list[str] | None = None,
     knots_vec: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray]:
     """Bare cr output (X, S_list, knots) — no scale.penalty, no absorb.cons.
@@ -4606,8 +4925,7 @@ def _cr_raw(
     if knots_vec is None:
         xu = np.unique(x[~np.isnan(x)])
         if len(xu) < nk:
-            raise ValueError(
-                f"cr smooth: fewer unique x than knots ({len(xu)} < {nk})")
+            raise ValueError(f"cr smooth: fewer unique x than knots ({len(xu)} < {nk})")
         # R's default knots: quantile(unique(x), seq(0, 1, length=nk)), type 7.
         # numpy.quantile default matches R's type 7.
         knots = np.quantile(xu, np.linspace(0.0, 1.0, nk))
@@ -4624,7 +4942,9 @@ def _cr_raw(
 
 
 def _build_cr_smooth(
-    call: Call, data: pl.DataFrame, knots: dict | None = None,
+    call: Call,
+    data: pl.DataFrame,
+    knots: dict | None = None,
 ) -> list[SmoothBlock]:
     """Build cubic regression spline (`bs="cr"`) smooth block.
 
@@ -4637,12 +4957,21 @@ def _build_cr_smooth(
     X, S_list, knots_vec = _cr_raw(call, data, term, knots_vec=kv)
     raw = _CRRawBasis(term=term[0], knots=knots_vec)
     return _apply_by_and_absorb(
-        call, data, X, S_list, "cr.smooth.spec", term, raw_basis=raw,
+        call,
+        data,
+        X,
+        S_list,
+        "cr.smooth.spec",
+        term,
+        raw_basis=raw,
     )
 
 
 def _shrink_null_penalty(
-    S: np.ndarray, null_dim: int, cascade: bool, shrink: float = 0.1,
+    S: np.ndarray,
+    null_dim: int,
+    cascade: bool,
+    shrink: float = 0.1,
 ) -> np.ndarray:
     """mgcv shrinkage (``attr(object,'shrink')=0.1``): lift S's null-space
     eigenvalues so the whole smooth is penalised/shrinkable — the cs/ts bases.
@@ -4653,8 +4982,8 @@ def _shrink_null_penalty(
     two null eigenvalues to λ·shrink and λ·shrink²; otherwise (tp/ts rule) all
     ``null_dim`` null eigenvalues are set to λ·shrink.
     """
-    w, V = np.linalg.eigh(0.5 * (S + S.T))     # ascending
-    lam = float(w[null_dim])                    # smallest positive eigenvalue
+    w, V = np.linalg.eigh(0.5 * (S + S.T))  # ascending
+    lam = float(w[null_dim])  # smallest positive eigenvalue
     if cascade:
         # mgcv cr: es$values[nk-1]<-es$values[nk-2]*s; es$values[nk]<-es$values[nk-1]*s
         w[1] = lam * shrink
@@ -4665,7 +4994,9 @@ def _shrink_null_penalty(
 
 
 def _build_cs_smooth(
-    call: Call, data: pl.DataFrame, knots: dict | None = None,
+    call: Call,
+    data: pl.DataFrame,
+    knots: dict | None = None,
 ) -> list[SmoothBlock]:
     """`bs="cs"` — cubic regression spline with shrinkage (mgcv
     smooth.construct.cs: cr + ``shrink=0.1`` on the 2-dim null space)."""
@@ -4676,7 +5007,13 @@ def _build_cs_smooth(
         S_list = [_shrink_null_penalty(S_list[0], null_dim=2, cascade=True)]
     raw = _CRRawBasis(term=term[0], knots=knots_vec)
     return _apply_by_and_absorb(
-        call, data, X, S_list, "cs.smooth", term, raw_basis=raw,
+        call,
+        data,
+        X,
+        S_list,
+        "cs.smooth",
+        term,
+        raw_basis=raw,
     )
 
 
@@ -4814,7 +5151,9 @@ def _cc_is_fixed(call: Call) -> bool:
 
 
 def _cc_raw(
-    call: Call, data: pl.DataFrame, term: list[str] | None = None,
+    call: Call,
+    data: pl.DataFrame,
+    term: list[str] | None = None,
     knots_vec: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, np.ndarray]:
     """Bare cc basis — returns ``(X, S_list, knots, BD)``, pre-absorb/by.
@@ -4853,14 +5192,22 @@ def _cc_raw(
 
 
 def _build_cc_smooth(
-    call: Call, data: pl.DataFrame, knots: dict | None = None,
+    call: Call,
+    data: pl.DataFrame,
+    knots: dict | None = None,
 ) -> list[SmoothBlock]:
     term = _smooth_term_vars(call)
     kv = None if knots is None else knots.get(term[0])
     X, S_list, kn, BD = _cc_raw(call, data, term, knots_vec=kv)
     raw = _CCRawBasis(term=term[0], knots=kn, BD=BD)
     return _apply_by_and_absorb(
-        call, data, X, S_list, "cc.smooth.spec", term, raw_basis=raw,
+        call,
+        data,
+        X,
+        S_list,
+        "cc.smooth.spec",
+        term,
+        raw_basis=raw,
     )
 
 
@@ -4893,6 +5240,7 @@ def _eval_c_vec_ints(node) -> list[int] | None:
 def _eval_c_vec_floats(node) -> list[float] | None:
     """Like `_eval_c_vec_ints` but preserves float precision.
     Also accepts a unary minus wrapping a numeric literal (e.g. `c(-1, 0.5)`)."""
+
     def _lit(n):
         if isinstance(n, Literal) and n.kind == "num":
             return float(n.value)
@@ -4900,6 +5248,7 @@ def _eval_c_vec_floats(node) -> list[float] | None:
             inner = _lit(n.operand)
             return None if inner is None else -inner
         return None
+
     if isinstance(node, Call) and node.fn == "c":
         out: list[float] = []
         for a in node.args:
@@ -4932,7 +5281,9 @@ def _ps_default_k(call: Call, m0: int) -> int:
 
 
 def _ps_knots(
-    x: np.ndarray, m0: int, k: int,
+    x: np.ndarray,
+    m0: int,
+    k: int,
     xrange: tuple[float, float] | None = None,
 ) -> np.ndarray:
     """mgcv's evenly-spaced P-spline knot vector.
@@ -4960,6 +5311,7 @@ def _ps_knots(
 def _ps_basis(x: np.ndarray, knots: np.ndarray, m0: int) -> np.ndarray:
     """B-spline basis of degree m0+1 evaluated at x (matches splines::spline.des)."""
     from scipy.interpolate import BSpline
+
     return BSpline.design_matrix(x, knots, m0 + 1).toarray()
 
 
@@ -4972,7 +5324,9 @@ def _ps_penalty(k: int, m1: int) -> np.ndarray:
 
 
 def _ps_raw(
-    call: Call, data: pl.DataFrame, term: list[str] | None = None,
+    call: Call,
+    data: pl.DataFrame,
+    term: list[str] | None = None,
     knots_vec: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, int]:
     """Bare ps basis — returns ``(X, S_list, knots, m0)``, pre-absorb/by.
@@ -5013,14 +5367,22 @@ def _ps_raw(
 
 
 def _build_ps_smooth(
-    call: Call, data: pl.DataFrame, knots: dict | None = None,
+    call: Call,
+    data: pl.DataFrame,
+    knots: dict | None = None,
 ) -> list[SmoothBlock]:
     term = _smooth_term_vars(call)
     kv = None if knots is None else knots.get(term[0])
     X, S_list, kn, m0 = _ps_raw(call, data, term, knots_vec=kv)
     raw = _PSRawBasis(term=term[0], knots=kn, m0=m0)
     return _apply_by_and_absorb(
-        call, data, X, S_list, "pspline.smooth", term, raw_basis=raw,
+        call,
+        data,
+        X,
+        S_list,
+        "pspline.smooth",
+        term,
+        raw_basis=raw,
     )
 
 
@@ -5050,6 +5412,7 @@ def _cp_basis(x: np.ndarray, knots: np.ndarray, ord_: int) -> np.ndarray:
     points above `xc` get an additive contribution from the wrapped x.
     """
     from scipy.interpolate import BSpline
+
     nk = len(knots)
     if ord_ < 2:
         raise ValueError("order too low")
@@ -5138,7 +5501,9 @@ def _bs_default_k(call: Call, m0: int) -> int:
 
 
 def _bs_knots_eval(
-    x: np.ndarray, m0: int, k: int,
+    x: np.ndarray,
+    m0: int,
+    k: int,
     xrange: tuple[float, float] | None = None,
 ) -> np.ndarray:
     """mgcv's default bs knot vector: nk = k - m0 + 1 interior + m0 extension
@@ -5166,6 +5531,7 @@ def _bs_design(x: np.ndarray, knots: np.ndarray, m0: int, deriv: int = 0) -> np.
     """B-spline of order m0+1 (degree m0) evaluated at x (or its `deriv`-th
     derivative). Matches `splines::spline.des(knots, x, m0+1, derivs=deriv)`."""
     from scipy.interpolate import BSpline
+
     if deriv == 0:
         return BSpline.design_matrix(x, knots, m0).toarray()
     nb = len(knots) - (m0 + 1)
@@ -5183,7 +5549,7 @@ def _bs_penalty_W1(pord: int) -> np.ndarray:
     polynomial of degree pord represented by its values at pord+1 evenly-
     spaced points in [-1,1]. Returns a (pord+1)×(pord+1) SPD matrix."""
     pts = np.linspace(-1, 1, pord + 1)
-    V = np.stack([pts ** j for j in range(pord + 1)], axis=1)  # V[i,j] = pts[i]^j
+    V = np.stack([pts**j for j in range(pord + 1)], axis=1)  # V[i,j] = pts[i]^j
     P = np.linalg.inv(V)
     H = np.zeros((pord + 1, pord + 1))
     for i in range(pord + 1):
@@ -5231,7 +5597,9 @@ def _bs_penalty(knots: np.ndarray, m0: int, m2: int) -> np.ndarray:
 
 
 def _bs_raw(
-    call: Call, data: pl.DataFrame, term: list[str] | None = None,
+    call: Call,
+    data: pl.DataFrame,
+    term: list[str] | None = None,
     knots_vec: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, int]:
     """Bare bs basis — returns ``(X, S_list, knots, m0)``, pre-absorb/by.
@@ -5266,11 +5634,13 @@ def _bs_raw(
             ks = np.sort(kv)
             dx = (ks[3] - ks[0]) / (nk - 1)
             lo_ext, hi_ext = ks[0] - dx * m0, ks[3] + dx * m0
-            kn = np.concatenate([
-                np.linspace(lo_ext, ks[0], m0 + 1),
-                np.linspace(ks[1], ks[2], max(0, nk - 2)),
-                np.linspace(ks[3], hi_ext, m0 + 1),
-            ])
+            kn = np.concatenate(
+                [
+                    np.linspace(lo_ext, ks[0], m0 + 1),
+                    np.linspace(ks[1], ks[2], max(0, nk - 2)),
+                    np.linspace(ks[3], hi_ext, m0 + 1),
+                ]
+            )
         elif kv.size == n_full:
             kn = kv
         else:
@@ -5284,19 +5654,29 @@ def _bs_raw(
 
 
 def _build_bs_smooth(
-    call: Call, data: pl.DataFrame, knots: dict | None = None,
+    call: Call,
+    data: pl.DataFrame,
+    knots: dict | None = None,
 ) -> list[SmoothBlock]:
     term = _smooth_term_vars(call)
     kv = None if knots is None else knots.get(term[0])
     X, S_list, kn, m0 = _bs_raw(call, data, term, knots_vec=kv)
     raw = _BSRawBasis(term=term[0], knots=kn, m0=m0)
     return _apply_by_and_absorb(
-        call, data, X, S_list, "Bspline.smooth", term, raw_basis=raw,
+        call,
+        data,
+        X,
+        S_list,
+        "Bspline.smooth",
+        term,
+        raw_basis=raw,
     )
 
 
 def _cp_raw(
-    call: Call, data: pl.DataFrame, term: list[str] | None = None,
+    call: Call,
+    data: pl.DataFrame,
+    term: list[str] | None = None,
     knots_vec: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, int]:
     """Bare cp basis — returns ``(X, S_list, knots, ord_)``, pre-absorb/by.
@@ -5342,14 +5722,22 @@ def _cp_raw(
 
 
 def _build_cp_smooth(
-    call: Call, data: pl.DataFrame, knots: dict | None = None,
+    call: Call,
+    data: pl.DataFrame,
+    knots: dict | None = None,
 ) -> list[SmoothBlock]:
     term = _smooth_term_vars(call)
     kv = None if knots is None else knots.get(term[0])
     X, S_list, kn, ord_ = _cp_raw(call, data, term, knots_vec=kv)
     raw = _CPRawBasis(term=term[0], knots=kn, ord_=ord_)
     return _apply_by_and_absorb(
-        call, data, X, S_list, "cpspline.smooth", term, raw_basis=raw,
+        call,
+        data,
+        X,
+        S_list,
+        "cpspline.smooth",
+        term,
+        raw_basis=raw,
     )
 
 
@@ -5382,39 +5770,45 @@ def _gp_parse_m(call: Call) -> tuple[bool, int, float, float]:
 
 def _gp_apply_kernel(E: np.ndarray, type_: int, power_k: float) -> np.ndarray:
     if type_ == 1:  # spherical (compact support on [0,1])
-        return (1.0 - 1.5 * E + 0.5 * E ** 3) * (E <= 1.0)
+        return (1.0 - 1.5 * E + 0.5 * E**3) * (E <= 1.0)
     if type_ == 2:  # power exponential
-        return np.exp(-(E ** power_k))
+        return np.exp(-(E**power_k))
     eE = np.exp(-E)
     if type_ == 3:  # Matern ν=1.5
         return (1.0 + E) * eE
     if type_ == 4:  # Matern ν=2.5
         return eE + (E * eE) * (1.0 + E / 3.0)
     if type_ == 5:  # Matern ν=3.5
-        return eE + (E * eE) * (1.0 + 0.4 * E + E ** 2 / 15.0)
+        return eE + (E * eE) * (1.0 + 0.4 * E + E**2 / 15.0)
     raise ValueError(f"unknown GP kernel type {type_}")
 
 
 def _gp_E_defn(
-    x: np.ndarray, xk: np.ndarray, type_: int, rho_init: float, power_k: float,
+    x: np.ndarray,
+    xk: np.ndarray,
+    type_: int,
+    rho_init: float,
+    power_k: float,
     sign_type: int,
 ) -> tuple[np.ndarray, tuple[float, float, float]]:
     """`gpE(x, xk, defn)`: distance-based kernel matrix + resolved defn.
     If rho_init <= 0, rho is set to max of the raw distance matrix."""
     diff = x[:, None, :] - xk[None, :, :]
-    E_raw = np.sqrt((diff ** 2).sum(axis=2))
+    E_raw = np.sqrt((diff**2).sum(axis=2))
     rho = rho_init if rho_init > 0 else float(E_raw.max())
     E = E_raw / rho
     K = _gp_apply_kernel(E, type_, power_k)
     return K, (sign_type * type_, rho, power_k)
 
 
-def _gp_E_with_defn(x: np.ndarray, xk: np.ndarray, defn: tuple[float, float, float]) -> np.ndarray:
+def _gp_E_with_defn(
+    x: np.ndarray, xk: np.ndarray, defn: tuple[float, float, float]
+) -> np.ndarray:
     """Recompute kernel using a pre-resolved defn (rho already known)."""
     st_t, rho, power_k = defn
     type_ = abs(int(round(st_t)))
     diff = x[:, None, :] - xk[None, :, :]
-    E = np.sqrt((diff ** 2).sum(axis=2)) / rho
+    E = np.sqrt((diff**2).sum(axis=2)) / rho
     return _gp_apply_kernel(E, type_, power_k)
 
 
@@ -5491,11 +5885,21 @@ def _build_gp_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     X = np.hstack([X_radial, T])
 
     raw = _GPRawBasis(
-        term=list(term), shift=shift, xu_c=xu_c, defn=defn,
-        UZ=UZ, stationary=stationary,
+        term=list(term),
+        shift=shift,
+        xu_c=xu_c,
+        defn=defn,
+        UZ=UZ,
+        stationary=stationary,
     )
     return _apply_by_and_absorb(
-        call, data, X, [D], "gp.smooth.spec", term, raw_basis=raw,
+        call,
+        data,
+        X,
+        [D],
+        "gp.smooth.spec",
+        term,
+        raw_basis=raw,
     )
 
 
@@ -5660,7 +6064,11 @@ def _tp_drop_null(call: Call) -> bool:
     m_src = call.kwargs.get("m")
     if isinstance(m_src, Call) and m_src.fn == "c" and len(m_src.args) >= 2:
         second = m_src.args[1]
-        if isinstance(second, Literal) and second.kind == "num" and int(second.value) == 0:
+        if (
+            isinstance(second, Literal)
+            and second.kind == "num"
+            and int(second.value) == 0
+        ):
             return True
     return False
 
@@ -5720,8 +6128,7 @@ def _tp_E(Xu: np.ndarray, m: int, d: int) -> np.ndarray:
         return np.zeros((0, 0))
     if _tp_eval_E_rs is not None:
         # Rust tpsE: rayon over rows, byte-identical to the numpy build below.
-        return _tp_eval_E_rs(np.ascontiguousarray(Xu), int(m), int(d),
-                             float(eta0))
+        return _tp_eval_E_rs(np.ascontiguousarray(Xu), int(m), int(d), float(eta0))
     # Squared distances by the SAME sequential accumulate as tpsE (tprs.c:91-94):
     # `r=0; for(k) { x=Xu_i,k - Xu_j,k; r += x*x; }` → `fma(x,x,r)` on arm64. The
     # per-arch `_rfma_vec` fold mirrors that (NOT `(diff*diff).sum()`, whose
@@ -5739,8 +6146,14 @@ def _tp_E(Xu: np.ndarray, m: int, d: int) -> np.ndarray:
 
 
 def _tp_eval_X_raw(
-    x_c: np.ndarray, Xu: np.ndarray, m: int, d: int, UZ: np.ndarray,
-    eta0: float, *, _chunk_elems: int = 1 << 22,
+    x_c: np.ndarray,
+    Xu: np.ndarray,
+    m: int,
+    d: int,
+    UZ: np.ndarray,
+    eta0: float,
+    *,
+    _chunk_elems: int = 1 << 22,
 ) -> np.ndarray:
     """Build the (n, k) tp design block ``[η(‖x_i−Xu_j‖) | T(x_i)] @ UZ`` for
     mgcv's kernel-eval path (knots ≠ data; `XBuild`, tprs.c:560).
@@ -5765,8 +6178,14 @@ def _tp_eval_X_raw(
         # below (3-way parity gated); keep the BLAS matmul in numpy so `b @ UZ`
         # stays byte-exact too.
         pp = np.ascontiguousarray(_tp_gen_poly_powers(M, m, d).astype(np.int64))
-        b = _tp_eval_b_rs(np.ascontiguousarray(x_c), np.ascontiguousarray(Xu),
-                          int(m), int(d), float(eta0), pp)
+        b = _tp_eval_b_rs(
+            np.ascontiguousarray(x_c),
+            np.ascontiguousarray(Xu),
+            int(m),
+            int(d),
+            float(eta0),
+            pp,
+        )
         return b @ UZ
     E = np.empty((n, nu))
     chunk = max(1, _chunk_elems // max(nu, 1))
@@ -5775,19 +6194,19 @@ def _tp_eval_X_raw(
         e = min(s + chunk, n)
         xs = x_c[s:e]
         if d == 1:
-            diff = xs[:, 0][:, None] - Xu0[None, :]       # (c, nu)
-            rsq = diff * diff                              # fma(z,z,0) ≡ z*z
+            diff = xs[:, 0][:, None] - Xu0[None, :]  # (c, nu)
+            rsq = diff * diff  # fma(z,z,0) ≡ z*z
         else:
             # XBuild distance (tprs.c:591): r=0; for(k) {z=…; r += z*z;} →
             # fma(z,z,r) on arm64. Sequential `_rfma_vec` fold (not the pairwise
             # `(diff*diff).sum()`) to stay 0-ulp to the rust `tp_eval_b` build.
-            diff = xs[:, None, :] - Xu[None, :, :]          # (c, nu, d)
+            diff = xs[:, None, :] - Xu[None, :, :]  # (c, nu, d)
             rsq = np.zeros(diff.shape[:-1])
             for k in range(d):
                 zk = diff[..., k]
                 rsq = _rfma_vec(zk, zk, rsq)
         E[s:e] = _tp_fast_eta_vec(m, d, rsq, eta0)
-    return np.hstack([E, _tp_T(x_c, m, d)]) @ UZ            # one full matmul
+    return np.hstack([E, _tp_T(x_c, m, d)]) @ UZ  # one full matmul
 
 
 def _tp_qt_factor(A_in: np.ndarray) -> np.ndarray:
@@ -5824,7 +6243,9 @@ def _tp_qt_factor(A_in: np.ndarray) -> np.ndarray:
     return Z
 
 
-def _tp_hqmult_right(C_in: np.ndarray, Z: np.ndarray, transposed: bool = False) -> np.ndarray:
+def _tp_hqmult_right(
+    C_in: np.ndarray, Z: np.ndarray, transposed: bool = False
+) -> np.ndarray:
     """`HQmult(C, Z, p=0, t=transposed)`.
 
     p=0 (post-mult), t=0: C := C @ H_0 @ H_1 @ … @ H_{r-1}  (ascending order).
@@ -5882,7 +6303,10 @@ def _tp_is_fixed(call: Call) -> bool:
 
 
 def _tp_rlanczos(
-    A: np.ndarray, m: int, lm: int, tol: float | None = None,
+    A: np.ndarray,
+    m: int,
+    lm: int,
+    tol: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Port of mgcv/src/mat.c::Rlanczos (symmetric Lanczos w/ full reorth).
 
@@ -6097,6 +6521,7 @@ def _tp_rlanczos(
 def _RUnif(seed: int):
     """R's RNG after ``set.seed(seed)`` — see :class:`hea.R.rng.RMersenneTwister`."""
     from .R.rng import RMersenneTwister
+
     return RMersenneTwister(seed)
 
 
@@ -6109,9 +6534,7 @@ def _mgcv_ordered_unique(xm: np.ndarray) -> np.ndarray:
     mgcv's seeded knot subsample indexes into these rows."""
     if xm.shape[1] == 1:
         return np.unique(xm[:, 0])[:, None]
-    labels = np.array(
-        ["*".join(f"{v:.15g}" for v in row) for row in xm]
-    )
+    labels = np.array(["*".join(f"{v:.15g}" for v in row) for row in xm])
     _, idx = np.unique(labels, return_index=True)
     return xm[idx]
 
@@ -6148,13 +6571,13 @@ def _xt_max_knots_seed(call: Call) -> tuple[int, int]:
                 "(ported: max.knots, seed)"
             )
     if node.args:
-        raise ValueError("xt=list(...) entries must be named "
-                         "(max.knots=, seed=)")
+        raise ValueError("xt=list(...) entries must be named (max.knots=, seed=)")
     return mk, seed
 
 
-def _mgcv_knot_subsample(xm: np.ndarray, max_knots: int,
-                         seed: int = 1) -> np.ndarray | None:
+def _mgcv_knot_subsample(
+    xm: np.ndarray, max_knots: int, seed: int = 1
+) -> np.ndarray | None:
     """The shared large-n knot rule of mgcv's tp/ds/sos constructors:
     when n > max.knots *and* the unique locations nu > max.knots, return
     the seeded 2000-row subsample of the ordered unique locations (in
@@ -6172,7 +6595,9 @@ def _mgcv_knot_subsample(xm: np.ndarray, max_knots: int,
 
 
 def _tp_raw(
-    call: Call, data: pl.DataFrame, term: list[str],
+    call: Call,
+    data: pl.DataFrame,
+    term: list[str],
 ) -> tuple[np.ndarray, list[np.ndarray], int, int, int, dict]:
     """Bare `smooth.construct.tp.smooth.spec` output: no scale.penalty,
     no absorb.cons, no drop_null. Returns `(X_raw, S_list, M, k, rank, state)`
@@ -6216,7 +6641,7 @@ def _tp_raw(
     E = _tp_E(Xu, m, d)
     T_mat = _tp_T(Xu, m, d)
 
-    pure_knot = (nu == k)
+    pure_knot = nu == k
 
     if pure_knot:
         # When nu == k mgcv skips the eigendecomposition entirely (no
@@ -6230,7 +6655,7 @@ def _tp_raw(
         Q_full = _tp_hqmult_right(np.eye(nu), Z_hh, transposed=False)
 
         UZ = np.zeros((nu + M, k))
-        UZ[:nu, :k - M] = Q_full[:, :k - M]
+        UZ[:nu, : k - M] = Q_full[:, : k - M]
         for i in range(M):
             UZ[(nu + M) - i - 1, k - i - 1] = 1.0
 
@@ -6282,7 +6707,7 @@ def _tp_raw(
         UZ = np.zeros((nu + M, k))
         UZ[:nu, :] = U
         UZ[:nu, :] = _tp_hqmult_right(UZ[:nu, :], Z_hh, transposed=False)
-        UZ[:nu, k - M:] = 0.0
+        UZ[:nu, k - M :] = 0.0
         for i in range(M):
             UZ[(nu + M) - i - 1, k - i - 1] = 1.0
 
@@ -6291,8 +6716,8 @@ def _tp_raw(
             # Q, last M cols = polynomial T; map unique → full data rows.
             X1 = U * v_k  # col-wise scaling
             X1 = _tp_hqmult_right(X1, Z_hh, transposed=False)
-            X1[:, k - M:] = 0.0
-            X1[:, k - M:k - M + M] = T_mat
+            X1[:, k - M :] = 0.0
+            X1[:, k - M : k - M + M] = T_mat
             X_raw = X1[yxindex, :]
         else:
             # Knots are a subsample — evaluate the kernel basis at the
@@ -6317,7 +6742,7 @@ def _tp_raw(
     # Rescale each X column so its sum-of-squares = n (= mgcv's "rms=1").
     # Apply same factor to UZ cols and to S rows+cols. After this, we have
     # the pre-absorb.cons smooth; still need scale.penalty + absorb.cons.
-    w = np.sqrt(np.sum(X_raw ** 2, axis=0) / n)
+    w = np.sqrt(np.sum(X_raw**2, axis=0) / n)
     w = np.where(w == 0, 1.0, w)
     X_raw = X_raw / w
     S_list = [S / w[:, None] / w[None, :] for S in S_list]
@@ -6341,9 +6766,15 @@ def _build_tp_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         # and skip absorb.cons entirely.
         keep = k - M
         full_raw = _TPRawBasis(
-            term=list(term), shift=state["shift"], Xu=state["Xu"],
-            m=state["m"], d=state["d"], M=M, k=k,
-            UZ=state["UZ"], w=state["w"],
+            term=list(term),
+            shift=state["shift"],
+            Xu=state["Xu"],
+            m=state["m"],
+            d=state["d"],
+            M=M,
+            k=k,
+            UZ=state["UZ"],
+            w=state["w"],
         )
         X_raw = X_raw[:, :keep]
         col_means = X_raw.mean(axis=0)
@@ -6352,19 +6783,37 @@ def _build_tp_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         S_list = [(S + S.T) / 2.0 for S in S_list]
         S_list, S_scale = _scale_penalty(X_raw, S_list)
         raw = _TPDropNullRawBasis(inner=full_raw, keep=keep, col_means=col_means)
-        return [SmoothBlock(
-            label=_smooth_label(call), term=term,
-            cls="tprs.smooth", X=X_raw, S=S_list,
-            spec=BasisSpec(raw=raw, by=None, absorb=None),
-            S_scale=S_scale,
-        )]
+        return [
+            SmoothBlock(
+                label=_smooth_label(call),
+                term=term,
+                cls="tprs.smooth",
+                X=X_raw,
+                S=S_list,
+                spec=BasisSpec(raw=raw, by=None, absorb=None),
+                S_scale=S_scale,
+            )
+        ]
 
     raw = _TPRawBasis(
-        term=list(term), shift=state["shift"], Xu=state["Xu"],
-        m=state["m"], d=state["d"], M=M, k=k, UZ=state["UZ"], w=state["w"],
+        term=list(term),
+        shift=state["shift"],
+        Xu=state["Xu"],
+        m=state["m"],
+        d=state["d"],
+        M=M,
+        k=k,
+        UZ=state["UZ"],
+        w=state["w"],
     )
     return _apply_by_and_absorb(
-        call, data, X_raw, S_list, "tprs.smooth", term, raw_basis=raw,
+        call,
+        data,
+        X_raw,
+        S_list,
+        "tprs.smooth",
+        term,
+        raw_basis=raw,
     )
 
 
@@ -6378,11 +6827,24 @@ def _build_ts_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     # set to 0.1 * smallest positive eigenvalue.
     S_list = [_shrink_null_penalty(S_list[0], null_dim=M, cascade=False)]
     raw = _TPRawBasis(
-        term=list(term), shift=state["shift"], Xu=state["Xu"],
-        m=state["m"], d=state["d"], M=M, k=k, UZ=state["UZ"], w=state["w"],
+        term=list(term),
+        shift=state["shift"],
+        Xu=state["Xu"],
+        m=state["m"],
+        d=state["d"],
+        M=M,
+        k=k,
+        UZ=state["UZ"],
+        w=state["w"],
     )
     return _apply_by_and_absorb(
-        call, data, X_raw, S_list, "ts.smooth", term, raw_basis=raw,
+        call,
+        data,
+        X_raw,
+        S_list,
+        "ts.smooth",
+        term,
+        raw_basis=raw,
     )
 
 
@@ -6396,7 +6858,9 @@ def _build_ts_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
 
 
 def _lowrank_kernel_reduce(
-    K: np.ndarray, T: np.ndarray, k: int,
+    K: np.ndarray,
+    T: np.ndarray,
+    k: int,
 ) -> tuple[np.ndarray, np.ndarray, int, int]:
     """mgcv's ds/sos low-rank reduction. ``K`` (nk,nk) kernel, ``T`` (nk,M)
     null space, ``k`` target basis dim → ``(S (k,k), UZ (nk,k-M), null_dim,
@@ -6410,24 +6874,28 @@ def _lowrank_kernel_reduce(
     nk = K.shape[0]
     M = T.shape[1]
     if k < nk:
-        vals, vecs = _tp_rlanczos(K, k, -1)              # (k,), (nk, k)
-        D = np.diag(vals)                                # (k, k)
+        vals, vecs = _tp_rlanczos(K, k, -1)  # (k,), (nk, k)
+        D = np.diag(vals)  # (k, k)
     else:
         k = nk
         vecs = np.eye(nk)
         D = K
-    U1 = vecs.T @ T                                      # (k, M)
-    Q, _ = np.linalg.qr(U1, mode="complete")             # (k, k)
-    QtD = Q.T @ D                                        # (k, k)
-    S_core = (Q.T @ QtD[M:, :].T)[M:, :]                 # (k-M, k-M)
+    U1 = vecs.T @ T  # (k, M)
+    Q, _ = np.linalg.qr(U1, mode="complete")  # (k, k)
+    QtD = Q.T @ D  # (k, k)
+    S_core = (Q.T @ QtD[M:, :].T)[M:, :]  # (k-M, k-M)
     S = np.zeros((k, k))
-    S[:k - M, :k - M] = 0.5 * (S_core + S_core.T)
-    UZ = (Q.T @ vecs.T)[M:, :].T                         # (nk, k-M)
+    S[: k - M, : k - M] = 0.5 * (S_core + S_core.T)
+    UZ = (Q.T @ vecs.T)[M:, :].T  # (nk, k-M)
     return S, UZ, M, k - M
 
 
 def _duchon_E(
-    x: np.ndarray, xk: np.ndarray, m: int, s: float, n: int,
+    x: np.ndarray,
+    xk: np.ndarray,
+    m: int,
+    s: float,
+    n: int,
 ) -> np.ndarray:
     """`DuchonE` — generalised polyharmonic kernel between rows of x and xk.
     ``ke = 2m + 2s − n`` (> 0 under the validity constraint m+s>n/2); E = dᵏ·log d
@@ -6437,9 +6905,9 @@ def _duchon_E(
     ke = int(round(2 * m + 2 * s - n))
     if ke % 2 == 0:
         logd = np.log(np.where(dist > 0, dist, 1.0))
-        E = np.where(dist > 0, (dist ** ke) * logd, 0.0)
+        E = np.where(dist > 0, (dist**ke) * logd, 0.0)
     else:
-        E = dist ** ke
+        E = dist**ke
     sign_e = 1 - 2 * (((ke // 2) + 1) % 2)
     return E * sign_e
 
@@ -6449,6 +6917,7 @@ def _duchon_T(X: np.ndarray, m: int, n: int) -> np.ndarray:
     M = C(m+n−1, n) columns. Same monomials as tp's null space but WITHOUT
     tp's m-bump."""
     from math import comb
+
     M = comb(m + n - 1, n)
     pi_pow = _tp_gen_poly_powers(M, m, n)
     T = np.ones((X.shape[0], M), dtype=float)
@@ -6479,8 +6948,7 @@ def _ds_order_ms(call: Call, d: int) -> tuple[int, float]:
     if m + s <= d / 2:
         s = 0.5 + d / 2 - m
         if s >= d / 2:
-            raise ValueError(
-                "ds smooth: no suitable s (m[2]); try increasing m[1]")
+            raise ValueError("ds smooth: no suitable s (m[2]); try increasing m[1]")
     return m, float(s)
 
 
@@ -6497,17 +6965,17 @@ def _ds_default_k(call: Call, M: int, d: int) -> int:
 @dataclass(slots=True)
 class _DSRawBasis(_RawBasis):
     """`smooth.construct.ds.smooth.spec` — Duchon spline (predict replay)."""
+
     term: list[str]
     shift: np.ndarray
-    knt: np.ndarray        # (nk, d) centered knots
-    UZ: np.ndarray         # (nk, k-M)
+    knt: np.ndarray  # (nk, d) centered knots
+    UZ: np.ndarray  # (nk, k-M)
     m: int
     s: float
     d: int
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
-        x = np.column_stack(
-            [data[v].to_numpy().astype(float) for v in self.term])
+        x = np.column_stack([data[v].to_numpy().astype(float) for v in self.term])
         x_c = x - self.shift
         E = _duchon_E(x_c, self.knt, self.m, self.s, self.d)
         T = _duchon_T(x_c, self.m, self.d)
@@ -6515,10 +6983,13 @@ class _DSRawBasis(_RawBasis):
 
 
 def _ds_raw(
-    call: Call, data: pl.DataFrame, term: list[str],
+    call: Call,
+    data: pl.DataFrame,
+    term: list[str],
     knots: dict | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], _DSRawBasis]:
     from math import comb
+
     d = len(term)
     x = np.column_stack([data[t].to_numpy().astype(float) for t in term])
     m, s = _ds_order_ms(call, d)
@@ -6555,19 +7026,26 @@ def _ds_raw(
     T_kk = _duchon_T(knt_c, m, d)
     S, UZ, _null, _rank = _lowrank_kernel_reduce(E_kk, T_kk, k)
     X = np.hstack([_duchon_E(x_c, knt_c, m, s, d) @ UZ, _duchon_T(x_c, m, d)])
-    raw = _DSRawBasis(
-        term=list(term), shift=shift, knt=knt_c, UZ=UZ, m=m, s=s, d=d)
+    raw = _DSRawBasis(term=list(term), shift=shift, knt=knt_c, UZ=UZ, m=m, s=s, d=d)
     return X, [S], raw
 
 
 def _build_ds_smooth(
-    call: Call, data: pl.DataFrame, knots: dict | None = None,
+    call: Call,
+    data: pl.DataFrame,
+    knots: dict | None = None,
 ) -> list[SmoothBlock]:
     """Build a Duchon spline (`bs="ds"`) — mgcv smooth.construct.ds."""
     term = _smooth_term_vars(call)
     X, S_list, raw = _ds_raw(call, data, term, knots=knots)
     return _apply_by_and_absorb(
-        call, data, X, S_list, "duchon.spline", term, raw_basis=raw,
+        call,
+        data,
+        X,
+        S_list,
+        "duchon.spline",
+        term,
+        raw_basis=raw,
     )
 
 
@@ -6588,11 +7066,12 @@ def _rksos(z: np.ndarray) -> np.ndarray:
       z>0 : 1 − log(1−W)·log(W) − Li2(W);  z≤0 : 1 − π²/6 + Li2(1−W);  z≥1 : 1.
     """
     from scipy.special import spence
+
     z = np.clip(np.asarray(z, dtype=float), -1.0, 1.0)
     W = (1.0 - z) / 2.0
     rk = np.empty(z.shape, dtype=float)
     m_lo = z <= 0.0
-    rk[m_lo] = 1.0 - np.pi ** 2 / 6.0 + spence(W[m_lo])        # Li2(1−W)
+    rk[m_lo] = 1.0 - np.pi**2 / 6.0 + spence(W[m_lo])  # Li2(1−W)
     m_mid = (z > 0.0) & (z < 1.0)
     Wm = W[m_mid]
     rk[m_mid] = 1.0 - np.log(1.0 - Wm) * np.log(Wm) - spence(1.0 - Wm)  # Li2(W)
@@ -6601,7 +7080,11 @@ def _rksos(z: np.ndarray) -> np.ndarray:
 
 
 def _makeR(
-    la: np.ndarray, lo: np.ndarray, lak: np.ndarray, lok: np.ndarray, m: int,
+    la: np.ndarray,
+    lo: np.ndarray,
+    lak: np.ndarray,
+    lok: np.ndarray,
+    m: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """mgcv's `makeR`: geodesic reproducing-kernel matrix between points
     (la, lo) and knots (lak, lok) (degrees), plus the null-space bases at each
@@ -6612,9 +7095,9 @@ def _makeR(
     lo_r = np.asarray(lo, dtype=float) * p180
     lak_r = np.asarray(lak, dtype=float) * p180
     lok_r = np.asarray(lok, dtype=float) * p180
-    v = (np.sin(la_r)[:, None] * np.sin(lak_r)[None, :]
-         + np.cos(la_r)[:, None] * np.cos(lak_r)[None, :]
-         * np.cos(lo_r[:, None] - lok_r[None, :]))
+    v = np.sin(la_r)[:, None] * np.sin(lak_r)[None, :] + np.cos(la_r)[:, None] * np.cos(
+        lak_r
+    )[None, :] * np.cos(lo_r[:, None] - lok_r[None, :])
     v = np.clip(v, -1.0, 1.0)
     gamma = np.arccos(v)
 
@@ -6654,15 +7137,26 @@ def _makeR(
     elif m == 3:
         W2 = W * W
         W3 = W2 * W
-        q = (A * (60.0 * W3 - 36.0 * W2) + 30.0 * W2
-             + C * (8.0 * W - 30.0 * W2) - 3.0 * W + 1.0) / 3.0
+        q = (
+            A * (60.0 * W3 - 36.0 * W2)
+            + 30.0 * W2
+            + C * (8.0 * W - 30.0 * W2)
+            - 3.0 * W
+            + 1.0
+        ) / 3.0
         R = (q / 6.0 - 1.0 / 24.0) / (2.0 * np.pi)
     else:  # m == 4
         W2 = W * W
         W3 = W2 * W
         W4 = W3 * W
-        q = (A * (70.0 * W4 - 60.0 * W3 + 6.0 * W2) + 35.0 * W3 * (1.0 - C)
-             + C * 55.0 * W2 / 3.0 - 12.5 * W2 - W / 3.0 + 0.25)
+        q = (
+            A * (70.0 * W4 - 60.0 * W3 + 6.0 * W2)
+            + 35.0 * W3 * (1.0 - C)
+            + C * 55.0 * W2 / 3.0
+            - 12.5 * W2
+            - W / 3.0
+            + 0.25
+        )
         R = (q / 24.0 - 1.0 / 120.0) / (2.0 * np.pi)
     return R, t_la, t_lak
 
@@ -6691,6 +7185,7 @@ def _sos_default_k(call: Call) -> int:
 @dataclass(slots=True)
 class _SOSRawBasis(_RawBasis):
     """`smooth.construct.sos.smooth.spec` — spline on the sphere (predict)."""
+
     term: list[str]
     la_k: np.ndarray
     lo_k: np.ndarray
@@ -6707,7 +7202,9 @@ class _SOSRawBasis(_RawBasis):
 
 
 def _sos_raw(
-    call: Call, data: pl.DataFrame, term: list[str],
+    call: Call,
+    data: pl.DataFrame,
+    term: list[str],
     knots: dict | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], _SOSRawBasis]:
     if len(term) != 2:
@@ -6726,8 +7223,7 @@ def _sos_raw(
         # mgcv's seeded max.knots subsample above 2000 unique (lat,long)
         # locations (smooth.r:3031-3050, bit-exact R RNG).
         mk_sos, seed_sos = _xt_max_knots_seed(call)
-        pts = _mgcv_knot_subsample(np.column_stack([la, lo]), mk_sos,
-                                   seed=seed_sos)
+        pts = _mgcv_knot_subsample(np.column_stack([la, lo]), mk_sos, seed=seed_sos)
         if pts is None:
             pts = np.unique(np.column_stack([la, lo]), axis=0)
         la_k, lo_k = pts[:, 0], pts[:, 1]
@@ -6743,19 +7239,26 @@ def _sos_raw(
     xs = 1.0 / xs
     X = X * xs
     S = S * xs[:, None] * xs[None, :]
-    raw = _SOSRawBasis(
-        term=list(term), la_k=la_k, lo_k=lo_k, UZ=UZ, m=m, xc_scale=xs)
+    raw = _SOSRawBasis(term=list(term), la_k=la_k, lo_k=lo_k, UZ=UZ, m=m, xc_scale=xs)
     return X, [S], raw
 
 
 def _build_sos_smooth(
-    call: Call, data: pl.DataFrame, knots: dict | None = None,
+    call: Call,
+    data: pl.DataFrame,
+    knots: dict | None = None,
 ) -> list[SmoothBlock]:
     """Build a spline on the sphere (`bs="sos"`) — mgcv smooth.construct.sos."""
     term = _smooth_term_vars(call)
     X, S_list, raw = _sos_raw(call, data, term, knots=knots)
     return _apply_by_and_absorb(
-        call, data, X, S_list, "sos.smooth", term, raw_basis=raw,
+        call,
+        data,
+        X,
+        S_list,
+        "sos.smooth",
+        term,
+        raw_basis=raw,
     )
 
 
@@ -6770,8 +7273,12 @@ def _build_sos_smooth(
 
 
 def _nat_param(
-    X: np.ndarray, S: np.ndarray, rank: int | None = None, type_: int = 1,
-    unit_fnorm: bool = True, return_rank: bool = False,
+    X: np.ndarray,
+    S: np.ndarray,
+    rank: int | None = None,
+    type_: int = 1,
+    unit_fnorm: bool = True,
+    return_rank: bool = False,
 ):
     """Port of mgcv's `nat.param(X, S, rank, type, unit.fnorm)`.
 
@@ -6801,6 +7308,7 @@ def _nat_param(
         # numpy's linalg.eigh uses `evd` (D&C), which gives a different
         # rotation of the same null space.
         from scipy.linalg import eigh as _sla_eigh
+
         w, V = _sla_eigh(S_sym, driver="evr")
         idx = np.argsort(-w)  # descending to match R's eigen()
         w = w[idx]
@@ -6810,7 +7318,7 @@ def _nat_param(
         if rank > 0:
             E[:rank] = np.sqrt(np.clip(w[:rank], 0.0, None))
         X_rot = X @ V
-        col_norm = np.sum(X_rot ** 2, axis=0) / (E ** 2)
+        col_norm = np.sum(X_rot**2, axis=0) / (E**2)
         av_norm = float(np.mean(col_norm[:rank])) if rank > 0 else 1.0
         if null_exists:
             E[rank:] = np.sqrt(col_norm[rank:] / av_norm)
@@ -6834,7 +7342,7 @@ def _nat_param(
                 scale = 1.0 / np.sqrt(np.mean(X_new[:, :rank] ** 2))
                 X_new[:, :rank] *= scale
                 P[:, :rank] *= scale
-                D = np.full(rank, scale ** 2)
+                D = np.full(rank, scale**2)
             if null_exists:
                 scalef = 1.0 / np.sqrt(np.mean(X_new[:, rank:] ** 2))
                 X_new[:, rank:] *= scalef
@@ -6850,8 +7358,9 @@ def _nat_param(
     # symmetrization before eigen (an LU solve or a 0.5*(A+A') perturbs the
     # null cluster enough to land on a different resolution).
     from scipy.linalg import eigh as _sla_eigh, solve_triangular as _sla_tri
-    Y = _sla_tri(R.T, S.T, lower=True)        # R^-T S'
-    RSR = _sla_tri(R.T, Y.T, lower=True)      # R^-T (S R^-1)
+
+    Y = _sla_tri(R.T, S.T, lower=True)  # R^-T S'
+    RSR = _sla_tri(R.T, Y.T, lower=True)  # R^-T (S R^-1)
     w, V = _sla_eigh(RSR, lower=True, driver="evr")
     order = np.argsort(-w)  # descending
     w = w[order]
@@ -6899,7 +7408,7 @@ def _nat_param(
             scale = 1.0 / np.sqrt(np.mean(X_new[:, :rank] ** 2))
             X_new[:, :rank] *= scale
             P[:, :rank] *= scale
-            D = D * scale ** 2
+            D = D * scale**2
         if rank < p:
             scalef = 1.0 / np.sqrt(np.mean(X_new[:, rank:] ** 2))
             X_new[:, rank:] *= scalef
@@ -6910,7 +7419,9 @@ def _nat_param(
     return X_new, D, P
 
 
-def _fs_find_factor(term: list[str], data: pl.DataFrame) -> tuple[str | None, list[str]]:
+def _fs_find_factor(
+    term: list[str], data: pl.DataFrame
+) -> tuple[str | None, list[str]]:
     """Split a term list into (factor_var | None, non_factor_vars).
 
     Returns `(None, term)` when no term is factor-like — mgcv falls through
@@ -6987,19 +7498,36 @@ def _build_fs_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     S_list, S_scale = _scale_penalty(X, S_list)
 
     base_raw = _TPRawBasis(
-        term=list(others), shift=state["shift"], Xu=state["Xu"],
-        m=state["m"], d=state["d"], M=M, k=k, UZ=state["UZ"], w=state["w"],
+        term=list(others),
+        shift=state["shift"],
+        Xu=state["Xu"],
+        m=state["m"],
+        d=state["d"],
+        M=M,
+        k=k,
+        UZ=state["UZ"],
+        w=state["w"],
     )
     raw = _FSRawBasis(
-        fterm=fterm, flev=list(flev), p=p, rank=rank, null_d=null_d,
-        base_raw=base_raw, P=P,
+        fterm=fterm,
+        flev=list(flev),
+        p=p,
+        rank=rank,
+        null_d=null_d,
+        base_raw=base_raw,
+        P=P,
     )
-    return [SmoothBlock(
-        label=_smooth_label(call), term=term,
-        cls="fs.interaction", X=X, S=S_list,
-        spec=BasisSpec(raw=raw, by=None, absorb=None),
-        S_scale=S_scale,
-    )]
+    return [
+        SmoothBlock(
+            label=_smooth_label(call),
+            term=term,
+            cls="fs.interaction",
+            X=X,
+            S=S_list,
+            spec=BasisSpec(raw=raw, by=None, absorb=None),
+            S_scale=S_scale,
+        )
+    ]
 
 
 def _xz_kr_contrast(X: np.ndarray, m: list[int], inner_p: int) -> np.ndarray:
@@ -7021,7 +7549,7 @@ def _xz_kr_contrast(X: np.ndarray, m: list[int], inner_p: int) -> np.ndarray:
         # non-last block, then the last block is dropped. After this the
         # factor dimension is mi-1 and we transpose so the next factor
         # populates the trailing axis.
-        X = (X[:, :mi - 1] - X[:, mi - 1:mi]).T
+        X = (X[:, : mi - 1] - X[:, mi - 1 : mi]).T
     p = inner_p
     X = X.reshape(X.size // p, p, order="F")
     X = X.T  # matches mgcv's trailing `X <- t(X); dim(X) <- c(length(X)/n, n)`
@@ -7095,6 +7623,7 @@ def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     # matrices: X[i, (a1, a2, ..., b)] = prod_j 1{fac_j[i]==lev_j[a_j]} * Xb[i, b].
     # Column layout matches mgcv's: outermost factor index cycles slowest.
     X = np.zeros((n, p_full))
+
     # Enumerate all factor-index combinations in row-major over factors.
     def _iter_factor_indices():
         if not nf:
@@ -7150,19 +7679,35 @@ def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
 
     label = _smooth_label(call)
     base_raw = _TPRawBasis(
-        term=list(otherlist), shift=state["shift"], Xu=state["Xu"],
-        m=state["m"], d=state["d"], M=M, k=k, UZ=state["UZ"], w=state["w"],
+        term=list(otherlist),
+        shift=state["shift"],
+        Xu=state["Xu"],
+        m=state["m"],
+        d=state["d"],
+        M=M,
+        k=k,
+        UZ=state["UZ"],
+        w=state["w"],
     )
     raw = _SZRawBasis(
-        term_full=list(term), ftermlist=list(ftermlist),
-        flev=[list(lv) for lv in flev], nf=list(nf),
-        base_raw=base_raw, p0=p0,
+        term_full=list(term),
+        ftermlist=list(ftermlist),
+        flev=[list(lv) for lv in flev],
+        nf=list(nf),
+        base_raw=base_raw,
+        p0=p0,
     )
-    return [SmoothBlock(
-        label=label, term=term, cls="sz.interaction", X=X_out, S=S_out,
-        spec=BasisSpec(raw=raw, by=None, absorb=None),
-        S_scale=S_scale,
-    )]
+    return [
+        SmoothBlock(
+            label=label,
+            term=term,
+            cls="sz.interaction",
+            X=X_out,
+            S=S_out,
+            spec=BasisSpec(raw=raw, by=None, absorb=None),
+            S_scale=S_scale,
+        )
+    ]
 
 
 # ---- ad (adaptive P-spline) -------------------------------------------------
@@ -7292,15 +7837,23 @@ def _ad_D2(ni: int, nj: int) -> dict:
     Dcr[rows, ci_pm] = -s
 
     return dict(
-        Drr=Drr, Dcc=Dcc, Dcr=Dcr,
-        rr_ri=rr_ri, rr_ci=rr_ci,
-        cc_ri=cc_ri, cc_ci=cc_ci,
-        cr_ri=cr_ri, cr_ci=cr_ci,
-        rmt=rmt, cmt=cmt,
+        Drr=Drr,
+        Dcc=Dcc,
+        Dcr=Dcr,
+        rr_ri=rr_ri,
+        rr_ci=rr_ci,
+        cc_ri=cc_ri,
+        cc_ci=cc_ci,
+        cr_ri=cr_ri,
+        cr_ci=cr_ci,
+        rmt=rmt,
+        cmt=cmt,
     )
 
 
-def _ad_inner_2d_basis(kp: tuple[int, int], Db: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _ad_inner_2d_basis(
+    kp: tuple[int, int], Db: dict
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Build the inner penalty-weight matrices Vrr, Vcc, Vcr (one column per
     adaptive penalty) for the 2D adaptive case with `kp.tot > 1`.
 
@@ -7345,7 +7898,8 @@ def _ad_inner_2d_basis(kp: tuple[int, int], Db: dict) -> tuple[np.ndarray, np.nd
 
 
 def _ad_raw_build(
-    call: Call, data: pl.DataFrame,
+    call: Call,
+    data: pl.DataFrame,
 ) -> tuple[np.ndarray, list[np.ndarray], _ADRawBasis]:
     """Raw (pre-by/absorb) construction for ``bs="ad"`` (1D/2D): returns
     ``(X, S_list, raw)``. Shared by :func:`_build_ad_smooth` and the te-margin
@@ -7369,8 +7923,10 @@ def _ad_raw_build(
         V = _ad_penalty_basis_1d(nk, k_pen)
         S_list = [Db.T @ (V[:, i : i + 1] * Db) for i in range(k_pen)]
         raw = _ADRawBasis(
-            term=list(term), knots_per_term=[knots],
-            m0=2, k_per_term=[X.shape[1]],
+            term=list(term),
+            knots_per_term=[knots],
+            m0=2,
+            k_per_term=[X.shape[1]],
         )
         return X, S_list, raw
 
@@ -7399,13 +7955,17 @@ def _ad_raw_build(
         Drr, Dcc, Dcr = Db["Drr"], Db["Dcc"], Db["Dcr"]
         S_list = []
         for i in range(kp_tot):
-            S = (Drr.T @ (Vrr[:, i : i + 1] * Drr)
-                 + Dcc.T @ (Vcc[:, i : i + 1] * Dcc)
-                 + Dcr.T @ (Vcr[:, i : i + 1] * Dcr))
+            S = (
+                Drr.T @ (Vrr[:, i : i + 1] * Drr)
+                + Dcc.T @ (Vcc[:, i : i + 1] * Dcc)
+                + Dcr.T @ (Vcr[:, i : i + 1] * Dcr)
+            )
             S_list.append(S)
     raw = _ADRawBasis(
-        term=list(term), knots_per_term=[knots_i, knots_j],
-        m0=2, k_per_term=[Xi.shape[1], Xj.shape[1]],
+        term=list(term),
+        knots_per_term=[knots_i, knots_j],
+        m0=2,
+        k_per_term=[Xi.shape[1], Xj.shape[1]],
     )
     return X, S_list, raw
 
@@ -7423,7 +7983,13 @@ def _build_ad_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     term = _smooth_term_vars(call)
     X, S_list, raw = _ad_raw_build(call, data)
     return _apply_by_and_absorb(
-        call, data, X, S_list, "pspline.smooth", term, raw_basis=raw,
+        call,
+        data,
+        X,
+        S_list,
+        "pspline.smooth",
+        term,
+        raw_basis=raw,
     )
 
 
@@ -7527,7 +8093,9 @@ def _te_parse_margins(call: Call, data: pl.DataFrame) -> list[dict]:
         elif len(m_src.args) == n_bases:
             m_list = list(m_src.args)
         else:
-            raise ValueError(f"m= length {len(m_src.args)} doesn't match margin count {n_bases}")
+            raise ValueError(
+                f"m= length {len(m_src.args)} doesn't match margin count {n_bases}"
+            )
     else:
         m_list = [m_src] * n_bases
 
@@ -7540,10 +8108,15 @@ def _te_parse_margins(call: Call, data: pl.DataFrame) -> list[dict]:
     j = 0
     for i in range(n_bases):
         j1 = j + d_list[i]
-        specs.append(dict(
-            term=term[j:j1], bs=bs_list[i], k=k_list[i],
-            m=m_list[i], fx=fx_list[i],
-        ))
+        specs.append(
+            dict(
+                term=term[j:j1],
+                bs=bs_list[i],
+                k=k_list[i],
+                m=m_list[i],
+                fx=fx_list[i],
+            )
+        )
         j = j1
     return specs
 
@@ -7594,7 +8167,9 @@ def _te_make_margin_call(spec: dict) -> Call:
 
 
 def _te_build_margin_raw(
-    spec: dict, data: pl.DataFrame, knots_vec: np.ndarray | None = None,
+    spec: dict,
+    data: pl.DataFrame,
+    knots_vec: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], object, bool, _RawBasis]:
     """Build the bare margin (no absorb.cons) — returns
     `(X, S_list, predict, noterp, raw)`. `noterp=True` signals that this
@@ -7614,46 +8189,64 @@ def _te_build_margin_raw(
     if bs == "cr":
         X, S_list, kn = _cr_raw(mcall, data, term, knots_vec=knots_vec)
         raw = _CRRawBasis(term=term[0], knots=kn)
+
         def _predict(x_new: np.ndarray) -> np.ndarray:
             return _cr_basis(np.asarray(x_new, dtype=float), kn)
+
         return X, S_list, _predict, True, raw
     if bs == "cc":
         # cyclic cubic margin (noterp=True like cr — already nicely parameterised).
         X, S_list, kn, BD = _cc_raw(mcall, data, term, knots_vec=knots_vec)
         raw = _CCRawBasis(term=term[0], knots=kn, BD=BD)
+
         def _predict(x_new: np.ndarray) -> np.ndarray:
             return _cc_basis(np.asarray(x_new, dtype=float), kn, BD)
+
         return X, S_list, _predict, True, raw
     if bs == "cp":
         # cyclic P-spline margin (noterp=False → np=TRUE SVD reparam applies).
         X, S_list, kn, ord_ = _cp_raw(mcall, data, term, knots_vec=knots_vec)
         raw = _CPRawBasis(term=term[0], knots=kn, ord_=ord_)
+
         def _predict(x_new: np.ndarray) -> np.ndarray:
             return _cp_basis(np.asarray(x_new, dtype=float), kn, ord_)
+
         return X, S_list, _predict, False, raw
     if bs == "ps":
         X, S_list, kn, m0 = _ps_raw(mcall, data, term, knots_vec=knots_vec)
         raw = _PSRawBasis(term=term[0], knots=kn, m0=m0)
+
         def _predict(x_new: np.ndarray) -> np.ndarray:
             return _ps_basis(np.asarray(x_new, dtype=float), kn, m0)
+
         return X, S_list, _predict, False, raw
     if bs == "bs":
         X, S_list, kn, m0 = _bs_raw(mcall, data, term, knots_vec=knots_vec)
         raw = _BSRawBasis(term=term[0], knots=kn, m0=m0)
+
         def _predict(x_new: np.ndarray) -> np.ndarray:
             return _bs_design(np.asarray(x_new, dtype=float), kn, m0, deriv=0)
+
         return X, S_list, _predict, False, raw
     if bs == "tp":
         X, S_list, M, k, _rank, state = _tp_raw(mcall, data, term)
         raw = _TPRawBasis(
-            term=list(term), shift=state["shift"], Xu=state["Xu"],
-            m=state["m"], d=state["d"], M=M, k=k,
-            UZ=state["UZ"], w=state["w"],
+            term=list(term),
+            shift=state["shift"],
+            Xu=state["Xu"],
+            m=state["m"],
+            d=state["d"],
+            M=M,
+            k=k,
+            UZ=state["UZ"],
+            w=state["w"],
         )
+
         # np-reparam predict callable: only invoked when len(term) == 1.
         def _predict(x_new: np.ndarray) -> np.ndarray:
             df = pl.DataFrame({term[0]: np.asarray(x_new, dtype=float)})
             return raw.eval(df)
+
         return X, S_list, _predict, False, raw
     if bs == "ad":
         # Adaptive (multi-penalty) margin — a hea extension beyond mgcv, which
@@ -7662,17 +8255,24 @@ def _te_build_margin_raw(
         # np-reparam (multi-penalty has no mgcv reparam analog). Predict replays
         # the ps basis via _ADRawBasis (so noterp=False is moot — np is skipped).
         X, S_list, raw = _ad_raw_build(mcall, data)
+
         def _predict(x_new: np.ndarray, _raw=raw, _term=term) -> np.ndarray:
             xn = np.asarray(x_new, dtype=float)
-            cols = ({_term[0]: xn} if xn.ndim == 1
-                    else {_term[c]: xn[:, c] for c in range(len(_term))})
+            cols = (
+                {_term[0]: xn}
+                if xn.ndim == 1
+                else {_term[c]: xn[:, c] for c in range(len(_term))}
+            )
             return _raw.eval(pl.DataFrame(cols))
+
         return X, S_list, _predict, False, raw
     raise NotImplementedError(f"te/ti margin with bs={bs!r} not yet supported")
 
 
 def _te_build_margin_centered(
-    spec: dict, data: pl.DataFrame, knots_vec: np.ndarray | None = None,
+    spec: dict,
+    data: pl.DataFrame,
+    knots_vec: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], object, bool, _RawBasis]:
     """Centered margin = bare margin (:func:`_te_build_margin_raw`) + sum-to-zero
     absorb, returning `(X, S_list, predict, noterp, raw)`. Equivalent to
@@ -7683,7 +8283,8 @@ def _te_build_margin_centered(
     supports every basis the bare builder does; ``knots_vec`` is forwarded.
     """
     X_raw, S_raw, predict_bare, noterp, bare = _te_build_margin_raw(
-        spec, data, knots_vec=knots_vec)
+        spec, data, knots_vec=knots_vec
+    )
     S_sym = [(S + S.T) / 2.0 for S in S_raw]
     # Margin-level rescale: interior te machinery, not mgcv's per-smooth
     # S.scale (that's recorded on the assembled tensor penalties).
@@ -7694,13 +8295,16 @@ def _te_build_margin_centered(
     X = X_raw @ Z
     S_list = [Z.T @ S @ Z for S in S_scaled]
     raw = _LinearTransformRawBasis(inner=bare, M=Z)
+
     def _predict(x_new: np.ndarray) -> np.ndarray:
         return np.asarray(predict_bare(x_new)) @ Z
+
     return X, S_list, _predict, noterp, raw
 
 
-def _te_reparam_margin(X: np.ndarray, S_list: list[np.ndarray], x_vals: np.ndarray,
-                       predict_basis) -> tuple[np.ndarray, list[np.ndarray], np.ndarray | None]:
+def _te_reparam_margin(
+    X: np.ndarray, S_list: list[np.ndarray], x_vals: np.ndarray, predict_basis
+) -> tuple[np.ndarray, list[np.ndarray], np.ndarray | None]:
     """Reparameterize a margin to spread basis evenly in x (matches mgcv's
     `np=TRUE` path at smooth.r:796-822).
 
@@ -7760,15 +8364,20 @@ def _tensor_prod_S(
                 blk = S if j == i else np.eye(dims[j])
                 M = blk if M is None else np.kron(M, blk)
             assert M is not None
-            out.append(0.5 * (M + M.T))   # always square (kron of squares)
+            out.append(0.5 * (M + M.T))  # always square (kron of squares)
             pen_margin.append(i)
     return out, pen_margin
 
 
-def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
-                     mc: list[bool] | None = None,
-                     matrix_arg: bool = False,
-                     knots: dict | None = None) -> list[SmoothBlock]:
+def _build_te_smooth(
+    call: Call,
+    data: pl.DataFrame,
+    *,
+    inter: bool = False,
+    mc: list[bool] | None = None,
+    matrix_arg: bool = False,
+    knots: dict | None = None,
+) -> list[SmoothBlock]:
     """`te(...)` / `ti(...)` constructor.
 
     Shared code path, differentiated by:
@@ -7799,7 +8408,9 @@ def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
             elif len(mc) == n_bases:
                 mc_list = [bool(v) for v in mc]
             else:
-                raise ValueError(f"mc= length {len(mc)} doesn't match margin count {n_bases}")
+                raise ValueError(
+                    f"mc= length {len(mc)} doesn't match margin count {n_bases}"
+                )
     else:
         mc_list = [False] * n_bases
 
@@ -7809,17 +8420,20 @@ def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
         do_np = _te_cast_bool(np_flag)
 
     Xm: list[np.ndarray] = []
-    Sm_lists: list[list[np.ndarray]] = []   # per-margin penalty lists (≥1)
+    Sm_lists: list[list[np.ndarray]] = []  # per-margin penalty lists (≥1)
     margin_raws: list[_RawBasis] = []
     for i, spec in enumerate(specs):
         # mgcv passes the same knots= list to every marginal smooth.construct;
         # 1-D cr margins consume it, others (tp) ignore it.
-        kv = (knots.get(spec["term"][0])
-              if knots and len(spec["term"]) == 1 else None)
+        kv = knots.get(spec["term"][0]) if knots and len(spec["term"]) == 1 else None
         if mc_list[i]:
-            Xi, Si_list, predict_i, noterp_i, raw_i = _te_build_margin_centered(spec, data, knots_vec=kv)
+            Xi, Si_list, predict_i, noterp_i, raw_i = _te_build_margin_centered(
+                spec, data, knots_vec=kv
+            )
         else:
-            Xi, Si_list, predict_i, noterp_i, raw_i = _te_build_margin_raw(spec, data, knots_vec=kv)
+            Xi, Si_list, predict_i, noterp_i, raw_i = _te_build_margin_raw(
+                spec, data, knots_vec=kv
+            )
 
         # np=TRUE SVD reparam — 1-D, single-penalty, non-noterp margins only
         # (cr/cc/cs opt out via noterp; ad is multi-penalty and has no mgcv
@@ -7863,26 +8477,46 @@ def _build_te_smooth(call: Call, data: pl.DataFrame, *, inter: bool = False,
         # step is skipped regardless of the by-row-sum test. Symmetrize S now.
         S_list = [(S + S.T) / 2.0 for S in S_list]
         return _defer_matrix_block(
-            call, data, X, S_list, cls, term_all, tensor_raw,
+            call,
+            data,
+            X,
+            S_list,
+            cls,
+            term_all,
+            tensor_raw,
         )
 
     if inter:
         # Skip outer absorb.cons (C = matrix(0,0,0)).
         S_list, S_scale = _scale_penalty(X, S_list)
-        return [SmoothBlock(
-            label=label, term=term_all, cls=cls, X=X, S=S_list,
-            spec=BasisSpec(raw=tensor_raw, by=None, absorb=None),
-            S_scale=S_scale,
-        )]
+        return [
+            SmoothBlock(
+                label=label,
+                term=term_all,
+                cls=cls,
+                X=X,
+                S=S_list,
+                spec=BasisSpec(raw=tensor_raw, by=None, absorb=None),
+                S_scale=S_scale,
+            )
+        ]
 
     # te: outer absorb.cons.
     return _apply_by_and_absorb(
-        call, data, X, S_list, cls, term_all, raw_basis=tensor_raw,
+        call,
+        data,
+        X,
+        S_list,
+        cls,
+        term_all,
+        raw_basis=tensor_raw,
     )
 
 
 def _build_ti_smooth(
-    call: Call, data: pl.DataFrame, knots: dict | None = None,
+    call: Call,
+    data: pl.DataFrame,
+    knots: dict | None = None,
     matrix_arg: bool = False,
 ) -> list[SmoothBlock]:
     """`ti(...)` — like te but each margin is centered (absorb.cons
@@ -7897,12 +8531,19 @@ def _build_ti_smooth(
     else:
         mc_vals = [_te_cast_int(mc_src) != 0]
     return _build_te_smooth(
-        call, data, inter=True, mc=mc_vals, matrix_arg=matrix_arg, knots=knots,
+        call,
+        data,
+        inter=True,
+        mc=mc_vals,
+        matrix_arg=matrix_arg,
+        knots=knots,
     )
 
 
 def _t2_margin_raw_and_rank(
-    spec: dict, data: pl.DataFrame, knots_vec: np.ndarray | None = None,
+    spec: dict,
+    data: pl.DataFrame,
+    knots_vec: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, int, _RawBasis]:
     """Build a t2 margin (no absorb.cons) and return `(X, S, rank, raw)`.
     The marginal penalty rank determines the range/null split used by
@@ -7924,41 +8565,48 @@ def _t2_margin_raw_and_rank(
     if bs == "cc":
         X, S_list, kn, BD = _cc_raw(mcall, data, term, knots_vec=knots_vec)
         S = 0.5 * (S_list[0] + S_list[0].T)
-        rank = X.shape[1] - 1            # cc null.space.dim = 1
+        rank = X.shape[1] - 1  # cc null.space.dim = 1
         raw = _CCRawBasis(term=term[0], knots=kn, BD=BD)
         return X, S, rank, raw
     if bs == "cp":
         X, S_list, kn, ord_ = _cp_raw(mcall, data, term, knots_vec=knots_vec)
         S = 0.5 * (S_list[0] + S_list[0].T)
-        rank = X.shape[1] - 1            # cp null.space.dim = 1
+        rank = X.shape[1] - 1  # cp null.space.dim = 1
         raw = _CPRawBasis(term=term[0], knots=kn, ord_=ord_)
         return X, S, rank, raw
     if bs == "ps":
         X, S_list, kn, m0 = _ps_raw(mcall, data, term, knots_vec=knots_vec)
         S = 0.5 * (S_list[0] + S_list[0].T)
-        rank = X.shape[1] - _ps_order_m(mcall)[1]   # null.space.dim = penalty order
+        rank = X.shape[1] - _ps_order_m(mcall)[1]  # null.space.dim = penalty order
         raw = _PSRawBasis(term=term[0], knots=kn, m0=m0)
         return X, S, rank, raw
     if bs == "bs":
         X, S_list, kn, m0 = _bs_raw(mcall, data, term, knots_vec=knots_vec)
         S = 0.5 * (S_list[0] + S_list[0].T)
-        rank = X.shape[1] - _bs_order_m(mcall)[1]   # null.space.dim = penalty order
+        rank = X.shape[1] - _bs_order_m(mcall)[1]  # null.space.dim = penalty order
         raw = _BSRawBasis(term=term[0], knots=kn, m0=m0)
         return X, S, rank, raw
     if bs == "tp":
         X, S_list, M, k, rank, state = _tp_raw(mcall, data, term)
         S = 0.5 * (S_list[0] + S_list[0].T)
         raw = _TPRawBasis(
-            term=list(term), shift=state["shift"], Xu=state["Xu"],
-            m=state["m"], d=state["d"], M=M, k=k,
-            UZ=state["UZ"], w=state["w"],
+            term=list(term),
+            shift=state["shift"],
+            Xu=state["Xu"],
+            m=state["m"],
+            d=state["d"],
+            M=M,
+            k=k,
+            UZ=state["UZ"],
+            w=state["w"],
         )
         return X, S, rank, raw
     raise NotImplementedError(f"t2 margin with bs={bs!r} not yet supported")
 
 
 def _t2_model_matrix(
-    Xm: list[np.ndarray], ranks: list[int],
+    Xm: list[np.ndarray],
+    ranks: list[int],
 ) -> tuple[np.ndarray, list[int]]:
     """Port of mgcv's `t2.model.matrix` with `full=FALSE, ord=NULL`.
 
@@ -8007,7 +8655,9 @@ def _t2_model_matrix(
 
 
 def _build_t2_smooth(
-    call: Call, data: pl.DataFrame, knots: dict | None = None,
+    call: Call,
+    data: pl.DataFrame,
+    knots: dict | None = None,
 ) -> list[SmoothBlock]:
     """`t2(...)` — Wood's alternative tensor product.
 
@@ -8019,9 +8669,7 @@ def _build_t2_smooth(
     (smooth.r:1117-1120) before scaling and constraint absorption.
     """
     if _smooth_pc_value(call) is not None:
-        raise NotImplementedError(
-            "pc= point constraint with t2() is not yet supported"
-        )
+        raise NotImplementedError("pc= point constraint with t2() is not yet supported")
     specs = _te_parse_margins(call, data)
 
     # t2 has no fx: mgcv's t2() hardcodes `fx <- FALSE` (smooth.r:539) — there
@@ -8039,8 +8687,7 @@ def _build_t2_smooth(
     margin_raws: list[_RawBasis] = []
     P_per_margin: list[np.ndarray] = []
     for spec in specs:
-        kv = (knots.get(spec["term"][0])
-              if knots and len(spec["term"]) == 1 else None)
+        kv = knots.get(spec["term"][0]) if knots and len(spec["term"]) == 1 else None
         Xi_raw, Si, ri, raw_i = _t2_margin_raw_and_rank(spec, data, knots_vec=kv)
         Xi_np, _D, P_i = _nat_param(Xi_raw, Si, rank=ri, type_=3, unit_fnorm=True)
         Xm.append(Xi_np)
@@ -8059,7 +8706,7 @@ def _build_t2_smooth(
     S_list: list[np.ndarray] = []
     for j in range(nsc):
         D = np.zeros(p)
-        D[cx[j]:cx[j + 1]] = 1.0
+        D[cx[j] : cx[j + 1]] = 1.0
         S_list.append(np.diag(D))
 
     # (t2 fx is rejected up front — mgcv hardcodes fx=FALSE for t2.)
@@ -8077,14 +8724,23 @@ def _build_t2_smooth(
         # so fit basis == predict basis.
         S_list, S_scale = _scale_penalty(X_raw_full, S_list)
         t2_raw = _T2RawBasis(
-            margins=margin_raws, P_per_margin=P_per_margin,
-            ranks=ranks, null_dim=0, Zn=None,
+            margins=margin_raws,
+            P_per_margin=P_per_margin,
+            ranks=ranks,
+            null_dim=0,
+            Zn=None,
         )
-        return [SmoothBlock(
-            label=label, term=term_all, cls=cls, X=X_raw_full, S=S_list,
-            spec=BasisSpec(raw=t2_raw, by=None, absorb=None),
-            S_scale=S_scale,
-        )]
+        return [
+            SmoothBlock(
+                label=label,
+                term=term_all,
+                cls=cls,
+                X=X_raw_full,
+                S=S_list,
+                spec=BasisSpec(raw=t2_raw, by=None, absorb=None),
+                S_scale=S_scale,
+            )
+        ]
 
     # Predict-time basis (mgcv's full absorb.cons via sm$Cp = colSums(X_raw_full)):
     # `Predict.matrix.t2.smooth` applies Z_p = qr.qy(qrc, [0; I_q]) — equivalent
@@ -8095,8 +8751,10 @@ def _build_t2_smooth(
     Q_p, _ = np.linalg.qr(cP, mode="complete")
     Z_p = Q_p[:, 1:]
     t2_predict = _T2PredictRawBasis(
-        margins=margin_raws, P_per_margin=P_per_margin,
-        ranks=ranks, Z_p=Z_p,
+        margins=margin_raws,
+        P_per_margin=P_per_margin,
+        ranks=ranks,
+        Z_p=Z_p,
     )
 
     if null_dim == 1:
@@ -8107,18 +8765,32 @@ def _build_t2_smooth(
         S_list = [S[np.ix_(keep, keep)] for S in S_list]
         S_list, S_scale = _scale_penalty(X, S_list)
         t2_raw = _T2RawBasis(
-            margins=margin_raws, P_per_margin=P_per_margin,
-            ranks=ranks, null_dim=1, Zn=None,
+            margins=margin_raws,
+            P_per_margin=P_per_margin,
+            ranks=ranks,
+            null_dim=1,
+            Zn=None,
         )
         Xp_in = X_raw_full @ Z_p
         X_bar = X.mean(axis=0)
         M = np.linalg.lstsq(Xp_in, X - X_bar, rcond=None)[0]
-        return [SmoothBlock(
-            label=label, term=term_all, cls=cls, X=X, S=S_list,
-            spec=BasisSpec(raw=t2_raw, by=None, absorb=None,
-                           predict_raw=t2_predict, coef_remap=(M, X_bar)),
-            S_scale=S_scale,
-        )]
+        return [
+            SmoothBlock(
+                label=label,
+                term=term_all,
+                cls=cls,
+                X=X,
+                S=S_list,
+                spec=BasisSpec(
+                    raw=t2_raw,
+                    by=None,
+                    absorb=None,
+                    predict_raw=t2_predict,
+                    coef_remap=(M, X_bar),
+                ),
+                S_scale=S_scale,
+            )
+        ]
 
     # Partial absorb.cons (smooth.r:4076-4100): C has zero cols on the range
     # space, so only the null-space cols of X / S get rotated. QR is on the
@@ -8141,18 +8813,32 @@ def _build_t2_smooth(
         bot = np.concatenate([S_NR, S_NN], axis=1)
         S_list_new.append(np.concatenate([top, bot], axis=0))
     t2_raw = _T2RawBasis(
-        margins=margin_raws, P_per_margin=P_per_margin,
-        ranks=ranks, null_dim=null_dim, Zn=Zn,
+        margins=margin_raws,
+        P_per_margin=P_per_margin,
+        ranks=ranks,
+        null_dim=null_dim,
+        Zn=Zn,
     )
     Xp_in = X_raw_full @ Z_p
     X_bar = X.mean(axis=0)
     M = np.linalg.lstsq(Xp_in, X - X_bar, rcond=None)[0]
-    return [SmoothBlock(
-        label=label, term=term_all, cls=cls, X=X, S=S_list_new,
-        spec=BasisSpec(raw=t2_raw, by=None, absorb=None,
-                       predict_raw=t2_predict, coef_remap=(M, X_bar)),
-        S_scale=S_scale,
-    )]
+    return [
+        SmoothBlock(
+            label=label,
+            term=term_all,
+            cls=cls,
+            X=X,
+            S=S_list_new,
+            spec=BasisSpec(
+                raw=t2_raw,
+                by=None,
+                absorb=None,
+                predict_raw=t2_predict,
+                coef_remap=(M, X_bar),
+            ),
+            S_scale=S_scale,
+        )
+    ]
 
 
 def _smooth_matrix_vars(call: Call, data: pl.DataFrame) -> list[str]:
@@ -8175,7 +8861,8 @@ def _smooth_matrix_vars(call: Call, data: pl.DataFrame) -> list[str]:
 
 
 def _check_rank(
-    X: np.ndarray, S_list: list[np.ndarray],
+    X: np.ndarray,
+    S_list: list[np.ndarray],
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray | None]:
     """Mgcv `smoothCon`'s ``check.rank`` block (lines 485-518).
 
@@ -8192,6 +8879,7 @@ def _check_rank(
     drop is correct.
     """
     from scipy.linalg import lapack
+
     p = X.shape[1]
     if p == 0:
         return X, S_list, None
@@ -8219,8 +8907,12 @@ def _check_rank(
 
 
 def _summation_apply_blocks(
-    blocks: list[SmoothBlock], n: int, m: int, matrix_vars: list[str],
-    long_data: pl.DataFrame, no_outer_cons: bool = False,
+    blocks: list[SmoothBlock],
+    n: int,
+    m: int,
+    matrix_vars: list[str],
+    long_data: pl.DataFrame,
+    no_outer_cons: bool = False,
 ) -> list[SmoothBlock]:
     """Run mgcv's ``smoothCon`` matrix-argument pipeline on each raw long-form
     block, in mgcv's order (smooth.r:3877-4051):
@@ -8251,7 +8943,7 @@ def _summation_apply_blocks(
         if X.shape[0] != n * m:
             raise RuntimeError(
                 f"matrix-arg summation: builder for {b.label!r} returned X "
-                f"with {X.shape[0]} rows, expected n*m = {n*m}"
+                f"with {X.shape[0]} rows, expected n*m = {n * m}"
             )
         S_list = list(b.S)
         # (1) scale.penalty on the long-form (pre-by) X.
@@ -8261,8 +8953,11 @@ def _summation_apply_blocks(
         by_mask = b.spec.by if b.spec is not None else None
         if by_mask is not None:
             by_col = _eval_by_col(by_mask.expr, long_data)
-            by_arr = (by_col.to_numpy() if isinstance(by_col, pl.Series)
-                      else np.asarray(by_col))
+            by_arr = (
+                by_col.to_numpy()
+                if isinstance(by_col, pl.Series)
+                else np.asarray(by_col)
+            )
             by_arr = by_arr.astype(float)
             X = X * by_arr[:, None]
             # L1 = row-sums of the by-matrix (one per original row). mgcv drops
@@ -8294,10 +8989,17 @@ def _summation_apply_blocks(
                     b.spec.keep_cols = composed
                 else:
                     b.spec.keep_cols = keep_mask
-        out.append(SmoothBlock(
-            label=b.label, term=b.term, cls=b.cls,
-            X=X_summed, S=S_list, spec=b.spec, S_scale=S_scale,
-        ))
+        out.append(
+            SmoothBlock(
+                label=b.label,
+                term=b.term,
+                cls=b.cls,
+                X=X_summed,
+                S=S_list,
+                spec=b.spec,
+                S_scale=S_scale,
+            )
+        )
     return out
 
 
@@ -8329,8 +9031,12 @@ def reject_unsupported_smooth_id(expanded: ExpandedFormula) -> None:
 
 
 def materialize_smooths(
-    expanded: ExpandedFormula, data: pl.DataFrame,
-    *, sparse_cons: int = 0, tero: bool = False, knots: dict | None = None,
+    expanded: ExpandedFormula,
+    data: pl.DataFrame,
+    *,
+    sparse_cons: int = 0,
+    tero: bool = False,
+    knots: dict | None = None,
     xt: Mapping | None = None,
 ) -> list[list[SmoothBlock]]:
     """Materialize each smooth in `expanded.smooths` to one or more blocks.
@@ -8388,9 +9094,7 @@ def materialize_smooths(
         # ``na.action=na.omit`` would also drop. ``prepare_design`` does the
         # NaN-aware drop upstream, so here we only need cell-null dropping
         # for the parametric / smooth-arg side.
-        ref_no_matrix = [
-            c for c in referenced if not is_matrix_col(data[c])
-        ]
+        ref_no_matrix = [c for c in referenced if not is_matrix_col(data[c])]
         if ref_no_matrix:
             data = data.drop_nulls(subset=ref_no_matrix)
 
@@ -8402,7 +9106,10 @@ def materialize_smooths(
         data = _apply_smooth_arg_exprs(data, expr_map)
 
     def _dispatch(
-        call: Call, d: pl.DataFrame, *, matrix_arg: bool = False,
+        call: Call,
+        d: pl.DataFrame,
+        *,
+        matrix_arg: bool = False,
     ) -> list[SmoothBlock]:
         if call.fn in ("te", "ti", "t2"):
             # mgcv threads the same knots= list to every marginal
@@ -8478,10 +9185,7 @@ def materialize_smooths(
         group = id_groups[idv]
         base_call = calls[group[0]]
         call_i = calls[i]
-        bs = (
-            None if base_call.fn in ("te", "ti", "t2")
-            else _smooth_bs(base_call)
-        )
+        bs = None if base_call.fn in ("te", "ti", "t2") else _smooth_bs(base_call)
         if base_call.fn == "t2" or bs in ("fs", "sz"):
             # t2's fit/predict-basis remap and fs/sz's factor-product
             # bases don't fit the shared-raw-basis replay below; refuse
@@ -8500,9 +9204,7 @@ def materialize_smooths(
             base_levels = [
                 _factor_levels(data[v]) for v in _smooth_term_vars(base_call)
             ]
-            my_levels = [
-                _factor_levels(data[v]) for v in _smooth_term_vars(call_i)
-            ]
+            my_levels = [_factor_levels(data[v]) for v in _smooth_term_vars(call_i)]
             if my_levels != base_levels:
                 raise NotImplementedError(
                     f"{_smooth_label(call_i)}: id-linked bs='re' smooths "
@@ -8529,8 +9231,7 @@ def materialize_smooths(
             # the dataX replacement (smooth.r:3870-3877) so all linked
             # smooths carry identical penalties (and the same S.scale —
             # clone.smooth.spec copies the whole smooth object).
-            cap["S_scaled"], cap["S_scale"] = _scale_penalty(
-                cap["X"], cap["S"])
+            cap["S_scaled"], cap["S_scale"] = _scale_penalty(cap["X"], cap["S"])
             rec = id_shared[idv] = cap
         base_vars = _smooth_term_vars(base_call)
         my_vars = _smooth_term_vars(call_i)
@@ -8539,9 +9240,11 @@ def materialize_smooths(
         )
         X_i = np.asarray(rec["raw"].eval(eval_frame), dtype=float)
         raw_i = (
-            rec["raw"] if my_vars == base_vars
+            rec["raw"]
+            if my_vars == base_vars
             else _RenamedRawBasis(
-                raw=rec["raw"], rename=dict(zip(my_vars, base_vars)),
+                raw=rec["raw"],
+                rename=dict(zip(my_vars, base_vars)),
             )
         )
         S_i = [np.array(S, dtype=float, copy=True) for S in rec["S_scaled"]]
@@ -8552,8 +9255,15 @@ def materialize_smooths(
         # non-orthogonally and log|H+S|/log|S|+ (hence the REML score)
         # shift by a constant even though the fit is identical.
         return _apply_by_and_absorb(
-            call_i, data, X_i, S_i, rec["cls"], my_vars,
-            raw_basis=raw_i, pre_scaled=True, C_source=rec["X"],
+            call_i,
+            data,
+            X_i,
+            S_i,
+            rec["cls"],
+            my_vars,
+            raw_basis=raw_i,
+            pre_scaled=True,
+            C_source=rec["X"],
             S_scale=list(rec["S_scale"]),
         )
 
@@ -8587,7 +9297,11 @@ def materialize_smooths(
                 finally:
                     _MATRIX_ARG_CV.reset(ma_token)
                 blocks = _summation_apply_blocks(
-                    blocks, n_orig, m, mvars, long_data,
+                    blocks,
+                    n_orig,
+                    m,
+                    mvars,
+                    long_data,
                     no_outer_cons=(call.fn == "ti"),
                 )
             else:
@@ -8647,7 +9361,9 @@ def is_matrix_col(s: pl.Series) -> bool:
 def matrix_to_2d(s: pl.Series) -> np.ndarray:
     """Materialize an ``Array(Float64, m)`` series as an (n, m) ndarray."""
     if not is_matrix_col(s):
-        raise TypeError(f"column {s.name!r} is not a matrix column (got dtype {s.dtype})")
+        raise TypeError(
+            f"column {s.name!r} is not a matrix column (got dtype {s.dtype})"
+        )
     return s.to_numpy().astype(float)
 
 
@@ -8692,8 +9408,7 @@ def normalize_data(
                 )
             else:
                 raise ValueError(
-                    f"data column {name!r}: ndim must be 1 or 2, "
-                    f"got ndim={arr_np.ndim}"
+                    f"data column {name!r}: ndim must be 1 or 2, got ndim={arr_np.ndim}"
                 )
         if n_ref is None:
             n_ref = n_here
@@ -8706,7 +9421,8 @@ def normalize_data(
 
 
 def long_form_view(
-    data: pl.DataFrame, matrix_vars: list[str],
+    data: pl.DataFrame,
+    matrix_vars: list[str],
 ) -> tuple[pl.DataFrame, int, int]:
     """Expand a DataFrame to long form for matrix-arg evaluation.
 
@@ -8785,6 +9501,7 @@ class Design:
         Response label — bare column name for ``y ~ ...`` formulas,
         deparsed LHS source (e.g. ``"medFPQ^0.25"``) otherwise.
     """
+
     expanded: ExpandedFormula
     data: pl.DataFrame
     X: pl.DataFrame
@@ -8809,12 +9526,12 @@ class Design:
 # Mirrors what mgcv/base R accept on a formula LHS: arithmetic via
 # `_eval_lhs_expr` (UnaryOp/BinOp), plus these elementary transforms.
 _LHS_FUNCS: dict[str, "callable"] = {
-    "log":   lambda e: e.log(),
-    "log2":  lambda e: e.log(2.0),
+    "log": lambda e: e.log(),
+    "log2": lambda e: e.log(2.0),
     "log10": lambda e: e.log10(),
-    "exp":   lambda e: e.exp(),
-    "sqrt":  lambda e: e.sqrt(),
-    "abs":   lambda e: e.abs(),
+    "exp": lambda e: e.exp(),
+    "sqrt": lambda e: e.sqrt(),
+    "abs": lambda e: e.abs(),
 }
 
 
@@ -8826,6 +9543,7 @@ def _lhs_referenced_cols(node, columns: set[str]) -> set[str]:
     are silently skipped — they'll error later in ``_eval_lhs_expr``.
     """
     out: set[str] = set()
+
     def visit(n):
         if isinstance(n, Name):
             if n.ident in columns:
@@ -8851,6 +9569,7 @@ def _lhs_referenced_cols(node, columns: set[str]) -> set[str]:
             return
         # Anything else (Dot, Empty, Subscript, …) shouldn't appear on a
         # response LHS — let _eval_lhs_expr raise the clearer error.
+
     visit(node)
     return out
 
@@ -8875,9 +9594,7 @@ def _eval_lhs_expr(node, columns: set[str]) -> pl.Expr:
         return pl.col(node.ident)
     if isinstance(node, Literal):
         if node.kind != "num":
-            raise NotImplementedError(
-                f"LHS literal kind {node.kind!r} not supported"
-            )
+            raise NotImplementedError(f"LHS literal kind {node.kind!r} not supported")
         return pl.lit(float(node.value))
     if isinstance(node, Paren):
         return _eval_lhs_expr(node.expr, columns)
@@ -8900,7 +9617,7 @@ def _eval_lhs_expr(node, columns: set[str]) -> pl.Expr:
         if node.op == "/":
             return L / R
         if node.op == "^":
-            return L ** R
+            return L**R
         raise NotImplementedError(f"LHS binary op {node.op!r} not supported")
     if isinstance(node, Call):
         if node.kwargs:
@@ -8924,13 +9641,12 @@ def _eval_lhs_expr(node, columns: set[str]) -> pl.Expr:
             f"LHS function {node.fn}() not supported "
             f"(allowed: I, {', '.join(sorted(_LHS_FUNCS))})"
         )
-    raise NotImplementedError(
-        f"LHS contains unsupported node {type(node).__name__}"
-    )
+    raise NotImplementedError(f"LHS contains unsupported node {type(node).__name__}")
 
 
 def _na_mask_with_matrix_cols(
-    data: pl.DataFrame, na_cols: set[str],
+    data: pl.DataFrame,
+    na_cols: set[str],
 ) -> np.ndarray:
     """Boolean keep-mask for rows with no NA across ``na_cols``.
 
@@ -9035,12 +9751,21 @@ def prepare_design(
 
     expanded = expand(f_parsed, data_columns=list(data.columns))
 
-    _na = {"omit": "omit", "na.omit": "omit", "exclude": "omit",
-           "na.exclude": "omit", "fail": "fail", "na.fail": "fail",
-           "pass": "pass", "na.pass": "pass"}.get(str(na_action))
+    _na = {
+        "omit": "omit",
+        "na.omit": "omit",
+        "exclude": "omit",
+        "na.exclude": "omit",
+        "fail": "fail",
+        "na.fail": "fail",
+        "pass": "pass",
+        "na.pass": "pass",
+    }.get(str(na_action))
     if _na is None:
-        raise ValueError("na_action must be one of 'omit' / 'exclude' / 'fail' "
-                         f"/ 'pass'; got {na_action!r}")
+        raise ValueError(
+            "na_action must be one of 'omit' / 'exclude' / 'fail' "
+            f"/ 'pass'; got {na_action!r}"
+        )
     na_cols = (referenced_columns(expanded) | lhs_cols) & columns
     if na_cols and _na != "pass":
         # Custom NA mask so that NaN inside ``Array(Float64, m)`` matrix
@@ -9053,7 +9778,7 @@ def prepare_design(
         else:
             data_clean = data
     else:
-        data_clean = data   # "pass": keep NA rows untouched
+        data_clean = data  # "pass": keep NA rows untouched
 
     # NOTE: a multivariate `cbind(y1, y2) ~ ...` LHS is NOT handled here — it
     # stays an `_eval_lhs_expr` raise (below). Models that accept a two-column
@@ -9081,10 +9806,21 @@ def prepare_design(
     # fit + rank screen) skip the ``pl.from_numpy`` → ``to_numpy`` round-trip.
     with with_contrasts(contrasts):
         X_values, X_names, param_assign = _build_design(
-            expanded, data_clean, drop_na=False, basis_state=basis_state)
+            expanded, data_clean, drop_na=False, basis_state=basis_state
+        )
     # ``orient="row"`` required for the square-design case — see ``materialize``.
-    X = (pl.DataFrame() if X_values is None
-         else pl.from_numpy(X_values, schema=X_names, orient="row"))
-    return Design(expanded=expanded, data=data_clean, X=X, y=y,
-                  response=response_label, param_assign=param_assign,
-                  X_values=X_values, X_names=X_names)
+    X = (
+        pl.DataFrame()
+        if X_values is None
+        else pl.from_numpy(X_values, schema=X_names, orient="row")
+    )
+    return Design(
+        expanded=expanded,
+        data=data_clean,
+        X=X,
+        y=y,
+        response=response_label,
+        param_assign=param_assign,
+        X_values=X_values,
+        X_names=X_names,
+    )

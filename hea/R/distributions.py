@@ -24,6 +24,7 @@ for Poisson (R's ``lambda`` is a Python keyword). ``df`` PDF is intentionally
 omitted — ``df`` is too common as a DataFrame variable; use
 ``scipy.stats.f.pdf`` directly when you need it.
 """
+
 from __future__ import annotations
 
 import math
@@ -50,6 +51,7 @@ def _r_rng() -> RMersenneTwister:
     global _R_RNG
     if _R_RNG is None:
         import time
+
         _R_RNG = RMersenneTwister(int(time.time()) & 0x7FFFFFFF)
     return _R_RNG
 
@@ -96,6 +98,7 @@ def rnorm(n, mean=0, sd=1):
     at evaluation time — N resolves against the receiver's row count.
     """
     import polars as pl
+
     if isinstance(n, pl.Expr):
         # Lazy per-row generation inside a tibble — draws from R's stream in
         # row order (reproducible and R-exact per draw; the in-frame generation
@@ -181,22 +184,31 @@ def rf(n, df1, df2, ncp=0):
 def dchisq(x, df, ncp=0):
     # central chi-square = gamma(shape=df/2, scale=2) — bit-exact via nmath.
     if np.all(np.asarray(ncp) == 0):
-        return _nm._disp("dgamma", _nm.dgamma, [x, np.asarray(df, float) / 2.0, 2.0],
-                         (False,))
+        return _nm._disp(
+            "dgamma", _nm.dgamma, [x, np.asarray(df, float) / 2.0, 2.0], (False,)
+        )
     return _nm._disp("dnchisq", _nm.dnchisq, [x, df, ncp], (False,))
 
 
 def pchisq(q, df, ncp=0, lower_tail=True):
     if np.all(np.asarray(ncp) == 0):
-        return _nm._disp("pgamma", _nm.pgamma, [q, np.asarray(df, float) / 2.0, 2.0],
-                         (lower_tail, False))
+        return _nm._disp(
+            "pgamma",
+            _nm.pgamma,
+            [q, np.asarray(df, float) / 2.0, 2.0],
+            (lower_tail, False),
+        )
     return _nm._disp("pnchisq", _nm.pnchisq, [q, df, ncp], (lower_tail, False))
 
 
 def qchisq(p, df, ncp=0, lower_tail=True):
     if np.all(np.asarray(ncp) == 0):
-        return _nm._disp("qgamma", _nm.qgamma, [p, np.asarray(df, float) / 2.0, 2.0],
-                         (lower_tail, False))
+        return _nm._disp(
+            "qgamma",
+            _nm.qgamma,
+            [p, np.asarray(df, float) / 2.0, 2.0],
+            (lower_tail, False),
+        )
     return _nm._disp("qnchisq", _nm.qnchisq, [p, df, ncp], (lower_tail, False))
 
 
@@ -271,8 +283,11 @@ def dunif(x, min=0, max=1, log=False):
     b = np.asarray(max, float)
     inside = (a <= x) & (x <= b)
     with np.errstate(divide="ignore", invalid="ignore"):
-        out = np.where(inside, -np.log(b - a), -np.inf) if log \
+        out = (
+            np.where(inside, -np.log(b - a), -np.inf)
+            if log
             else np.where(inside, 1.0 / (b - a), 0.0)
+        )
     out = np.asarray(out, float)
     out = np.where((b <= a) | np.isnan(x) | np.isnan(a) | np.isnan(b), np.nan, out)
     return float(out) if _scalar_in(x, a, b) else out
@@ -290,8 +305,14 @@ def punif(q, min=0, max=1, lower_tail=True, log_p=False):
         with np.errstate(divide="ignore"):
             p = np.log(p)
     p = np.asarray(p, float)
-    bad = (b < a) | ~np.isfinite(a) | ~np.isfinite(b) \
-        | np.isnan(q) | np.isnan(a) | np.isnan(b)
+    bad = (
+        (b < a)
+        | ~np.isfinite(a)
+        | ~np.isfinite(b)
+        | np.isnan(q)
+        | np.isnan(a)
+        | np.isnan(b)
+    )
     p = np.where(bad, np.nan, p)
     return float(p) if _scalar_in(q, a, b) else p
 
@@ -309,8 +330,15 @@ def qunif(p, min=0, max=1, lower_tail=True, log_p=False):
     out = np.asarray(a + pv * (b - a), float)
     # R_Q_P01_check: probability out of [0,1] (identity scale) -> NaN.
     p01_bad = (pv < 0.0) | (pv > 1.0)
-    bad = p01_bad | (b < a) | ~np.isfinite(a) | ~np.isfinite(b) \
-        | np.isnan(p) | np.isnan(a) | np.isnan(b)
+    bad = (
+        p01_bad
+        | (b < a)
+        | ~np.isfinite(a)
+        | ~np.isfinite(b)
+        | np.isnan(p)
+        | np.isnan(a)
+        | np.isnan(b)
+    )
     out = np.where(bad, np.nan, out)
     return float(out) if _scalar_in(p, a, b) else out
 
@@ -329,14 +357,16 @@ def dexp(x, rate=1, log=False):
 
 def pexp(q, rate=1, lower_tail=True, log_p=False):
     """R's ``pexp`` — bit-exact via ported pexp (nmath/pexp.c)."""
-    return _nm._disp("pexp", _nm.pexp, [q, 1.0 / np.asarray(rate, float)],
-                     (lower_tail, log_p))
+    return _nm._disp(
+        "pexp", _nm.pexp, [q, 1.0 / np.asarray(rate, float)], (lower_tail, log_p)
+    )
 
 
 def qexp(p, rate=1, lower_tail=True, log_p=False):
     """R's ``qexp`` — bit-exact via ported qexp (nmath/qexp.c)."""
-    return _nm._disp("qexp", _nm.qexp, [p, 1.0 / np.asarray(rate, float)],
-                     (lower_tail, log_p))
+    return _nm._disp(
+        "qexp", _nm.qexp, [p, 1.0 / np.asarray(rate, float)], (lower_tail, log_p)
+    )
 
 
 def rexp(n, rate=1):
@@ -414,14 +444,12 @@ def dcauchy(x, location=0, scale=1, log=False):
 
 def pcauchy(q, location=0, scale=1, lower_tail=True, log_p=False):
     """R's ``pcauchy`` — Cauchy CDF (nmath/pcauchy.c); bit-exact."""
-    return _nm._disp("pcauchy", _nm.pcauchy, [q, location, scale],
-                     (lower_tail, log_p))
+    return _nm._disp("pcauchy", _nm.pcauchy, [q, location, scale], (lower_tail, log_p))
 
 
 def qcauchy(p, location=0, scale=1, lower_tail=True, log_p=False):
     """R's ``qcauchy`` — Cauchy quantile (nmath/qcauchy.c); bit-exact."""
-    return _nm._disp("qcauchy", _nm.qcauchy, [p, location, scale],
-                     (lower_tail, log_p))
+    return _nm._disp("qcauchy", _nm.qcauchy, [p, location, scale], (lower_tail, log_p))
 
 
 def rcauchy(n, location=0, scale=1):
@@ -443,14 +471,12 @@ def dlogis(x, location=0, scale=1, log=False):
 
 def plogis(q, location=0, scale=1, lower_tail=True, log_p=False):
     """R's ``plogis`` — logistic CDF (nmath/plogis.c); bit-exact."""
-    return _nm._disp("plogis", _nm.plogis, [q, location, scale],
-                     (lower_tail, log_p))
+    return _nm._disp("plogis", _nm.plogis, [q, location, scale], (lower_tail, log_p))
 
 
 def qlogis(p, location=0, scale=1, lower_tail=True, log_p=False):
     """R's ``qlogis`` — logistic quantile (nmath/qlogis.c); bit-exact."""
-    return _nm._disp("qlogis", _nm.qlogis, [p, location, scale],
-                     (lower_tail, log_p))
+    return _nm._disp("qlogis", _nm.qlogis, [p, location, scale], (lower_tail, log_p))
 
 
 def rlogis(n, location=0, scale=1):
@@ -461,7 +487,7 @@ def rlogis(n, location=0, scale=1):
     loc = _recycle(location, nn)
     sc = _recycle(scale, nn)
     u = np.asarray(rng.unif_rand(nn), dtype=float)
-    return loc + sc * np.log(u / (1. - u))
+    return loc + sc * np.log(u / (1.0 - u))
 
 
 # log-normal
@@ -472,14 +498,12 @@ def dlnorm(x, meanlog=0, sdlog=1, log=False):
 
 def plnorm(q, meanlog=0, sdlog=1, lower_tail=True, log_p=False):
     """R's ``plnorm`` — log-normal CDF (nmath/plnorm.c → pnorm); bit-exact."""
-    return _nm._disp("plnorm", _nm.plnorm, [q, meanlog, sdlog],
-                     (lower_tail, log_p))
+    return _nm._disp("plnorm", _nm.plnorm, [q, meanlog, sdlog], (lower_tail, log_p))
 
 
 def qlnorm(p, meanlog=0, sdlog=1, lower_tail=True, log_p=False):
     """R's ``qlnorm`` — log-normal quantile (nmath/qlnorm.c → qnorm); bit-exact."""
-    return _nm._disp("qlnorm", _nm.qlnorm, [p, meanlog, sdlog],
-                     (lower_tail, log_p))
+    return _nm._disp("qlnorm", _nm.qlnorm, [p, meanlog, sdlog], (lower_tail, log_p))
 
 
 def rlnorm(n, meanlog=0, sdlog=1):
@@ -496,14 +520,12 @@ def dweibull(x, shape, scale=1, log=False):
 
 def pweibull(q, shape, scale=1, lower_tail=True, log_p=False):
     """R's ``pweibull`` — Weibull CDF (nmath/pweibull.c); bit-exact."""
-    return _nm._disp("pweibull", _nm.pweibull, [q, shape, scale],
-                     (lower_tail, log_p))
+    return _nm._disp("pweibull", _nm.pweibull, [q, shape, scale], (lower_tail, log_p))
 
 
 def qweibull(p, shape, scale=1, lower_tail=True, log_p=False):
     """R's ``qweibull`` — Weibull quantile (nmath/qweibull.c); bit-exact."""
-    return _nm._disp("qweibull", _nm.qweibull, [p, shape, scale],
-                     (lower_tail, log_p))
+    return _nm._disp("qweibull", _nm.qweibull, [p, shape, scale], (lower_tail, log_p))
 
 
 def rweibull(n, shape, scale=1):
@@ -574,13 +596,15 @@ def dwilcox(x, m, n, log=False):
 def pwilcox(q, m, n, lower_tail=True, log_p=False):
     """R's ``pwilcox`` — CDF of the Wilcoxon rank-sum (Mann-Whitney) statistic."""
     return _nm._vec(
-        lambda qq, mm, nn: _nm.pwilcox(qq, mm, nn, lower_tail, log_p), q, m, n)
+        lambda qq, mm, nn: _nm.pwilcox(qq, mm, nn, lower_tail, log_p), q, m, n
+    )
 
 
 def qwilcox(p, m, n, lower_tail=True, log_p=False):
     """R's ``qwilcox`` — quantile of the Wilcoxon rank-sum (Mann-Whitney) stat."""
     return _nm._vec(
-        lambda pp, mm, nn: _nm.qwilcox(pp, mm, nn, lower_tail, log_p), p, m, n)
+        lambda pp, mm, nn: _nm.qwilcox(pp, mm, nn, lower_tail, log_p), p, m, n
+    )
 
 
 # hypergeometric  (R: dhyper(x, m, n, k) — m white, n black, k drawn)
@@ -610,16 +634,18 @@ def dnbinom(x, size, prob=None, mu=None, log=False):
 def pnbinom(q, size, prob=None, mu=None, lower_tail=True, log_p=False):
     """R's ``pnbinom(q, size, prob | mu)`` (nmath/pnbinom.c → pbeta); bit-exact."""
     if mu is not None:
-        return _nm._disp("pnbinom_mu", _nm.pnbinom_mu, [q, size, mu],
-                         (lower_tail, log_p))
+        return _nm._disp(
+            "pnbinom_mu", _nm.pnbinom_mu, [q, size, mu], (lower_tail, log_p)
+        )
     return _nm._disp("pnbinom", _nm.pnbinom, [q, size, prob], (lower_tail, log_p))
 
 
 def qnbinom(p, size, prob=None, mu=None, lower_tail=True, log_p=False):
     """R's ``qnbinom(p, size, prob | mu)`` (nmath/qnbinom.c); bit-exact."""
     if mu is not None:
-        return _nm._disp("qnbinom_mu", _nm.qnbinom_mu, [p, size, mu],
-                         (lower_tail, log_p))
+        return _nm._disp(
+            "qnbinom_mu", _nm.qnbinom_mu, [p, size, mu], (lower_tail, log_p)
+        )
     return _nm._disp("qnbinom", _nm.qnbinom, [p, size, prob], (lower_tail, log_p))
 
 
@@ -631,8 +657,9 @@ def ptukey(q, nmeans, df, nranges=1, lower_tail=True, log_p=False):
     freedom, ``nranges`` the number of independent ranges (default 1). R-parity
     via the ported nmath ``ptukey`` (Copenhaver-Holland Gauss-Legendre
     quadrature); see the module docstring on the Rust f64 fast path."""
-    return _nm._disp("ptukey", _nm.ptukey, [q, nranges, nmeans, df],
-                     (lower_tail, log_p))
+    return _nm._disp(
+        "ptukey", _nm.ptukey, [q, nranges, nmeans, df], (lower_tail, log_p)
+    )
 
 
 def qtukey(p, nmeans, df, nranges=1, lower_tail=True, log_p=False):
@@ -640,8 +667,9 @@ def qtukey(p, nmeans, df, nranges=1, lower_tail=True, log_p=False):
 
     Inverse of :func:`ptukey` (secant iteration off an AS 70 start value);
     R-parity via the ported nmath ``qtukey``."""
-    return _nm._disp("qtukey", _nm.qtukey, [p, nranges, nmeans, df],
-                     (lower_tail, log_p))
+    return _nm._disp(
+        "qtukey", _nm.qtukey, [p, nranges, nmeans, df], (lower_tail, log_p)
+    )
 
 
 def set_seed(seed):
@@ -687,8 +715,9 @@ def sample(x, size=None, replace=False, prob=None):
     if size is None:
         size = n
     if prob is not None:
-        idx = _r_rng().sample_prob(np.asarray(prob, dtype=float),
-                                   int(size), replace=replace)
+        idx = _r_rng().sample_prob(
+            np.asarray(prob, dtype=float), int(size), replace=replace
+        )
     else:
         idx = _r_rng().sample_int(n, int(size), replace=replace)
     if names is not None:
@@ -702,6 +731,7 @@ def sample(x, size=None, replace=False, prob=None):
 # set.seed); the closed-form pbirthday/qbirthday/dmultinom are pure R ports.
 # ======================================================================
 
+
 # negative binomial variates (R: rnbinom(n, size, prob | mu); rnbinom.c)
 def rnbinom(n, size, prob=None, mu=None):
     """R: ``rnbinom(n, size, prob | mu)`` — negative-binomial variates,
@@ -712,11 +742,9 @@ def rnbinom(n, size, prob=None, mu=None):
     sz = _recycle(size, nn)
     if mu is not None:
         mm = _recycle(mu, nn)
-        return np.array([rng.rnbinom(float(sz[i]), float(mm[i]))
-                         for i in range(nn)])
+        return np.array([rng.rnbinom(float(sz[i]), float(mm[i])) for i in range(nn)])
     pr = _recycle(prob, nn)
-    return np.array([rng.rnbinom_prob(float(sz[i]), float(pr[i]))
-                     for i in range(nn)])
+    return np.array([rng.rnbinom_prob(float(sz[i]), float(pr[i])) for i in range(nn)])
 
 
 # hypergeometric variates (R: rhyper(nn, m, n, k); rhyper.c, H2PE)
@@ -729,8 +757,9 @@ def rhyper(nn, m, n, k):
     ms = _recycle(m, ln)
     ns = _recycle(n, ln)
     ks = _recycle(k, ln)
-    return np.array([rng.rhyper(float(ms[i]), float(ns[i]), float(ks[i]))
-                     for i in range(ln)])
+    return np.array(
+        [rng.rhyper(float(ms[i]), float(ns[i]), float(ks[i])) for i in range(ln)]
+    )
 
 
 # Wilcoxon signed-rank + rank-sum variates (signrank.c / wilcox.c)
@@ -779,9 +808,10 @@ def r2dtable(n, r, c):
     for i in range(1, ntotal + 1):
         fact[i] = _nm._lgammafn(float(i + 1))
     rng = _r_rng()
-    return [np.array(rng.rcont2(r.tolist(), c.tolist(), ntotal, fact),
-                     dtype=np.int64)
-            for _ in range(int(n))]
+    return [
+        np.array(rng.rcont2(r.tolist(), c.tolist(), ntotal, fact), dtype=np.int64)
+        for _ in range(int(n))
+    ]
 
 
 # Wishart matrices (R: rWishart(n, df, Sigma); rWishart.c, Bartlett)
@@ -791,6 +821,7 @@ def rWishart(n, df, Sigma):
     The RNG stream is bit-exact; the Cholesky/crossprod carry platform-BLAS
     rounding (a few ulp vs R's reference BLAS, not a port discrepancy)."""
     from scipy.linalg import cholesky
+
     Sigma = np.asarray(Sigma, dtype=float)
     if Sigma.ndim != 2 or Sigma.shape[0] != Sigma.shape[1]:
         raise ValueError("'Sigma' must be a square, real matrix")
@@ -798,13 +829,13 @@ def rWishart(n, df, Sigma):
     nn = int(n)
     if nn <= 0:
         nn = 1
-    r_chol = cholesky(Sigma, lower=False)          # dpotrf "U": R'R = Sigma
+    r_chol = cholesky(Sigma, lower=False)  # dpotrf "U": R'R = Sigma
     rng = _r_rng()
     out = np.empty((p, p, nn), dtype=float)
     for j in range(nn):
         a = rng.std_rwishart_factor(float(df), p)  # upper-tri Bartlett factor
-        m = a @ r_chol                             # tmp = A · R  (dtrmm)
-        out[:, :, j] = m.T @ m                     # crossprod (dsyrk)
+        m = a @ r_chol  # tmp = A · R  (dtrmm)
+        out[:, :, j] = m.T @ m  # crossprod (dsyrk)
     return out
 
 
@@ -818,7 +849,7 @@ def pbirthday(n, classes=365, coincident=2):
     if k < 2:
         return 1.0
     if k == 2:
-        acc = np.longdouble(1.0)                    # R's prod → long double
+        acc = np.longdouble(1.0)  # R's prod → long double
         for i in range(int(n)):
             acc *= np.longdouble((c - i) / c)
         return float(1.0 - acc)
@@ -842,8 +873,9 @@ def qbirthday(prob=0.5, classes=365, coincident=2):
         return 1
     if p >= 1:
         return int(c * (k - 1) + 1)
-    nn = math.exp(((k - 1) * math.log(c) + _nm._lgammafn(k + 1)
-                   + math.log(-math.log1p(-p))) / k)
+    nn = math.exp(
+        ((k - 1) * math.log(c) + _nm._lgammafn(k + 1) + math.log(-math.log1p(-p))) / k
+    )
     nn = math.ceil(nn)
     if pbirthday(nn, c, k) < prob:
         nn += 1
@@ -870,7 +902,7 @@ def dmultinom(x, size=None, prob=None, log=False):
     if s == 0:
         raise ValueError("probabilities must be finite, non-negative and not all 0")
     prob = prob / s
-    x = np.floor(x + 0.5).astype(np.int64)         # as.integer(x + 0.5)
+    x = np.floor(x + 0.5).astype(np.int64)  # as.integer(x + 0.5)
     if np.any(x < 0):
         raise ValueError("'x' must be non-negative")
     total = int(x.sum())
@@ -886,7 +918,7 @@ def dmultinom(x, size=None, prob=None, log=False):
             return 0.0 if log else 1.0
         x = x[~i0]
         prob = prob[~i0]
-    acc = np.longdouble(0.0)                        # R: sum(...) in long double
+    acc = np.longdouble(0.0)  # R: sum(...) in long double
     for xi, pi in zip(x, prob):
         acc += np.longdouble(xi * math.log(pi) - _nm._lgammafn(float(xi) + 1))
     r = _nm._lgammafn(float(size) + 1) + float(acc)

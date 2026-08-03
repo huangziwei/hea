@@ -34,7 +34,9 @@ def _residuals(model):
         return model._residuals_arr
     if hasattr(model, "residuals"):
         r = model.residuals
-        return r["residuals"].to_numpy() if isinstance(r, pl.DataFrame) else np.asarray(r)
+        return (
+            r["residuals"].to_numpy() if isinstance(r, pl.DataFrame) else np.asarray(r)
+        )
     raise TypeError(f"residuals(): can't extract from {type(model).__name__}")
 
 
@@ -85,7 +87,7 @@ DEFAULT_ENV: dict = {
     "cos": np.cos,
     "tan": np.tan,
     "head": lambda x, n: np.asarray(x)[: int(n)],
-    "tail": lambda x, n: np.asarray(x)[-int(n):],
+    "tail": lambda x, n: np.asarray(x)[-int(n) :],
     "sort": np.sort,
     "unique": np.unique,
     "rev": lambda x: np.asarray(x)[::-1],
@@ -135,7 +137,7 @@ def eval_node(node, data: pl.DataFrame | None, env: dict):
         if op == "/":
             return L / R
         if op == "^":
-            return L ** R
+            return L**R
         raise ValueError(f"unsupported binary op {op!r} in expression")
 
     if isinstance(node, UnaryOp):

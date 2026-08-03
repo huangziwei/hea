@@ -14,6 +14,7 @@ the workspace accounting is reproduced exactly rather than replaced by dicts.
 The public entry point is :func:`fexact`; the leaf routines keep the f2xact…
 f11act names of the C for cross-reference.
 """
+
 from __future__ import annotations
 
 import math
@@ -27,8 +28,8 @@ from . import nmath as _nm
 _rs_fexact = rs_fn("fexact")
 
 _INT_MAX = 2147483647
-_TOL = 3.45254e-7                       # sqrt of the smallest relative spacing
-_AMISS = -12345.0                       # returned when the probability is undefined
+_TOL = 3.45254e-7  # sqrt of the smallest relative spacing
+_AMISS = -12345.0  # returned when the probability is undefined
 _LOG_2PI = 1.83787706640934548356065947281
 
 
@@ -46,7 +47,14 @@ def _f11act(arr, src, dst, i1, i2):
         arr[dst + m - 1] = arr[src + m]
 
 
-def _f8act(arr, src, dst, is_, i1, izero, ):
+def _f8act(
+    arr,
+    src,
+    dst,
+    is_,
+    i1,
+    izero,
+):
     """f8xact — reduce a vector that has a zero element: copy ``src`` to ``dst``
     inserting ``is_`` at its sorted position (both columns pre-offset, 1-based)."""
     i = 1
@@ -54,7 +62,7 @@ def _f8act(arr, src, dst, is_, i1, izero, ):
         arr[dst + i - 1] = arr[src + i - 1]
         i += 1
     while i <= izero - 1:
-        if is_ >= arr[src + i]:                 # irow[i+1]
+        if is_ >= arr[src + i]:  # irow[i+1]
             break
         arr[dst + i - 1] = arr[src + i]
         i += 1
@@ -119,7 +127,7 @@ class _Fexact:
     def __init__(self, nrow, ncol, table, expect, percnt, emin, workspace, mult):
         self.nrow = nrow
         self.ncol = ncol
-        self.M = table                  # M[i][j], 0-based; R's column-major matrix
+        self.M = table  # M[i][j], 0-based; R's column-major matrix
         self.expect = expect
         self.percnt = percnt
         self.emin = emin
@@ -160,17 +168,17 @@ class _Fexact:
             nonlocal iwkpt
             if itype == 2 or itype == 3:
                 iwkpt += number
-            else:                       # double: two int units per element
+            else:  # double: two int units per element
                 iwkpt += number << 1
 
-        _alloc(ntot + 1, 4)             # i1  fact
-        _alloc(nco, 2)                  # i2  ico
-        _alloc(nco, 2)                  # i3  iro
-        _alloc(nco, 2)                  # i3a kyy
-        _alloc(nro, 2)                  # i3b idif
-        _alloc(nro, 2)                  # i3c irn
-        _alloc(max(k * 5 + (kk << 1), nco * 7 + 4 * n2_stack), 2)   # iiwk
-        _alloc(max(nco + 1 + 2 * n2_stack, k), 4)                   # irwk
+        _alloc(ntot + 1, 4)  # i1  fact
+        _alloc(nco, 2)  # i2  ico
+        _alloc(nco, 2)  # i3  iro
+        _alloc(nco, 2)  # i3a kyy
+        _alloc(nro, 2)  # i3b idif
+        _alloc(nro, 2)  # i3c irn
+        _alloc(max(k * 5 + (kk << 1), nco * 7 + 4 * n2_stack), 2)  # iiwk
+        _alloc(max(nco + 1 + 2 * n2_stack, k), 4)  # irwk
 
         numb = 18 + 10 * self.mult
         ldkey = (iwkmax - iwkpt) // numb - 1
@@ -215,7 +223,7 @@ class _Fexact:
         maybe_chisq = self.expect > 0.0
         expect, percnt, emin = self.expect, self.percnt, self.emin
 
-        def TBL(i, j):                  # 1-based, R column-major
+        def TBL(i, j):  # 1-based, R column-major
             return M[i - 1][j - 1]
 
         nr_gt_nc = nrow > ncol
@@ -234,8 +242,8 @@ class _Fexact:
             for j in range(1, nrow + 1):
                 ico[i] += TBL(j, i)
 
-        iro[1:nrow + 1] = sorted(iro[1:nrow + 1])
-        ico[1:ncol + 1] = sorted(ico[1:ncol + 1])
+        iro[1 : nrow + 1] = sorted(iro[1 : nrow + 1])
+        ico[1 : ncol + 1] = sorted(ico[1 : ncol + 1])
 
         if nr_gt_nc:
             nro = ncol
@@ -365,7 +373,7 @@ class _Fexact:
                 for i in range(1, nro + 1):
                     irn[i] = iro[i] - idif[i]
                 if k1 > 1:
-                    irn[1:nro + 1] = sorted(irn[1:nro + 1])
+                    irn[1 : nro + 1] = sorted(irn[1 : nro + 1])
                     nrb = 1
                     for i in range(1, nro + 1):
                         if irn[i] != 0:
@@ -429,13 +437,25 @@ class _Fexact:
                     if LP[itp] > 0.0:
                         dspt = obs - obs2 - ddf
                         LP[itp] = self._f3xact(
-                            nro2, irn[nrb:nrb + nro2], k1,
-                            ico[kb + 1:kb + 1 + k1], ntot, fact, self.n2_stack)
+                            nro2,
+                            irn[nrb : nrb + nro2],
+                            k1,
+                            ico[kb + 1 : kb + 1 + k1],
+                            ntot,
+                            fact,
+                            self.n2_stack,
+                        )
                         if LP[itp] > 0.0:
                             LP[itp] = 0.0
                         SP[itp] = self._f4xact(
-                            nro2, irn[nrb:nrb + nro2], k1,
-                            ico[kb + 1:kb + 1 + k1], dspt, fact, tol)
+                            nro2,
+                            irn[nrb : nrb + nro2],
+                            k1,
+                            ico[kb + 1 : kb + 1 + k1],
+                            dspt,
+                            fact,
+                            tol,
+                        )
                         if SP[itp] > 0.0:
                             SP[itp] = 0.0
                         if maybe_chisq and (irn[nrb] * ico[kb + 1]) > ntot * emin:
@@ -447,16 +467,15 @@ class _Fexact:
                             if ncell * 100 >= k1 * nro2 * percnt:
                                 tmp = 0.0
                                 for i in range(nro2):
-                                    tmp += (fact[irn[nrb + i]]
-                                            - fact[irn[nrb + i] - 1])
+                                    tmp += fact[irn[nrb + i]] - fact[irn[nrb + i] - 1]
                                 tmp *= k1 - 1
                                 for j in range(1, k1 + 1):
-                                    tmp += (nro2 - 1) * (fact[ico[kb + j]]
-                                                         - fact[ico[kb + j] - 1])
+                                    tmp += (nro2 - 1) * (
+                                        fact[ico[kb + j]] - fact[ico[kb + j] - 1]
+                                    )
                                 df = float((nro2 - 1) * (k1 - 1))
                                 tmp += df * _LOG_2PI
-                                tmp -= (nro2 * k1 - 1) * (fact[ntot]
-                                                          - fact[ntot - 1])
+                                tmp -= (nro2 * k1 - 1) * (fact[ntot] - fact[ntot - 1])
                                 tm[itp] = (obs - dro) * -2.0 - tmp
                             else:
                                 tm[itp] = -9876.0
@@ -484,12 +503,25 @@ class _Fexact:
                         df = float((nro2 - 1) * (k1 - 1))
                         pv = _nm.pgamma(
                             max(0.0, tmp + (pastp + drn) * 2.0) / 2.0,
-                            df / 2.0, 1.0, False, True)
+                            df / 2.0,
+                            1.0,
+                            False,
+                            True,
+                        )
                         pre += float(ifreq) * math.exp(pastp + drn + pv)
                     else:
                         itop = self._f5xact(
-                            pastp + ddf, kval, ifreq, itop,
-                            jkey, jstp, jstp2, jstp3, jstp4, psh)
+                            pastp + ddf,
+                            kval,
+                            ifreq,
+                            itop,
+                            jkey,
+                            jstp,
+                            jstp2,
+                            jstp3,
+                            jstp4,
+                            psh,
+                        )
                         psh = False
                 ipn = ifrq[ipn + ikstp2]
                 if ipn > 0:
@@ -547,8 +579,7 @@ class _Fexact:
         if nrow * ncol == 4:
             n11 = (irow[1] + 1) * (icol[1] + 1) // (ntot + 2)
             n12 = irow[1] - n11
-            return -(fact[n11] + fact[n12]
-                     + fact[icol[1] - n11] + fact[icol[2] - n12])
+            return -(fact[n11] + fact[n12] + fact[icol[1] - n11] + fact[icol[2] - n12])
 
         # Test for optimal table
         val = 0.0
@@ -613,10 +644,17 @@ class _Fexact:
                 nr1 = nro - 1
                 nrt = iro[irl]
                 nct = ico[1]
-                lb[1] = int((float(nrt + 1) * (nct + 1))
-                            / float(nn + nr1 * nc1s + 1) - _TOL) - 1
-                nu[1] = (int((float(nrt + nc1s) * (nct + nr1))
-                             / float(nn + nr1 + nc1s)) - lb[1] + 1)
+                lb[1] = (
+                    int(
+                        (float(nrt + 1) * (nct + 1)) / float(nn + nr1 * nc1s + 1) - _TOL
+                    )
+                    - 1
+                )
+                nu[1] = (
+                    int((float(nrt + nc1s) * (nct + nr1)) / float(nn + nr1 + nc1s))
+                    - lb[1]
+                    + 1
+                )
                 nr[1] = nrt - lb[1]
                 state = "LoopNode"
                 continue
@@ -641,10 +679,14 @@ class _Fexact:
                     lev += 1
                     nc1 = nco - lev
                     nct = ico[lev]
-                    lb[lev] = int((float(nrt + 1) * (nct + 1))
-                                  / float(nn1 + nr1 * nc1 + 1) - _TOL)
-                    nu[lev] = int((float(nrt + nc1) * (nct + nr1))
-                                  / float(nn1 + nr1 + nc1) - lb[lev] + 1)
+                    lb[lev] = int(
+                        (float(nrt + 1) * (nct + 1)) / float(nn1 + nr1 * nc1 + 1) - _TOL
+                    )
+                    nu[lev] = int(
+                        (float(nrt + nc1) * (nct + nr1)) / float(nn1 + nr1 + nc1)
+                        - lb[lev]
+                        + 1
+                    )
                     nr[lev] = nrt - lb[lev]
                 alen[nco] = alen[lev] + fact[nr[lev]]
                 lb[nco] = nr[lev]
@@ -671,7 +713,7 @@ class _Fexact:
                 else:
                     for i in range(1, nco + 1):
                         it[i] = max(ico[i] - lb[i], 0)
-                    it[1:nco + 1] = sorted(it[1:nco + 1])
+                    it[1 : nco + 1] = sorted(it[1 : nco + 1])
                     dky = float(kyy)
                     dkey = it[1] * dky + it[2]
                     for i in range(3, nco + 1):
@@ -679,7 +721,8 @@ class _Fexact:
                     if dkey > _INT_MAX:
                         raise FexactError(
                             "FEXACT[f3xact] hash key exceeds INT_MAX; "
-                            "use simulate_p_value=True")
+                            "use simulate_p_value=True"
+                        )
                     key = int(dkey)
                     ipn = key % ldst + 1
                     pushed = False
@@ -715,7 +758,8 @@ class _Fexact:
                     if not pushed:
                         raise FexactError(
                             "FEXACT error 30: stack length exceeded in f3xact; "
-                            "increase 'workspace' (or use simulate_p_value=True)")
+                            "increase 'workspace' (or use simulate_p_value=True)"
+                        )
                     state = "LoopNode"
                     continue
 
@@ -928,8 +972,7 @@ class _Fexact:
                 continue
 
     # ---------------------------------------------------------------- f5xact
-    def _f5xact(self, pastp, kval, ifreq, itop,
-                jkey, jstp, jstp2, jstp3, jstp4, psh):
+    def _f5xact(self, pastp, kval, ifreq, itop, jkey, jstp, jstp2, jstp3, jstp4, psh):
         """Put a node on the stack ("PUT"): a per-key binary tree of past path
         lengths, merging entries within ``tol`` and accumulating frequencies."""
         ldkey, ldstp = self.ldkey, self.ldstp
@@ -958,7 +1001,8 @@ class _Fexact:
             if target is None:
                 raise FexactError(
                     "FEXACT error 6 (f5xact): LDKEY=%d too small (kval=%d); "
-                    "increase 'workspace'" % (ldkey, kval))
+                    "increase 'workspace'" % (ldkey, kval)
+                )
             if target == "L30":
                 key[jkey + itp] = kval
                 itop += 1
@@ -966,7 +1010,8 @@ class _Fexact:
                 if itop > ldstp:
                     raise FexactError(
                         "FEXACT error 7 (f5xact): LDSTP=%d too small; increase "
-                        "'workspace' (or use simulate_p_value=True)" % ldstp)
+                        "'workspace' (or use simulate_p_value=True)" % ldstp
+                    )
                 ifrq[jstp2 + itop - 1] = -1
                 ifrq[jstp3 + itop - 1] = -1
                 ifrq[jstp4 + itop - 1] = -1
@@ -998,7 +1043,8 @@ class _Fexact:
         if itop > ldstp:
             raise FexactError(
                 "FEXACT error 7 (f5xact): LDSTP=%d too small; increase "
-                "'workspace' (or use simulate_p_value=True)" % ldstp)
+                "'workspace' (or use simulate_p_value=True)" % ldstp
+            )
         ipn = ipoin[jkey + itp]
         itmp = ipn
         while True:
@@ -1071,7 +1117,7 @@ class _Fexact:
                 ks = k
             return True, k, ks
 
-        while True:                     # Loop
+        while True:  # Loop
             kk = k + 1
             found_l70 = False
             while kk <= nrow:
@@ -1110,8 +1156,9 @@ class _Fexact:
             return True, k, ks
 
 
-def fexact(nrow, ncol, table, expect=-1.0, percnt=100.0, emin=0.0,
-           workspace=200000, mult=30):
+def fexact(
+    nrow, ncol, table, expect=-1.0, percnt=100.0, emin=0.0, workspace=200000, mult=30
+):
     """R's ``fexact()`` — Fisher's exact test p-value ("PRE") for the ``nrow``
     by ``ncol`` contingency ``table`` (a 0-based 2-D sequence indexed
     ``table[i][j]``). The defaults ``expect=-1, percnt=100, emin=0`` request
@@ -1120,10 +1167,17 @@ def fexact(nrow, ncol, table, expect=-1.0, percnt=100.0, emin=0.0,
     if _rs_fexact is not None:
         flat = [int(v) for row in table for v in row]
         try:
-            return _rs_fexact(int(nrow), int(ncol), flat, float(expect),
-                              float(percnt), float(emin), int(workspace),
-                              int(mult))
-        except RuntimeError as e:                       # unify the error type
+            return _rs_fexact(
+                int(nrow),
+                int(ncol),
+                flat,
+                float(expect),
+                float(percnt),
+                float(emin),
+                int(workspace),
+                int(mult),
+            )
+        except RuntimeError as e:  # unify the error type
             raise FexactError(str(e)) from None
     inst = _Fexact(nrow, ncol, table, expect, percnt, emin, workspace, mult)
     return inst.run()

@@ -95,8 +95,8 @@ fn xwx_smooth_block<'py>(
     // scan stays under the per-column factor work). MUST match the
     // `_XWX_DENSE_MSIZE_CAP`/`min(p)>15`/`16·nst·n` gate in bam.py so the numpy
     // spec and this kernel take the same branch (`rs == python`).
-    let dense = n > msize
-        || (pim.min(pjm) > 15 && msize <= XWX_DENSE_MSIZE_CAP && msize <= 16 * nst * n);
+    let dense =
+        n > msize || (pim.min(pjm) > 15 && msize <= XWX_DENSE_MSIZE_CAP && msize <= 16 * nst * n);
     let rfac = pjm <= pim; // form C (m_im×p_jm) else D (m_jm×p_im)
     let nrow = ndi * pim;
     let ncol = ndj * pjm;
@@ -132,13 +132,15 @@ fn xwx_smooth_block<'py>(
                         }
                         let row = n - 1;
                         deposit(
-                            ki_s[row] as usize, kj_t[row] as usize,
+                            ki_s[row] as usize,
+                            kj_t[row] as usize,
                             w_f[row] * tti_sr[row] * ttj_tc[row],
                         );
                     } else {
                         for row in 0..n {
                             deposit(
-                                ki_s[row] as usize, kj_t[row] as usize,
+                                ki_s[row] as usize,
+                                kj_t[row] as usize,
                                 w_f[row] * tti_sr[row] * ttj_tc[row],
                             );
                         }

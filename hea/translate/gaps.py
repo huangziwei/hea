@@ -42,36 +42,40 @@ from pathlib import Path
 from typing import Optional
 
 
-_KNOWN_KINDS: frozenset[str] = frozenset({
-    # Translation-side
-    "parse_error",
-    "unknown_function",
-    "unknown_verb",
-    "unknown_arg",
-    "unknown_geom",
-    "unknown_scale",
-    "unknown_coord",
-    "unknown_facet",
-    "unknown_theme_element",
-    "nse_ambiguous",
-    "not_implemented",
-    "replacement_function",   # R `f(x) <- v` setter form
-    "with_expression",        # `with(df, expr)` — NSE rewrite not yet built
-    "python_keyword_call",    # bare `class(x)`/`lambda(x)` collides with a Python keyword
-    "lexer_ambiguity",        # parser/lexer can't disambiguate the input
-    # Runtime-side
-    "runtime_error_r",
-    "runtime_error_py",
-    # Parity-side
-    "result_diff_schema",
-    "result_diff_values",
-    "result_diff_factor",
-    "result_diff_plot_data",
-    "result_diff_row_count",
-})
+_KNOWN_KINDS: frozenset[str] = frozenset(
+    {
+        # Translation-side
+        "parse_error",
+        "unknown_function",
+        "unknown_verb",
+        "unknown_arg",
+        "unknown_geom",
+        "unknown_scale",
+        "unknown_coord",
+        "unknown_facet",
+        "unknown_theme_element",
+        "nse_ambiguous",
+        "not_implemented",
+        "replacement_function",  # R `f(x) <- v` setter form
+        "with_expression",  # `with(df, expr)` — NSE rewrite not yet built
+        "python_keyword_call",  # bare `class(x)`/`lambda(x)` collides with a Python keyword
+        "lexer_ambiguity",  # parser/lexer can't disambiguate the input
+        # Runtime-side
+        "runtime_error_r",
+        "runtime_error_py",
+        # Parity-side
+        "result_diff_schema",
+        "result_diff_values",
+        "result_diff_factor",
+        "result_diff_plot_data",
+        "result_diff_row_count",
+    }
+)
 
 
-_DEFAULT_REGISTRY = Path(__file__).resolve().parent.parent.parent / "tests" / "parity" / "gaps.jsonl"
+_DEFAULT_REGISTRY = (
+    Path(__file__).resolve().parent.parent.parent / "tests" / "parity" / "gaps.jsonl"
+)
 
 
 @dataclass(slots=True)
@@ -159,7 +163,9 @@ def log_gap(
     # Merge into existing
     existing.last_seen = today
     if notes and notes not in existing.notes:
-        existing.notes = (existing.notes + "\n" + notes).strip() if existing.notes else notes
+        existing.notes = (
+            (existing.notes + "\n" + notes).strip() if existing.notes else notes
+        )
     _write_all(rows, registry)
     return existing
 

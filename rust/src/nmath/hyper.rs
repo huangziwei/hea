@@ -27,10 +27,7 @@ pub(crate) fn dhyper_scalar(mut x: f64, mut r: f64, mut b: f64, mut n: f64, give
     if x.is_nan() || r.is_nan() || b.is_nan() || n.is_nan() {
         return x + r + b + n;
     }
-    if (r < 0.0 || r_nonint(r))
-        || (b < 0.0 || r_nonint(b))
-        || (n < 0.0 || r_nonint(n))
-        || n > r + b
+    if (r < 0.0 || r_nonint(r)) || (b < 0.0 || r_nonint(b)) || (n < 0.0 || r_nonint(n)) || n > r + b
     {
         return f64::NAN;
     }

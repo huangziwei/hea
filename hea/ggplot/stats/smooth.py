@@ -62,8 +62,8 @@ class LoessFit:
     degree: int
     family: str
     iterations: int
-    sigma: float            # residual standard deviation
-    df_residual: float       # n - trace(S)
+    sigma: float  # residual standard deviation
+    df_residual: float  # n - trace(S)
     robust_weights: np.ndarray  # final M-step weights (1s for gaussian)
 
     def predict(self, newx, *, se: bool = False):
@@ -74,7 +74,12 @@ class LoessFit:
         """
         newx = np.asarray(newx, dtype=float)
         fit, var = _loess_eval(
-            newx, self.x, self.y, self.span, self.degree, self.robust_weights,
+            newx,
+            self.x,
+            self.y,
+            self.span,
+            self.degree,
+            self.robust_weights,
             want_var=se,
         )
         se_arr = self.sigma * np.sqrt(np.maximum(var, 0.0)) if se else None
@@ -82,8 +87,15 @@ class LoessFit:
         return (fit, se_arr) if se else fit
 
 
-def loess(x, y, *, span: float = 0.75, degree: int = 2,
-          family: str = "gaussian", iterations: int = 4) -> LoessFit:
+def loess(
+    x,
+    y,
+    *,
+    span: float = 0.75,
+    degree: int = 2,
+    family: str = "gaussian",
+    iterations: int = 4,
+) -> LoessFit:
     """Fit a loess smoother. See :class:`LoessFit` for what comes back."""
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -103,8 +115,7 @@ def loess(x, y, *, span: float = 0.75, degree: int = 2,
     n_robust_iter = iterations if family == "symmetric" else 0
 
     for _ in range(n_robust_iter + 1):
-        fitted, leverages = _loess_eval(x, x, y, span, degree, robust_w,
-                                        want_var=True)
+        fitted, leverages = _loess_eval(x, x, y, span, degree, robust_w, want_var=True)
 
         residuals = y - fitted
 
@@ -127,7 +138,8 @@ def loess(x, y, *, span: float = 0.75, degree: int = 2,
     sigma = float(np.sqrt(np.sum(residuals**2 * robust_w) / df_residual))
 
     return LoessFit(
-        x=x, y=y,
+        x=x,
+        y=y,
         fitted=fitted,
         residuals=residuals,
         span=span,
@@ -140,8 +152,16 @@ def loess(x, y, *, span: float = 0.75, degree: int = 2,
     )
 
 
-def _loess_local_fit(x_query: float, x: np.ndarray, y: np.ndarray, span: float,
-                     degree: int, extra_w: np.ndarray, *, want_var: bool):
+def _loess_local_fit(
+    x_query: float,
+    x: np.ndarray,
+    y: np.ndarray,
+    span: float,
+    degree: int,
+    extra_w: np.ndarray,
+    *,
+    want_var: bool,
+):
     """Fit a local polynomial of given degree at ``x_query`` using
     ``span`` fraction of nearest neighbours of ``x``. ``extra_w`` is the
     M-step robustness vector (or all-1 for gaussian). Returns
@@ -206,7 +226,8 @@ def _loess_eval(xq, x, y, span, degree, extra_w, want_var):
             np.ascontiguousarray(xq),
             np.ascontiguousarray(np.asarray(x, dtype=float)),
             np.ascontiguousarray(np.asarray(y, dtype=float)),
-            float(span), int(degree),
+            float(span),
+            int(degree),
             np.ascontiguousarray(np.asarray(extra_w, dtype=float)),
             bool(want_var),
         )
@@ -215,8 +236,9 @@ def _loess_eval(xq, x, y, span, degree, extra_w, want_var):
     fitted = np.empty(m)
     var = np.empty(m)
     for i in range(m):
-        beta, var00 = _loess_local_fit(xq[i], x, y, span, degree, extra_w,
-                                       want_var=want_var)
+        beta, var00 = _loess_local_fit(
+            xq[i], x, y, span, degree, extra_w, want_var=want_var
+        )
         fitted[i] = beta[0]
         var[i] = var00
     return fitted, var
@@ -242,34 +264,54 @@ class StatSmooth(Stat):
         mask = ~(np.isnan(x) | np.isnan(y))
         x, y = x[mask], y[mask]
         if len(x) < 2:
-            return pl.DataFrame({
-                "x": [], "y": [], "ymin": [], "ymax": [], "se": [],
-            })
+            return pl.DataFrame(
+                {
+                    "x": [],
+                    "y": [],
+                    "ymin": [],
+                    "ymax": [],
+                    "se": [],
+                }
+            )
 
         x_min, x_max = float(x.min()), float(x.max())
         grid = np.linspace(x_min, x_max, self.n)
 
         yhat, se = _fit_predict(
-            self.method, self.formula, x, y, grid,
-            span=self.span, family=self.family,
+            self.method,
+            self.formula,
+            x,
+            y,
+            grid,
+            span=self.span,
+            family=self.family,
         )
 
         z = _nmath.qnorm5(0.5 + self.level / 2)
         ymin = yhat - z * se
         ymax = yhat + z * se
 
-        return pl.DataFrame({
-            "x": grid,
-            "y": yhat,
-            "ymin": ymin,
-            "ymax": ymax,
-            "se": se,
-        })
+        return pl.DataFrame(
+            {
+                "x": grid,
+                "y": yhat,
+                "ymin": ymin,
+                "ymax": ymax,
+                "se": se,
+            }
+        )
 
 
-def _fit_predict(method: str, formula: str | None,
-                 x: np.ndarray, y: np.ndarray, grid: np.ndarray, *,
-                 span: float, family=None):
+def _fit_predict(
+    method: str,
+    formula: str | None,
+    x: np.ndarray,
+    y: np.ndarray,
+    grid: np.ndarray,
+    *,
+    span: float,
+    family=None,
+):
     """Returns ``(yhat, se)`` evaluated on ``grid`` for the chosen method."""
     if method == "loess":
         fit = loess(x, y, span=span)
@@ -288,6 +330,7 @@ def _fit_predict(method: str, formula: str | None,
         yhat = pred["fit"].to_numpy()
         ci_lo = pred["lwr"].to_numpy()
         from scipy.stats import t
+
         df = float(fit.df_residuals)
         t_crit = t.ppf(0.975, df)
         se = (yhat - ci_lo) / t_crit
@@ -342,6 +385,7 @@ def _resolve_family(family):
             return result
     if isinstance(family, str):
         import hea.family as _f
+
         name = family.lower().replace(".", "_")
         cls = getattr(_f, name, None)
         if cls is None:
@@ -356,7 +400,15 @@ def _resolve_family(family):
     )
 
 
-def stat_smooth(*, method="loess", formula=None, se=True, level=0.95,
-                span=0.75, n=80, family=None):
-    return StatSmooth(method=method, formula=formula, se=se, level=level,
-                      span=span, n=n, family=family)
+def stat_smooth(
+    *, method="loess", formula=None, se=True, level=0.95, span=0.75, n=80, family=None
+):
+    return StatSmooth(
+        method=method,
+        formula=formula,
+        se=se,
+        level=level,
+        span=span,
+        n=n,
+        family=family,
+    )

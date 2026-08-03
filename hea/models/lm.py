@@ -80,9 +80,7 @@ def _subset_keep(n: int, subset) -> list[int]:
     has_nonneg = bool((ints >= 0).any())
     has_neg = bool((ints < 0).any())
     if has_nonneg and has_neg:
-        raise ValueError(
-            "subset=: cannot mix non-negative and negative indices"
-        )
+        raise ValueError("subset=: cannot mix non-negative and negative indices")
     if has_neg:
         # Negative indices drop the corresponding rows (Python convention:
         # -1 is the last row).
@@ -148,17 +146,23 @@ def _resolve_subset(subset, data: pl.DataFrame):
     """
     if isinstance(subset, str):
         from ..translate import translate_r  # local: avoid import cycle
+
         py_src = translate_r(subset)
         ns = {c: data[c] for c in data.columns}
         result = eval(py_src, {"__builtins__": {}}, ns)  # noqa: S307 — R-style NSE
         return np.asarray(result).astype(bool)
     if isinstance(subset, pl.Expr):
-        return data.select(subset.alias("__subset__"))["__subset__"].to_numpy().astype(bool)
+        return (
+            data.select(subset.alias("__subset__"))["__subset__"]
+            .to_numpy()
+            .astype(bool)
+        )
     return subset
 
 
-def _drop_aliased_cols(X_df: pl.DataFrame, tol: float = 1e-7, *,
-                       values: np.ndarray | None = None) -> list[str]:
+def _drop_aliased_cols(
+    X_df: pl.DataFrame, tol: float = 1e-7, *, values: np.ndarray | None = None
+) -> list[str]:
     """Identify linearly-dependent columns in a design matrix.
 
     With the Rust kernel present, use R's **exact** ``dqrdc2`` pivot/rank
@@ -199,7 +203,7 @@ def _drop_aliased_cols(X_df: pl.DataFrame, tol: float = 1e-7, *,
     ref = np.where(col_norms > 0.0, col_norms, 1.0)
     suspect = bool(np.any(diag_abs < ref * tol))
     if not suspect:
-        return []                                   # clearly full rank — fast path
+        return []  # clearly full rank — fast path
 
     if _linalg._rs_dqrls_rank is not None:
         # Rank-deficient → resolve EXACTLY with R's dqrdc2 (Rust): the columns
@@ -234,7 +238,7 @@ def _lowess(x, y, frac=2 / 3, it=3):
     bw = np.partition(dists, r - 1, axis=1)[:, r - 1]
     bw = np.where(bw == 0, 1.0, bw)
     W = np.clip(dists / bw[:, None], 0, 1)
-    W = (1 - W ** 3) ** 3
+    W = (1 - W**3) ** 3
 
     yhat = ys.copy()
     delta = np.ones(n)
@@ -283,7 +287,10 @@ def _label_top_n(ax, xs, ys, scores, n=3, indices=None):
 
 
 def _qq_plot(
-    ax, vals, labels=None, label_n=3,
+    ax,
+    vals,
+    labels=None,
+    label_n=3,
     xlabel="Theoretical Quantiles",
     ylabel="Standardized Residuals",
     title="Normal Q-Q",
@@ -318,9 +325,12 @@ def _qq_plot(
             pos = rank[orig_i]
             text = str(labels[orig_i]) if labels is not None else str(int(orig_i))
             ax.annotate(
-                text, (q[pos], v[pos]),
-                fontsize=8, color="black",
-                xytext=(3, 3), textcoords="offset points",
+                text,
+                (q[pos], v[pos]),
+                fontsize=8,
+                color="black",
+                xytext=(3, 3),
+                textcoords="offset points",
             )
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
@@ -358,7 +368,8 @@ class SummaryLm:
         self.adj_r_squared = float(model.r_squared_adjusted)
         self.fstatistic = (
             np.array([model.fstats, model.df_model, model.df_residuals])
-            if model.fstats is not None else None
+            if model.fstats is not None
+            else None
         )
         # R: ``summary.lm`` sets ``ans$df <- c(p, rdf, NCOL(Qr$qr))`` — that's
         # (rank incl. intercept, residual df, *total* columns incl. aliased),
@@ -408,9 +419,7 @@ class SummaryLm:
         if len(matches) == 1:
             return getattr(self, self._ALIASES[matches[0]])
         if len(matches) > 1:
-            raise KeyError(
-                f"summary(lm)[{key!r}] ambiguous; matches: {matches}"
-            )
+            raise KeyError(f"summary(lm)[{key!r}] ambiguous; matches: {matches}")
         raise KeyError(f"summary(lm) has no component {key!r}")
 
     def __getattr__(self, name):
@@ -450,7 +459,7 @@ class SummaryMlm:
         if isinstance(key, int):
             # R's summary(m)[[i]] is 1-based; allow Python negatives too.
             return self._summaries[self._names[key - 1 if key > 0 else key]]
-        k = key[len("Response "):] if str(key).startswith("Response ") else key
+        k = key[len("Response ") :] if str(key).startswith("Response ") else key
         return self._summaries[k]
 
     def __iter__(self):
@@ -458,8 +467,7 @@ class SummaryMlm:
 
     def __repr__(self) -> str:
         return "\n\n".join(
-            f"Response {name} :\n\n{self._summaries[name]!r}"
-            for name in self._names
+            f"Response {name} :\n\n{self._summaries[name]!r}" for name in self._names
         )
 
 
@@ -485,31 +493,39 @@ def _format_summary_lm(model, digits: int, cor: bool) -> str:
     ci_low_arr = model.ci_bhat[ci_low_col].to_numpy()
     ci_hi_arr = model.ci_bhat[ci_hi_col].to_numpy()
     est_s, se_s = format_signif_jointly(
-        [bhat_disp, se_disp], digits=digits,
+        [bhat_disp, se_disp],
+        digits=digits,
     )
     cilo_s, cihi_s = format_signif_jointly(
-        [ci_low_arr, ci_hi_arr], digits=digits,
+        [ci_low_arr, ci_hi_arr],
+        digits=digits,
     )
-    res = pl.DataFrame({
-        "": model._names_disp,
-        "Estimate": est_s,
-        "Std. Error": se_s,
-        ci_low_col: cilo_s,
-        ci_hi_col: cihi_s,
-        "t value": format_signif(t_arr, digits=digits),
-        "Pr(>|t|)": format_pval(p_arr, digits=_dig_tst(digits)),
-        " ": sig,
-    })
-    num_cols = ("Estimate", "Std. Error", ci_low_col, ci_hi_col,
-                "t value", "Pr(>|t|)")
+    res = pl.DataFrame(
+        {
+            "": model._names_disp,
+            "Estimate": est_s,
+            "Std. Error": se_s,
+            ci_low_col: cilo_s,
+            ci_hi_col: cihi_s,
+            "t value": format_signif(t_arr, digits=digits),
+            "Pr(>|t|)": format_pval(p_arr, digits=_dig_tst(digits)),
+            " ": sig,
+        }
+    )
+    num_cols = ("Estimate", "Std. Error", ci_low_col, ci_hi_col, "t value", "Pr(>|t|)")
     # Aliased rows print "NA" in every numeric column (R's printCoefmat
     # ``na.print="NA"``); the formatters emit "NaN" for those NaN entries.
     aliased = ~np.isfinite(np.asarray(bhat_disp, dtype=float))
     if aliased.any():
-        res = res.with_columns([
-            pl.when(pl.Series(aliased)).then(pl.lit("NA")).otherwise(pl.col(c)).alias(c)
-            for c in num_cols
-        ])
+        res = res.with_columns(
+            [
+                pl.when(pl.Series(aliased))
+                .then(pl.lit("NA"))
+                .otherwise(pl.col(c))
+                .alias(c)
+                for c in num_cols
+            ]
+        )
     num_align = {c: "right" for c in num_cols}
     docstring += format_df(res, align=num_align)
     docstring += "\n---"
@@ -559,9 +575,7 @@ class lm:
         # ``__new__`` (standard factory idiom): returning a non-instance skips
         # ``__init__``. Every other ``method`` builds an ``lm`` as usual.
         if method == "model.frame":
-            return cls._model_frame(
-                formula, data, subset=subset, na_action=na_action
-            )
+            return cls._model_frame(formula, data, subset=subset, na_action=na_action)
         return super().__new__(cls)
 
     @staticmethod
@@ -571,8 +585,14 @@ class lm:
         ``na.action`` row-drops — with no fit. ``na.fail`` errors on any NA;
         ``omit``/``exclude`` drop NA rows (R keeps NA rows under exclude in the
         frame, but the fit-facing frame is complete-case either way here)."""
-        norm = {"omit": "omit", "na.omit": "omit", "exclude": "omit",
-                "na.exclude": "omit", "fail": "fail", "na.fail": "fail"}
+        norm = {
+            "omit": "omit",
+            "na.omit": "omit",
+            "exclude": "omit",
+            "na.exclude": "omit",
+            "fail": "fail",
+            "na.fail": "fail",
+        }
         na = norm.get(str(na_action))
         if na is None:
             raise ValueError(f"na_action must be omit/exclude/fail; got {na_action!r}")
@@ -602,13 +622,21 @@ class lm:
         # (class "mlm") — m independent fits sharing one X/QR. Detect it from
         # the LHS and route to the mlm builder (which wraps m per-column `lm`s).
         from hea.formula import parse as _parse, _multivariate_lhs_specs
+
         _lhs = _parse(formula).lhs
         _mv = _multivariate_lhs_specs(_lhs) if _lhs is not None else None
         if _mv is not None:
             self._init_mlm(
-                formula, data, _mv, weights=weights, method=method,
-                subset=subset, na_action=na_action, contrasts=contrasts,
-                singular_ok=singular_ok, offset=offset,
+                formula,
+                data,
+                _mv,
+                weights=weights,
+                method=method,
+                subset=subset,
+                na_action=na_action,
+                contrasts=contrasts,
+                singular_ok=singular_ok,
+                offset=offset,
             )
             return
         self._is_mlm = False
@@ -620,6 +648,7 @@ class lm:
         # (lm.R:38-39) — hea keeps no alternative solvers.
         if method != "qr":
             import warnings
+
             warnings.warn(
                 f"method = '{method}' is not supported. Using 'qr'",
                 stacklevel=2,
@@ -634,10 +663,16 @@ class lm:
         # ``exclude`` fits on the complete cases but pads the *accessors*
         # (resid / fitted / predict) back to the model-frame length with NA
         # (see _na_pad). Accept R-style aliases.
-        _na_norm = {"omit": "omit", "na.omit": "omit",
-                    "exclude": "exclude", "na.exclude": "exclude",
-                    "fail": "fail", "na.fail": "fail",
-                    "pass": "pass", "na.pass": "pass"}
+        _na_norm = {
+            "omit": "omit",
+            "na.omit": "omit",
+            "exclude": "exclude",
+            "na.exclude": "exclude",
+            "fail": "fail",
+            "na.fail": "fail",
+            "pass": "pass",
+            "na.pass": "pass",
+        }
         self.na_action = _na_norm.get(str(na_action))
         if self.na_action is None:
             raise ValueError(
@@ -725,9 +760,13 @@ class lm:
         # R's predvars: capture each poly/bs/ns/scale call's training params at
         # fit so predict() replays them on new data instead of recomputing.
         self._basis_state: dict = {}
-        d = prepare_design(formula, data, contrasts=contrasts,
-                           na_action="pass" if self.na_action == "pass" else "omit",
-                           basis_state=self._basis_state)
+        d = prepare_design(
+            formula,
+            data,
+            contrasts=contrasts,
+            na_action="pass" if self.na_action == "pass" else "omit",
+            basis_state=self._basis_state,
+        )
         self._expanded = d.expanded
         self._design_data = d.data
         self.X = d.X
@@ -752,7 +791,8 @@ class lm:
         _assign = getattr(d, "param_assign", None)
         self._col_assign = (
             {c: int(a) for c, a in zip(self.X.columns, _assign)}
-            if _assign is not None else None
+            if _assign is not None
+            else None
         )
 
         # R's lm() drops linearly-dependent columns from X (via dqrdc2's
@@ -767,7 +807,8 @@ class lm:
         # defined because of singularities)" only when you look at the model).
         _full_cols = list(self.X.columns)  # before the rank-deficiency drop
         self._aliased_cols: list[str] = _drop_aliased_cols(
-            self.X, values=self._X_values)
+            self.X, values=self._X_values
+        )
         if self._aliased_cols and not singular_ok:
             # R: lm.fit(singular.ok=FALSE) — refuse rank-deficient designs.
             raise ValueError("singular fit encountered")
@@ -815,7 +856,8 @@ class lm:
         # ``self.weights`` was already aligned to X's rows above. The
         # solvers / leverage consume the diagonal ``W``.
         self._w = (
-            np.ones(n) if self.weights is None
+            np.ones(n)
+            if self.weights is None
             else np.asarray(self.weights, dtype=float)
         )
         # Effective sample size: R drops zero-weight rows from the fit, so
@@ -874,7 +916,8 @@ class lm:
         self.rank = self.p
         self.assign = (
             np.array([self._col_assign[c] for c in self._full_names])
-            if self._col_assign is not None else None
+            if self._col_assign is not None
+            else None
         )
 
         self._bhat_arr = np.asarray(bhat).reshape(-1)
@@ -908,8 +951,7 @@ class lm:
         # (df_residuals == 0, e.g. n == rank) has no residual variance —
         # R returns NaN (and NaN SEs / t / p) rather than erroring.
         self.sigma_squared = (
-            self.rss / self.df_residuals
-            if self.df_residuals > 0 else float("nan")
+            self.rss / self.df_residuals if self.df_residuals > 0 else float("nan")
         )
         self.sigma = np.sqrt(self.sigma_squared)
 
@@ -973,24 +1015,45 @@ class lm:
     # ------------------------------------------------------------------
     # Multivariate response (R's "mlm": cbind(y1, y2, ...) ~ rhs)
     # ------------------------------------------------------------------
-    def _init_mlm(self, formula, data, mv_specs, *, weights, method, subset,
-                  na_action, contrasts, singular_ok, offset):
+    def _init_mlm(
+        self,
+        formula,
+        data,
+        mv_specs,
+        *,
+        weights,
+        method,
+        subset,
+        na_action,
+        contrasts,
+        singular_ok,
+        offset,
+    ):
         """Fit a multivariate linear model: one `lm` per response column, all
         sharing a single jointly-na-omitted model frame (so every column has the
         identical X/QR — R's mlm). Combined accessors (coef p×m, fitted/residuals
         n×m, sigma per-column) delegate to the per-column sub-models."""
         from hea.formula import parse as _parse, deparse as _deparse, _eval_lhs_expr
+
         self._is_mlm = True
         self.formula = formula
         self.method = method
         self.contrasts = contrasts
 
-        _na_norm = {"omit": "omit", "na.omit": "omit", "exclude": "exclude",
-                    "na.exclude": "exclude", "fail": "fail", "na.fail": "fail"}
+        _na_norm = {
+            "omit": "omit",
+            "na.omit": "omit",
+            "exclude": "exclude",
+            "na.exclude": "exclude",
+            "fail": "fail",
+            "na.fail": "fail",
+        }
         self.na_action = _na_norm.get(str(na_action))
         if self.na_action is None:
-            raise ValueError("na_action must be one of 'omit' / 'exclude' / "
-                             f"'fail'; got {na_action!r}")
+            raise ValueError(
+                "na_action must be one of 'omit' / 'exclude' / "
+                f"'fail'; got {na_action!r}"
+            )
 
         rhs_src = _deparse(_parse(formula).rhs)
         resp_names = [lbl for lbl, _ in mv_specs]
@@ -1000,17 +1063,25 @@ class lm:
 
         # Replicate lm's subset → na-omit → weights/offset alignment, but
         # na-omit JOINTLY over every response (R's shared model frame).
-        w_arr = None if weights is None else np.asarray(weights, dtype=float).reshape(-1)
-        off_arr = None if offset is None else np.asarray(offset, dtype=float).reshape(-1)
+        w_arr = (
+            None if weights is None else np.asarray(weights, dtype=float).reshape(-1)
+        )
+        off_arr = (
+            None if offset is None else np.asarray(offset, dtype=float).reshape(-1)
+        )
         if w_arr is not None:
             if w_arr.shape[0] != data.height:
-                raise ValueError("Length of weights should be the same as the "
-                                 "number of rows in the dataframe")
+                raise ValueError(
+                    "Length of weights should be the same as the "
+                    "number of rows in the dataframe"
+                )
             if not np.all(np.isfinite(w_arr)) or np.any(w_arr < 0.0):
                 raise ValueError("missing or negative weights not allowed")
         if off_arr is not None and off_arr.shape[0] != data.height:
-            raise ValueError("Length of offset should be the same as the number "
-                             "of rows in the dataframe")
+            raise ValueError(
+                "Length of offset should be the same as the number "
+                "of rows in the dataframe"
+            )
         if subset is not None:
             keep = _subset_keep(data.height, _resolve_subset(subset, data))
             data = data[keep]
@@ -1039,15 +1110,24 @@ class lm:
         add = {}
         for lbl, node in mv_specs:
             if lbl not in cols:
-                add[lbl] = data.select(_eval_lhs_expr(node, cols).alias(lbl))[lbl].to_numpy()
+                add[lbl] = data.select(_eval_lhs_expr(node, cols).alias(lbl))[
+                    lbl
+                ].to_numpy()
         if add:
             data = data.with_columns([pl.Series(k, v) for k, v in add.items()])
 
         # Per-column fits on the shared clean frame (na-omit now a no-op).
         self._mlm_models = {
-            lbl: lm(f"`{lbl}` ~ {rhs_src}", data,
-                    weights=w_arr, method=method, contrasts=contrasts,
-                    singular_ok=singular_ok, offset=off_arr, na_action="omit")
+            lbl: lm(
+                f"`{lbl}` ~ {rhs_src}",
+                data,
+                weights=w_arr,
+                method=method,
+                contrasts=contrasts,
+                singular_ok=singular_ok,
+                offset=off_arr,
+                na_action="omit",
+            )
             for lbl in resp_names
         }
         self.response_models = self._mlm_models
@@ -1063,19 +1143,28 @@ class lm:
 
         # Combined accessors.
         self._coef_matrix = np.column_stack(
-            [self._mlm_models[r]._bhat_arr for r in resp_names])
+            [self._mlm_models[r]._bhat_arr for r in resp_names]
+        )
         self.coef = self._mlm_matrix_frame(
-            {r: self._mlm_models[r]._bhat_arr for r in resp_names}, index="term",
-            index_vals=self.column_names)
+            {r: self._mlm_models[r]._bhat_arr for r in resp_names},
+            index="term",
+            index_vals=self.column_names,
+        )
         self.coefficients = self.coef
         self.bhat = self.coef
         self.fitted = self._mlm_matrix_frame(
-            {r: self._mlm_pad(self._mlm_models[r].yhat["fit"].to_numpy())
-             for r in resp_names})
+            {
+                r: self._mlm_pad(self._mlm_models[r].yhat["fit"].to_numpy())
+                for r in resp_names
+            }
+        )
         self.yhat = self.fitted
         self.residuals = self._mlm_matrix_frame(
-            {r: self._mlm_pad(self._mlm_models[r].residuals.to_series(0).to_numpy())
-             for r in resp_names})
+            {
+                r: self._mlm_pad(self._mlm_models[r].residuals.to_series(0).to_numpy())
+                for r in resp_names
+            }
+        )
         self.sigma = np.array([self._mlm_models[r].sigma for r in resp_names])
 
     def _mlm_pad(self, arr: np.ndarray) -> np.ndarray:
@@ -1092,6 +1181,7 @@ class lm:
         """Bundle per-response arrays into a hea.DataFrame (one column per
         response). With ``index=``, prepend a label column (used by coef)."""
         from ..tidy import DataFrame as _DF
+
         cols = {}
         if index is not None:
             cols[index] = list(index_vals)
@@ -1101,16 +1191,22 @@ class lm:
 
     def _mlm_predict(self, newdata, interval, se_fit, type_):
         from ..tidy import DataFrame as _DF
+
         if interval is not None or se_fit or type_ != "response":
             raise NotImplementedError(
                 "predict() on a multivariate (mlm) fit returns point predictions "
                 "only (type='response', no interval/se_fit) — matching R's "
                 "predict.mlm. For per-column inference use "
-                ".response_models['<name>'].predict(...).")
-        return _DF(pl.DataFrame({
-            r: self._mlm_models[r].predict(newdata)["fit"].to_numpy()
-            for r in self._response_names
-        }))
+                ".response_models['<name>'].predict(...)."
+            )
+        return _DF(
+            pl.DataFrame(
+                {
+                    r: self._mlm_models[r].predict(newdata)["fit"].to_numpy()
+                    for r in self._response_names
+                }
+            )
+        )
 
     def __repr__(self):
         if getattr(self, "_is_mlm", False):
@@ -1163,7 +1259,11 @@ class lm:
         plain fit skips the O(n·p²) ``X @ (XᵀWX)⁻¹`` matmul (R's ``lm()`` is lazy
         here too). Computed from the kept design + ``XtXinv`` + prior weights, all
         retained on the model — bit-identical to the former eager value."""
-        X = self._X_values if self._X_values is not None else self.X.to_numpy().astype(float)
+        X = (
+            self._X_values
+            if self._X_values is not None
+            else self.X.to_numpy().astype(float)
+        )
         HX = X @ self.XtXinv
         return (HX * X).sum(axis=1) * self._w
 
@@ -1181,18 +1281,18 @@ class lm:
         se_bhat = self._se_bhat_arr[:, None]
         bhat = self._bhat_arr[:, None]
         ci = (
-            _dist.qt(1 - alpha / 2, self.df_residuals) * se_bhat * np.array([-1, 1]) + bhat
+            _dist.qt(1 - alpha / 2, self.df_residuals) * se_bhat * np.array([-1, 1])
+            + bhat
         )
         return pl.DataFrame(
             {
                 "coef": self.column_names,
-                f"CI[{alpha/2*100}%]": ci[:, 0],
-                f"CI[{100-alpha/2*100}]%": ci[:, 1],
+                f"CI[{alpha / 2 * 100}%]": ci[:, 0],
+                f"CI[{100 - alpha / 2 * 100}]%": ci[:, 1],
             }
         )
 
-    def compute_ci_bhat_bootstrap(self, num_bootstrap=4000, alpha=0.05,
-                                  *, seed=None):
+    def compute_ci_bhat_bootstrap(self, num_bootstrap=4000, alpha=0.05, *, seed=None):
         """Residual bootstrap CI for the coefficients.
 
         hea-original (``stats::lm`` has no bootstrap-CI method), so this is
@@ -1203,7 +1303,7 @@ class lm:
         """
 
         X = self.X.to_numpy().astype(float)
-        sw = np.sqrt(self._w)            # √w row-scaling (was cholesky(diag(w)))
+        sw = np.sqrt(self._w)  # √w row-scaling (was cholesky(diag(w)))
         bhat = self._bhat_arr[:, None]
         residuals = self._residuals_arr
         n = len(residuals)
@@ -1230,9 +1330,7 @@ class lm:
             gen = seed
         else:
             gen = np.random.default_rng(seed)
-        residuals_star = gen.choice(
-            residuals, size=(num_bootstrap, n), replace=True
-        )
+        residuals_star = gen.choice(residuals, size=(num_bootstrap, n), replace=True)
 
         bhat_stars = np.zeros([num_bootstrap, self.p])
         for i in range(num_bootstrap):
@@ -1240,14 +1338,12 @@ class lm:
             f = Q.T @ (sw * y_flat)
             bhat_stars[i] = solve_triangular(R, f)
 
-        quantiles = np.quantile(
-            bhat_stars, q=[alpha / 2, 1 - alpha / 2], axis=0
-        ).T
+        quantiles = np.quantile(bhat_stars, q=[alpha / 2, 1 - alpha / 2], axis=0).T
         ci_bhat_bootstrap = pl.DataFrame(
             {
                 "coef": self.column_names,
-                f"CI[{alpha/2*100}%]": quantiles[:, 0],
-                f"CI[{100-alpha/2*100}]%": quantiles[:, 1],
+                f"CI[{alpha / 2 * 100}%]": quantiles[:, 0],
+                f"CI[{100 - alpha / 2 * 100}]%": quantiles[:, 1],
             }
         )
         self.ci_bhat_bootstrap = ci_bhat_bootstrap
@@ -1257,8 +1353,16 @@ class lm:
 
         return ci_bhat_bootstrap
 
-    def compute_yhat(self, Xnew=None, interval=None, alpha=0.05, se_fit=False,
-                     res_var=None, df_q=None, pred_var=None):
+    def compute_yhat(
+        self,
+        Xnew=None,
+        interval=None,
+        alpha=0.05,
+        se_fit=False,
+        res_var=None,
+        df_q=None,
+        pred_var=None,
+    ):
         # ``res_var`` / ``df_q`` override the residual variance σ² and the
         # interval-quantile df (R's ``scale²`` / ``df``); ``None`` → the fit's
         # own σ² / df.residual. ``pred_var`` overrides the prediction-interval
@@ -1269,7 +1373,12 @@ class lm:
             X = self.X.to_numpy().astype(float)
             off = self._offset
         else:
-            X = materialize(self._expanded, Xnew, basis_state=self._basis_state).select(self.column_names).to_numpy().astype(float)
+            X = (
+                materialize(self._expanded, Xnew, basis_state=self._basis_state)
+                .select(self.column_names)
+                .to_numpy()
+                .astype(float)
+            )
             # Re-evaluate formula offsets against newdata, mirroring R's
             # predict.lm. Offsets are zero unless the formula uses offset(...).
             off = np.zeros(X.shape[0])
@@ -1285,9 +1394,7 @@ class lm:
             # √(res_var·xᵀ(XᵀWX)⁻¹x). Same quantity the confidence interval
             # uses (and reported even when interval="prediction").
             rv = self.sigma_squared if res_var is None else res_var
-            var_mean = np.einsum(
-                "ij,jk,ik->i", X, self.XtXinv, X
-            ) * rv
+            var_mean = np.einsum("ij,jk,ik->i", X, self.XtXinv, X) * rv
             yhat = yhat.with_columns(
                 pl.Series("se.fit", np.sqrt(np.maximum(var_mean, 0.0)))
             )
@@ -1298,9 +1405,9 @@ class lm:
             case True:
                 # Both CI and PI in one frame — column names are prefixed
                 # so the two interval kinds don't collide.
-                ci_yhat = self.compute_ci_yhat(
-                    yhat, Xnew, alpha, res_var, df_q
-                ).rename({"lwr": "ci_lwr", "upr": "ci_upr"})
+                ci_yhat = self.compute_ci_yhat(yhat, Xnew, alpha, res_var, df_q).rename(
+                    {"lwr": "ci_lwr", "upr": "ci_upr"}
+                )
                 pi_yhat = self.compute_pi_yhat(
                     yhat, Xnew, alpha, res_var, df_q, pred_var
                 ).rename({"lwr": "pi_lwr", "upr": "pi_upr"})
@@ -1318,23 +1425,25 @@ class lm:
                     "Please enter a valid value: [None, True, 'prediction', 'confidence']"
                 )
 
-    def compute_ci_yhat(self, yhat, Xnew=None, alpha=0.05, res_var=None,
-                        df_q=None):
+    def compute_ci_yhat(self, yhat, Xnew=None, alpha=0.05, res_var=None, df_q=None):
         rv = self.sigma_squared if res_var is None else res_var
         dq = self.df_residuals if df_q is None else df_q
         if Xnew is None:
             X = self.X.to_numpy().astype(float)
         else:
-            X = materialize(self._expanded, Xnew, basis_state=self._basis_state).select(self.column_names).to_numpy().astype(float)
+            X = (
+                materialize(self._expanded, Xnew, basis_state=self._basis_state)
+                .select(self.column_names)
+                .to_numpy()
+                .astype(float)
+            )
 
         # Var(ŷ) = res_var · x'(X'X)⁻¹x  ⇒  se = √diag(res_var · X(X'X)⁻¹Xᵀ).
         var_mean = np.einsum("ij,jk,ik->i", X, self.XtXinv, X) * rv
         se_yhat_mean = np.sqrt(np.maximum(var_mean, 0.0))
         yhat_vals = yhat["fit"].to_numpy().astype(float)[:, None]
         ci = (
-            _dist.qt(1 - alpha / 2, dq)
-            * se_yhat_mean[:, None]
-            * np.array([-1, 1])
+            _dist.qt(1 - alpha / 2, dq) * se_yhat_mean[:, None] * np.array([-1, 1])
             + yhat_vals
         )
         return pl.DataFrame(
@@ -1344,14 +1453,20 @@ class lm:
             }
         )
 
-    def compute_pi_yhat(self, yhat, Xnew=None, alpha=0.05, res_var=None,
-                        df_q=None, pred_var=None):
+    def compute_pi_yhat(
+        self, yhat, Xnew=None, alpha=0.05, res_var=None, df_q=None, pred_var=None
+    ):
         rv = self.sigma_squared if res_var is None else res_var
         dq = self.df_residuals if df_q is None else df_q
         if Xnew is None:
             X = self.X.to_numpy().astype(float)
         else:
-            X = materialize(self._expanded, Xnew, basis_state=self._basis_state).select(self.column_names).to_numpy().astype(float)
+            X = (
+                materialize(self._expanded, Xnew, basis_state=self._basis_state)
+                .select(self.column_names)
+                .to_numpy()
+                .astype(float)
+            )
 
         # Var(y_new − ŷ) = pred_var + res_var·x'(X'X)⁻¹x  (R: ip + pred.var,
         # pred.var defaulting to res_var).
@@ -1360,9 +1475,7 @@ class lm:
         se_yhat = np.sqrt(pv + np.maximum(var_mean, 0.0))
         yhat_vals = yhat["fit"].to_numpy().astype(float)[:, None]
         pi = (
-            _dist.qt(1 - alpha / 2, dq)
-            * se_yhat[:, None]
-            * np.array([-1, 1])
+            _dist.qt(1 - alpha / 2, dq) * se_yhat[:, None] * np.array([-1, 1])
             + yhat_vals
         )
         return pl.DataFrame(
@@ -1413,7 +1526,9 @@ class lm:
         se_f = self._expand_to_full(self._se_bhat_arr)
         with np.errstate(divide="ignore", invalid="ignore"):
             t_f = bhat_f / se_f
-        p_f = 2.0 * _dist.pt(np.abs(t_f), self.df_residuals, lower_tail=False)  # NaN stays NaN
+        p_f = 2.0 * _dist.pt(
+            np.abs(t_f), self.df_residuals, lower_tail=False
+        )  # NaN stays NaN
         tcrit = _dist.qt(1 - 0.05 / 2, self.df_residuals)
         cilo = bhat_f - tcrit * se_f
         cihi = bhat_f + tcrit * se_f
@@ -1452,7 +1567,8 @@ class lm:
             # Eq: r2adj = 1 - (1 - r2) * (n_eff - 1) / df_residuals
             r_squared_adjusted = (
                 1 - (1 - r_squared) * (self._n_eff - 1) / self.df_residuals
-                if df_ok else float("nan")
+                if df_ok
+                else float("nan")
             )
         else:
             tss = float(np.sum(w * y**2))
@@ -1461,7 +1577,8 @@ class lm:
             # Eq: r2adj = 1 - (1 - r2) * n_eff / df_residuals
             r_squared_adjusted = (
                 1 - (1 - r_squared) * self._n_eff / self.df_residuals
-                if df_ok else float("nan")
+                if df_ok
+                else float("nan")
             )
 
         return tss, r_squared, r_squared_adjusted
@@ -1480,7 +1597,9 @@ class lm:
             mse = self.rss / self.df_residuals
             with np.errstate(divide="ignore", invalid="ignore"):
                 fstats = float(np.float64(msr) / np.float64(mse))
-            f_p_value = float(_dist.pf(fstats, self.df_model, self.df_residuals, lower_tail=False))
+            f_p_value = float(
+                _dist.pf(fstats, self.df_model, self.df_residuals, lower_tail=False)
+            )
         else:
             fstats, f_p_value = None, None
         return fstats, f_p_value
@@ -1501,8 +1620,8 @@ class lm:
             nz = self._w > 0.0
             sum_log_w = float(np.sum(np.log(self._w[nz])))
         return float(
-            0.5 * (sum_log_w
-                   - n * (np.log(2 * np.pi) + 1 - np.log(n) + np.log(self.rss)))
+            0.5
+            * (sum_log_w - n * (np.log(2 * np.pi) + 1 - np.log(n) + np.log(self.rss)))
         )
 
     def compute_AIC(self):
@@ -1514,9 +1633,21 @@ class lm:
         # R's BIC uses log(nobs) with nobs = N = #{wᵢ ≠ 0}.
         return -2 * self.loglike + np.log(self._n_eff) * self.npar
 
-    def predict(self, newdata=None, interval=None, alpha=0.05, *,
-                level=None, se_fit=False, type="response", terms=None,
-                rankdeficient="warnif", scale=None, df=None, pred_var=None):
+    def predict(
+        self,
+        newdata=None,
+        interval=None,
+        alpha=0.05,
+        *,
+        level=None,
+        se_fit=False,
+        type="response",
+        terms=None,
+        rankdeficient="warnif",
+        scale=None,
+        df=None,
+        pred_var=None,
+    ):
         """R: ``predict.lm`` — fitted/predicted values on ``newdata``.
 
         ``interval`` ∈ ``{None, "confidence", "prediction", True}`` adds
@@ -1576,8 +1707,13 @@ class lm:
             out = self._predict_terms(Xnew=newdata, se_fit=se_fit, terms=terms)
         elif type == "response":
             out = self.compute_yhat(
-                Xnew=newdata, interval=interval, alpha=alpha, se_fit=se_fit,
-                res_var=res_var, df_q=df_q, pred_var=pred_var,
+                Xnew=newdata,
+                interval=interval,
+                alpha=alpha,
+                se_fit=se_fit,
+                res_var=res_var,
+                df_q=df_q,
+                pred_var=pred_var,
             )
         else:
             raise ValueError(
@@ -1594,6 +1730,7 @@ class lm:
         # improvement on R's list shape).
         if se_fit and type == "response":
             from ..tidy import DataFrame as _DF  # local: avoid import cycle
+
             if not isinstance(out, _DF):
                 out = _DF(out)
             out.df = self.df_residuals if df_q is None else df_q
@@ -1618,7 +1755,9 @@ class lm:
         P = np.linalg.pinv(Xtr) @ Xtr  # projector onto the training row space
         Xnew = (
             materialize(self._expanded, newdata, basis_state=self._basis_state)
-            .select(self._full_names).to_numpy().astype(float)
+            .select(self._full_names)
+            .to_numpy()
+            .astype(float)
         )
         resid_norm = np.linalg.norm(Xnew - Xnew @ P, axis=1)
         x_norm = np.linalg.norm(Xnew, axis=1)
@@ -1656,7 +1795,7 @@ class lm:
         # "warnif" / "non-estim": attach the flagged 0-based row indices as
         # ``.non_estim`` (R's attr(*, "non-estim")); "warnif" also warns.
         if mode == "warnif":
-            warnings.warn(f'{msg}; .non_estim has doubtful cases')
+            warnings.warn(f"{msg}; .non_estim has doubtful cases")
         from ..tidy import DataFrame as _DF  # local: avoid import cycle
 
         out = _DF(out)
@@ -1689,6 +1828,7 @@ class lm:
         constant = getattr(frame, "constant", None)
         if constant is not None:
             from ..tidy import DataFrame as _DF
+
             padded = _DF(padded)
             padded.constant = constant
         return padded
@@ -1713,9 +1853,12 @@ class lm:
         if Xnew is None:
             X = self.X.to_numpy().astype(float)
         else:
-            X = materialize(self._expanded, Xnew, basis_state=self._basis_state).select(
-                self.column_names
-            ).to_numpy().astype(float)
+            X = (
+                materialize(self._expanded, Xnew, basis_state=self._basis_state)
+                .select(self.column_names)
+                .to_numpy()
+                .astype(float)
+            )
 
         beta = self._bhat_arr
         avx = self.X.to_numpy().astype(float).mean(axis=0)  # R: colMeans(mm)
@@ -1735,9 +1878,7 @@ class lm:
             data[label] = Xc[:, idx] @ beta[idx]
             if se_fit:
                 sub = XtXinv[np.ix_(idx, idx)]
-                var_t = np.einsum(
-                    "ij,jk,ik->i", Xc[:, idx], sub, Xc[:, idx]
-                ) * res_var
+                var_t = np.einsum("ij,jk,ik->i", Xc[:, idx], sub, Xc[:, idx]) * res_var
                 se_data[label] = np.sqrt(np.maximum(var_t, 0.0))
 
         if terms is not None:
@@ -1751,6 +1892,7 @@ class lm:
                 data[f"se.{k}"] = v
 
         from ..tidy import DataFrame as _DF  # local: avoid import cycle
+
         out = _DF(data)
         # R attaches the term constant as attr(., "constant"); hea's
         # DataFrame subclass carries it as a plain attribute.
@@ -1803,9 +1945,11 @@ class lm:
         # displayed values contain any negative (so signs line up).
         tri_vals = [corr[i + 1, j] for i in range(len(rows)) for j in range(i + 1)]
         pad_pos = any(v < 0 for v in tri_vals)
+
         def fmt(v: float) -> str:
             s = f"{v:.2f}"
             return s if s.startswith("-") or not pad_pos else " " + s
+
         cells = [
             [fmt(corr[i + 1, j]) if j <= i else "" for j in range(len(cols))]
             for i in range(len(rows))
@@ -1818,8 +1962,10 @@ class lm:
         hdr = " " * row_w + " " + " ".join(c.ljust(w) for c, w in zip(cols, col_w))
         lines = [hdr.rstrip()]
         for i, r in enumerate(rows):
-            line = r.ljust(row_w) + " " + " ".join(
-                cells[i][j].ljust(col_w[j]) for j in range(len(cols))
+            line = (
+                r.ljust(row_w)
+                + " "
+                + " ".join(cells[i][j].ljust(col_w[j]) for j in range(len(cols)))
             )
             lines.append(line.rstrip())
         return "\n".join(lines)
@@ -1949,7 +2095,10 @@ class lm:
         h_mean = float(np.mean(h))
         if h_mean > 0 and bool(np.all(np.abs(h - h_mean) < 1e-10 * h_mean)):
             return self._plot_constant_leverage(
-                ax=ax, r=r, facecolor=facecolor, edgecolor=edgecolor,
+                ax=ax,
+                r=r,
+                facecolor=facecolor,
+                edgecolor=edgecolor,
                 label_n=label_n,
             )
 
@@ -1969,7 +2118,7 @@ class lm:
             ax.plot(h_grid, -rline, color="red", linestyle="--", linewidth=0.8)
         ax.set_ylim(ymin, ymax)
         # label by Cook's distance
-        cook = (r ** 2 / self.p) * h / np.clip(1 - h, 1e-12, None)
+        cook = (r**2 / self.p) * h / np.clip(1 - h, 1e-12, None)
         _label_top_n(ax, h, r, scores=cook, n=label_n)
         ax.set_xlabel("Leverage")
         ax.set_ylabel("Standardized Residuals")
@@ -1986,7 +2135,8 @@ class lm:
 
         referenced = referenced_columns(self._expanded)
         factor_cols = [
-            c for c in self._design_data.columns
+            c
+            for c in self._design_data.columns
             if c in referenced
             and self._design_data[c].dtype in (pl.Enum, pl.Categorical, pl.Utf8)
         ]
@@ -1996,8 +2146,7 @@ class lm:
             level_labels = [":".join(row) for row in keys]
             unique_levels = list(dict.fromkeys(level_labels))
             level_to_x = {lab: i for i, lab in enumerate(unique_levels)}
-            x_pos = np.array([level_to_x[lab] for lab in level_labels],
-                             dtype=float)
+            x_pos = np.array([level_to_x[lab] for lab in level_labels], dtype=float)
             ax.scatter(x_pos, r, facecolor=facecolor, edgecolor=edgecolor)
             ax.set_xticks(range(len(unique_levels)))
             ax.set_xticklabels(unique_levels)
@@ -2030,7 +2179,6 @@ class lm:
     def plot_contrast(
         self, features=None, figsize=None, subplots=None, away_from="median"
     ):
-
         """Visreg style contrast plot.
 
         "It showed the effect of changing Xj away from an arbitrary point xj*;
@@ -2066,7 +2214,6 @@ class lm:
         ax = np.array([ax]).flatten()
 
         for i, name in enumerate(features):
-
             xx = self.X[name].to_numpy().astype(float)
 
             if away_from == "median":
@@ -2078,7 +2225,9 @@ class lm:
             else:
                 raise ValueError(f'The Input value for "{away_from}" is not supported.')
 
-            X_arr = self.X.with_columns(pl.lit(xxbar).alias(name)).to_numpy().astype(float)
+            X_arr = (
+                self.X.with_columns(pl.lit(xxbar).alias(name)).to_numpy().astype(float)
+            )
             rj = self.y.to_numpy().astype(float) - (X_arr @ self._bhat_arr)
             ax[i].scatter(xx, rj, color="gray", facecolor="none", edgecolor="black")
             ax[i].set_xlabel(name)
@@ -2087,7 +2236,7 @@ class lm:
             ax[i].spines["right"].set_visible(False)
 
             se_scalar = float(self.se_bhat[name].item())
-            Vx = (xx - xxbar) ** 2 * se_scalar ** 2
+            Vx = (xx - xxbar) ** 2 * se_scalar**2
             se = np.sqrt(Vx)
 
             tt = _dist.qt(1 - 0.05 / 2, self.df_residuals)
@@ -2107,7 +2256,6 @@ class lm:
     def plot_conditional(
         self, features=None, figsize=None, subplots=None, away_from="median"
     ):
-
         """Visreg style conditional plot.
 
         It showed the relationship between E(Y) and Xj while holding other variables constant (mean or median).
@@ -2141,7 +2289,6 @@ class lm:
         ax = np.array([ax]).flatten()
 
         for i, name in enumerate(features):
-
             xx = self.X[name].to_numpy().astype(float)
 
             if away_from == "median":
@@ -2161,9 +2308,11 @@ class lm:
             else:
                 raise ValueError('The Input value for "away_from" is not supported.')
 
-            Xnew = self.X.with_columns(
-                [pl.lit(v).alias(k) for k, v in repl.items()]
-            ).to_numpy().astype(float)
+            Xnew = (
+                self.X.with_columns([pl.lit(v).alias(k) for k, v in repl.items()])
+                .to_numpy()
+                .astype(float)
+            )
 
             rj = self._residuals_arr + (Xnew @ self._bhat_arr)
             ax[i].scatter(xx, rj, color="gray", facecolor="none", edgecolor="black")
@@ -2208,7 +2357,7 @@ def _chol2inv(R: np.ndarray) -> np.ndarray:
         # singular factor — fall back to the triangular-solve form (same value)
         Rinv = solve_triangular(R, np.eye(R.shape[0]))
         return Rinv @ Rinv.T
-    return np.triu(inv) + np.triu(inv, 1).T   # dpotri fills one triangle; mirror
+    return np.triu(inv) + np.triu(inv, 1).T  # dpotri fills one triangle; mirror
 
 
 def _qty_householder(qr_c: np.ndarray, tau: np.ndarray, c: np.ndarray) -> np.ndarray:

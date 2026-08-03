@@ -11,6 +11,7 @@ Usage:
 >>> from hea.io import read_csv
 >>> read_csv("foo.csv", schema_overrides={"id": Int64, "name": String})
 """
+
 from polars import (
     Array,
     BaseExtension,
@@ -49,11 +50,38 @@ from polars import (
 )
 
 __all__ = [
-    "Array", "BaseExtension", "Binary", "Boolean", "Categorical",
-    "DataType", "Date", "Datetime", "Decimal", "Duration", "Enum",
-    "Extension", "Field", "Float16", "Float32", "Float64",
-    "Int8", "Int16", "Int32", "Int64", "Int128",
-    "List", "Null", "Object", "String", "Struct", "Time",
-    "UInt8", "UInt16", "UInt32", "UInt64", "UInt128",
-    "Unknown", "Utf8",
+    "Array",
+    "BaseExtension",
+    "Binary",
+    "Boolean",
+    "Categorical",
+    "DataType",
+    "Date",
+    "Datetime",
+    "Decimal",
+    "Duration",
+    "Enum",
+    "Extension",
+    "Field",
+    "Float16",
+    "Float32",
+    "Float64",
+    "Int8",
+    "Int16",
+    "Int32",
+    "Int64",
+    "Int128",
+    "List",
+    "Null",
+    "Object",
+    "String",
+    "Struct",
+    "Time",
+    "UInt8",
+    "UInt16",
+    "UInt32",
+    "UInt64",
+    "UInt128",
+    "Unknown",
+    "Utf8",
 ]

@@ -55,11 +55,7 @@ class FacetWrap(Facet):
             return pl.DataFrame({"PANEL": [1], "ROW": [1], "COL": [1]})
 
         # Unique combinations across facet variables, in row-major order.
-        unique = (
-            data.select(self.facets)
-            .unique(maintain_order=True)
-            .sort(self.facets)
-        )
+        unique = data.select(self.facets).unique(maintain_order=True).sort(self.facets)
         n = len(unique)
         nrow, ncol = self.grid_dims(n)
 
@@ -124,5 +120,6 @@ def facet_wrap(facets, *, ncol=None, nrow=None, scales="fixed", as_table=True):
         raise ValueError(
             f"scales must be one of 'fixed'/'free'/'free_x'/'free_y'; got {scales!r}"
         )
-    return FacetWrap(facets=facet_list, ncol=ncol, nrow=nrow,
-                     scales=scales, as_table=as_table)
+    return FacetWrap(
+        facets=facet_list, ncol=ncol, nrow=nrow, scales=scales, as_table=as_table
+    )

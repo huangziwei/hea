@@ -69,6 +69,7 @@ class RConsoleOutput(str):
 
     def _repr_html_(self) -> str:
         import html
+
         return f"<pre>{html.escape(str.__str__(self))}</pre>"
 
 
@@ -265,8 +266,16 @@ def _build_exec_namespace(caller) -> dict:
         ns.setdefault(name, getattr(hea, name))
     # Names from every user-facing sub-namespace — col / lit / DataFrame /
     # lm / Binomial / anova / t_test / data / etc.
-    for sub in (hea.tidy, hea.dtypes, hea.io, hea.models, hea.family,
-                hea.R, hea.data, hea.session_info):
+    for sub in (
+        hea.tidy,
+        hea.dtypes,
+        hea.io,
+        hea.models,
+        hea.family,
+        hea.R,
+        hea.data,
+        hea.session_info,
+    ):
         for name in dir(sub):
             if not name.startswith("_"):
                 ns.setdefault(name, getattr(sub, name))
@@ -283,6 +292,7 @@ def _propagate_to_caller(caller, ns: dict) -> None:
     """
     # Don't push back hea names or dunders we added.
     import hea
+
     hea_names = {n for n in dir(hea) if not n.startswith("_")}
     skip = hea_names | {k for k in caller.f_globals if k.startswith("__")}
     for k, v in ns.items():
@@ -339,8 +349,7 @@ def _execute_r_and_load(r_source: str):
         result = run_r(script_path, tmp)
         if result.returncode != 0:
             raise RuntimeError(
-                f"to_R(execute=True): R subprocess failed.\n"
-                f"stderr:\n{result.stderr}"
+                f"to_R(execute=True): R subprocess failed.\nstderr:\n{result.stderr}"
             )
         if result.captured:
             return pl.read_csv(result.out_csv)

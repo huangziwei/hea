@@ -7,6 +7,7 @@ Every test function returns an :class:`HTest`; :func:`aov` returns an
 {"two.sided", "greater", "less"}, ``conf_level=0.95``, ``correct=``
 (continuity correction) where applicable.
 """
+
 from __future__ import annotations
 
 import math
@@ -37,7 +38,7 @@ def _avg_rank(a) -> np.ndarray:
         j = i
         while j + 1 < n and sa[j + 1] == sa[i]:
             j += 1
-        r[i:j + 1] = (i + j) / 2.0 + 1.0  # 1-based average rank of the tie run
+        r[i : j + 1] = (i + j) / 2.0 + 1.0  # 1-based average rank of the tie run
         i = j + 1
     out = np.empty(n, dtype=float)
     out[order] = r
@@ -87,7 +88,9 @@ class HTest:
                 tail = "less than"
             if isinstance(null, dict):
                 null_str = ", ".join(f"{k} = {_fmt(v)}" for k, v in null.items())
-                out.append(f"alternative hypothesis: true {null_str.split(' = ')[0]} is {tail} {null_str.split(' = ')[1]}")
+                out.append(
+                    f"alternative hypothesis: true {null_str.split(' = ')[0]} is {tail} {null_str.split(' = ')[1]}"
+                )
             elif null is not None:
                 # name from estimate keys when possible
                 nm = next(iter(self.estimate.keys()), "value")
@@ -119,9 +122,12 @@ class AnovaTable:
     type: str = "II"
 
     def __repr__(self) -> str:
-        out = [f"Anova Table (Type {self.type} tests)", "",
-               f"Response: {self.response}",
-               f"{'':<12}{'Sum Sq':>10}{'Df':>4}{'F value':>10}{'Pr(>F)':>12}"]
+        out = [
+            f"Anova Table (Type {self.type} tests)",
+            "",
+            f"Response: {self.response}",
+            f"{'':<12}{'Sum Sq':>10}{'Df':>4}{'F value':>10}{'Pr(>F)':>12}",
+        ]
         for r in self.rows:
             out.append(
                 f"{r['term']:<12}{_fmt(r['sum_sq']):>10}{r['df']:>4}"
@@ -164,8 +170,16 @@ def signed_rank(x):
     return np.sign(arr) * _avg_rank(np.abs(arr))
 
 
-p_adjust_methods = ("holm", "hochberg", "hommel", "bonferroni",
-                    "BH", "BY", "fdr", "none")
+p_adjust_methods = (
+    "holm",
+    "hochberg",
+    "hommel",
+    "bonferroni",
+    "BH",
+    "BY",
+    "fdr",
+    "none",
+)
 
 
 def p_adjust(p, method: str = "holm", n: Optional[int] = None):
@@ -179,8 +193,7 @@ def p_adjust(p, method: str = "holm", n: Optional[int] = None):
     unchanged. Returns an :class:`numpy.ndarray`.
     """
     if method not in p_adjust_methods:
-        raise ValueError(
-            f"p_adjust: 'method' must be one of {p_adjust_methods!r}")
+        raise ValueError(f"p_adjust: 'method' must be one of {p_adjust_methods!r}")
     if method == "fdr":  # back compatibility
         method = "BH"
     p0 = np.asarray(p, dtype=float).ravel().copy()  # output holder
@@ -253,6 +266,7 @@ def p_adjust(p, method: str = "holm", n: Optional[int] = None):
 # "less"}, ``conf_level=0.95``, ``correct=`` (continuity correction)
 # where applicable. ``mu`` / ``p`` / ``ratio`` carry their R meanings.
 
+
 def t_test(
     x,
     y=None,
@@ -323,7 +337,7 @@ def t_test(
         else:
             sx2, sy2 = vx / nx, vy / ny
             stderr = math.sqrt(sx2 + sy2)
-            df = stderr ** 4 / (sx2 ** 2 / (nx - 1) + sy2 ** 2 / (ny - 1))
+            df = stderr**4 / (sx2**2 / (nx - 1) + sy2**2 / (ny - 1))
         tstat = (mx - my - mu) / stderr
 
     if alternative == "less":
@@ -354,6 +368,7 @@ def t_test(
 # --- Streitberg-Röhmel exact permutation densities (src/permdist.c) ----------
 # Used for the exact Wilcoxon p-value in the presence of ties/zeroes, where the
 # plain signrank/wilcox distributions no longer apply.
+
 
 def _rsum_ld(arr) -> float:
     """R's ``sum()`` over a double vector: strict left-to-right accumulation in
@@ -582,8 +597,11 @@ def wilcox_test(
             method = "Wilcoxon signed rank exact test"
             if alternative == "two.sided":
                 m = (float(np.sum(z)) / 2.0) if z is not None else n * (n + 1) / 4
-                p = (_psignrank_z(V - 0.25, n, z, lower_tail=False) if V > m
-                     else _psignrank_z(V, n, z))
+                p = (
+                    _psignrank_z(V - 0.25, n, z, lower_tail=False)
+                    if V > m
+                    else _psignrank_z(V, n, z)
+                )
                 pval = min(2.0 * p, 1.0)
             elif alternative == "greater":
                 pval = _psignrank_z(V - 0.25, n, z, lower_tail=False)
@@ -599,8 +617,9 @@ def wilcox_test(
             V = float(np.sum(r[xm > 0]))
             mean = n * (n + 1) / 4.0
             nties = np.unique(r, return_counts=True)[1].astype(float)
-            sigma = math.sqrt(n * (n + 1) * (2 * n + 1) / 24.0
-                              - np.sum(nties**3 - nties) / 48.0)
+            sigma = math.sqrt(
+                n * (n + 1) * (2 * n + 1) / 24.0 - np.sum(nties**3 - nties) / 48.0
+            )
             ic = 0 if (icorrect > 0 and (ties or zero)) else icorrect
             pval = _wilcox_pval_asymp(V - mean, sigma, alternative, ic, n=n)
             if icorrect >= 0:
@@ -623,14 +642,16 @@ def wilcox_test(
     use_exact = ((n_x < 50) and (n_y < 50)) if exact is None else exact
     r = _avg_rank(np.concatenate([x - mu, y]))
     ties = len(np.unique(r)) != len(r)
-    W = float(np.sum(r[:len(x)]) - n_x * (n_x + 1) / 2.0)
+    W = float(np.sum(r[: len(x)]) - n_x * (n_x + 1) / 2.0)
     if use_exact:
         z = r if ties else None
         method = "Wilcoxon rank sum exact test"
         if alternative == "two.sided":
-            pval = min(2.0 * _pwilcox_z(W, n_x, n_y, z),
-                       2.0 * _pwilcox_z(W - 0.25, n_x, n_y, z, lower_tail=False),
-                       1.0)
+            pval = min(
+                2.0 * _pwilcox_z(W, n_x, n_y, z),
+                2.0 * _pwilcox_z(W - 0.25, n_x, n_y, z, lower_tail=False),
+                1.0,
+            )
         elif alternative == "greater":
             pval = _pwilcox_z(W - 0.25, n_x, n_y, z, lower_tail=False)
         else:  # less
@@ -638,13 +659,15 @@ def wilcox_test(
     else:
         mean = n_x * n_y / 2.0
         nties = np.unique(r, return_counts=True)[1].astype(float)
-        sigma = math.sqrt((n_x * n_y / 12.0)
-                          * ((n_x + n_y + 1)
-                             - np.sum(nties**3 - nties)
-                             / ((n_x + n_y) * (n_x + n_y - 1))))
+        sigma = math.sqrt(
+            (n_x * n_y / 12.0)
+            * (
+                (n_x + n_y + 1)
+                - np.sum(nties**3 - nties) / ((n_x + n_y) * (n_x + n_y - 1))
+            )
+        )
         ic = 0 if (icorrect > 0 and ties) else icorrect
-        pval = _wilcox_pval_asymp(W - mean, sigma, alternative, ic,
-                                  m=n_x, n=n_y)
+        pval = _wilcox_pval_asymp(W - mean, sigma, alternative, ic, m=n_x, n=n_y)
         if icorrect >= 0:
             method += " with continuity correction"
     return HTest(
@@ -662,8 +685,11 @@ def _wilcox_pval_asymp(zdiff, sigma, alternative, icorrect, *, n, m=None):
     the Fellingham-Stoker Edgeworth expansion when ``icorrect >= 1``.
     ``m`` distinguishes the two-sample (``m`` set) from one-sample kernel."""
     if icorrect >= 0:
-        correction = {"two.sided": math.copysign(0.5, zdiff) if zdiff != 0 else 0.0,
-                      "greater": 0.5, "less": -0.5}[alternative]
+        correction = {
+            "two.sided": math.copysign(0.5, zdiff) if zdiff != 0 else 0.0,
+            "greater": 0.5,
+            "less": -0.5,
+        }[alternative]
     else:
         correction = 0.0
     z = (zdiff - correction) / sigma
@@ -677,23 +703,29 @@ def _wilcox_pval_asymp(zdiff, sigma, alternative, icorrect, *, n, m=None):
             d4 = 5 * n * (n + 1) * (2 * n + 1)
             l4 = -n4 / d4
             n6 = 576 * (3 * n**4 + 6 * n**2 - 3 * n + 1)
-            d6 = 7 * (n * (n + 1) * (2 * n + 1))**2
+            d6 = 7 * (n * (n + 1) * (2 * n + 1)) ** 2
             l6 = n6 / d6
         else:  # two-sample rank-sum Edgeworth
             n4 = m**2 + n**2 + m * n + m + n
             d4 = 20 * m * n * (m + n + 1)
             l4 = -n4 / d4
-            n6 = (2 * (m**4 + n**4) + 4 * m * n * (m**2 + n**2)
-                  + 6 * m**2 * n**2 + 4 * (m**3 + n**3)
-                  + 7 * m * n * (m + n) + (m**2 + n**2) + 2 * m * n - (m + n))
-            d6 = 210 * m**2 * n**2 * (m + n + 1)**2
+            n6 = (
+                2 * (m**4 + n**4)
+                + 4 * m * n * (m**2 + n**2)
+                + 6 * m**2 * n**2
+                + 4 * (m**3 + n**3)
+                + 7 * m * n * (m + n)
+                + (m**2 + n**2)
+                + 2 * m * n
+                - (m + n)
+            )
+            d6 = 210 * m**2 * n**2 * (m + n + 1) ** 2
             l6 = n6 / d6
         e = l4 / 24 * zz * (zz**2 - 3)
         if icorrect > 1:
             e += l6 / 720 * zz * (zz**4 - 10 * zz**2 + 15)
         if icorrect > 2:
-            e += 35 * l4**2 / 40320 * zz * (zz**6 - 21 * zz**4
-                                            + 105 * zz**2 - 105)
+            e += 35 * l4**2 / 40320 * zz * (zz**6 - 21 * zz**4 + 105 * zz**2 - 105)
         return (y - e) if lower_tail else (y + e)
 
     if alternative == "less":
@@ -710,8 +742,20 @@ def _two_sided_min(lo, hi) -> float:
 
 
 # --- Exact Spearman (AS 89, src/prho.c) & Kendall (src/kendall.c) ------------
-_PRHO_C = (.2274, .2531, .1745, .0758, .1033, .3932,
-           .0879, .0151, .0072, .0831, .0131, 4.6e-4)
+_PRHO_C = (
+    0.2274,
+    0.2531,
+    0.1745,
+    0.0758,
+    0.1033,
+    0.3932,
+    0.0879,
+    0.0151,
+    0.0072,
+    0.0831,
+    0.0131,
+    4.6e-4,
+)
 
 
 def _prho(n, is_, lower_tail):
@@ -730,6 +774,7 @@ def _prho(n, is_, lower_tail):
         return 1 - pv
     if n <= n_small:  # exact by full permutation enumeration
         import itertools
+
         nfac = math.factorial(n)
         if is_ == n3:
             ifr = 1
@@ -752,14 +797,23 @@ def _prho(n, is_, lower_tail):
     b = 1 / y
     x = (6.0 * (is_ - 1) * b / _rfma(y, y, -1.0) - 1) * math.sqrt(y - 1)
     y = x * x
-    u = x * b * _rfma(
-        y,
-        _rfma(-(y * b),
-              _rfma(-y,
+    u = (
+        x
+        * b
+        * _rfma(
+            y,
+            _rfma(
+                -(y * b),
+                _rfma(
+                    -y,
                     _rfma(y * b, _rfma(-c12, y, c11), _rfma(-c10, b, c9)),
-                    _rfma(c8, b, c7)),
-              _rfma(b, _rfma(c6, b, c5), -c4)),
-        _rfma(b, _rfma(c3, b, c2), c1))
+                    _rfma(c8, b, c7),
+                ),
+                _rfma(b, _rfma(c6, b, c5), -c4),
+            ),
+            _rfma(b, _rfma(c3, b, c2), c1),
+        )
+    )
     y = u / math.exp(y / 2.0)
     pv = (-y if lower_tail else y) + _nm.pnorm5(x, 0.0, 1.0, lower_tail, False)
     if pv < 0:
@@ -849,8 +903,9 @@ def cor_test(
         elif alternative == "greater":
             pval = float(_dist.pt(t, df, lower_tail=False))
         else:
-            pval = _two_sided_min(float(_dist.pt(t, df)),
-                                  float(_dist.pt(t, df, lower_tail=False)))
+            pval = _two_sided_min(
+                float(_dist.pt(t, df)), float(_dist.pt(t, df, lower_tail=False))
+            )
         conf_int = None
         if n > 3:
             z = math.atanh(r)
@@ -878,7 +933,7 @@ def cor_test(
 
     if method == "spearman":
         rho = float(np.corrcoef(_avg_rank(x), _avg_rank(y))[0, 1])
-        S = (n ** 3 - n) * (1.0 - rho) / 6.0
+        S = (n**3 - n) * (1.0 - rho) / 6.0
         use_exact = True if exact is None else exact
         if ties and use_exact:
             use_exact = False  # cannot compute exact p-value with ties
@@ -886,20 +941,28 @@ def cor_test(
         def pspearman(q, lower_tail):
             if n <= 1290 and use_exact:
                 return float(_prho(n, round(q) + 2 * int(lower_tail), lower_tail))
-            den = (n ** 3 - n) / 6.0
+            den = (n**3 - n) / 6.0
             if continuity:
                 den += 1.0
             rr = 1.0 - q / den
-            return float(_dist.pt(rr / math.sqrt((1.0 - rr * rr) / (n - 2)),
-                                  df=n - 2, lower_tail=not lower_tail))
+            return float(
+                _dist.pt(
+                    rr / math.sqrt((1.0 - rr * rr) / (n - 2)),
+                    df=n - 2,
+                    lower_tail=not lower_tail,
+                )
+            )
 
         if alternative == "greater":
             pval = pspearman(S, lower_tail=True)
         elif alternative == "less":
             pval = pspearman(S, lower_tail=False)
         else:
-            p = (pspearman(S, lower_tail=False) if S > (n ** 3 - n) / 6.0
-                 else pspearman(S, lower_tail=True))
+            p = (
+                pspearman(S, lower_tail=False)
+                if S > (n**3 - n) / 6.0
+                else pspearman(S, lower_tail=True)
+            )
             pval = float(min(2.0 * p, 1.0))
         return HTest(
             method="Spearman's rank correlation rho",
@@ -950,9 +1013,11 @@ def cor_test(
         vu = float(np.sum(cy * (cy - 1) * (2 * cy + 5)))
         v1 = float(np.sum(cx * (cx - 1)) * np.sum(cy * (cy - 1)))
         v2 = float(np.sum(cx * (cx - 1) * (cx - 2)) * np.sum(cy * (cy - 1) * (cy - 2)))
-        var_S = ((v0 - vt - vu) / 18.0
-                 + v1 / (2.0 * n * (n - 1))
-                 + v2 / (9.0 * n * (n - 1) * (n - 2)))
+        var_S = (
+            (v0 - vt - vu) / 18.0
+            + v1 / (2.0 * n * (n - 1))
+            + v2 / (9.0 * n * (n - 1) * (n - 2))
+        )
         Sc = math.copysign(abs(S) - 1.0, S) if continuity else S
         z = Sc / math.sqrt(var_S)
         if alternative == "less":
@@ -960,8 +1025,9 @@ def cor_test(
         elif alternative == "greater":
             pval = float(_dist.pnorm(z, lower_tail=False))
         else:
-            pval = _two_sided_min(float(_dist.pnorm(z)),
-                                  float(_dist.pnorm(z, lower_tail=False)))
+            pval = _two_sided_min(
+                float(_dist.pnorm(z)), float(_dist.pnorm(z, lower_tail=False))
+            )
         return HTest(
             method="Kendall's rank correlation tau",
             statistic={"z": z},
@@ -997,8 +1063,9 @@ def kruskal_test(formula: str, data: pl.DataFrame) -> HTest:
     stat = float(sum(r[g == gl].sum() ** 2 / (g == gl).sum() for gl in glabels))
     _, ties = np.unique(x, return_counts=True)
     ties = ties.astype(float)
-    H = ((12.0 * stat / (n * (n + 1)) - 3.0 * (n + 1))
-         / (1.0 - np.sum(ties ** 3 - ties) / (n ** 3 - n)))
+    H = (12.0 * stat / (n * (n + 1)) - 3.0 * (n + 1)) / (
+        1.0 - np.sum(ties**3 - ties) / (n**3 - n)
+    )
     pval = float(_dist.pchisq(H, k - 1, lower_tail=False))
     return HTest(
         method="Kruskal-Wallis rank sum test",
@@ -1034,11 +1101,13 @@ def chisq_test(
     arr = np.asarray(x)
     if y is not None:
         tbl = _crosstab(x, y)
-        return _chisq_table(tbl, correct=correct, name="x and y",
-                            simulate_p_value=simulate_p_value, B=B)
+        return _chisq_table(
+            tbl, correct=correct, name="x and y", simulate_p_value=simulate_p_value, B=B
+        )
     if arr.ndim == 2:
-        return _chisq_table(arr, correct=correct, name="x",
-                            simulate_p_value=simulate_p_value, B=B)
+        return _chisq_table(
+            arr, correct=correct, name="x", simulate_p_value=simulate_p_value, B=B
+        )
     # goodness of fit
     counts = arr.astype(float)
     if p is None:
@@ -1058,7 +1127,7 @@ def chisq_test(
         nx = len(counts)
         nn = int(total)
         idx = _dist._r_rng().sample_prob(p, B * nn, replace=True)
-        sm = np.asarray(idx).reshape((B, nn))          # each row = one replicate
+        sm = np.asarray(idx).reshape((B, nn))  # each row = one replicate
         almost_1 = 1.0 - 64.0 * _nm._DBL_EPSILON
         ss = np.empty(B, dtype=float)
         for b in range(B):
@@ -1106,8 +1175,14 @@ def _chisq_stat(tbl: np.ndarray, *, correct: bool) -> tuple[float, int, bool]:
     return stat, df, is_2x2 and yates > 0
 
 
-def _chisq_table(tbl: np.ndarray, *, correct: bool, name: str,
-                 simulate_p_value: bool = False, B: int = 2000) -> HTest:
+def _chisq_table(
+    tbl: np.ndarray,
+    *,
+    correct: bool,
+    name: str,
+    simulate_p_value: bool = False,
+    B: int = 2000,
+) -> HTest:
     tbl = np.asarray(tbl, dtype=float)
     nr, nc = tbl.shape
     n = tbl.sum()
@@ -1125,7 +1200,7 @@ def _chisq_table(tbl: np.ndarray, *, correct: bool, name: str,
             method="Pearson's Chi-squared test with simulated p-value\n\t "
             f"(based on {B} replicates)",
             statistic={"X-squared": float(stat)},
-            parameter={},                           # df = NA for the MC test
+            parameter={},  # df = NA for the MC test
             p_value=pval,
             alternative="",
             data_name=name,
@@ -1153,7 +1228,8 @@ def _crosstab(x, y) -> np.ndarray:
     y_ser = pl.Series("__y__", y).cast(pl.Utf8)
     return (
         pl.DataFrame({"__x__": x_ser, "__y__": y_ser})
-        .group_by(["__x__", "__y__"]).len()
+        .group_by(["__x__", "__y__"])
+        .len()
         .pivot(values="len", index="__x__", on="__y__")
         .fill_null(0)
         .drop("__x__")
@@ -1185,7 +1261,7 @@ def _chisq_sim(sr, sc, B, expected, rng):
     for it in range(B):
         obs = rng.rcont2(sr, sc, n, fact)
         chisq = 0.0
-        for j in range(ncol):                       # column-major, as C
+        for j in range(ncol):  # column-major, as C
             for i in range(nrow):
                 ev = e[i, j]
                 ov = obs[i][j]
@@ -1207,7 +1283,7 @@ def _fisher_sim(sr, sc, B, rng):
     for it in range(B):
         obs = rng.rcont2(sr, sc, n, fact)
         ans = 0.0
-        for j in range(ncol):                       # column-major, as C
+        for j in range(ncol):  # column-major, as C
             for i in range(nrow):
                 ans -= fact[obs[i][j]]
         out[it] = ans
@@ -1221,17 +1297,16 @@ def _fisher_test_simulate(tbl, name, B):
     tbl = np.asarray(tbl, dtype=float)
     sr = tbl.sum(axis=1)
     sc = tbl.sum(axis=0)
-    x2 = tbl[sr > 0][:, sc > 0]                     # drop all-zero margins
+    x2 = tbl[sr > 0][:, sc > 0]  # drop all-zero margins
     nr, nc = x2.shape
     if nr <= 1:
         raise ValueError("need 2 or more non-zero row marginals")
     if nc <= 1:
         raise ValueError("need 2 or more non-zero column marginals")
     # STATISTIC = -sum(lfactorial(x)) = -sum(lgamma(x+1)); R sums in LDOUBLE.
-    stat = -_rsum_ld(np.array([_nm._lgammafn(float(v) + 1.0)
-                               for v in x2.ravel()]))
+    stat = -_rsum_ld(np.array([_nm._lgammafn(float(v) + 1.0) for v in x2.ravel()]))
     tmp = _fisher_sim(x2.sum(axis=1), x2.sum(axis=0), B, _dist._r_rng())
-    almost_1 = 1.0 + 64.0 * _nm._DBL_EPSILON        # PR#10558: STATISTIC < 0
+    almost_1 = 1.0 + 64.0 * _nm._DBL_EPSILON  # PR#10558: STATISTIC < 0
     pval = (1.0 + float(np.count_nonzero(tmp <= stat / almost_1))) / (B + 1)
     pval = max(0.0, min(1.0, pval))
     return HTest(
@@ -1255,22 +1330,27 @@ def _fisher_test_exact(tbl, name, *, workspace, hybrid, hybrid_pars, mult):
         raise ValueError("'x' must have at least 2 rows and columns")
     if np.any(tbl < 0) or not np.all(np.isfinite(tbl)):
         raise ValueError("all entries of 'x' must be nonnegative and finite")
-    xi = np.rint(tbl).astype(np.int64)          # R rounds to integer storage
+    xi = np.rint(tbl).astype(np.int64)  # R rounds to integer storage
     if np.any(xi > _fexact._INT_MAX):
         raise ValueError("'x' has entries too large to be integer")
     nr, nc = xi.shape
     table = xi.tolist()
     if hybrid:
-        expect, percnt, emin = (float(hybrid_pars[0]), float(hybrid_pars[1]),
-                                float(hybrid_pars[2]))
-        method = ("Fisher's Exact Test for Count Data hybrid using "
-                  "asym.chisq. iff (exp=%g, perc=%g, Emin=%g)"
-                  % (expect, percnt, emin))
+        expect, percnt, emin = (
+            float(hybrid_pars[0]),
+            float(hybrid_pars[1]),
+            float(hybrid_pars[2]),
+        )
+        method = (
+            "Fisher's Exact Test for Count Data hybrid using "
+            "asym.chisq. iff (exp=%g, perc=%g, Emin=%g)" % (expect, percnt, emin)
+        )
     else:
         expect, percnt, emin = -1.0, 100.0, 0.0
         method = "Fisher's Exact Test for Count Data"
-    pval = _fexact.fexact(nr, nc, table, expect, percnt, emin,
-                          workspace=int(workspace), mult=int(mult))
+    pval = _fexact.fexact(
+        nr, nc, table, expect, percnt, emin, workspace=int(workspace), mult=int(mult)
+    )
     pval = max(0.0, min(1.0, pval))
     return HTest(
         method=method,
@@ -1328,8 +1408,13 @@ def fisher_test(
         if simulate_p_value:
             return _fisher_test_simulate(tbl, name, int(B))
         return _fisher_test_exact(
-            tbl, name, workspace=int(workspace), hybrid=hybrid,
-            hybrid_pars=hybrid_pars, mult=int(mult))
+            tbl,
+            name,
+            workspace=int(workspace),
+            hybrid=hybrid,
+            hybrid_pars=hybrid_pars,
+            mult=int(mult),
+        )
 
     m = tbl[0, 0] + tbl[1, 0]  # sum(x[, 1])
     n = tbl[0, 1] + tbl[1, 1]  # sum(x[, 2])
@@ -1398,6 +1483,7 @@ def fisher_test(
 
     conf = None
     if conf_int:
+
         def ncp_u(val, alpha):
             if val == hi:
                 return math.inf
@@ -1406,7 +1492,8 @@ def fisher_test(
                 return _nm.uniroot(lambda t: pnhyper(val, t) - alpha, 0.0, 1.0)
             if p > alpha:
                 return 1.0 / _nm.uniroot(
-                    lambda t: pnhyper(val, 1.0 / t) - alpha, eps, 1.0)
+                    lambda t: pnhyper(val, 1.0 / t) - alpha, eps, 1.0
+                )
             return 1.0
 
         def ncp_l(val, alpha):
@@ -1415,11 +1502,12 @@ def fisher_test(
             p = pnhyper(val, 1.0, upper_tail=True)
             if p > alpha:
                 return _nm.uniroot(
-                    lambda t: pnhyper(val, t, upper_tail=True) - alpha, 0.0, 1.0)
+                    lambda t: pnhyper(val, t, upper_tail=True) - alpha, 0.0, 1.0
+                )
             if p < alpha:
                 return 1.0 / _nm.uniroot(
-                    lambda t: pnhyper(val, 1.0 / t, upper_tail=True) - alpha,
-                    eps, 1.0)
+                    lambda t: pnhyper(val, 1.0 / t, upper_tail=True) - alpha, eps, 1.0
+                )
             return 1.0
 
         if alternative == "less":
@@ -1465,7 +1553,7 @@ def prop_test(
     if x_arr.shape != n_arr.shape:
         raise ValueError("prop_test(): x and n must have the same length")
     k = len(x_arr)
-    estimates = {f"prop {i+1}": float(x_arr[i] / n_arr[i]) for i in range(k)}
+    estimates = {f"prop {i + 1}": float(x_arr[i] / n_arr[i]) for i in range(k)}
 
     if k == 1:
         p_null = 0.5 if p is None else float(np.asarray(p))
@@ -1476,7 +1564,7 @@ def prop_test(
         if p_null in (0.0, 1.0):
             stat = float("inf") if diff > 0 else 0.0
         else:
-            stat = (diff ** 2) / (p_null * (1 - p_null) / n0)
+            stat = (diff**2) / (p_null * (1 - p_null) / n0)
         df = 1
         pval = float(_dist.pchisq(stat, df, lower_tail=False))
         return HTest(
@@ -1495,10 +1583,9 @@ def prop_test(
         # k-sample equality of proportions: (k × 2) chi-squared. R applies
         # Yates' continuity correction only for the 2×2 case; for k > 2
         # the correction is silently dropped.
-        tbl = np.array([
-            [int(x_arr[i]), int(n_arr[i] - x_arr[i])]
-            for i in range(k)
-        ], dtype=float)
+        tbl = np.array(
+            [[int(x_arr[i]), int(n_arr[i] - x_arr[i])] for i in range(k)], dtype=float
+        )
         use_correction = correct and k == 2
         stat, df, _ = _chisq_stat(tbl, correct=use_correction)
         suffix = " with continuity correction" if use_correction else ""
@@ -1517,8 +1604,7 @@ def prop_test(
             data_name="x out of n",
         )
     raise NotImplementedError(
-        "prop_test(): k > 1 with explicit ``p`` (vector hypothesis) "
-        "not yet wired"
+        "prop_test(): k > 1 with explicit ``p`` (vector hypothesis) not yet wired"
     )
 
 
@@ -1541,9 +1627,7 @@ def binom_test(
     if n is None:
         x_arr = np.asarray(x, dtype=int)
         if x_arr.shape != (2,):
-            raise ValueError(
-                "binom_test(): n must be provided unless x = (succ, fail)"
-            )
+            raise ValueError("binom_test(): n must be provided unless x = (succ, fail)")
         x_succ = int(x_arr[0])
         n = int(x_arr.sum())
     else:
@@ -1569,13 +1653,17 @@ def binom_test(
         elif x_succ < m:
             i = np.arange(math.ceil(m), n + 1)
             yy = int(np.sum(np.asarray(_dist.dbinom(i, n, p)) <= d * rel_err))
-            pval = float(_dist.pbinom(x_succ, n, p)
-                         + _dist.pbinom(n - yy, n, p, lower_tail=False))
+            pval = float(
+                _dist.pbinom(x_succ, n, p)
+                + _dist.pbinom(n - yy, n, p, lower_tail=False)
+            )
         else:
             i = np.arange(0, math.floor(m) + 1)
             yy = int(np.sum(np.asarray(_dist.dbinom(i, n, p)) <= d * rel_err))
-            pval = float(_dist.pbinom(yy - 1, n, p)
-                         + _dist.pbinom(x_succ - 1, n, p, lower_tail=False))
+            pval = float(
+                _dist.pbinom(yy - 1, n, p)
+                + _dist.pbinom(x_succ - 1, n, p, lower_tail=False)
+            )
 
     # Clopper-Pearson CI via qbeta.
     def p_L(a):
@@ -1684,8 +1772,9 @@ def bartlett_test(x, g) -> HTest:
     n_total = float(ni.sum())
     v_total = float(np.sum(ni * vi) / n_total)
     # stats:::bartlett.test.default
-    stat = ((n_total * math.log(v_total) - np.sum(ni * np.log(vi)))
-            / (1.0 + (np.sum(1.0 / ni) - 1.0 / n_total) / (3.0 * (k - 1))))
+    stat = (n_total * math.log(v_total) - np.sum(ni * np.log(vi))) / (
+        1.0 + (np.sum(1.0 / ni) - 1.0 / n_total) / (3.0 * (k - 1))
+    )
     return HTest(
         method="Bartlett test of homogeneity of variances",
         statistic={"Bartlett's K-squared": float(stat)},
@@ -1754,13 +1843,14 @@ def _swilk(x: np.ndarray):
         if n > 5:
             i1 = 3
             a2 = -a[2] / ssumm2 + _swilk_poly(c2, 6, rsn)
-            fac = math.sqrt((summ2 - 2.0 * (a[1] * a[1]) - 2.0 * (a[2] * a[2]))
-                            / (1.0 - 2.0 * (a1 * a1) - 2.0 * (a2 * a2)))
+            fac = math.sqrt(
+                (summ2 - 2.0 * (a[1] * a[1]) - 2.0 * (a[2] * a[2]))
+                / (1.0 - 2.0 * (a1 * a1) - 2.0 * (a2 * a2))
+            )
             a[2] = a2
         else:
             i1 = 2
-            fac = math.sqrt((summ2 - 2.0 * (a[1] * a[1]))
-                            / (1.0 - 2.0 * (a1 * a1)))
+            fac = math.sqrt((summ2 - 2.0 * (a[1] * a[1])) / (1.0 - 2.0 * (a1 * a1)))
         a[1] = a1
         for i in range(i1, nn2 + 1):
             a[i] /= -fac
@@ -1971,7 +2061,7 @@ def _ks_K2x(n: int, d: float) -> float:
     for i in range(m):
         H[i * m] -= _R_pow_di(h, i + 1)
         H[(m - 1) * m + i] -= _R_pow_di(h, m - i)
-    H[(m - 1) * m] += (_R_pow_di(2 * h - 1, m) if (2 * h - 1 > 0) else 0.0)
+    H[(m - 1) * m] += _R_pow_di(2 * h - 1, m) if (2 * h - 1 > 0) else 0.0
     for i in range(m):
         for j in range(m):
             if i - j + 1 > 0:
@@ -1991,10 +2081,14 @@ def _ks_K2x(n: int, d: float) -> float:
 def _pkolmogorov_one_exact(q, n, lower_tail=True):
     """One-sided one-sample exact Kolmogorov (Birnbaum-Tingey 1951)."""
     jmax = int(math.floor(n * (1 - q)))
-    terms = [math.exp(_nm.lchoose(n, j)
-                      + (n - j) * math.log(1 - q - j / n)
-                      + (j - 1) * math.log(q + j / n))
-             for j in range(0, jmax + 1)]
+    terms = [
+        math.exp(
+            _nm.lchoose(n, j)
+            + (n - j) * math.log(1 - q - j / n)
+            + (j - 1) * math.log(q + j / n)
+        )
+        for j in range(0, jmax + 1)
+    ]
     p = q * _rsum_ld(terms)
     return (1 - p) if lower_tail else p
 
@@ -2121,7 +2215,7 @@ def _psmirnov(q, n_x, n_y, w_combined, alternative, exact, lower_tail=True):
         return 1 - lower_tail
     if q > 1:
         return float(lower_tail)
-    two = (alternative == "two.sided")
+    two = alternative == "two.sided"
     n = n_x * n_y / (n_x + n_y)
     if not exact:  # asymptotic
         if two:
@@ -2156,7 +2250,7 @@ _DBL_EPS = 2.220446049250313e-16
 def _psmirnov_exact_p(q, n_x, n_y, z, alternative, lower_tail):
     """R's ``psmirnov_exact`` probability (no log) — the exact branch of
     :func:`_psmirnov`, factored for the public ``psmirnov``."""
-    two = (alternative == "two.sided")
+    two = alternative == "two.sided"
     m_, nn = int(n_x), int(n_y)
     if alternative == "less":
         m_, nn = nn, m_
@@ -2176,7 +2270,7 @@ def _psmirnov_asymp_r(q, n_x, n_y, alternative, lower_tail, log_p):
     if alternative == "two.sided":
         ret = _ks_K2l(math.sqrt(n) * q, lower_tail, 1e-6)
         return math.log(ret) if log_p else ret
-    ret = -math.expm1((-2 * n) * (q * q))          # R: -expm1(-2 n q^2)
+    ret = -math.expm1((-2 * n) * (q * q))  # R: -expm1(-2 n q^2)
     if log_p:
         return math.log(ret) if lower_tail else math.log1p(-ret)
     return ret if lower_tail else 1 - ret
@@ -2237,17 +2331,26 @@ def rsmirnov(n, sizes, z=None, alternative="two.sided"):
     if n_y < 1:
         raise ValueError("not enough 'y' data")
     if z is None:
-        rt = [1] * (n_x + n_y)                      # rep.int(1L, n_x + n_y)
+        rt = [1] * (n_x + n_y)  # rep.int(1L, n_x + n_y)
     else:
         _, counts = np.unique(np.asarray(z), return_counts=True)  # table(z)
         rt = [int(v) for v in counts]
     cols = [n_y, n_x] if alternative == "less" else [n_x, n_y]
-    two = (alternative == "two.sided")
+    two = alternative == "two.sided"
     return _smirnov_sim(rt, cols, B, two, _dist._r_rng())
 
 
-def psmirnov(q, sizes, z=None, alternative="two.sided", exact=True,
-             simulate=False, B=2000, lower_tail=True, log_p=False):
+def psmirnov(
+    q,
+    sizes,
+    z=None,
+    alternative="two.sided",
+    exact=True,
+    simulate=False,
+    B=2000,
+    lower_tail=True,
+    log_p=False,
+):
     """R's ``psmirnov(q, sizes, z, alternative, exact, simulate, B, lower.tail,
     log.p)`` — the two-sample Smirnov CDF ``P(D < q)`` (ks.test.R). Exact
     (Schröer-Trenkler recursion, incl. ties) and asymptotic branches are
@@ -2270,14 +2373,14 @@ def psmirnov(q, sizes, z=None, alternative="two.sided", exact=True,
         else:
             p0 = None
         if p0 is not None:
-            ret[i] = ((math.log(p0) if p0 > 0 else -math.inf) if log_p else p0)
+            ret[i] = (math.log(p0) if p0 > 0 else -math.inf) if log_p else p0
         elif simulate:
             ret[i] = _psmirnov_ecdf(dsim, qi, lower_tail, log_p)
         elif not exact:
             ret[i] = _psmirnov_asymp_r(qi, n_x, n_y, alternative, lower_tail, log_p)
         else:
             pp = _psmirnov_exact_p(qi, n_x, n_y, z, alternative, lower_tail)
-            if not math.isfinite(pp):               # exact failed → MC fallback
+            if not math.isfinite(pp):  # exact failed → MC fallback
                 if dsim is None:
                     dsim = rsmirnov(B, sizes, z, alternative)
                 ret[i] = _psmirnov_ecdf(dsim, qi, lower_tail, log_p)
@@ -2286,23 +2389,37 @@ def psmirnov(q, sizes, z=None, alternative="two.sided", exact=True,
     return float(ret[0]) if np.ndim(q) == 0 else ret
 
 
-def qsmirnov(p, sizes, z=None, alternative="two.sided", exact=True,
-             simulate=False, B=2000):
+def qsmirnov(
+    p, sizes, z=None, alternative="two.sided", exact=True, simulate=False, B=2000
+):
     """R's ``qsmirnov(p, sizes, z, alternative, exact, simulate, B)`` — the
     Smirnov quantile: the smallest support point ``d`` with ``psmirnov(d) >= p``
     (ks.test.R). With ``p=None`` returns the ``{stat, prob}`` support table."""
     n_x = int(math.floor(sizes[0]))
     n_y = int(math.floor(sizes[1]))
     if n_x * n_y < 1e4:
-        stat = np.unique(np.subtract.outer(
-            np.arange(n_x + 1) / n_x, np.arange(n_y + 1) / n_y).ravel())
+        stat = np.unique(
+            np.subtract.outer(
+                np.arange(n_x + 1) / n_x, np.arange(n_y + 1) / n_y
+            ).ravel()
+        )
     else:
         stat = np.arange(-10000, 10001) / (1e4 + 1)
     if alternative == "two.sided":
         stat = np.abs(stat)
-    prb = np.atleast_1d(psmirnov(stat, sizes, z=z, alternative=alternative,
-                                 exact=exact, simulate=simulate, B=B,
-                                 lower_tail=True, log_p=False))
+    prb = np.atleast_1d(
+        psmirnov(
+            stat,
+            sizes,
+            z=z,
+            alternative=alternative,
+            exact=exact,
+            simulate=simulate,
+            B=B,
+            lower_tail=True,
+            log_p=False,
+        )
+    )
     if p is None:
         return {"stat": stat, "prob": prb}
     pa = np.atleast_1d(np.asarray(p, dtype=float))
@@ -2318,10 +2435,20 @@ def qsmirnov(p, sizes, z=None, alternative="two.sided", exact=True,
 
 
 _KS_CDF_NAMES = {
-    "pnorm": "pnorm", "punif": "punif", "pexp": "pexp", "pgamma": "pgamma",
-    "pbeta": "pbeta", "plnorm": None, "pchisq": "pchisq", "pt": "pt",
-    "pf": "pf", "ppois": "ppois", "pbinom": "pbinom", "pcauchy": None,
-    "pweibull": None, "plogis": None,
+    "pnorm": "pnorm",
+    "punif": "punif",
+    "pexp": "pexp",
+    "pgamma": "pgamma",
+    "pbeta": "pbeta",
+    "plnorm": None,
+    "pchisq": "pchisq",
+    "pt": "pt",
+    "pf": "pf",
+    "ppois": "ppois",
+    "pbinom": "pbinom",
+    "pcauchy": None,
+    "pweibull": None,
+    "plogis": None,
 }
 
 
@@ -2334,7 +2461,8 @@ def _ks_resolve_cdf(y):
         return getattr(_dist, name)
     raise ValueError(
         f"ks_test(): 'y' must be a second sample, a CDF callable, or a "
-        f"supported distribution name; got {y!r}")
+        f"supported distribution name; got {y!r}"
+    )
 
 
 def ks_test(
@@ -2374,18 +2502,23 @@ def ks_test(
         cdf = _ks_resolve_cdf(y)
         ties = len(np.unique(x_arr)) < n
         use_exact = ((n < 100) and not ties) if exact is None else exact
-        method = ("Exact" if use_exact else "Asymptotic") \
-            + " one-sample Kolmogorov-Smirnov test"
-        xs = np.asarray(cdf(np.sort(x_arr), *args, **kwargs), float) \
-            - np.arange(n) / n
+        method = (
+            "Exact" if use_exact else "Asymptotic"
+        ) + " one-sample Kolmogorov-Smirnov test"
+        xs = np.asarray(cdf(np.sort(x_arr), *args, **kwargs), float) - np.arange(n) / n
         if alternative == "two.sided":
             stat = float(max(np.max(xs), np.max(1.0 / n - xs)))
         elif alternative == "greater":
             stat = float(np.max(1.0 / n - xs))
         else:
             stat = float(np.max(xs))
-        pval = _pkolmogorov(stat, n, two_sided=(alternative == "two.sided"),
-                            exact=use_exact, lower_tail=False)
+        pval = _pkolmogorov(
+            stat,
+            n,
+            two_sided=(alternative == "two.sided"),
+            exact=use_exact,
+            lower_tail=False,
+        )
         nm_alt = {
             "two.sided": "two-sided",
             "less": "the CDF of x lies below the null hypothesis",
@@ -2400,8 +2533,9 @@ def ks_test(
             raise ValueError("not enough 'y' data")
         n_x = n
         use_exact = (n_x * n_y < 10000) if exact is None else exact
-        method = ("Exact" if use_exact else "Asymptotic") \
-            + " two-sample Kolmogorov-Smirnov test"
+        method = (
+            "Exact" if use_exact else "Asymptotic"
+        ) + " two-sample Kolmogorov-Smirnov test"
         w = np.concatenate([x_arr, y_arr])
         order = np.argsort(w, kind="stable")
         vals = np.where(order < n_x, 1.0 / n_x, -1.0 / n_y)
@@ -2414,8 +2548,9 @@ def ks_test(
             z[_i] = float(acc)
         ties = len(np.unique(w)) < (n_x + n_y)
         if ties:
-            keep = np.concatenate([np.where(np.diff(np.sort(w)) != 0)[0],
-                                   [n_x + n_y - 1]])
+            keep = np.concatenate(
+                [np.where(np.diff(np.sort(w)) != 0)[0], [n_x + n_y - 1]]
+            )
             z = z[keep]
         if alternative == "two.sided":
             stat = float(np.max(np.abs(z)))
@@ -2423,8 +2558,15 @@ def ks_test(
             stat = float(np.max(z))
         else:
             stat = float(-np.min(z))
-        pval = _psmirnov(stat, n_x, n_y, w if ties else None,
-                         alternative, use_exact, lower_tail=False)
+        pval = _psmirnov(
+            stat,
+            n_x,
+            n_y,
+            w if ties else None,
+            alternative,
+            use_exact,
+            lower_tail=False,
+        )
         data_name = "x and y"
 
     pval = min(1.0, max(0.0, pval))
@@ -2449,16 +2591,14 @@ def mcnemar_test(x, y=None, *, correct: bool = True) -> HTest:
     else:
         tbl = np.asarray(x)
     if tbl.shape != (2, 2):
-        raise ValueError(
-            f"mcnemar_test(): table must be 2x2 (got {tbl.shape})"
-        )
+        raise ValueError(f"mcnemar_test(): table must be 2x2 (got {tbl.shape})")
     b = float(tbl[0, 1])
     c = float(tbl[1, 0])
     if b + c == 0:
         stat = 0.0
     elif correct:
         diff = max(abs(b - c) - 1, 0.0)
-        stat = diff ** 2 / (b + c)
+        stat = diff**2 / (b + c)
     else:
         stat = (b - c) ** 2 / (b + c)
     pval = float(_dist.pchisq(stat, 1, lower_tail=False))
@@ -2485,17 +2625,17 @@ def friedman_test(y, groups, blocks) -> HTest:
     g_arr = np.asarray(groups)
     b_arr = np.asarray(blocks)
     if not (y_arr.shape == g_arr.shape == b_arr.shape):
-        raise ValueError(
-            "friedman_test(): y, groups, blocks must have the same length"
-        )
+        raise ValueError("friedman_test(): y, groups, blocks must have the same length")
     # Internal column names use ``__y__`` / ``__g__`` / ``__b__`` so user
     # group/block labels equal to "y" or "g" or "b" don't collide with
     # the temp column names after pivot.
-    df = pl.DataFrame({
-        "__y__": y_arr,
-        "__g__": pl.Series(g_arr).cast(pl.Utf8),
-        "__b__": pl.Series(b_arr).cast(pl.Utf8),
-    })
+    df = pl.DataFrame(
+        {
+            "__y__": y_arr,
+            "__g__": pl.Series(g_arr).cast(pl.Utf8),
+            "__b__": pl.Series(b_arr).cast(pl.Utf8),
+        }
+    )
     wide = df.pivot(values="__y__", index="__b__", on="__g__")
     cols = [c for c in wide.columns if c != "__b__"]
     # (blocks × groups) matrix; rank within each block-row (R: t(apply(y,1,rank))).
@@ -2507,9 +2647,12 @@ def friedman_test(y, groups, blocks) -> HTest:
     for row in mat:
         _, cnt = np.unique(row, return_counts=True)
         cnt = cnt.astype(float)
-        tie_sum += float(np.sum(cnt ** 3 - cnt))
-    stat = (12.0 * np.sum((r.sum(axis=0) - n * (k + 1) / 2.0) ** 2)
-            / (n * k * (k + 1) - tie_sum / (k - 1)))
+        tie_sum += float(np.sum(cnt**3 - cnt))
+    stat = (
+        12.0
+        * np.sum((r.sum(axis=0) - n * (k + 1) / 2.0) ** 2)
+        / (n * k * (k + 1) - tie_sum / (k - 1))
+    )
     return HTest(
         method="Friedman rank sum test",
         statistic={"Friedman chi-squared": float(stat)},
@@ -2531,8 +2674,7 @@ def _rmedian(arr) -> float:
     return _rmean([a[half - 1], a[half]])
 
 
-def oneway_test(formula: str, data: pl.DataFrame, *,
-                var_equal: bool = False) -> HTest:
+def oneway_test(formula: str, data: pl.DataFrame, *, var_equal: bool = False) -> HTest:
     """R's ``oneway.test`` — test for equal means across groups.
 
     Welch's ANOVA by default (``var_equal=False``, not assuming equal
@@ -2559,18 +2701,18 @@ def oneway_test(formula: str, data: pl.DataFrame, *,
     v_i = np.array([_rvar(gr) for gr in groups])
     w_i = n_i / v_i
     sum_w = _rsum_ld(w_i)
-    tmp = _rsum_ld((1 - w_i / sum_w) ** 2 / (n_i - 1)) / (k ** 2 - 1)
+    tmp = _rsum_ld((1 - w_i / sum_w) ** 2 / (n_i - 1)) / (k**2 - 1)
     if var_equal:
         n = _rsum_ld(n_i)
         grand = _rmean(y)
-        stat = ((_rsum_ld(n_i * (m_i - grand) ** 2) / (k - 1))
-                / (_rsum_ld((n_i - 1) * v_i) / (n - k)))
+        stat = (_rsum_ld(n_i * (m_i - grand) ** 2) / (k - 1)) / (
+            _rsum_ld((n_i - 1) * v_i) / (n - k)
+        )
         df1, df2 = float(k - 1), float(n - k)
         method = "One-way analysis of means"
     else:
         m = _rsum_ld(w_i * m_i) / sum_w
-        stat = (_rsum_ld(w_i * (m_i - m) ** 2)
-                / ((k - 1) * (1 + 2 * (k - 2) * tmp)))
+        stat = _rsum_ld(w_i * (m_i - m) ** 2) / ((k - 1) * (1 + 2 * (k - 2) * tmp))
         df1, df2 = float(k - 1), 1.0 / (3 * tmp)
         method = "One-way analysis of means (not assuming equal variances)"
     pval = float(_dist.pf(stat, df1, df2, lower_tail=False))
@@ -2610,9 +2752,8 @@ def fligner_test(x, g) -> HTest:
     xc = x - np.array([med[gi] for gi in g])
     a = _dist.qnorm((1 + _avg_rank(np.abs(xc)) / (n + 1)) / 2)
     a = a - _rmean(a)
-    v = _rsum_ld(a ** 2) / (n - 1)
-    stat = _rsum_ld([len(a[g == gl]) * _rmean(a[g == gl]) ** 2
-                     for gl in glabels]) / v
+    v = _rsum_ld(a**2) / (n - 1)
+    stat = _rsum_ld([len(a[g == gl]) * _rmean(a[g == gl]) ** 2 for gl in glabels]) / v
     df = k - 1
     return HTest(
         method="Fligner-Killeen test of homogeneity of variances",
@@ -2642,7 +2783,7 @@ def mood_test(x, y, alternative: str = "two.sided") -> HTest:
     N = m + n
     if N < 3:
         raise ValueError("not enough observations")
-    E = m * (N ** 2 - 1) / 12
+    E = m * (N**2 - 1) / 12
     v = (1 / 180) * m * n * (N + 1) * (N + 2) * (N - 2)
     z = np.concatenate([x, y])
     if len(np.unique(z)) == len(z):
@@ -2655,7 +2796,8 @@ def mood_test(x, y, alternative: str = "two.sided") -> HTest:
         p = np.cumsum((np.arange(1, N + 1) - (N + 1) / 2) ** 2)
         ct = np.cumsum(t)
         v = v - (m * n) / (180 * N * (N - 1)) * _rsum_ld(
-            t * (t ** 2 - 1) * (t ** 2 - 4 + 15 * (N - 2 * ct + t) ** 2))
+            t * (t**2 - 1) * (t**2 - 4 + 15 * (N - 2 * ct + t) ** 2)
+        )
         pcum = p[(ct).astype(int) - 1]
         dp = np.diff(np.concatenate([[0.0], pcum]))
         T = _rsum_ld(a * dp / t)
@@ -2686,8 +2828,9 @@ def quade_test(y, groups=None, blocks=None) -> HTest:
     p-value (nmath ``pf``) are bit-exact to R; the degenerate ``A == B``
     case returns ``NaN`` with ``PVAL = gamma(k+1)^(1-b)``.
     """
-    y_arr = np.asarray(y, dtype=float) if not isinstance(y, np.ndarray) \
-        else y.astype(float)
+    y_arr = (
+        np.asarray(y, dtype=float) if not isinstance(y, np.ndarray) else y.astype(float)
+    )
     if y_arr.ndim == 2 and groups is None and blocks is None:
         mat = y_arr
         dname = "y"
@@ -2697,7 +2840,8 @@ def quade_test(y, groups=None, blocks=None) -> HTest:
         bv = np.asarray(blocks)
         if not (yv.shape == gv.shape == bv.shape):
             raise ValueError(
-                "quade_test(): y, groups, blocks must have the same length")
+                "quade_test(): y, groups, blocks must have the same length"
+            )
         glabels = np.unique(gv)
         blabels = np.unique(bv)
         mat = np.full((len(blabels), len(glabels)), np.nan)
@@ -2732,8 +2876,9 @@ def quade_test(y, groups=None, blocks=None) -> HTest:
     )
 
 
-def poisson_test(x, T=1.0, r=1.0, alternative: str = "two.sided",
-                 conf_level: float = 0.95) -> HTest:
+def poisson_test(
+    x, T=1.0, r=1.0, alternative: str = "two.sided", conf_level: float = 0.95
+) -> HTest:
     """R's ``poisson.test`` — exact test for one or two Poisson rates.
 
     One count (``k = 1``): exact test of the rate against ``r`` on time base
@@ -2769,16 +2914,20 @@ def poisson_test(x, T=1.0, r=1.0, alternative: str = "two.sided",
 
     if k == 2:
         prob = r * T[0] / (r * T[0] + T[1])
-        rval = binom_test([int(x[0]), int(x[1])], p=prob,
-                          alternative=alternative, conf_level=conf_level)
+        rval = binom_test(
+            [int(x[0]), int(x[1])],
+            p=prob,
+            alternative=alternative,
+            conf_level=conf_level,
+        )
         pp = rval.conf_int
-        ci = (pp[0] / (1 - pp[0]) * T[1] / T[0],
-              pp[1] / (1 - pp[1]) * T[1] / T[0])
+        ci = (pp[0] / (1 - pp[0]) * T[1] / T[0], pp[1] / (1 - pp[1]) * T[1] / T[0])
         return HTest(
             method="Comparison of Poisson rates",
             statistic={"count1": float(x[0])},
-            parameter={"expected count1":
-                       float(x.sum() * r * T[0] / (T[0] + T[1] * r))},
+            parameter={
+                "expected count1": float(x.sum() * r * T[0] / (T[0] + T[1] * r))
+            },
             p_value=rval.p_value,
             conf_int=ci,
             estimate={"rate ratio": float((x[0] / T[0]) / (x[1] / T[1]))},
@@ -2809,13 +2958,15 @@ def poisson_test(x, T=1.0, r=1.0, alternative: str = "two.sided",
                     N = 2 * N
                 i = np.arange(math.ceil(m), N + 1)
                 y = int(np.sum(np.asarray(_dist.dpois(i, m)) <= d * rel_err))
-                pval = (float(_dist.ppois(xx, m))
-                        + float(_dist.ppois(N - y, m, lower_tail=False)))
+                pval = float(_dist.ppois(xx, m)) + float(
+                    _dist.ppois(N - y, m, lower_tail=False)
+                )
             else:  # xx > m
                 i = np.arange(0, math.floor(m) + 1)
                 y = int(np.sum(np.asarray(_dist.dpois(i, m)) <= d * rel_err))
-                pval = (float(_dist.ppois(y - 1, m))
-                        + float(_dist.ppois(xx - 1, m, lower_tail=False)))
+                pval = float(_dist.ppois(y - 1, m)) + float(
+                    _dist.ppois(xx - 1, m, lower_tail=False)
+                )
 
     def p_L(xv, alpha):
         return 0.0 if xv == 0 else float(_dist.qgamma(alpha, xv))
@@ -2864,12 +3015,11 @@ def prop_trend_test(x, n, score=None) -> HTest:
     p = _rsum_ld(x) / _rsum_ld(n)
     w = n / p / (1 - p)
     freq = x / n
-    fit = lm("freq ~ score",
-             pl.DataFrame({"freq": freq, "score": score}), weights=w)
+    fit = lm("freq ~ score", pl.DataFrame({"freq": freq, "score": score}), weights=w)
     chisq = float(np.asarray(fit.effects)[1]) ** 2
     score_str = " ".join(
-        str(int(s)) if float(s).is_integer() else repr(float(s))
-        for s in score)
+        str(int(s)) if float(s).is_integer() else repr(float(s)) for s in score
+    )
     return HTest(
         method="Chi-squared Test for Trend in Proportions",
         statistic={"X-squared": chisq},
@@ -2896,8 +3046,7 @@ def _cansari(k: int, m: int, n: int, memo: dict) -> float:
     elif n == 0:
         v = 1.0 if k == lo else 0.0
     else:
-        v = (_cansari(k, m, n - 1, memo)
-             + _cansari(k - (m + n + 1) // 2, m - 1, n, memo))
+        v = _cansari(k, m, n - 1, memo) + _cansari(k - (m + n + 1) // 2, m - 1, n, memo)
     memo[key] = v
     return v
 
@@ -2919,8 +3068,9 @@ def _pansari(q, m: int, n: int) -> float:
     return p / c
 
 
-def ansari_test(x, y, alternative: str = "two.sided",
-                exact: Optional[bool] = None) -> HTest:
+def ansari_test(
+    x, y, alternative: str = "two.sided", exact: Optional[bool] = None
+) -> HTest:
     """R's ``ansari.test`` — Ansari-Bradley two-sample test of scale.
 
     Faithful port of ``ansari.test.R`` (p-value only; ``conf.int`` is not
@@ -2968,9 +3118,11 @@ def ansari_test(x, y, alternative: str = "two.sided",
         even = (N % 2) == 0
         if not ties:
             z = stat - (m * (N + 2) / 4 if even else m * (N + 1) ** 2 / (4 * N))
-            sigma = (math.sqrt((m * n * (N + 2) * (N - 2)) / (48 * (N - 1)))
-                     if even else
-                     math.sqrt((m * n * (N + 1) * (3 + N ** 2)) / (48 * N ** 2)))
+            sigma = (
+                math.sqrt((m * n * (N + 2) * (N - 2)) / (48 * (N - 1)))
+                if even
+                else math.sqrt((m * n * (N + 1) * (3 + N**2)) / (48 * N**2))
+            )
         else:
             z = stat - m * _rmean(ab)
             sigma = math.sqrt(m * n * _rvar(ab) / N)
@@ -2983,6 +3135,7 @@ def ansari_test(x, y, alternative: str = "two.sided",
             pval = p
         if exact and ties:
             import warnings
+
             warnings.warn("cannot compute exact p-value with ties")
 
     return HTest(
@@ -3044,10 +3197,10 @@ def _mantelhaen_exact(arr, ns, alternative, conf_level) -> HTest:
     the common-odds-ratio p-value, MLE and CI from the product-hypergeometric
     density (:func:`_d2x2xk`) inverted with the ported ``uniroot`` — mirrors
     fisher_test's non-central hypergeometric machinery."""
-    mn = arr.sum(axis=0)               # (2, K): column totals per stratum
+    mn = arr.sum(axis=0)  # (2, K): column totals per stratum
     m_ = mn[0, :]
     n_ = mn[1, :]
-    t_ = arr.sum(axis=1)[0, :]         # row-1 totals per stratum
+    t_ = arr.sum(axis=1)[0, :]  # row-1 totals per stratum
     s = _rsum_ld(arr[0, 0, :])
     lo = _rsum_ld(np.maximum(0.0, t_ - n_))
     hi = _rsum_ld(np.minimum(m_, t_))
@@ -3108,8 +3261,7 @@ def _mantelhaen_exact(arr, ns, alternative, conf_level) -> HTest:
         if p < alpha:
             return _nm.uniroot(lambda tt: pn(val, tt) - alpha, 0.0, 1.0)
         if p > alpha:
-            return 1.0 / _nm.uniroot(
-                lambda tt: pn(val, 1.0 / tt) - alpha, eps, 1.0)
+            return 1.0 / _nm.uniroot(lambda tt: pn(val, 1.0 / tt) - alpha, eps, 1.0)
         return 1.0
 
     def ncp_l(val, alpha):
@@ -3118,10 +3270,12 @@ def _mantelhaen_exact(arr, ns, alternative, conf_level) -> HTest:
         p = pn(val, 1.0, upper_tail=True)
         if p > alpha:
             return _nm.uniroot(
-                lambda tt: pn(val, tt, upper_tail=True) - alpha, 0.0, 1.0)
+                lambda tt: pn(val, tt, upper_tail=True) - alpha, 0.0, 1.0
+            )
         if p < alpha:
             return 1.0 / _nm.uniroot(
-                lambda tt: pn(val, 1.0 / tt, upper_tail=True) - alpha, eps, 1.0)
+                lambda tt: pn(val, 1.0 / tt, upper_tail=True) - alpha, eps, 1.0
+            )
         return 1.0
 
     if alternative == "less":
@@ -3144,9 +3298,15 @@ def _mantelhaen_exact(arr, ns, alternative, conf_level) -> HTest:
     )
 
 
-def mantelhaen_test(x, y=None, z=None, alternative: str = "two.sided",
-                    correct: bool = True, exact: bool = False,
-                    conf_level: float = 0.95) -> HTest:
+def mantelhaen_test(
+    x,
+    y=None,
+    z=None,
+    alternative: str = "two.sided",
+    correct: bool = True,
+    exact: bool = False,
+    conf_level: float = 0.95,
+) -> HTest:
     """R's ``mantelhaen.test`` — Cochran-Mantel-Haenszel test.
 
     ``x`` is an ``I×J×K`` array of stratified counts (or parallel factor
@@ -3175,38 +3335,44 @@ def mantelhaen_test(x, y=None, z=None, alternative: str = "two.sided",
     if nr == 2 and nc == 2:
         if exact:
             return _mantelhaen_exact(arr, ns, alternative, conf_level)
-        s_x = arr.sum(axis=1)          # (2, K): row totals per stratum
-        s_y = arr.sum(axis=0)          # (2, K): col totals per stratum
-        n = arr.sum(axis=(0, 1))       # (K,): stratum totals
+        s_x = arr.sum(axis=1)  # (2, K): row totals per stratum
+        s_y = arr.sum(axis=0)  # (2, K): col totals per stratum
+        n = arr.sum(axis=(0, 1))  # (K,): stratum totals
         DELTA = _rsum_ld(arr[0, 0, :] - s_x[0, :] * s_y[0, :] / n)
         YATES = 0.5 if (correct and abs(DELTA) >= 0.5) else 0.0
-        denom = _rsum_ld(s_x[0, :] * s_x[1, :] * s_y[0, :] * s_y[1, :]
-                         / (n ** 2 * (n - 1)))
+        denom = _rsum_ld(
+            s_x[0, :] * s_x[1, :] * s_y[0, :] * s_y[1, :] / (n**2 * (n - 1))
+        )
         stat = (abs(DELTA) - YATES) ** 2 / denom
         if alternative == "two.sided":
             pval = float(_dist.pchisq(stat, 1, lower_tail=False))
         else:
             zv = math.copysign(math.sqrt(stat), DELTA)
             pval = float(_dist.pnorm(zv, lower_tail=(alternative == "less")))
-        method = ("Mantel-Haenszel chi-squared test "
-                  + ("with" if YATES else "without")
-                  + " continuity correction")
+        method = (
+            "Mantel-Haenszel chi-squared test "
+            + ("with" if YATES else "without")
+            + " continuity correction"
+        )
         x11, x12 = arr[0, 0, :], arr[0, 1, :]
         x21, x22 = arr[1, 0, :], arr[1, 1, :]
         s_diag = _rsum_ld(x11 * x22 / n)
         s_offd = _rsum_ld(x12 * x21 / n)
         estimate = s_diag / s_offd
         sd = math.sqrt(
-            _rsum_ld((x11 + x22) * x11 * x22 / n ** 2) / (2 * s_diag ** 2)
-            + _rsum_ld(((x11 + x22) * x12 * x21 + (x12 + x21) * x11 * x22)
-                       / n ** 2) / (2 * s_diag * s_offd)
-            + _rsum_ld((x12 + x21) * x12 * x21 / n ** 2) / (2 * s_offd ** 2))
+            _rsum_ld((x11 + x22) * x11 * x22 / n**2) / (2 * s_diag**2)
+            + _rsum_ld(((x11 + x22) * x12 * x21 + (x12 + x21) * x11 * x22) / n**2)
+            / (2 * s_diag * s_offd)
+            + _rsum_ld((x12 + x21) * x12 * x21 / n**2) / (2 * s_offd**2)
+        )
         qn = _dist.qnorm
         if alternative == "less":
             ci = (0.0, estimate * math.exp(float(qn(conf_level)) * sd))
         elif alternative == "greater":
-            ci = (estimate * math.exp(float(qn(conf_level, lower_tail=False))
-                                      * sd), float("inf"))
+            ci = (
+                estimate * math.exp(float(qn(conf_level, lower_tail=False)) * sd),
+                float("inf"),
+            )
         else:
             q = float(qn((1 - conf_level) / 2))
             ci = (estimate * math.exp(q * sd), estimate * math.exp(-q * sd))
@@ -3231,13 +3397,13 @@ def mantelhaen_test(x, y=None, z=None, alternative: str = "two.sided",
     for k in range(ns):
         f = arr[:, :, k]
         ntot = f.sum()
-        rowsums = f.sum(axis=1)[:nr - 1]
-        colsums = f.sum(axis=0)[:nc - 1]
-        nvec = nvec + f[:nr - 1, :nc - 1].flatten(order="F")
+        rowsums = f.sum(axis=1)[: nr - 1]
+        colsums = f.sum(axis=0)[: nc - 1]
+        nvec = nvec + f[: nr - 1, : nc - 1].flatten(order="F")
         mvec = mvec + np.outer(rowsums, colsums).flatten(order="F") / ntot
         A_J = np.diag(ntot * colsums) - np.outer(colsums, colsums)
         A_I = np.diag(ntot * rowsums) - np.outer(rowsums, rowsums)
-        V = V + np.kron(A_J, A_I) / (ntot ** 2 * (ntot - 1))
+        V = V + np.kron(A_J, A_I) / (ntot**2 * (ntot - 1))
     nvec = nvec - mvec
     stat = float(nvec @ np.linalg.solve(V, nvec))
     pval = float(_dist.pchisq(stat, df, lower_tail=False))
@@ -3278,10 +3444,8 @@ class PairwiseHTest:
             cells = []
             for j in range(len(self.col_names)):
                 v = self.p_value[i, j]
-                cells.append("-" if (v is None or math.isnan(v))
-                             else _fmt_pval(v))
-            out.append(f"{str(rn):<{rw}}"
-                       + "".join(f"{c:>{cw}}" for c in cells))
+                cells.append("-" if (v is None or math.isnan(v)) else _fmt_pval(v))
+            out.append(f"{str(rn):<{rw}}" + "".join(f"{c:>{cw}}" for c in cells))
         out.append("")
         out.append(f"P value adjustment method: {self.p_adjust_method} ")
         return "\n".join(out)
@@ -3304,9 +3468,14 @@ def _pairwise_table(compare_levels, level_names, method):
     return pp
 
 
-def pairwise_t_test(x, g, p_adjust_method: str = "holm", pool_sd=None,
-                    paired: bool = False,
-                    alternative: str = "two.sided") -> PairwiseHTest:
+def pairwise_t_test(
+    x,
+    g,
+    p_adjust_method: str = "holm",
+    pool_sd=None,
+    paired: bool = False,
+    alternative: str = "two.sided",
+) -> PairwiseHTest:
     """R's ``pairwise.t.test`` — pairwise t-tests with p-value adjustment.
 
     ``pool_sd`` (default ``not paired``) uses a single pooled SD across all
@@ -3336,7 +3505,8 @@ def pairwise_t_test(x, g, p_adjust_method: str = "holm", pool_sd=None,
         degf = nn - 1
         total_degf = _rsum_ld(degf)
         pooled_sd = math.sqrt(
-            _rsum_ld(np.where(degf != 0, s ** 2, 0.0) * degf) / total_degf)
+            _rsum_ld(np.where(degf != 0, s**2, 0.0) * degf) / total_degf
+        )
 
         def compare(i, j):
             dif = xbar[i - 1] - xbar[j - 1]
@@ -3344,24 +3514,29 @@ def pairwise_t_test(x, g, p_adjust_method: str = "holm", pool_sd=None,
             tval = dif / se
             if alternative == "two.sided":
                 return 2 * float(_dist.pt(-abs(tval), total_degf))
-            return float(_dist.pt(tval, total_degf,
-                                  lower_tail=(alternative == "less")))
+            return float(_dist.pt(tval, total_degf, lower_tail=(alternative == "less")))
     else:
         method_str = "paired t tests" if paired else "t tests with non-pooled SD"
 
         def compare(i, j):
             xi = x[g == glabels[i - 1]]
             xj = x[g == glabels[j - 1]]
-            return t_test(xi, xj, paired=paired,
-                          alternative=alternative).p_value
+            return t_test(xi, xj, paired=paired, alternative=alternative).p_value
 
     pp = _pairwise_table(compare, glabels, p_adjust_method)
-    return PairwiseHTest(method_str, pp, list(glabels[1:]),
-                         list(glabels[:-1]), p_adjust_method, "x and g")
+    return PairwiseHTest(
+        method_str,
+        pp,
+        list(glabels[1:]),
+        list(glabels[:-1]),
+        p_adjust_method,
+        "x and g",
+    )
 
 
-def pairwise_wilcox_test(x, g, p_adjust_method: str = "holm",
-                         paired: bool = False, **kwargs) -> PairwiseHTest:
+def pairwise_wilcox_test(
+    x, g, p_adjust_method: str = "holm", paired: bool = False, **kwargs
+) -> PairwiseHTest:
     """R's ``pairwise.wilcox.test`` — pairwise Wilcoxon tests with adjustment.
 
     Each pair is a :func:`wilcox_test`; the p-value table is :func:`p_adjust`-ed
@@ -3382,12 +3557,14 @@ def pairwise_wilcox_test(x, g, p_adjust_method: str = "holm",
         return wt.p_value
 
     pp = _pairwise_table(compare, glabels, p_adjust_method)
-    return PairwiseHTest(holder[0], pp, list(glabels[1:]),
-                         list(glabels[:-1]), p_adjust_method, "x and g")
+    return PairwiseHTest(
+        holder[0], pp, list(glabels[1:]), list(glabels[:-1]), p_adjust_method, "x and g"
+    )
 
 
-def pairwise_prop_test(x, n=None, p_adjust_method: str = "holm",
-                       **kwargs) -> PairwiseHTest:
+def pairwise_prop_test(
+    x, n=None, p_adjust_method: str = "holm", **kwargs
+) -> PairwiseHTest:
     """R's ``pairwise.prop.test`` — pairwise comparison of proportions.
 
     ``x`` is a length-``k`` success vector with trial counts ``n`` (or a
@@ -3414,13 +3591,17 @@ def pairwise_prop_test(x, n=None, p_adjust_method: str = "holm",
     level_names = list(range(1, len(x) + 1))
 
     def compare(i, j):
-        return prop_test([x[i - 1], x[j - 1]], [n[i - 1], n[j - 1]],
-                         **kwargs).p_value
+        return prop_test([x[i - 1], x[j - 1]], [n[i - 1], n[j - 1]], **kwargs).p_value
 
     pp = _pairwise_table(compare, level_names, p_adjust_method)
-    return PairwiseHTest("Pairwise comparison of proportions", pp,
-                         level_names[1:], level_names[:-1],
-                         p_adjust_method, "x")
+    return PairwiseHTest(
+        "Pairwise comparison of proportions",
+        pp,
+        level_names[1:],
+        level_names[:-1],
+        p_adjust_method,
+        "x",
+    )
 
 
 _DBL_XMAX = float(np.finfo(float).max)
@@ -3435,7 +3616,7 @@ def _uniroot_ext(f, lower, upper, extend_int="no", tol=None, maxiter=1000):
     ``[lower, upper]`` until ``f`` changes sign, then Brent-solve via the ported
     ``zeroin2``. ``extend_int`` ∈ {"no","yes","downX","upX"}."""
     if tol is None:
-        tol = _nm._DBL_EPSILON ** 0.25
+        tol = _nm._DBL_EPSILON**0.25
     if not (lower < upper):
         raise ValueError("lower < upper is not fulfilled")
     f_lower = f(lower)
@@ -3449,20 +3630,23 @@ def _uniroot_ext(f, lower, upper, extend_int="no", tol=None, maxiter=1000):
 
     f_low = truncate(f_lower)
     f_upp = truncate(f_upper)
-    do_x = ((sig is None and f_low * f_upp > 0)
-            or (sig is not None and (sig * f_low > 0 or sig * f_upp < 0)))
+    do_x = (sig is None and f_low * f_upp > 0) or (
+        sig is not None and (sig * f_low > 0 or sig * f_upp < 0)
+    )
     it = 0
     if do_x:
+
         def delta_of(u):
             return 0.01 * max(1e-4, abs(u))
+
         if sig is None:
             dl, du = delta_of(lower), delta_of(upper)
-            while (f_lower * f_upper > 0
-                   and (math.isfinite(lower) or math.isfinite(upper))):
+            while f_lower * f_upper > 0 and (
+                math.isfinite(lower) or math.isfinite(upper)
+            ):
                 it += 1
                 if it > maxiter:
-                    raise ValueError(
-                        f"no sign change found in {it - 1} iterations")
+                    raise ValueError(f"no sign change found in {it - 1} iterations")
                 if math.isfinite(lower):
                     ol, of = lower, f_lower
                     lower = lower - dl
@@ -3481,8 +3665,7 @@ def _uniroot_ext(f, lower, upper, extend_int="no", tol=None, maxiter=1000):
             while sig * f_lower > 0:
                 it += 1
                 if it > maxiter:
-                    raise ValueError(
-                        f"no sign change found in {it - 1} iterations")
+                    raise ValueError(f"no sign change found in {it - 1} iterations")
                 lower = lower - d
                 f_lower = f(lower)
                 d *= 2
@@ -3490,8 +3673,7 @@ def _uniroot_ext(f, lower, upper, extend_int="no", tol=None, maxiter=1000):
             while sig * f_upper < 0:
                 it += 1
                 if it > maxiter:
-                    raise ValueError(
-                        f"no sign change found in {it - 1} iterations")
+                    raise ValueError(f"no sign change found in {it - 1} iterations")
                 upper = upper + d
                 f_upper = f(upper)
                 d *= 2
@@ -3527,9 +3709,17 @@ def _assert_prob(x, name):
         raise ValueError(f"'{name}' must be numeric in [0, 1]")
 
 
-def power_t_test(n=None, delta=None, sd=1.0, sig_level=0.05, power=None,
-                 type: str = "two.sample", alternative: str = "two.sided",
-                 strict: bool = False, tol=None) -> PowerHTest:
+def power_t_test(
+    n=None,
+    delta=None,
+    sd=1.0,
+    sig_level=0.05,
+    power=None,
+    type: str = "two.sample",
+    alternative: str = "two.sided",
+    strict: bool = False,
+    tol=None,
+) -> PowerHTest:
     """R's ``power.t.test`` — power of the one/two-sample/paired t-test.
 
     Exactly one of ``n``, ``delta``, ``sd``, ``power``, ``sig_level`` must be
@@ -3538,8 +3728,9 @@ def power_t_test(n=None, delta=None, sd=1.0, sig_level=0.05, power=None,
     noncentral-t ``pt``/``qt`` — bit-exact to R.
     """
     if sum(v is None for v in (n, delta, sd, power, sig_level)) != 1:
-        raise ValueError("exactly one of 'n', 'delta', 'sd', 'power', and "
-                         "'sig_level' must be None")
+        raise ValueError(
+            "exactly one of 'n', 'delta', 'sd', 'power', and 'sig_level' must be None"
+        )
     _assert_prob(sig_level, "sig_level")
     _assert_prob(power, "power")
     tsample = {"one.sample": 1, "two.sample": 2, "paired": 1}[type]
@@ -3559,31 +3750,63 @@ def power_t_test(n=None, delta=None, sd=1.0, sig_level=0.05, power=None,
     if power is None:
         power = pbody(n, delta, sd, sig_level)
     elif n is None:
-        n = _uniroot_ext(lambda v: pbody(v, delta, sd, sig_level) - power,
-                         2, 1e7, "upX", tol)
+        n = _uniroot_ext(
+            lambda v: pbody(v, delta, sd, sig_level) - power, 2, 1e7, "upX", tol
+        )
     elif sd is None:
-        sd = _uniroot_ext(lambda v: pbody(n, delta, v, sig_level) - power,
-                          delta * 1e-7, delta * 1e7, "downX", tol)
+        sd = _uniroot_ext(
+            lambda v: pbody(n, delta, v, sig_level) - power,
+            delta * 1e-7,
+            delta * 1e7,
+            "downX",
+            tol,
+        )
     elif delta is None:
-        delta = _uniroot_ext(lambda v: pbody(n, v, sd, sig_level) - power,
-                             sd * 1e-7, sd * 1e7, "upX", tol)
+        delta = _uniroot_ext(
+            lambda v: pbody(n, v, sd, sig_level) - power,
+            sd * 1e-7,
+            sd * 1e7,
+            "upX",
+            tol,
+        )
     else:  # sig_level is None
         sig_level = _uniroot_ext(
-            lambda v: pbody(n, delta, sd, v) - power, 1e-10, 1 - 1e-10,
-            "yes", tol)
-    note = {"paired": "n is number of *pairs*, sd is std.dev. of "
-            "*differences* within pairs",
-            "two.sample": "n is number in *each* group"}.get(type)
-    method = ({"one.sample": "One-sample", "two.sample": "Two-sample",
-               "paired": "Paired"}[type] + " t test power calculation")
-    return PowerHTest(method, {"n": n, "delta": delta, "sd": sd,
-                               "sig.level": sig_level, "power": power,
-                               "alternative": alternative}, note)
+            lambda v: pbody(n, delta, sd, v) - power, 1e-10, 1 - 1e-10, "yes", tol
+        )
+    note = {
+        "paired": "n is number of *pairs*, sd is std.dev. of "
+        "*differences* within pairs",
+        "two.sample": "n is number in *each* group",
+    }.get(type)
+    method = {
+        "one.sample": "One-sample",
+        "two.sample": "Two-sample",
+        "paired": "Paired",
+    }[type] + " t test power calculation"
+    return PowerHTest(
+        method,
+        {
+            "n": n,
+            "delta": delta,
+            "sd": sd,
+            "sig.level": sig_level,
+            "power": power,
+            "alternative": alternative,
+        },
+        note,
+    )
 
 
-def power_prop_test(n=None, p1=None, p2=None, sig_level=0.05, power=None,
-                    alternative: str = "two.sided", strict: bool = False,
-                    tol=None) -> PowerHTest:
+def power_prop_test(
+    n=None,
+    p1=None,
+    p2=None,
+    sig_level=0.05,
+    power=None,
+    alternative: str = "two.sided",
+    strict: bool = False,
+    tol=None,
+) -> PowerHTest:
     """R's ``power.prop.test`` — power of the two-sample proportion test.
 
     Exactly one of ``n``, ``p1``, ``p2``, ``power``, ``sig_level`` must be
@@ -3591,8 +3814,9 @@ def power_prop_test(n=None, p1=None, p2=None, sig_level=0.05, power=None,
     ported ``pnorm``/``qnorm`` — bit-exact to R.
     """
     if sum(v is None for v in (n, p1, p2, power, sig_level)) != 1:
-        raise ValueError("exactly one of 'n', 'p1', 'p2', 'power', and "
-                         "'sig_level' must be None")
+        raise ValueError(
+            "exactly one of 'n', 'p1', 'p2', 'power', and 'sig_level' must be None"
+        )
     _assert_prob(sig_level, "sig_level")
     _assert_prob(power, "power")
     tside = {"one.sided": 1, "two.sided": 2}[alternative]
@@ -3606,38 +3830,59 @@ def power_prop_test(n=None, p1=None, p2=None, sig_level=0.05, power=None,
             v1 = p1_ * (1 - p1_)
             v2 = p2_ * (1 - p2_)
             denom = math.sqrt(v1 + v2)
-            return (float(_dist.pnorm(
-                        (math.sqrt(n_) * d - qu * math.sqrt(2 * vbar)) / denom))
-                    + float(_dist.pnorm(
-                        (math.sqrt(n_) * d + qu * math.sqrt(2 * vbar)) / denom,
-                        lower_tail=False)))
-        return float(_dist.pnorm(
-            (math.sqrt(n_) * d - qu * math.sqrt((p1_ + p2_)
-                                                * (1 - (p1_ + p2_) / 2)))
-            / math.sqrt(p1_ * (1 - p1_) + p2_ * (1 - p2_))))
+            return float(
+                _dist.pnorm((math.sqrt(n_) * d - qu * math.sqrt(2 * vbar)) / denom)
+            ) + float(
+                _dist.pnorm(
+                    (math.sqrt(n_) * d + qu * math.sqrt(2 * vbar)) / denom,
+                    lower_tail=False,
+                )
+            )
+        return float(
+            _dist.pnorm(
+                (
+                    math.sqrt(n_) * d
+                    - qu * math.sqrt((p1_ + p2_) * (1 - (p1_ + p2_) / 2))
+                )
+                / math.sqrt(p1_ * (1 - p1_) + p2_ * (1 - p2_))
+            )
+        )
 
     if power is None:
         power = pbody(n, p1, p2, sig_level)
     elif n is None:
-        n = _uniroot_ext(lambda v: pbody(v, p1, p2, sig_level) - power,
-                         1, 1e7, "upX", tol)
+        n = _uniroot_ext(
+            lambda v: pbody(v, p1, p2, sig_level) - power, 1, 1e7, "upX", tol
+        )
     elif p1 is None:
-        p1 = _uniroot_ext(lambda v: pbody(n, v, p2, sig_level) - power,
-                          0, p2, "yes", tol)
+        p1 = _uniroot_ext(
+            lambda v: pbody(n, v, p2, sig_level) - power, 0, p2, "yes", tol
+        )
     elif p2 is None:
-        p2 = _uniroot_ext(lambda v: pbody(n, p1, v, sig_level) - power,
-                          p1, 1, "yes", tol)
+        p2 = _uniroot_ext(
+            lambda v: pbody(n, p1, v, sig_level) - power, p1, 1, "yes", tol
+        )
     else:  # sig_level is None
         sig_level = _uniroot_ext(
-            lambda v: pbody(n, p1, p2, v) - power, 1e-10, 1 - 1e-10, "upX", tol)
+            lambda v: pbody(n, p1, p2, v) - power, 1e-10, 1 - 1e-10, "upX", tol
+        )
     return PowerHTest(
         "Two-sample comparison of proportions power calculation",
-        {"n": n, "p1": p1, "p2": p2, "sig.level": sig_level, "power": power,
-         "alternative": alternative}, "n is number in *each* group")
+        {
+            "n": n,
+            "p1": p1,
+            "p2": p2,
+            "sig.level": sig_level,
+            "power": power,
+            "alternative": alternative,
+        },
+        "n is number in *each* group",
+    )
 
 
-def power_anova_test(groups=None, n=None, between_var=None, within_var=None,
-                     sig_level=0.05, power=None) -> PowerHTest:
+def power_anova_test(
+    groups=None, n=None, between_var=None, within_var=None, sig_level=0.05, power=None
+) -> PowerHTest:
     """R's ``power.anova.test`` — power of the balanced one-way ANOVA F-test.
 
     Exactly one of ``groups``, ``n``, ``between_var``, ``within_var``,
@@ -3645,10 +3890,14 @@ def power_anova_test(groups=None, n=None, between_var=None, within_var=None,
     of ``power.anova.test`` using the ported noncentral-F ``pf``/``qf`` —
     bit-exact to R.
     """
-    if sum(v is None for v in (groups, n, between_var, within_var, power,
-                               sig_level)) != 1:
-        raise ValueError("exactly one of 'groups', 'n', 'between_var', "
-                         "'within_var', 'power', and 'sig_level' must be None")
+    if (
+        sum(v is None for v in (groups, n, between_var, within_var, power, sig_level))
+        != 1
+    ):
+        raise ValueError(
+            "exactly one of 'groups', 'n', 'between_var', "
+            "'within_var', 'power', and 'sig_level' must be None"
+        )
     if groups is not None and groups < 2:
         raise ValueError("number of groups must be at least 2")
     if n is not None and n < 2:
@@ -3658,38 +3907,53 @@ def power_anova_test(groups=None, n=None, between_var=None, within_var=None,
 
     def pbody(groups_, n_, bv, wv, sig_):
         lam = (groups_ - 1) * n_ * (bv / wv)
-        qf_ = float(_dist.qf(sig_, groups_ - 1, (n_ - 1) * groups_,
-                             lower_tail=False))
-        return float(_dist.pf(qf_, groups_ - 1, (n_ - 1) * groups_, ncp=lam,
-                              lower_tail=False))
+        qf_ = float(_dist.qf(sig_, groups_ - 1, (n_ - 1) * groups_, lower_tail=False))
+        return float(
+            _dist.pf(qf_, groups_ - 1, (n_ - 1) * groups_, ncp=lam, lower_tail=False)
+        )
 
     if power is None:
         power = pbody(groups, n, between_var, within_var, sig_level)
     elif groups is None:
         groups = _uniroot_ext(
-            lambda v: pbody(v, n, between_var, within_var, sig_level) - power,
-            2, 1e2)
+            lambda v: pbody(v, n, between_var, within_var, sig_level) - power, 2, 1e2
+        )
     elif n is None:
         n = _uniroot_ext(
-            lambda v: pbody(groups, v, between_var, within_var, sig_level)
-            - power, 2, 1e5)
+            lambda v: pbody(groups, v, between_var, within_var, sig_level) - power,
+            2,
+            1e5,
+        )
     elif within_var is None:
         within_var = _uniroot_ext(
             lambda v: pbody(groups, n, between_var, v, sig_level) - power,
-            between_var * 1e-7, between_var * 1e7)
+            between_var * 1e-7,
+            between_var * 1e7,
+        )
     elif between_var is None:
         between_var = _uniroot_ext(
             lambda v: pbody(groups, n, v, within_var, sig_level) - power,
-            within_var * 1e-7, within_var * 1e7)
+            within_var * 1e-7,
+            within_var * 1e7,
+        )
     else:  # sig_level is None
         sig_level = _uniroot_ext(
             lambda v: pbody(groups, n, between_var, within_var, v) - power,
-            1e-10, 1 - 1e-10)
+            1e-10,
+            1 - 1e-10,
+        )
     return PowerHTest(
         "Balanced one-way analysis of variance power calculation",
-        {"groups": groups, "n": n, "between.var": between_var,
-         "within.var": within_var, "sig.level": sig_level, "power": power},
-        "n is number in each group")
+        {
+            "groups": groups,
+            "n": n,
+            "between.var": between_var,
+            "within.var": within_var,
+            "sig.level": sig_level,
+            "power": power,
+        },
+        "n is number in each group",
+    )
 
 
 def aov(formula: str, data: pl.DataFrame, *, type: str = "II") -> AnovaTable:
@@ -3716,7 +3980,11 @@ def aov(formula: str, data: pl.DataFrame, *, type: str = "II") -> AnovaTable:
         ss = float(sub.rss - rss_full)
         df_term = int(sub.df_residuals - df_full)
         F = (ss / df_term) / (rss_full / df_full) if df_term > 0 else None
-        p = float(_dist.pf(F, df_term, df_full, lower_tail=False)) if F is not None else None
+        p = (
+            float(_dist.pf(F, df_term, df_full, lower_tail=False))
+            if F is not None
+            else None
+        )
         rows.append(
             {
                 "term": term,

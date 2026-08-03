@@ -26,6 +26,7 @@ Usage:
 >>> df = read_csv("flights.csv", na=["NA", "N/A"])
 >>> iris = data("iris")
 """
+
 from __future__ import annotations
 
 import functools
@@ -139,6 +140,7 @@ def read_csv(source, *args, **kwargs):
     # StringIO so it gets parsed instead of being looked up on disk.
     if isinstance(source, str) and "\n" in source:
         import io as _io
+
         source = _io.StringIO(source)
     # readr also accepts a list of paths and concatenates the results
     # row-wise. Polars's reader takes a single path; emulate by reading
@@ -150,9 +152,13 @@ def read_csv(source, *args, **kwargs):
 
 
 __all__ = [
-    *_READERS, *_SCANNERS,
-    "read_ipc_schema", "read_parquet_metadata", "read_parquet_schema",
-    "data", "map_data",
+    *_READERS,
+    *_SCANNERS,
+    "read_ipc_schema",
+    "read_parquet_metadata",
+    "read_parquet_schema",
+    "data",
+    "map_data",
 ]
 
 del _name
@@ -178,34 +184,34 @@ _RDATASETS_PKG_ALIAS = {"R": "datasets"}
 # a user-built ``DataFrame({"time": …, "value": …})`` won't accidentally
 # fire the ts dispatch.
 _KNOWN_TS_DATASETS: dict[tuple[str, str], float] = {
-    ("datasets", "AirPassengers"):  12.0,   # monthly
-    ("datasets", "BJsales"):         1.0,
-    ("datasets", "BJsales.lead"):    1.0,
-    ("datasets", "JohnsonJohnson"):  4.0,   # quarterly
-    ("datasets", "LakeHuron"):       1.0,
-    ("datasets", "Nile"):            1.0,
+    ("datasets", "AirPassengers"): 12.0,  # monthly
+    ("datasets", "BJsales"): 1.0,
+    ("datasets", "BJsales.lead"): 1.0,
+    ("datasets", "JohnsonJohnson"): 4.0,  # quarterly
+    ("datasets", "LakeHuron"): 1.0,
+    ("datasets", "Nile"): 1.0,
     ("datasets", "UKDriverDeaths"): 12.0,
-    ("datasets", "UKgas"):           4.0,
-    ("datasets", "USAccDeaths"):    12.0,
-    ("datasets", "WWWusage"):        1.0,
-    ("datasets", "airmiles"):        1.0,
-    ("datasets", "austres"):         4.0,
-    ("datasets", "co2"):            12.0,
-    ("datasets", "discoveries"):     1.0,
-    ("datasets", "fdeaths"):        12.0,
-    ("datasets", "freeny.y"):        4.0,
-    ("datasets", "ldeaths"):        12.0,
-    ("datasets", "lh"):              1.0,
-    ("datasets", "lynx"):            1.0,
-    ("datasets", "mdeaths"):        12.0,
-    ("datasets", "nhtemp"):          1.0,
-    ("datasets", "nottem"):         12.0,
-    ("datasets", "presidents"):      4.0,
+    ("datasets", "UKgas"): 4.0,
+    ("datasets", "USAccDeaths"): 12.0,
+    ("datasets", "WWWusage"): 1.0,
+    ("datasets", "airmiles"): 1.0,
+    ("datasets", "austres"): 4.0,
+    ("datasets", "co2"): 12.0,
+    ("datasets", "discoveries"): 1.0,
+    ("datasets", "fdeaths"): 12.0,
+    ("datasets", "freeny.y"): 4.0,
+    ("datasets", "ldeaths"): 12.0,
+    ("datasets", "lh"): 1.0,
+    ("datasets", "lynx"): 1.0,
+    ("datasets", "mdeaths"): 12.0,
+    ("datasets", "nhtemp"): 1.0,
+    ("datasets", "nottem"): 12.0,
+    ("datasets", "presidents"): 4.0,
     ("datasets", "sunspot.month"): 12.0,
-    ("datasets", "sunspot.year"):   1.0,
-    ("datasets", "sunspots"):       12.0,
-    ("datasets", "treering"):        1.0,
-    ("datasets", "uspop"):           0.1,
+    ("datasets", "sunspot.year"): 1.0,
+    ("datasets", "sunspots"): 12.0,
+    ("datasets", "treering"): 1.0,
+    ("datasets", "uspop"): 0.1,
 }
 
 
@@ -220,6 +226,7 @@ def _apply_ts_metadata(df: "DataFrame", package: str, name: str) -> "DataFrame":
     if list(df.columns) != ["time", "value"]:
         return df  # CSV shape unexpectedly diverged; skip silently.
     from .tidy.dataframe import TsMeta
+
     start = float(df["time"][0])
     end = float(df["time"][-1])
     df._ts_meta = TsMeta(start=start, end=end, frequency=freq)
@@ -414,8 +421,12 @@ def _dataset_index() -> dict[str, list[str]]:
     return {n: sorted(pkgs) for n, pkgs in merged.items()}
 
 
-def data(name: str, package: str | None = None, save_to: str = "./data",
-         overwrite: bool = False) -> DataFrame:
+def data(
+    name: str,
+    package: str | None = None,
+    save_to: str = "./data",
+    overwrite: bool = False,
+) -> DataFrame:
     """Load a named dataset.
 
     Resolution
@@ -501,7 +512,9 @@ def data(name: str, package: str | None = None, save_to: str = "./data",
             # Snapshot which dirs don't exist yet so a failed download can
             # roll them back — otherwise a network error leaves an empty
             # data/<package>/ (and possibly data/) behind in the CWD.
-            created_dirs = [Path(p) for p in (save_to, datapath) if not os.path.exists(p)]
+            created_dirs = [
+                Path(p) for p in (save_to, datapath) if not os.path.exists(p)
+            ]
             os.makedirs(datapath, exist_ok=True)
             print(f"Downloading {name} (from {package})...")
             base = f"https://raw.githubusercontent.com/huangziwei/hea/main/datasets/{package}/{name}"
@@ -557,8 +570,15 @@ def data(name: str, package: str | None = None, save_to: str = "./data",
 # ---------------------------------------------------------------------------
 
 _MAP_DATA_NAMES = (
-    "world", "world2", "usa", "state", "county",
-    "nz", "france", "italy", "lakes",
+    "world",
+    "world2",
+    "usa",
+    "state",
+    "county",
+    "nz",
+    "france",
+    "italy",
+    "lakes",
 )
 
 
@@ -573,8 +593,9 @@ def _find_bundled_map(name: str) -> Path | None:
     return None
 
 
-def map_data(name: str, *, save_to: str = "./data",
-             overwrite: bool = False) -> DataFrame:
+def map_data(
+    name: str, *, save_to: str = "./data", overwrite: bool = False
+) -> DataFrame:
     """Load a bundled map polygon dataset, mirroring ``ggplot2::map_data()``.
 
     Returns a frame with columns ``long``, ``lat``, ``group``, ``order``,
@@ -607,8 +628,9 @@ def map_data(name: str, *, save_to: str = "./data",
         datapath = os.path.join(save_to, "maps")
         pq_path = Path(datapath) / f"{name}.parquet"
         if not pq_path.exists() or overwrite:
-            created_dirs = [Path(p) for p in (save_to, datapath)
-                            if not os.path.exists(p)]
+            created_dirs = [
+                Path(p) for p in (save_to, datapath) if not os.path.exists(p)
+            ]
             os.makedirs(datapath, exist_ok=True)
             print(f"Downloading map_data({name!r})...")
             url = (

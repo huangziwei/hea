@@ -136,7 +136,17 @@ class TestIdents:
         assert _kinds(".foo") == ["IDENT", "EOF"]
 
     def test_keywords(self):
-        for kw in ("if", "else", "for", "while", "repeat", "break", "next", "in", "function"):
+        for kw in (
+            "if",
+            "else",
+            "for",
+            "while",
+            "repeat",
+            "break",
+            "next",
+            "in",
+            "function",
+        ):
             assert _kinds(kw) == [kw, "EOF"]
 
 
@@ -171,14 +181,34 @@ class TestConstants:
 
 
 class TestOperators:
-    @pytest.mark.parametrize("src,kind", [
-        ("<-", "<-"), ("<<-", "<<-"), ("<=", "<="), ("<", "<"),
-        ("->", "->"), ("->>", "->>"), (">=", ">="), (">", ">"),
-        ("==", "=="), ("!=", "!="), ("=", "="),
-        ("&", "&"), ("&&", "&&"), ("|", "|"), ("||", "||"), ("|>", "|>"),
-        (":", ":"), ("::", "::"), (":::", ":::"),
-        ("[", "["), ("[[", "[["), ("]", "]"), ("]]", "]]"),
-    ])
+    @pytest.mark.parametrize(
+        "src,kind",
+        [
+            ("<-", "<-"),
+            ("<<-", "<<-"),
+            ("<=", "<="),
+            ("<", "<"),
+            ("->", "->"),
+            ("->>", "->>"),
+            (">=", ">="),
+            (">", ">"),
+            ("==", "=="),
+            ("!=", "!="),
+            ("=", "="),
+            ("&", "&"),
+            ("&&", "&&"),
+            ("|", "|"),
+            ("||", "||"),
+            ("|>", "|>"),
+            (":", ":"),
+            ("::", "::"),
+            (":::", ":::"),
+            ("[", "["),
+            ("[[", "[["),
+            ("]", "]"),
+            ("]]", "]]"),
+        ],
+    )
     def test_op_kind(self, src, kind):
         assert tokenize(src)[0].kind == kind
 
@@ -246,7 +276,15 @@ class TestNewlines:
 
     def test_term_inside_brace(self):
         # ``{ }`` does NOT suppress newlines — they separate block statements.
-        assert _kinds("{\nx\ny\n}") == ["{", "IDENT", "TERM", "IDENT", "TERM", "}", "EOF"]
+        assert _kinds("{\nx\ny\n}") == [
+            "{",
+            "IDENT",
+            "TERM",
+            "IDENT",
+            "TERM",
+            "}",
+            "EOF",
+        ]
 
     def test_semicolon_always_term(self):
         assert _kinds("x;y") == ["IDENT", "TERM", "IDENT", "EOF"]
@@ -261,7 +299,15 @@ def test_canonical_pipeline():
     src = 'flights |> filter(dest == "IAH")'
     kinds = _kinds(src)
     assert kinds == [
-        "IDENT", "|>", "IDENT", "(", "IDENT", "==", "STR", ")", "EOF",
+        "IDENT",
+        "|>",
+        "IDENT",
+        "(",
+        "IDENT",
+        "==",
+        "STR",
+        ")",
+        "EOF",
     ]
 
 
@@ -285,5 +331,15 @@ flights |>
 def test_assignment_then_call():
     toks = tokenize("x <- f(1, 2)\ny")
     assert [t.kind for t in toks] == [
-        "IDENT", "<-", "IDENT", "(", "NUM", ",", "NUM", ")", "TERM", "IDENT", "EOF",
+        "IDENT",
+        "<-",
+        "IDENT",
+        "(",
+        "NUM",
+        ",",
+        "NUM",
+        ")",
+        "TERM",
+        "IDENT",
+        "EOF",
     ]

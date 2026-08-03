@@ -10,6 +10,7 @@ Unlike ``test_rs_parity`` (Rust == R, libm-dependent → macOS-only), this is an
 internal invariant of the crate, so it runs on **every** platform / in CI: it is
 what guards the parallel path on Linux, where the strict R gate is skipped.
 """
+
 import numpy as np
 import pytest
 
@@ -25,11 +26,11 @@ CHUNK = 512
 def _build_cases():
     g = np.random.default_rng(0)
     n = N
-    xp = g.uniform(0.1, 20.0, n)       # x > 0
-    al = g.uniform(0.5, 8.0, n)        # shape / a
-    sc = g.uniform(0.5, 3.0, n)        # scale
+    xp = g.uniform(0.1, 20.0, n)  # x > 0
+    al = g.uniform(0.5, 8.0, n)  # shape / a
+    sc = g.uniform(0.5, 3.0, n)  # scale
     p01 = g.uniform(1e-4, 1 - 1e-4, n)
-    xr = g.normal(0, 3, n)             # real line
+    xr = g.normal(0, 3, n)  # real line
     df = g.uniform(1.0, 40.0, n)
     df2 = g.uniform(1.0, 40.0, n)
     bb = g.uniform(0.5, 8.0, n)
@@ -37,7 +38,7 @@ def _build_cases():
     nb = g.integers(1, 200, n).astype(float)
     kb = np.round(g.random(n) * nb)
     pb = g.uniform(0.05, 0.95, n)
-    sx = g.uniform(-0.4, 0.4, n)       # small |x| for pow1p
+    sx = g.uniform(-0.4, 0.4, n)  # small |x| for pow1p
     Z = np.zeros(n)
     ONE = np.ones(n)
     # (rs name, [inputs in native order], (trailing flag bools))
@@ -94,8 +95,8 @@ def _serial(fn, arrs, fl):
 def test_parallel_matches_serial(case):
     name, arrs, fl = case
     fn = getattr(rs, name)
-    par = _call(fn, arrs, fl, slice(None))   # N=3000 → parallel branch
-    ser = _serial(fn, arrs, fl)              # CHUNK=512 → serial branch
+    par = _call(fn, arrs, fl, slice(None))  # N=3000 → parallel branch
+    ser = _serial(fn, arrs, fl)  # CHUNK=512 → serial branch
     # Same Rust kernel both ways → identical output bits (incl. sign-of-zero and
     # NaN payloads), so a raw byte compare is the right 0-ulp check here.
     assert par.tobytes() == ser.tobytes(), f"{name}: parallel != serial"

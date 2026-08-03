@@ -67,7 +67,9 @@ def abline(*args, h=None, v=None, lty=None, col="black", ax=None):
         return ax
 
     if not args:
-        raise TypeError("abline(): need either positional (a, b)/(lmod)/(coef) or h=/v=")
+        raise TypeError(
+            "abline(): need either positional (a, b)/(lmod)/(coef) or h=/v="
+        )
 
     if len(args) == 1:
         arg = args[0]
@@ -75,7 +77,9 @@ def abline(*args, h=None, v=None, lty=None, col="black", ax=None):
             bhat = np.asarray(arg._bhat_arr).ravel()
             cols = list(arg.column_names)
             if "(Intercept)" not in cols:
-                raise ValueError("abline(lmod): fit has no (Intercept); pass coefs explicitly")
+                raise ValueError(
+                    "abline(lmod): fit has no (Intercept); pass coefs explicitly"
+                )
             if len(bhat) != 2:
                 raise ValueError(
                     f"abline(lmod): expected 2 coefficients (intercept + 1 slope), got {len(bhat)} "
@@ -109,8 +113,15 @@ def points(x, y, *, ax=None, pch=None, cex=None, col=None):
     return ax
 
 
-def lines(*args, ax=None, data: pl.DataFrame | None = None, lty=None, col="black",
-          type: str = "l", **_kwargs):
+def lines(
+    *args,
+    ax=None,
+    data: pl.DataFrame | None = None,
+    lty=None,
+    col="black",
+    type: str = "l",
+    **_kwargs,
+):
     """Overlay a line on an existing axes.
 
     Forms:
@@ -148,10 +159,14 @@ def lines(*args, ax=None, data: pl.DataFrame | None = None, lty=None, col="black
 
 
 _R_LOC = {
-    "topright": "upper right", "topleft": "upper left",
-    "bottomright": "lower right", "bottomleft": "lower left",
-    "top": "upper center", "bottom": "lower center",
-    "left": "center left", "right": "center right",
+    "topright": "upper right",
+    "topleft": "upper left",
+    "bottomright": "lower right",
+    "bottomleft": "lower left",
+    "top": "upper center",
+    "bottom": "lower center",
+    "left": "center left",
+    "right": "center right",
     "center": "center",
 }
 
@@ -178,12 +193,25 @@ def legend(*args, ax=None, legend=None, pch=None, lty=None, col=None, **kwargs):
     cols = list(col) if isinstance(col, (list, tuple)) else [col] * len(labels)
     from ._util import _R_MARKERS
     from matplotlib.lines import Line2D
+
     for i, lab in enumerate(labels):
-        marker = _R_MARKERS[int(pchs[i]) % len(_R_MARKERS)] if pchs[i] is not None else None
+        marker = (
+            _R_MARKERS[int(pchs[i]) % len(_R_MARKERS)] if pchs[i] is not None else None
+        )
         ls = r_lty(ltys[i]) if ltys[i] is not None else "None"
         c = cols[i] if cols[i] is not None else "black"
-        handles.append(Line2D([0], [0], marker=marker or "", linestyle=ls, color=c,
-                              label=lab, markerfacecolor="none", markeredgecolor=c))
+        handles.append(
+            Line2D(
+                [0],
+                [0],
+                marker=marker or "",
+                linestyle=ls,
+                color=c,
+                label=lab,
+                markerfacecolor="none",
+                markeredgecolor=c,
+            )
+        )
 
     loc = None
     if args:
@@ -287,6 +315,8 @@ def qqline(x, *, ax=None, col="black", lty=None):
     intercept = ry1 - slope * qx1
     xlim = ax.get_xlim()
     xs = np.array(xlim)
-    ax.plot(xs, intercept + slope * xs, linestyle=r_lty(lty) if lty else "--", color=col)
+    ax.plot(
+        xs, intercept + slope * xs, linestyle=r_lty(lty) if lty else "--", color=col
+    )
     ax.set_xlim(xlim)
     return ax

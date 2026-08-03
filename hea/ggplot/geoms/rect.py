@@ -30,13 +30,15 @@ _PT_PER_MM = 72.27 / 25.4
 
 @dataclass
 class GeomRect(Geom):
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": None,
-        "fill": "grey35",
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": None,
+            "fill": "grey35",
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+        }
+    )
     required_aes: tuple = ("xmin", "xmax", "ymin", "ymax")
     key_glyph: str = "polygon"
 
@@ -71,8 +73,10 @@ class GeomRect(Geom):
         # PatchCollection doesn't auto-update the axes data limits; do it
         # explicitly so autoscale picks up rect bounds.
         ax.update_datalim(
-            [(float(xmin.min()), float(ymin.min())),
-             (float(xmax.max()), float(ymax.max()))]
+            [
+                (float(xmin.min()), float(ymin.min())),
+                (float(xmax.max()), float(ymax.max())),
+            ]
         )
         ax.autoscale_view()
 
@@ -82,15 +86,17 @@ class GeomTile(Geom):
     # Mirrors ggplot2's ``GeomTile$default_aes`` (R/geom-tile.R):
     # ``linewidth = 0.4 * borderwidth = 0.4 * 0.5 = 0.2`` mm — slightly
     # thinner than the 0.5 used by ``GeomRect`` parent.
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": None,
-        "fill": "grey20",
-        "size": 0.2,
-        "linetype": "solid",
-        "alpha": 1.0,
-        "width": 1.0,
-        "height": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": None,
+            "fill": "grey20",
+            "size": 0.2,
+            "linetype": "solid",
+            "alpha": 1.0,
+            "width": 1.0,
+            "height": 1.0,
+        }
+    )
     required_aes: tuple = ("x", "y")
     key_glyph: str = "polygon"
 
@@ -112,10 +118,12 @@ class GeomRaster(Geom):
     :class:`GeomTile`.
     """
 
-    default_aes: dict = field(default_factory=lambda: {
-        "fill": "grey20",
-        "alpha": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "fill": "grey20",
+            "alpha": 1.0,
+        }
+    )
     required_aes: tuple = ("x", "y")
     key_glyph: str = "polygon"
 
@@ -152,12 +160,15 @@ class GeomRaster(Geom):
         dy = ys[1] - ys[0] if len(ys) > 1 else 1.0
         # imshow's `extent` is (left, right, bottom, top). origin="lower"
         # aligns the (0, 0) cell with the bottom-left corner.
-        extent = (xs[0] - dx / 2, xs[-1] + dx / 2,
-                  ys[0] - dy / 2, ys[-1] + dy / 2)
+        extent = (xs[0] - dx / 2, xs[-1] + dx / 2, ys[0] - dy / 2, ys[-1] + dy / 2)
         alpha = float(_scalar(data, "alpha", default=1.0))
         ax.imshow(
-            grid, extent=extent, origin="lower",
-            alpha=alpha, aspect="auto", interpolation="nearest",
+            grid,
+            extent=extent,
+            origin="lower",
+            alpha=alpha,
+            aspect="auto",
+            interpolation="nearest",
         )
 
 
@@ -238,8 +249,9 @@ def _color_to_rgba(c, default):
     return mcolors.to_rgba(r_color(c))
 
 
-def geom_rect(mapping=None, data=None, *, stat="identity", position="identity",
-              **kwargs):
+def geom_rect(
+    mapping=None, data=None, *, stat="identity", position="identity", **kwargs
+):
     """Filled rectangles from ``xmin``/``xmax``/``ymin``/``ymax`` aesthetics.
 
     Each row produces one rectangle. Use :func:`geom_tile` if your data
@@ -248,16 +260,18 @@ def geom_rect(mapping=None, data=None, *, stat="identity", position="identity",
     return _make_layer(GeomRect(), mapping, data, stat, position, kwargs)
 
 
-def geom_tile(mapping=None, data=None, *, stat="identity", position="identity",
-              **kwargs):
+def geom_tile(
+    mapping=None, data=None, *, stat="identity", position="identity", **kwargs
+):
     """Heatmap-style tiles centred at ``(x, y)`` with ``width``/``height``
     (default 1 each).
     """
     return _make_layer(GeomTile(), mapping, data, stat, position, kwargs)
 
 
-def geom_raster(mapping=None, data=None, *, stat="identity", position="identity",
-                **kwargs):
+def geom_raster(
+    mapping=None, data=None, *, stat="identity", position="identity", **kwargs
+):
     """Fast heatmap via :func:`matplotlib.axes.Axes.imshow`. Requires a
     regular ``(x, y)`` grid (uniformly spaced cells); falls back to
     :func:`geom_tile` for irregular grids.

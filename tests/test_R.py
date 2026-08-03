@@ -21,34 +21,121 @@ import hea
 from hea import R as R_mod
 from hea.R import nmath as _nm
 from hea.R import (
-    as_character, as_integer, as_logical, as_numeric,
-    colnames, complete_cases, cor, cov, cumsum, cummax, cummin, cumprod,
-    dim, diff, duplicated,
-    factor, head,
-    is_factor, is_finite, is_na, is_null, is_numeric,
-    length, levels, mean, median,
-    na_omit, names, ncol, nlevels, nrow,
+    as_character,
+    as_integer,
+    as_logical,
+    as_numeric,
+    colnames,
+    complete_cases,
+    cor,
+    cov,
+    cumsum,
+    cummax,
+    cummin,
+    cumprod,
+    dim,
+    diff,
+    duplicated,
+    factor,
+    head,
+    is_factor,
+    is_finite,
+    is_na,
+    is_null,
+    is_numeric,
+    length,
+    levels,
+    mean,
+    median,
+    na_omit,
+    names,
+    ncol,
+    nlevels,
+    nrow,
     order,
     quantile,
-    rank as R_rank, rev, sd, seq, seq_along, seq_len, signed_rank,
-    sort, summary, tail,
-    tabulate, unique, var, which, which_max, which_min,
+    rank as R_rank,
+    rev,
+    sd,
+    seq,
+    seq_along,
+    seq_len,
+    signed_rank,
+    sort,
+    summary,
+    tail,
+    tabulate,
+    unique,
+    var,
+    which,
+    which_max,
+    which_min,
     # distributions (a representative subset; full grid checked elsewhere)
-    dnorm, pnorm, qnorm, rnorm,
-    dt, pt, qt, dchisq, qchisq, pchisq, qf, pf,
-    ptukey, qtukey,
-    dhyper, phyper,
-    dsignrank, psignrank, qsignrank, dwilcox, pwilcox, qwilcox,
-    dbinom, pbinom, dpois, ppois, punif, qexp, pgamma, pbeta,
-    dcauchy, pcauchy, qcauchy, rcauchy,
-    dlogis, plogis, qlogis,
-    dlnorm, plnorm, qlnorm,
-    dweibull, pweibull, qweibull, rweibull,
-    dgeom, pgeom, qgeom, rgeom,
-    qhyper, dnbinom, pnbinom, qnbinom,
-    rnbinom, rhyper, rsignrank, rwilcox, rmultinom,
-    r2dtable, rWishart, dmultinom, pbirthday, qbirthday,
-    psmirnov, qsmirnov, rsmirnov,
+    dnorm,
+    pnorm,
+    qnorm,
+    rnorm,
+    dt,
+    pt,
+    qt,
+    dchisq,
+    qchisq,
+    pchisq,
+    qf,
+    pf,
+    ptukey,
+    qtukey,
+    dhyper,
+    phyper,
+    dsignrank,
+    psignrank,
+    qsignrank,
+    dwilcox,
+    pwilcox,
+    qwilcox,
+    dbinom,
+    pbinom,
+    dpois,
+    ppois,
+    punif,
+    qexp,
+    pgamma,
+    pbeta,
+    dcauchy,
+    pcauchy,
+    qcauchy,
+    rcauchy,
+    dlogis,
+    plogis,
+    qlogis,
+    dlnorm,
+    plnorm,
+    qlnorm,
+    dweibull,
+    pweibull,
+    qweibull,
+    rweibull,
+    dgeom,
+    pgeom,
+    qgeom,
+    rgeom,
+    qhyper,
+    dnbinom,
+    pnbinom,
+    qnbinom,
+    rnbinom,
+    rhyper,
+    rsignrank,
+    rwilcox,
+    rmultinom,
+    r2dtable,
+    rWishart,
+    dmultinom,
+    pbirthday,
+    qbirthday,
+    psmirnov,
+    qsmirnov,
+    rsmirnov,
     set_seed,
 )
 
@@ -79,9 +166,7 @@ def test_all_exports_are_defined():
 
 @pytest.fixture
 def df():
-    return pl.DataFrame(
-        {"a": [1, 2, 3, 4, 5, 6, 7], "b": list("abcdefg")}
-    )
+    return pl.DataFrame({"a": [1, 2, 3, 4, 5, 6, 7], "b": list("abcdefg")})
 
 
 def test_head_tail_dispatch_on_dataframe(df):
@@ -220,9 +305,7 @@ def test_unique_preserves_order():
 
 
 def test_duplicated():
-    assert duplicated([1, 2, 2, 3, 1]).tolist() == [
-        False, False, True, False, True
-    ]
+    assert duplicated([1, 2, 2, 3, 1]).tolist() == [False, False, True, False, True]
     s = pl.Series([1, 2, 2, 3, 1])
     assert duplicated(s).to_list() == [False, False, True, False, True]
 
@@ -279,11 +362,13 @@ def test_cor_scalar_and_matrix():
 
 def test_IQR_eager_list_matches_R_default():
     from hea.R import IQR
+
     assert IQR([2, 5, 11, 11, 19, 35]) == 10.5
 
 
 def test_IQR_eager_quantile_types():
     from hea.R import IQR
+
     x = [2, 5, 11, 11, 19, 35]
     assert IQR(x, type=1) == 14
     assert IQR(x, type=4) == 11.5
@@ -292,11 +377,13 @@ def test_IQR_eager_quantile_types():
 
 def test_IQR_na_rm_drops_nulls():
     from hea.R import IQR
+
     assert IQR([1, None, 3], na_rm=True) == 1.0
 
 
 def test_IQR_invalid_type_raises():
     from hea.R import IQR
+
     with pytest.raises(ValueError, match="1..9"):
         IQR([1, 2, 3], type=10)
     with pytest.raises(ValueError, match="1..9"):
@@ -305,6 +392,7 @@ def test_IQR_invalid_type_raises():
 
 def test_IQR_series_returns_scalar():
     from hea.R import IQR
+
     s = pl.Series([2, 5, 11, 11, 19, 35])
     assert IQR(s) == 10.5
     # hea's default ``na_rm=True`` skips nulls — IQR over the non-null
@@ -329,6 +417,7 @@ def test_IQR_series_returns_scalar():
 
 def test_interaction_default_matches_R_cartesian_levels():
     from hea.R import interaction
+
     out = interaction(["a", "b", "a"], [1, 2, 1])
     assert isinstance(out, pl.Series)
     assert out.to_list() == ["a.1", "b.2", "a.1"]
@@ -337,18 +426,21 @@ def test_interaction_default_matches_R_cartesian_levels():
 
 def test_interaction_drop_true_keeps_observed_only():
     from hea.R import interaction
+
     out = interaction(["a", "b", "a"], [1, 2, 1], drop=True)
     assert out.dtype.categories.to_list() == ["a.1", "b.2"]
 
 
 def test_interaction_lex_order_sorts_levels():
     from hea.R import interaction
+
     out = interaction(["a", "b", "a"], [1, 2, 1], lex_order=True)
     assert out.dtype.categories.to_list() == ["a.1", "a.2", "b.1", "b.2"]
 
 
 def test_interaction_custom_sep():
     from hea.R import interaction
+
     out = interaction(["a", "b"], [1, 2], sep="_")
     assert out.to_list() == ["a_1", "b_2"]
     assert out.dtype.categories.to_list() == ["a_1", "b_1", "a_2", "b_2"]
@@ -357,18 +449,21 @@ def test_interaction_custom_sep():
 def test_interaction_na_propagates():
     """If any input is null at row i, the result at row i is null."""
     from hea.R import interaction
+
     out = interaction(["a", None, "b"], [1, 2, None])
     assert out.to_list() == ["a.1", None, None]
 
 
 def test_interaction_no_args_raises():
     from hea.R import interaction
+
     with pytest.raises(TypeError, match="at least one"):
         interaction()
 
 
 def test_interaction_unequal_lengths_raises():
     from hea.R import interaction
+
     with pytest.raises(ValueError, match="same length"):
         interaction(["a", "b"], [1, 2, 3])
 
@@ -377,6 +472,7 @@ def test_interaction_expr_returns_categorical_expr():
     """In Expr context, returns a Categorical-typed Expr that composes
     with mutate / group_by / ggplot's group= aesthetic."""
     from hea.R import interaction
+
     df = pl.DataFrame({"day": [1, 2, 1, 2], "month": [1, 1, 2, 2]})
     out = df.with_columns(g=interaction("day", "month"))
     assert out["g"].dtype == pl.Categorical
@@ -386,6 +482,7 @@ def test_interaction_expr_returns_categorical_expr():
 def test_IQR_non_type_7_on_expr_raises():
     """Polars only has linear interpolation; other R types only work eager."""
     from hea.R import IQR
+
     with pytest.raises(NotImplementedError, match="type=4"):
         IQR(pl.col("x"), type=4)
     with pytest.raises(NotImplementedError, match="type=4"):
@@ -430,9 +527,7 @@ def test_is_na_array_and_series():
 def test_is_null_is_finite_is_numeric():
     assert is_null(None) is True
     assert is_null(0) is False
-    assert is_finite([1.0, float("inf"), float("nan")]).tolist() == [
-        True, False, False
-    ]
+    assert is_finite([1.0, float("inf"), float("nan")]).tolist() == [True, False, False]
     assert is_numeric(pl.Series([1, 2, 3]))
     assert not is_numeric(pl.Series(["a", "b"]))
 
@@ -452,8 +547,20 @@ def test_factor_accepts_list_and_unknown_value_handling():
     and numpy arrays should work the same. Unknown values default to
     null (R parity); ``strict=True`` raises (forcats ``fct()`` parity).
     """
-    month_levels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    month_levels = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+    ]
 
     # list input, all values known
     y1 = factor(["Dec", "Apr", "Jan", "Mar"], levels=month_levels)
@@ -487,8 +594,20 @@ def test_factor_repr_appends_levels_line():
     assert "Levels: Apr Dec Jan Mar" in text
 
     # explicit levels keep the user-specified order in the Levels line
-    month_levels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    month_levels = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+    ]
     y2 = factor(["Dec", "Apr"], levels=month_levels)
     assert "Levels: " + " ".join(month_levels) in str(y2)
 
@@ -518,6 +637,7 @@ def test_ordered_factor_renders_with_lt_separators():
 
     # 2. factor(..., ordered=True) is the same alias underneath
     from hea.R import factor
+
     y2 = factor(["c", "a", "b"], levels=["a", "b", "c"], ordered=True)
     assert "Levels: a < b < c" in str(y2)
 
@@ -597,118 +717,351 @@ def test_rank_signed_rank_ndarray_backwards_compat():
 # the author explicitly classifies them.
 _R_EXPR_SKIP = {
     # Hypothesis tests — return HTest, not Expr.
-    "t_test", "wilcox_test", "cor_test", "kruskal_test", "chisq_test",
-    "fisher_test", "prop_test", "binom_test", "var_test", "bartlett_test",
-    "shapiro_test", "ks_test", "mcnemar_test", "friedman_test", "aov",
-    "oneway_test", "fligner_test", "mood_test", "quade_test",
-    "poisson_test", "prop_trend_test", "mantelhaen_test", "ansari_test",
-    "pairwise_t_test", "pairwise_wilcox_test", "pairwise_prop_test",
-    "power_t_test", "power_prop_test", "power_anova_test",
+    "t_test",
+    "wilcox_test",
+    "cor_test",
+    "kruskal_test",
+    "chisq_test",
+    "fisher_test",
+    "prop_test",
+    "binom_test",
+    "var_test",
+    "bartlett_test",
+    "shapiro_test",
+    "ks_test",
+    "mcnemar_test",
+    "friedman_test",
+    "aov",
+    "oneway_test",
+    "fligner_test",
+    "mood_test",
+    "quade_test",
+    "poisson_test",
+    "prop_trend_test",
+    "mantelhaen_test",
+    "ansari_test",
+    "pairwise_t_test",
+    "pairwise_wilcox_test",
+    "pairwise_prop_test",
+    "power_t_test",
+    "power_prop_test",
+    "power_anova_test",
     # Multiple-comparison p-value adjustment — vector in / vector out, not Expr.
-    "p_adjust", "p_adjust_methods",
+    "p_adjust",
+    "p_adjust_methods",
     # Result classes — not callable in the vector-shape sense.
-    "HTest", "AnovaTable", "PairwiseHTest", "PowerHTest", "Terms",
+    "HTest",
+    "AnovaTable",
+    "PairwiseHTest",
+    "PowerHTest",
+    "Terms",
     # Formula / model-frame helpers — operate on formula strings, frames, or
     # na.action objects; poly/polym build basis matrices (multi-arg). Not Exprs.
-    "reformulate", "as_formula", "update_formula", "delete_response",
-    "drop_terms", "DF2formula", "get_all_vars",
-    "na_pass", "na_fail", "na_exclude", "na_action",
-    "naresid", "napredict", "naprint", "NAAction",
-    "MFclass", "poly", "polym", "predict_poly", "Poly",
+    "reformulate",
+    "as_formula",
+    "update_formula",
+    "delete_response",
+    "drop_terms",
+    "DF2formula",
+    "get_all_vars",
+    "na_pass",
+    "na_fail",
+    "na_exclude",
+    "na_action",
+    "naresid",
+    "napredict",
+    "naprint",
+    "NAAction",
+    "MFclass",
+    "poly",
+    "polym",
+    "predict_poly",
+    "Poly",
     # Model generics — operate on fitted models, not columns.
-    "coef", "coefficients", "fixef", "ranef", "refit", "refitML",
-    "resid", "residuals", "fitted", "fitted_values",
-    "predict", "confint", "vcov", "logLik", "deviance", "profile", "bootMer",
-    "nobs", "weights", "df_residual", "formula", "model_matrix", "model_frame",
-    "terms", "update", "AIC", "BIC", "effects", "simulate",
-    "variable_names", "case_names", "labels",
-    "anova", "add1", "drop1", "step",
+    "coef",
+    "coefficients",
+    "fixef",
+    "ranef",
+    "refit",
+    "refitML",
+    "resid",
+    "residuals",
+    "fitted",
+    "fitted_values",
+    "predict",
+    "confint",
+    "vcov",
+    "logLik",
+    "deviance",
+    "profile",
+    "bootMer",
+    "nobs",
+    "weights",
+    "df_residual",
+    "formula",
+    "model_matrix",
+    "model_frame",
+    "terms",
+    "update",
+    "AIC",
+    "BIC",
+    "effects",
+    "simulate",
+    "variable_names",
+    "case_names",
+    "labels",
+    "anova",
+    "add1",
+    "drop1",
+    "step",
     # lme4 merMod accessors (operate on a fitted gmm, not on columns).
-    "VarCorr", "getME", "getData", "extractAIC", "rePCA",
-    "isREML", "isLMM", "isGLMM", "isNLMM", "isSingular",
-    "hatvalues", "rstandard", "rstudent",
-    "cooks_distance", "dffits", "dfbeta", "dfbetas", "influence",
+    "VarCorr",
+    "getME",
+    "getData",
+    "extractAIC",
+    "rePCA",
+    "isREML",
+    "isLMM",
+    "isGLMM",
+    "isNLMM",
+    "isSingular",
+    "hatvalues",
+    "rstandard",
+    "rstudent",
+    "cooks_distance",
+    "dffits",
+    "dfbeta",
+    "dfbetas",
+    "influence",
     # lm / aov extras — operate on fitted models, QR objects, or design frames.
-    "sigma", "cov2cor", "weighted_residuals", "covratio",
-    "influence_measures", "Infl", "lsfit", "ls_diag", "ls_print",
+    "sigma",
+    "cov2cor",
+    "weighted_residuals",
+    "covratio",
+    "influence_measures",
+    "Infl",
+    "lsfit",
+    "ls_diag",
+    "ls_print",
     "replications",
     # emmeans — model-shaped (operate on fitted models / EmmGrid tables).
-    "emmeans", "EmmGrid", "summary_emmgrid_contrasts",
+    "emmeans",
+    "EmmGrid",
+    "summary_emmgrid_contrasts",
     # Distribution PDFs/CDFs/quantiles/random — scalar in, scalar out.
-    "dnorm", "pnorm", "qnorm", "rnorm",
-    "dt", "pt", "qt", "rt",
-    "dchisq", "pchisq", "qchisq", "rchisq",
-    "pf", "qf", "rf",
-    "dbinom", "pbinom", "qbinom", "rbinom",
-    "dpois", "ppois", "qpois", "rpois",
-    "dunif", "punif", "qunif", "runif",
-    "ptukey", "qtukey",
-    "dsignrank", "psignrank", "qsignrank", "rsignrank",
-    "dwilcox", "pwilcox", "qwilcox", "rwilcox",
-    "dhyper", "phyper", "qhyper", "rhyper",
-    "dnbinom", "pnbinom", "qnbinom", "rnbinom",
+    "dnorm",
+    "pnorm",
+    "qnorm",
+    "rnorm",
+    "dt",
+    "pt",
+    "qt",
+    "rt",
+    "dchisq",
+    "pchisq",
+    "qchisq",
+    "rchisq",
+    "pf",
+    "qf",
+    "rf",
+    "dbinom",
+    "pbinom",
+    "qbinom",
+    "rbinom",
+    "dpois",
+    "ppois",
+    "qpois",
+    "rpois",
+    "dunif",
+    "punif",
+    "qunif",
+    "runif",
+    "ptukey",
+    "qtukey",
+    "dsignrank",
+    "psignrank",
+    "qsignrank",
+    "rsignrank",
+    "dwilcox",
+    "pwilcox",
+    "qwilcox",
+    "rwilcox",
+    "dhyper",
+    "phyper",
+    "qhyper",
+    "rhyper",
+    "dnbinom",
+    "pnbinom",
+    "qnbinom",
+    "rnbinom",
     # combinatorial / multivariate + Smirnov distribution surface.
-    "dmultinom", "rmultinom", "pbirthday", "qbirthday", "r2dtable", "rWishart",
-    "psmirnov", "qsmirnov", "rsmirnov",
-    "dexp", "pexp", "qexp", "rexp",
-    "dgamma", "pgamma", "qgamma", "rgamma",
-    "dbeta", "pbeta", "qbeta", "rbeta",
-    "dcauchy", "pcauchy", "qcauchy", "rcauchy",
-    "dlogis", "plogis", "qlogis", "rlogis",
-    "dlnorm", "plnorm", "qlnorm", "rlnorm",
-    "dweibull", "pweibull", "qweibull", "rweibull",
-    "dgeom", "pgeom", "qgeom", "rgeom",
+    "dmultinom",
+    "rmultinom",
+    "pbirthday",
+    "qbirthday",
+    "r2dtable",
+    "rWishart",
+    "psmirnov",
+    "qsmirnov",
+    "rsmirnov",
+    "dexp",
+    "pexp",
+    "qexp",
+    "rexp",
+    "dgamma",
+    "pgamma",
+    "qgamma",
+    "rgamma",
+    "dbeta",
+    "pbeta",
+    "qbeta",
+    "rbeta",
+    "dcauchy",
+    "pcauchy",
+    "qcauchy",
+    "rcauchy",
+    "dlogis",
+    "plogis",
+    "qlogis",
+    "rlogis",
+    "dlnorm",
+    "plnorm",
+    "qlnorm",
+    "rlnorm",
+    "dweibull",
+    "pweibull",
+    "qweibull",
+    "rweibull",
+    "dgeom",
+    "pgeom",
+    "qgeom",
+    "rgeom",
     "set_seed",
     # Frame-meta — operate on the DataFrame, not a column.
-    "nrow", "ncol", "dim", "length", "colnames", "names",
-    "head", "tail", "summary", "complete_cases", "na_omit",
+    "nrow",
+    "ncol",
+    "dim",
+    "length",
+    "colnames",
+    "names",
+    "head",
+    "tail",
+    "summary",
+    "complete_cases",
+    "na_omit",
     # Matrix / frame utilities — operate on 2D shapes, not single columns.
-    "rowSums", "colSums", "rowMeans", "colMeans",
-    "apply", "rbind", "cbind", "sweep", "expand_grid", "matrix",
-    "R_range", "R_round",
+    "rowSums",
+    "colSums",
+    "rowMeans",
+    "colMeans",
+    "apply",
+    "rbind",
+    "cbind",
+    "sweep",
+    "expand_grid",
+    "matrix",
+    "R_range",
+    "R_round",
     # Distance / clustering — operate on data matrices, Dist objects, or hclust
     # trees, not single columns (base-R stats clustering surface).
-    "Dist", "dist", "as_dist", "as_matrix_dist", "format_dist", "labels_dist",
-    "print_dist", "mahalanobis", "cmdscale",
-    "Hclust", "hclust", "as_hclust", "cutree", "cophenetic", "print_hclust",
-    "Kmeans", "kmeans", "fitted_kmeans", "print_kmeans",
+    "Dist",
+    "dist",
+    "as_dist",
+    "as_matrix_dist",
+    "format_dist",
+    "labels_dist",
+    "print_dist",
+    "mahalanobis",
+    "cmdscale",
+    "Hclust",
+    "hclust",
+    "as_hclust",
+    "cutree",
+    "cophenetic",
+    "print_hclust",
+    "Kmeans",
+    "kmeans",
+    "fitted_kmeans",
+    "print_kmeans",
     # Dendrogram subsystem — operate on Dendrogram trees, not single columns.
-    "Dendrogram", "as_dendrogram", "cophenetic_dendrogram", "cut_dendrogram",
-    "dendrapply", "is_leaf", "labels_dendrogram", "merge_dendrogram",
-    "midcache_dendrogram", "nleaves", "nobs_dendrogram", "order_dendrogram",
-    "print_dendrogram", "reorder", "reorder_dendrogram", "rev_dendrogram",
+    "Dendrogram",
+    "as_dendrogram",
+    "cophenetic_dendrogram",
+    "cut_dendrogram",
+    "dendrapply",
+    "is_leaf",
+    "labels_dendrogram",
+    "merge_dendrogram",
+    "midcache_dendrogram",
+    "nleaves",
+    "nobs_dendrogram",
+    "order_dendrogram",
+    "print_dendrogram",
+    "reorder",
+    "reorder_dendrogram",
+    "rev_dendrogram",
     "str_dendrogram",
     # Vector primitives — variadic / multi-arg; not column ops.
-    "rep", "sample", "sapply", "tapply",
+    "rep",
+    "sample",
+    "sapply",
+    "tapply",
     # Length-changing transforms — would shorten/lengthen the column.
-    "diff", "which", "tabulate",
+    "diff",
+    "which",
+    "tabulate",
     # Container / contingency tables — return tables, not Exprs.
-    "table", "xtabs", "prop_table", "addmargins",
+    "table",
+    "xtabs",
+    "prop_table",
+    "addmargins",
     # Sequence generators — take ints, not columns.
-    "seq", "seq_len", "seq_along",
+    "seq",
+    "seq_len",
+    "seq_along",
     # Time series construction — returns a DataFrame (R's ``ts``), not an Expr.
     "ts",
     # Variadic / index-based — multi-input shape.
     "order",
     # Bucketing — eager-only (custom labels machinery).
-    "cut", "findInterval",
+    "cut",
+    "findInterval",
     # Categorical / dtype introspection — Expr has no eval-time dtype info.
-    "factor", "fct", "ordered", "levels", "nlevels", "is_factor", "is_numeric", "is_null",
+    "factor",
+    "fct",
+    "ordered",
+    "levels",
+    "nlevels",
+    "is_factor",
+    "is_numeric",
+    "is_null",
     # cov: no clean polars top-level for 2-vector covariance (compute
     # manually via (x - x.mean()) * (y - y.mean()) / (n - 1) if needed).
     "cov",
     # I/O & clock — side-effect functions; not column ops.
-    "cat", "today", "now",
+    "cat",
+    "today",
+    "now",
     # plotmath — takes R-source string, not a column.
     "quote",
     # stringr regex-debug pretty-printers — print to stdout, return None.
-    "str_view", "str_view_all",
+    "str_view",
+    "str_view_all",
     # lubridate parsers — operate on strings / scalars, not column Exprs.
-    "ymd", "mdy", "dmy",
-    "ymd_hms", "ymd_hm", "mdy_hms", "mdy_hm", "dmy_hms", "dmy_hm",
+    "ymd",
+    "mdy",
+    "dmy",
+    "ymd_hms",
+    "ymd_hm",
+    "mdy_hms",
+    "mdy_hm",
+    "dmy_hms",
+    "dmy_hm",
     # stringr helpers that don't take an Expr as the first arg or take
     # multiple required args (covered separately by _R_EXPR_EXTRA below).
-    "str_glue", "str_sort", "str_equal",
+    "str_glue",
+    "str_sort",
+    "str_equal",
 }
 
 
@@ -716,12 +1069,12 @@ _R_EXPR_SKIP = {
 # produce a meaningful Expr. Keyed by name; value is a callable that
 # returns the *additional* args + kwargs given the test's ``pl.col("x")``.
 _R_EXPR_EXTRA: dict[str, callable] = {
-    "cor":      lambda c: ((c,), {}),       # cor needs (x, y)
-    "quantile": lambda c: ((0.5,), {}),     # Expr needs scalar prob
-    "atan2":    lambda c: ((c,), {}),       # atan2 needs (y, x)
+    "cor": lambda c: ((c,), {}),  # cor needs (x, y)
+    "quantile": lambda c: ((0.5,), {}),  # Expr needs scalar prob
+    "atan2": lambda c: ((c,), {}),  # atan2 needs (y, x)
     "str_detect": lambda c: (("[aeiou]",), {}),  # needs pattern
-    "str_count":  lambda c: (("[aeiou]",), {}),  # needs pattern
-    "str_sub":    lambda c: ((1, 3), {}),        # start, end
+    "str_count": lambda c: (("[aeiou]",), {}),  # needs pattern
+    "str_sub": lambda c: ((1, 3), {}),  # start, end
 }
 
 
@@ -734,6 +1087,7 @@ def test_R_vector_functions_dispatch_on_expr():
     ``pl.lit(ndarray-of-Expr)`` failure path).
     """
     import hea.R as R_mod
+
     c = pl.col("x")
     failures = []
     for name in R_mod.__all__:
@@ -791,7 +1145,9 @@ def _assert_r(checks, *, rel_tol=1e-12):
             assert got == ref[expr], f"{expr}: {got!r} != live R {ref[expr]!r}"
     else:
         for got, expr, fb in checks:
-            assert math.isclose(got, fb, rel_tol=rel_tol), f"{expr}: {got!r} !~ R {fb!r}"
+            assert math.isclose(got, fb, rel_tol=rel_tol), (
+                f"{expr}: {got!r} !~ R {fb!r}"
+            )
 
 
 def _assert_r_tol(checks, *, rel_tol=1e-12):
@@ -801,54 +1157,82 @@ def _assert_r_tol(checks, *, rel_tol=1e-12):
     if _R_BITEXACT:
         ref = r_scalar_values([e for _, e, _ in checks])
         for got, expr, _ in checks:
-            assert math.isclose(got, ref[expr], rel_tol=rel_tol), \
+            assert math.isclose(got, ref[expr], rel_tol=rel_tol), (
                 f"{expr}: {got!r} !~ live R {ref[expr]!r}"
+            )
     else:
         for got, expr, fb in checks:
-            assert math.isclose(got, fb, rel_tol=rel_tol), \
+            assert math.isclose(got, fb, rel_tol=rel_tol), (
                 f"{expr}: {got!r} !~ R {fb!r}"
+            )
 
 
 def test_dnorm_pnorm_qnorm():
-    _assert_r([
-        (dnorm(0), "dnorm(0)", 0.3989422804014327),
-        (pnorm(1.96), "pnorm(1.96)", 0.97500210485177963),
-        (qnorm(0.975), "qnorm(0.975)", 1.9599639845400536),
-    ])
+    _assert_r(
+        [
+            (dnorm(0), "dnorm(0)", 0.3989422804014327),
+            (pnorm(1.96), "pnorm(1.96)", 0.97500210485177963),
+            (qnorm(0.975), "qnorm(0.975)", 1.9599639845400536),
+        ]
+    )
 
 
 def test_pnorm_lower_tail_false():
     # R's pnorm(.., lower.tail=FALSE) uses the upper-tail kernel directly.
-    _assert_r([(pnorm(1.96, lower_tail=False),
-                "pnorm(1.96, lower.tail=FALSE)", 0.024997895148220428)])
+    _assert_r(
+        [
+            (
+                pnorm(1.96, lower_tail=False),
+                "pnorm(1.96, lower.tail=FALSE)",
+                0.024997895148220428,
+            )
+        ]
+    )
 
 
 def test_qnorm_lower_tail_false():
     # P(Z > q) = 0.025  →  q = qnorm(0.975); R's lower.tail=FALSE path differs
     # from 1-p by 1 ulp (0.5 - p + 0.5 idiom) — we replicate it exactly.
-    _assert_r([(qnorm(0.025, lower_tail=False),
-                "qnorm(0.025, lower.tail=FALSE)", 1.9599639845400538)])
+    _assert_r(
+        [
+            (
+                qnorm(0.025, lower_tail=False),
+                "qnorm(0.025, lower.tail=FALSE)",
+                1.9599639845400538,
+            )
+        ]
+    )
 
 
 def test_t_distribution():
-    _assert_r([
-        (qt(0.975, df=10), "qt(0.975, df=10)", 2.2281388519862739),
-        (pt(2, df=10), "pt(2, df=10)", 0.96330598261462974),
-    ])
+    _assert_r(
+        [
+            (qt(0.975, df=10), "qt(0.975, df=10)", 2.2281388519862739),
+            (pt(2, df=10), "pt(2, df=10)", 0.96330598261462974),
+        ]
+    )
 
 
 def test_chisq_distribution():
-    _assert_r([
-        (qchisq(0.95, df=1), "qchisq(0.95, df=1)", 3.841458820694124),
-        (pchisq(3.841458821, df=1), "pchisq(3.841458821, df=1)", 0.9500000000091211),
-    ])
+    _assert_r(
+        [
+            (qchisq(0.95, df=1), "qchisq(0.95, df=1)", 3.841458820694124),
+            (
+                pchisq(3.841458821, df=1),
+                "pchisq(3.841458821, df=1)",
+                0.9500000000091211,
+            ),
+        ]
+    )
 
 
 def test_f_distribution():
-    _assert_r([
-        (qf(0.95, 2, 10), "qf(0.95, 2, 10)", 4.1028210151304005),
-        (pf(4.102821, 2, 10), "pf(4.102821, 2, 10)", 0.94999999958445847),
-    ])
+    _assert_r(
+        [
+            (qf(0.95, 2, 10), "qf(0.95, 2, 10)", 4.1028210151304005),
+            (pf(4.102821, 2, 10), "pf(4.102821, 2, 10)", 0.94999999958445847),
+        ]
+    )
 
 
 def test_tukey_studentized_range():
@@ -856,34 +1240,81 @@ def test_tukey_studentized_range():
     # qtukey.c). The nmath scalar takes (q, rr=nranges, cc=nmeans, df); R's
     # user signature is ptukey(q, nmeans, df, nranges=1). The public ptukey/
     # qtukey add a Rust f64 fast path (≤ few ulp), covered in test_rs_parity.
-    _assert_r([
-        (float(_nm.ptukey(3.5, 1, 4, 20, True, False)),
-         "ptukey(3.5, 4, 20)", 0.90504154945144333),
-        (float(_nm.ptukey(3.5, 1, 4, 20, False, False)),
-         "ptukey(3.5, 4, 20, lower.tail=FALSE)", 0.094958450548556672),
-        (float(_nm.ptukey(3.5, 2, 4, 20, True, False)),
-         "ptukey(3.5, 4, 20, nranges=2)", 0.82597563005997021),
-        (float(_nm.qtukey(0.95, 1, 4, 20, True, False)),
-         "qtukey(0.95, 4, 20)", 3.9582934614503928),
-        (float(_nm.qtukey(0.99, 1, 6, 30, True, False)),
-         "qtukey(0.99, 6, 30)", 5.2418260490366073),
-    ])
+    _assert_r(
+        [
+            (
+                float(_nm.ptukey(3.5, 1, 4, 20, True, False)),
+                "ptukey(3.5, 4, 20)",
+                0.90504154945144333,
+            ),
+            (
+                float(_nm.ptukey(3.5, 1, 4, 20, False, False)),
+                "ptukey(3.5, 4, 20, lower.tail=FALSE)",
+                0.094958450548556672,
+            ),
+            (
+                float(_nm.ptukey(3.5, 2, 4, 20, True, False)),
+                "ptukey(3.5, 4, 20, nranges=2)",
+                0.82597563005997021,
+            ),
+            (
+                float(_nm.qtukey(0.95, 1, 4, 20, True, False)),
+                "qtukey(0.95, 4, 20)",
+                3.9582934614503928,
+            ),
+            (
+                float(_nm.qtukey(0.99, 1, 6, 30, True, False)),
+                "qtukey(0.99, 6, 30)",
+                5.2418260490366073,
+            ),
+        ]
+    )
 
 
 def test_noncentral_t_f_chisq():
     # Noncentral t / F / chi-square d/p/q bit-exact to R via the Python nmath
     # reference (pnt/pnf/pnchisq etc.). The public pt/pf/pchisq(ncp!=0) add a
     # Rust f64 fast path (≤ few ulp), covered in test_rs_parity.
-    _assert_r([
-        (float(_nm.pnt(2, 10, 1, True, False)), "pt(2, 10, ncp=1)", 0.80761156253031108),
-        (float(_nm.qnt(0.9, 10, 1, True, False)), "qt(0.9, 10, ncp=1)", 2.5260798970603702),
-        (float(_nm.dnt(2, 10, 1, False)), "dt(2, 10, ncp=1)", 0.22542404659006754),
-        (float(_nm.pnf(3, 4, 20, 5, True, False)), "pf(3, 4, 20, ncp=5)", 0.70573017245554626),
-        (float(_nm.qnf(0.9, 4, 20, 5, True, False)), "qf(0.9, 4, 20, ncp=5)", 4.7522167215545368),
-        (float(_nm.pnchisq(10, 5, 3, True, False)), "pchisq(10, 5, ncp=3)", 0.71723684643114338),
-        (float(_nm.dnchisq(10, 5, 3, False)), "dchisq(10, 5, ncp=3)", 0.061806315927121186),
-        (float(_nm.qnchisq(0.9, 5, 3, True, False)), "qchisq(0.9, 5, ncp=3)", 14.322122198979427),
-    ])
+    _assert_r(
+        [
+            (
+                float(_nm.pnt(2, 10, 1, True, False)),
+                "pt(2, 10, ncp=1)",
+                0.80761156253031108,
+            ),
+            (
+                float(_nm.qnt(0.9, 10, 1, True, False)),
+                "qt(0.9, 10, ncp=1)",
+                2.5260798970603702,
+            ),
+            (float(_nm.dnt(2, 10, 1, False)), "dt(2, 10, ncp=1)", 0.22542404659006754),
+            (
+                float(_nm.pnf(3, 4, 20, 5, True, False)),
+                "pf(3, 4, 20, ncp=5)",
+                0.70573017245554626,
+            ),
+            (
+                float(_nm.qnf(0.9, 4, 20, 5, True, False)),
+                "qf(0.9, 4, 20, ncp=5)",
+                4.7522167215545368,
+            ),
+            (
+                float(_nm.pnchisq(10, 5, 3, True, False)),
+                "pchisq(10, 5, ncp=3)",
+                0.71723684643114338,
+            ),
+            (
+                float(_nm.dnchisq(10, 5, 3, False)),
+                "dchisq(10, 5, ncp=3)",
+                0.061806315927121186,
+            ),
+            (
+                float(_nm.qnchisq(0.9, 5, 3, True, False)),
+                "qchisq(0.9, 5, ncp=3)",
+                14.322122198979427,
+            ),
+        ]
+    )
 
 
 def test_noncentral_tukey_hyper_rs_fast_path():
@@ -910,56 +1341,76 @@ def test_noncentral_tukey_hyper_rs_fast_path():
 def test_signrank_wilcox_distributions():
     # Exact Wilcoxon signed-rank / rank-sum d/p/q, bit-exact to R
     # (ported nmath signrank.c / wilcox.c).
-    _assert_r([
-        (float(psignrank(10, 8)), "psignrank(10, 8)", 0.15625000000000003),
-        (float(dsignrank(10, 8)), "dsignrank(10, 8)", 0.03125),
-        (float(qsignrank(0.975, 12)), "qsignrank(0.975, 12)", 64.0),
-        (float(pwilcox(20, 6, 8)), "pwilcox(20, 6, 8)", 0.33100233100233101),
-        (float(dwilcox(20, 6, 8)), "dwilcox(20, 6, 8)", 0.044622044622044624),
-        (float(qwilcox(0.1, 10, 10)), "qwilcox(0.1, 10, 10)", 33.0),
-    ])
+    _assert_r(
+        [
+            (float(psignrank(10, 8)), "psignrank(10, 8)", 0.15625000000000003),
+            (float(dsignrank(10, 8)), "dsignrank(10, 8)", 0.03125),
+            (float(qsignrank(0.975, 12)), "qsignrank(0.975, 12)", 64.0),
+            (float(pwilcox(20, 6, 8)), "pwilcox(20, 6, 8)", 0.33100233100233101),
+            (float(dwilcox(20, 6, 8)), "dwilcox(20, 6, 8)", 0.044622044622044624),
+            (float(qwilcox(0.1, 10, 10)), "qwilcox(0.1, 10, 10)", 33.0),
+        ]
+    )
 
 
 def test_cauchy_logis_lnorm_weibull_geom():
     # Second-half continuous + geometric families. Closed-form (no LDOUBLE
     # series) → the public API (Rust f64 _rs fast path) is itself 0-ulp to R,
     # so assert it directly (unlike the noncentral f64 kernels).
-    _assert_r([
-        (float(dcauchy(1.5, 0, 2)), "dcauchy(1.5, 0, 2)", 0.10185916357881301),
-        (float(pcauchy(1.5, 0, 2)), "pcauchy(1.5, 0, 2)", 0.70483276469913347),
-        (float(qcauchy(0.9, 0, 2)), "qcauchy(0.9, 0, 2)", 6.1553670743505089),
-        (float(dlogis(1.0)), "dlogis(1)", 0.19661193324148188),
-        (float(plogis(1.0)), "plogis(1)", 0.7310585786300049),
-        (float(qlogis(0.8)), "qlogis(0.8)", 1.3862943611198908),
-        (float(dlnorm(2.0)), "dlnorm(2)", 0.15687401927898109),
-        (float(plnorm(2.0)), "plnorm(2)", 0.75589140421441725),
-        (float(qlnorm(0.9)), "qlnorm(0.9)", 3.6022244792791591),
-        (float(dweibull(1.5, 2, 1.3)), "dweibull(1.5, 2, 1.3)", 0.46884775144958446),
-        (float(pweibull(1.5, 2, 1.3)), "pweibull(1.5, 2, 1.3)", 0.73588243335006742),
-        (float(qweibull(0.9, 2, 1.3)), "qweibull(0.9, 2, 1.3)", 1.9726552682006904),
-        (float(dgeom(3, 0.4)), "dgeom(3, 0.4)", 0.086399999999999991),
-        (float(pgeom(3, 0.4)), "pgeom(3, 0.4)", 0.87040000000000006),
-        (float(qgeom(0.9, 0.4)), "qgeom(0.9, 0.4)", 4.0),
-    ])
+    _assert_r(
+        [
+            (float(dcauchy(1.5, 0, 2)), "dcauchy(1.5, 0, 2)", 0.10185916357881301),
+            (float(pcauchy(1.5, 0, 2)), "pcauchy(1.5, 0, 2)", 0.70483276469913347),
+            (float(qcauchy(0.9, 0, 2)), "qcauchy(0.9, 0, 2)", 6.1553670743505089),
+            (float(dlogis(1.0)), "dlogis(1)", 0.19661193324148188),
+            (float(plogis(1.0)), "plogis(1)", 0.7310585786300049),
+            (float(qlogis(0.8)), "qlogis(0.8)", 1.3862943611198908),
+            (float(dlnorm(2.0)), "dlnorm(2)", 0.15687401927898109),
+            (float(plnorm(2.0)), "plnorm(2)", 0.75589140421441725),
+            (float(qlnorm(0.9)), "qlnorm(0.9)", 3.6022244792791591),
+            (
+                float(dweibull(1.5, 2, 1.3)),
+                "dweibull(1.5, 2, 1.3)",
+                0.46884775144958446,
+            ),
+            (
+                float(pweibull(1.5, 2, 1.3)),
+                "pweibull(1.5, 2, 1.3)",
+                0.73588243335006742,
+            ),
+            (float(qweibull(0.9, 2, 1.3)), "qweibull(0.9, 2, 1.3)", 1.9726552682006904),
+            (float(dgeom(3, 0.4)), "dgeom(3, 0.4)", 0.086399999999999991),
+            (float(pgeom(3, 0.4)), "pgeom(3, 0.4)", 0.87040000000000006),
+            (float(qgeom(0.9, 0.4)), "qgeom(0.9, 0.4)", 4.0),
+        ]
+    )
 
 
 def test_nbinom_qhyper():
     # Negative binomial (prob + mu parameterizations) and hypergeometric
     # quantile. f64 discrete kernels → the public _rs path is 0-ulp to R.
-    _assert_r([
-        (float(dnbinom(3, 5, 0.4)), "dnbinom(3, 5, 0.4)", 0.077414399999999994),
-        (float(dnbinom(3, 5, mu=8)), "dnbinom(3, 5, mu=8)", 0.068650105431054348),
-        (float(pnbinom(3, 5, 0.4)), "pnbinom(3, 5, 0.4)", 0.17367040000000014),
-        (float(pnbinom(3, 5, mu=8)), "pnbinom(3, 5, mu=8)", 0.15077356023716559),
-        (float(qnbinom(0.9, 5, 0.4)), "qnbinom(0.9, 5, 0.4)", 13.0),
-        (float(qnbinom(0.9, 5, mu=8)), "qnbinom(0.9, 5, mu=8)", 14.0),
-        (float(dnbinom(3, 5, 0.4, log=True)),
-         "dnbinom(3, 5, 0.4, log=TRUE)", -2.558582469179334),
-        (float(pnbinom(10, 5, 0.4, lower_tail=False)),
-         "pnbinom(10, 5, 0.4, lower.tail=FALSE)", 0.2172777056501759),
-        (float(qhyper(0.9, 20, 25, 15)), "qhyper(0.9, 20, 25, 15)", 9.0),
-        (float(qhyper(0.5, 8, 14, 9)), "qhyper(0.5, 8, 14, 9)", 3.0),
-    ])
+    _assert_r(
+        [
+            (float(dnbinom(3, 5, 0.4)), "dnbinom(3, 5, 0.4)", 0.077414399999999994),
+            (float(dnbinom(3, 5, mu=8)), "dnbinom(3, 5, mu=8)", 0.068650105431054348),
+            (float(pnbinom(3, 5, 0.4)), "pnbinom(3, 5, 0.4)", 0.17367040000000014),
+            (float(pnbinom(3, 5, mu=8)), "pnbinom(3, 5, mu=8)", 0.15077356023716559),
+            (float(qnbinom(0.9, 5, 0.4)), "qnbinom(0.9, 5, 0.4)", 13.0),
+            (float(qnbinom(0.9, 5, mu=8)), "qnbinom(0.9, 5, mu=8)", 14.0),
+            (
+                float(dnbinom(3, 5, 0.4, log=True)),
+                "dnbinom(3, 5, 0.4, log=TRUE)",
+                -2.558582469179334,
+            ),
+            (
+                float(pnbinom(10, 5, 0.4, lower_tail=False)),
+                "pnbinom(10, 5, 0.4, lower.tail=FALSE)",
+                0.2172777056501759,
+            ),
+            (float(qhyper(0.9, 20, 25, 15)), "qhyper(0.9, 20, 25, 15)", 9.0),
+            (float(qhyper(0.5, 8, 14, 9)), "qhyper(0.5, 8, 14, 9)", 3.0),
+        ]
+    )
 
 
 def test_r_generators_cauchy_weibull_geom():
@@ -968,7 +1419,9 @@ def test_r_generators_cauchy_weibull_geom():
     set_seed(42)
     assert float(rcauchy(3, 1, 2)[0]) == pytest.approx(0.45155182574632846, rel=1e-12)
     set_seed(13)
-    assert float(rweibull(3, 1.7, 2.3)[0]) == pytest.approx(1.2236370854093777, rel=1e-12)
+    assert float(rweibull(3, 1.7, 2.3)[0]) == pytest.approx(
+        1.2236370854093777, rel=1e-12
+    )
     set_seed(101)
     assert rgeom(4, 0.08).astype(int).tolist() == [7, 23, 9, 9]
 
@@ -976,34 +1429,59 @@ def test_r_generators_cauchy_weibull_geom():
 def test_pbirthday_qbirthday_dmultinom():
     # Closed-form combinatorial densities — pure R ports (birthday.R / distn.R),
     # bit-exact (long-double sum/prod + nmath lgammafn).
-    _assert_r([
-        (float(pbirthday(23)), "pbirthday(23)", 0.5072972343239854),
-        (float(pbirthday(10, 365, 3)),
-         "pbirthday(10, 365, 3)", 0.0012248510714326258),
-        (float(qbirthday(0.5)), "qbirthday(0.5)", 23.0),
-        (float(qbirthday(0.9, 365, 3)), "qbirthday(0.9, 365, 3)", 135.0),
-        (float(dmultinom([1, 2, 3], prob=[0.2, 0.3, 0.5])),
-         "dmultinom(c(1,2,3), prob=c(0.2,0.3,0.5))", 0.13499999999999993),
-        (float(dmultinom([1, 2, 3], prob=[0.2, 0.3, 0.5], log=True)),
-         "dmultinom(c(1,2,3), prob=c(0.2,0.3,0.5), log=TRUE)", -2.002480500543708),
-    ])
+    _assert_r(
+        [
+            (float(pbirthday(23)), "pbirthday(23)", 0.5072972343239854),
+            (
+                float(pbirthday(10, 365, 3)),
+                "pbirthday(10, 365, 3)",
+                0.0012248510714326258,
+            ),
+            (float(qbirthday(0.5)), "qbirthday(0.5)", 23.0),
+            (float(qbirthday(0.9, 365, 3)), "qbirthday(0.9, 365, 3)", 135.0),
+            (
+                float(dmultinom([1, 2, 3], prob=[0.2, 0.3, 0.5])),
+                "dmultinom(c(1,2,3), prob=c(0.2,0.3,0.5))",
+                0.13499999999999993,
+            ),
+            (
+                float(dmultinom([1, 2, 3], prob=[0.2, 0.3, 0.5], log=True)),
+                "dmultinom(c(1,2,3), prob=c(0.2,0.3,0.5), log=TRUE)",
+                -2.002480500543708,
+            ),
+        ]
+    )
 
 
 def test_psmirnov_qsmirnov():
     # Two-sample Smirnov CDF (exact recursion + asymptotic) and quantile,
     # bit-exact to R (reuses the ks.test exact kernels; ties via z=).
-    _assert_r([
-        (float(psmirnov(0.5, (5, 8))), "psmirnov(0.5, c(5,8))", 0.6837606837606837),
-        (float(psmirnov(0.4, (5, 8), alternative="greater")),
-         "psmirnov(0.4, c(5,8), alternative='greater')", 0.7016317016317015),
-        (float(psmirnov(0.5, (5, 8), lower_tail=False)),
-         "psmirnov(0.5, c(5,8), lower.tail=FALSE)", 0.3162393162393162),
-        (float(psmirnov(0.5, (12, 15), exact=False)),
-         "psmirnov(0.5, c(12,15), exact=FALSE)", 0.9286552524988926),
-        (float(psmirnov(0.5, (5, 5), z=[1, 1, 2, 3, 3, 4, 5, 6, 7, 7])),
-         "psmirnov(0.5, c(5,5), z=c(1,1,2,3,3,4,5,6,7,7))", 0.6428571428571428),
-        (float(qsmirnov(0.95, (5, 8))), "qsmirnov(0.95, c(5,8))", 0.75),
-    ])
+    _assert_r(
+        [
+            (float(psmirnov(0.5, (5, 8))), "psmirnov(0.5, c(5,8))", 0.6837606837606837),
+            (
+                float(psmirnov(0.4, (5, 8), alternative="greater")),
+                "psmirnov(0.4, c(5,8), alternative='greater')",
+                0.7016317016317015,
+            ),
+            (
+                float(psmirnov(0.5, (5, 8), lower_tail=False)),
+                "psmirnov(0.5, c(5,8), lower.tail=FALSE)",
+                0.3162393162393162,
+            ),
+            (
+                float(psmirnov(0.5, (12, 15), exact=False)),
+                "psmirnov(0.5, c(12,15), exact=FALSE)",
+                0.9286552524988926,
+            ),
+            (
+                float(psmirnov(0.5, (5, 5), z=[1, 1, 2, 3, 3, 4, 5, 6, 7, 7])),
+                "psmirnov(0.5, c(5,5), z=c(1,1,2,3,3,4,5,6,7,7))",
+                0.6428571428571428,
+            ),
+            (float(qsmirnov(0.95, (5, 8))), "qsmirnov(0.95, c(5,8))", 0.75),
+        ]
+    )
 
 
 def test_r_generators_nbinom_hyper_rank():
@@ -1027,18 +1505,22 @@ def test_r_multinom_2dtable_wishart_smirnov():
     # stream is exact; its chol/crossprod carry ≤ few ulp of platform-BLAS.
     set_seed(42)
     assert rmultinom(4, 10, [0.2, 0.3, 0.5]).tolist() == [
-        [4, 1, 2, 3], [4, 5, 3, 1], [2, 4, 5, 6]]
+        [4, 1, 2, 3],
+        [4, 5, 3, 1],
+        [2, 4, 5, 6],
+    ]
     set_seed(7)
     tabs = r2dtable(2, [3, 2], [2, 3])
     assert [t.tolist() for t in tabs] == [[[0, 3], [2, 0]], [[1, 2], [1, 1]]]
     set_seed(101)
     assert rsmirnov(6, (5, 8)).tolist() == pytest.approx(
-        [0.25, 0.4, 0.4, 0.2, 0.3, 0.675])
+        [0.25, 0.4, 0.4, 0.2, 0.3, 0.675]
+    )
     set_seed(7)
     w = rWishart(1, 5, [[2.0, 0.5], [0.5, 1.0]])[:, :, 0]
     assert w.ravel().tolist() == pytest.approx(
-        [26.17012340132881, 10.434953805570906,
-         10.434953805570906, 4.8473550148401925])
+        [26.17012340132881, 10.434953805570906, 10.434953805570906, 4.8473550148401925]
+    )
 
 
 def test_binom():
@@ -1050,20 +1532,28 @@ def test_binom():
 
 def test_poisson_with_lambda_keyword():
     # dpois / ppois bit-exact to R (ported dpois saddlepoint, ppois->pgamma).
-    _assert_r([
-        (float(dpois(2, lambda_=3)), "dpois(2, 3)", 0.22404180765538773),
-        (float(ppois(2, lambda_=3)), "ppois(2, 3)", 0.42319008112684348),
-    ])
+    _assert_r(
+        [
+            (float(dpois(2, lambda_=3)), "dpois(2, 3)", 0.22404180765538773),
+            (float(ppois(2, lambda_=3)), "ppois(2, 3)", 0.42319008112684348),
+        ]
+    )
 
 
 def test_uniform_exp_gamma_beta():
     assert float(punif(0.3)) == pytest.approx(0.3)
     assert float(qexp(0.5)) == pytest.approx(np.log(2), rel=1e-6)
     # pgamma / pbeta bit-exact to R (ported nmath pgamma / toms708 pbeta).
-    _assert_r([
-        (float(pgamma(1, shape=2, rate=1)), "pgamma(1, shape=2, rate=1)", 0.26424111765711528),
-        (float(pbeta(0.5, 2, 5)), "pbeta(0.5, 2, 5)", 0.890625),
-    ])
+    _assert_r(
+        [
+            (
+                float(pgamma(1, shape=2, rate=1)),
+                "pgamma(1, shape=2, rate=1)",
+                0.26424111765711528,
+            ),
+            (float(pbeta(0.5, 2, 5)), "pbeta(0.5, 2, 5)", 0.890625),
+        ]
+    )
 
 
 def test_set_seed_reproducible():
@@ -1095,26 +1585,78 @@ def test_rmersenne_family_samplers_match_r():
 
     np.testing.assert_allclose(
         f(1, lambda r: r.exp_rand(), 5),
-        [0.755181833128345, 1.181642779107106, 0.145706726703793,
-         0.139795261868498, 0.436068625779175], rtol=1e-12)
+        [
+            0.755181833128345,
+            1.181642779107106,
+            0.145706726703793,
+            0.139795261868498,
+            0.436068625779175,
+        ],
+        rtol=1e-12,
+    )
     np.testing.assert_allclose(
         f(2, lambda r: r.rgamma(3, 2), 5),
-        [2.56593501810152, 2.42084845343624, 2.06431284019708,
-         5.40513641980691, 3.00717049677133], rtol=1e-10)
+        [
+            2.56593501810152,
+            2.42084845343624,
+            2.06431284019708,
+            5.40513641980691,
+            3.00717049677133,
+        ],
+        rtol=1e-10,
+    )
     np.testing.assert_allclose(
         f(3, lambda r: r.rgamma(0.4), 5),
-        [0.01631525060736624, 0.12958103428420428, 0.00772927389486502,
-         0.00584445661994953, 1.22420510697687734], rtol=1e-9)
-    assert [int(x) for x in f(4, lambda r: r.rpois(3.0), 8)] == \
-        [3, 0, 2, 2, 4, 2, 4, 5]
-    assert [int(x) for x in f(5, lambda r: r.rpois(25.0), 8)] == \
-        [20, 22, 25, 33, 21, 25, 20, 25]
-    assert [int(x) for x in f(6, lambda r: r.rbinom(10, 0.3), 8)] == \
-        [3, 5, 2, 2, 4, 6, 6, 4]
-    assert [int(x) for x in f(7, lambda r: r.rbinom(200, 0.4), 8)] == \
-        [82, 76, 76, 78, 81, 85, 90, 70]
-    assert [int(x) for x in f(8, lambda r: r.rnbinom(2, 5), 8)] == \
-        [4, 5, 6, 0, 8, 2, 5, 13]
+        [
+            0.01631525060736624,
+            0.12958103428420428,
+            0.00772927389486502,
+            0.00584445661994953,
+            1.22420510697687734,
+        ],
+        rtol=1e-9,
+    )
+    assert [int(x) for x in f(4, lambda r: r.rpois(3.0), 8)] == [3, 0, 2, 2, 4, 2, 4, 5]
+    assert [int(x) for x in f(5, lambda r: r.rpois(25.0), 8)] == [
+        20,
+        22,
+        25,
+        33,
+        21,
+        25,
+        20,
+        25,
+    ]
+    assert [int(x) for x in f(6, lambda r: r.rbinom(10, 0.3), 8)] == [
+        3,
+        5,
+        2,
+        2,
+        4,
+        6,
+        6,
+        4,
+    ]
+    assert [int(x) for x in f(7, lambda r: r.rbinom(200, 0.4), 8)] == [
+        82,
+        76,
+        76,
+        78,
+        81,
+        85,
+        90,
+        70,
+    ]
+    assert [int(x) for x in f(8, lambda r: r.rnbinom(2, 5), 8)] == [
+        4,
+        5,
+        6,
+        0,
+        8,
+        2,
+        5,
+        13,
+    ]
 
 
 def test_rmersenne_composed_families_match_r():
@@ -1128,46 +1670,132 @@ def test_rmersenne_composed_families_match_r():
         r = MT(seed)
         return [fn(r) for _ in range(k)]
 
-    np.testing.assert_allclose(f(1, lambda r: r.rchisq(3), 8),
-        [0.94331456701213001, 5.5437815656796143, 5.3543968318754569,
-         2.9152466284968503, 5.0531907965078293, 3.7492110953605073,
-         3.3173247857629455, 1.4358542591922681], rtol=1e-9)
-    np.testing.assert_allclose(f(1, lambda r: r.rchisq(3, 2.5), 8),
-        [1.4007473814073526, 5.3543968318754569, 4.5570610095050101,
-         5.6340352822938744, 3.092611107839025, 1.4629708539445847,
-         5.7511096054004343, 8.7129370516950448], rtol=1e-9)
-    np.testing.assert_allclose(f(1, lambda r: r.rt(4), 8),
-        [-0.67291659996486219, -0.5843383715604018, 0.57211571515607695,
-         -0.34111699754345642, -0.21805345233165202, 0.60311428389395705,
-         -0.41526835800270151, -0.013495013427469081], rtol=1e-9)
-    np.testing.assert_allclose(f(1, lambda r: r.rf(4, 7), 8),
-        [0.25307567624745586, 1.6113499786337722, 1.5400491076567895,
-         1.6052631863861921, 0.58985814242435342, 0.69212578066138286,
-         0.23118802715891759, 0.84371345838504663], rtol=1e-9)
+    np.testing.assert_allclose(
+        f(1, lambda r: r.rchisq(3), 8),
+        [
+            0.94331456701213001,
+            5.5437815656796143,
+            5.3543968318754569,
+            2.9152466284968503,
+            5.0531907965078293,
+            3.7492110953605073,
+            3.3173247857629455,
+            1.4358542591922681,
+        ],
+        rtol=1e-9,
+    )
+    np.testing.assert_allclose(
+        f(1, lambda r: r.rchisq(3, 2.5), 8),
+        [
+            1.4007473814073526,
+            5.3543968318754569,
+            4.5570610095050101,
+            5.6340352822938744,
+            3.092611107839025,
+            1.4629708539445847,
+            5.7511096054004343,
+            8.7129370516950448,
+        ],
+        rtol=1e-9,
+    )
+    np.testing.assert_allclose(
+        f(1, lambda r: r.rt(4), 8),
+        [
+            -0.67291659996486219,
+            -0.5843383715604018,
+            0.57211571515607695,
+            -0.34111699754345642,
+            -0.21805345233165202,
+            0.60311428389395705,
+            -0.41526835800270151,
+            -0.013495013427469081,
+        ],
+        rtol=1e-9,
+    )
+    np.testing.assert_allclose(
+        f(1, lambda r: r.rf(4, 7), 8),
+        [
+            0.25307567624745586,
+            1.6113499786337722,
+            1.5400491076567895,
+            1.6052631863861921,
+            0.58985814242435342,
+            0.69212578066138286,
+            0.23118802715891759,
+            0.84371345838504663,
+        ],
+        rtol=1e-9,
+    )
     # rbeta BB (min > 1), with the aa/bb swap (rbeta(a,b)+rbeta(b,a)==1).
-    np.testing.assert_allclose(f(2, lambda r: r.rbeta(2, 3), 6),
-        [0.20153661209123486, 0.44718349735790824, 0.16045907961851755,
-         0.3800521727916239, 0.4336392373583321, 0.58685628551895686], rtol=1e-9)
-    np.testing.assert_allclose(f(2, lambda r: r.rbeta(3, 2), 6),
-        [0.79846338790876514, 0.5528165026420917, 0.83954092038148243,
-         0.61994782720837605, 0.56636076264166801, 0.4131437144810432], rtol=1e-9)
+    np.testing.assert_allclose(
+        f(2, lambda r: r.rbeta(2, 3), 6),
+        [
+            0.20153661209123486,
+            0.44718349735790824,
+            0.16045907961851755,
+            0.3800521727916239,
+            0.4336392373583321,
+            0.58685628551895686,
+        ],
+        rtol=1e-9,
+    )
+    np.testing.assert_allclose(
+        f(2, lambda r: r.rbeta(3, 2), 6),
+        [
+            0.79846338790876514,
+            0.5528165026420917,
+            0.83954092038148243,
+            0.61994782720837605,
+            0.56636076264166801,
+            0.4131437144810432,
+        ],
+        rtol=1e-9,
+    )
     # rbeta BC (min <= 1), incl. the a == 1 edge.
-    np.testing.assert_allclose(f(3, lambda r: r.rbeta(0.5, 0.8), 6),
-        [0.61473057792667174, 0.21442516685532181, 0.96858430275314145,
-         0.25050089115849417, 0.36212582276500171, 0.32241222305695116], rtol=1e-9)
-    np.testing.assert_allclose(f(4, lambda r: r.rbeta(1, 3), 6),
-        [0.19073474794599599, 0.44489425584764741, 0.070961268480035325,
-         0.11254197198550225, 0.017583976693441462, 0.097764348433268394], rtol=1e-9)
+    np.testing.assert_allclose(
+        f(3, lambda r: r.rbeta(0.5, 0.8), 6),
+        [
+            0.61473057792667174,
+            0.21442516685532181,
+            0.96858430275314145,
+            0.25050089115849417,
+            0.36212582276500171,
+            0.32241222305695116,
+        ],
+        rtol=1e-9,
+    )
+    np.testing.assert_allclose(
+        f(4, lambda r: r.rbeta(1, 3), 6),
+        [
+            0.19073474794599599,
+            0.44489425584764741,
+            0.070961268480035325,
+            0.11254197198550225,
+            0.017583976693441462,
+            0.097764348433268394,
+        ],
+        rtol=1e-9,
+    )
     # weighted sample: ProbSampleReplace, ProbSampleNoReplace, and the Walker
     # alias path (n=250, >200 sizeable weights → R_unif_index + unif_rand).
     p = np.array([0.30, 0.11, 0.24, 0.05, 0.19, 0.07])
-    assert [int(x) + 1 for x in MT(5).sample_prob(p, 10, replace=True)] == \
-        [1, 5, 6, 1, 1, 5, 3, 2, 4, 1]
-    assert [int(x) + 1 for x in MT(6).sample_prob(p, 4, replace=False)] == \
-        [5, 4, 1, 3]
-    assert [int(x) + 1 for x in
-            MT(9).sample_prob(np.arange(1, 251, dtype=float), 8, replace=True)] == \
-        [187, 248, 152, 249, 227, 30, 232, 232]
+    assert [int(x) + 1 for x in MT(5).sample_prob(p, 10, replace=True)] == [
+        1,
+        5,
+        6,
+        1,
+        1,
+        5,
+        3,
+        2,
+        4,
+        1,
+    ]
+    assert [int(x) + 1 for x in MT(6).sample_prob(p, 4, replace=False)] == [5, 4, 1, 3]
+    assert [
+        int(x) + 1
+        for x in MT(9).sample_prob(np.arange(1, 251, dtype=float), 8, replace=True)
+    ] == [187, 248, 152, 249, 227, 30, 232, 232]
 
 
 def test_public_r_surface_routes_through_mersenne_twister():
@@ -1177,19 +1805,18 @@ def test_public_r_surface_routes_through_mersenne_twister():
     ``set.seed(1)`` reference values; (2) every routed function reproduces a
     fresh ``RMersenneTwister(seed)`` draw, and all share ONE advancing stream
     like R's global RNG."""
-    from hea.R import (runif, sample, rpois, rgamma, rbinom, rexp,
-                       rchisq, rt, rf, rbeta)
+    from hea.R import runif, sample, rpois, rgamma, rbinom, rexp, rchisq, rt, rf, rbeta
     from hea.R.rng import RMersenneTwister as MT
 
     # (1) R parity — set.seed(1); runif(5) / rnorm(5) (R 4.x reference values).
     set_seed(1)
     np.testing.assert_allclose(
-        runif(5),
-        [0.2655087, 0.3721239, 0.5728534, 0.9082078, 0.2016819], rtol=1e-6)
+        runif(5), [0.2655087, 0.3721239, 0.5728534, 0.9082078, 0.2016819], rtol=1e-6
+    )
     set_seed(1)
     np.testing.assert_allclose(
-        rnorm(5),
-        [-0.6264538, 0.1836433, -0.8356286, 1.5952808, 0.3295078], rtol=1e-6)
+        rnorm(5), [-0.6264538, 0.1836433, -0.8356286, 1.5952808, 0.3295078], rtol=1e-6
+    )
 
     # (2) routing — each public fn == the same draw off RMersenneTwister(seed).
     def draws(seed, fn, k):
@@ -1201,23 +1828,24 @@ def test_public_r_surface_routes_through_mersenne_twister():
     set_seed(11)
     np.testing.assert_array_equal(rnorm(4), MT(11).rnorm(4))
     set_seed(11)
-    np.testing.assert_array_equal(rpois(6, 3.0),
-                                  draws(11, lambda r: r.rpois(3.0), 6))
+    np.testing.assert_array_equal(rpois(6, 3.0), draws(11, lambda r: r.rpois(3.0), 6))
     set_seed(12)
-    np.testing.assert_array_equal(rgamma(5, 2.0, scale=1.5),
-                                  draws(12, lambda r: r.rgamma(2.0, scale=1.5), 5))
+    np.testing.assert_array_equal(
+        rgamma(5, 2.0, scale=1.5), draws(12, lambda r: r.rgamma(2.0, scale=1.5), 5)
+    )
     set_seed(13)
-    np.testing.assert_array_equal(rbinom(7, 20, 0.3),
-                                  draws(13, lambda r: r.rbinom(20, 0.3), 7))
+    np.testing.assert_array_equal(
+        rbinom(7, 20, 0.3), draws(13, lambda r: r.rbinom(20, 0.3), 7)
+    )
     set_seed(14)
-    np.testing.assert_array_equal(rexp(5, 2.0),
-                                  draws(14, lambda r: r.exp_rand() / 2.0, 5))
+    np.testing.assert_array_equal(
+        rexp(5, 2.0), draws(14, lambda r: r.exp_rand() / 2.0, 5)
+    )
 
     # unweighted sample is R's shrinking-pool walk on the same stream.
     vals = np.arange(1, 11)
     set_seed(2)
-    np.testing.assert_array_equal(sample(vals),
-                                  vals[MT(2).sample_int(10, 10)])
+    np.testing.assert_array_equal(sample(vals), vals[MT(2).sample_int(10, 10)])
 
     # (3) one advancing global stream: interleaved runif then rpois ==
     # sequential draws off a single MT (R's global-RNG semantics).
@@ -1234,24 +1862,42 @@ def test_public_r_surface_routes_through_mersenne_twister():
         return np.array([fn(r) for _ in range(k)])
 
     set_seed(1)
-    np.testing.assert_allclose(rt(8, 4),
-        [-0.67291659996486219, -0.5843383715604018, 0.57211571515607695,
-         -0.34111699754345642, -0.21805345233165202, 0.60311428389395705,
-         -0.41526835800270151, -0.013495013427469081], rtol=1e-9)
+    np.testing.assert_allclose(
+        rt(8, 4),
+        [
+            -0.67291659996486219,
+            -0.5843383715604018,
+            0.57211571515607695,
+            -0.34111699754345642,
+            -0.21805345233165202,
+            0.60311428389395705,
+            -0.41526835800270151,
+            -0.013495013427469081,
+        ],
+        rtol=1e-9,
+    )
     set_seed(2)
-    np.testing.assert_allclose(rbeta(6, 2, 3),
-        [0.20153661209123486, 0.44718349735790824, 0.16045907961851755,
-         0.3800521727916239, 0.4336392373583321, 0.58685628551895686], rtol=1e-9)
+    np.testing.assert_allclose(
+        rbeta(6, 2, 3),
+        [
+            0.20153661209123486,
+            0.44718349735790824,
+            0.16045907961851755,
+            0.3800521727916239,
+            0.4336392373583321,
+            0.58685628551895686,
+        ],
+        rtol=1e-9,
+    )
     set_seed(9)
     np.testing.assert_array_equal(
         sample(250, 8, replace=True, prob=list(range(1, 251))),
-        [187, 248, 152, 249, 227, 30, 232, 232])
+        [187, 248, 152, 249, 227, 30, 232, 232],
+    )
     set_seed(7)
-    np.testing.assert_array_equal(rchisq(5, 3),
-                                  mt_draws(7, lambda r: r.rchisq(3), 5))
+    np.testing.assert_array_equal(rchisq(5, 3), mt_draws(7, lambda r: r.rchisq(3), 5))
     set_seed(8)
-    np.testing.assert_array_equal(rf(5, 4, 7),
-                                  mt_draws(8, lambda r: r.rf(4, 7), 5))
+    np.testing.assert_array_equal(rf(5, 4, 7), mt_draws(8, lambda r: r.rf(4, 7), 5))
 
     # (5) set_seed no longer touches numpy's global RNG — fully decoupled.
     set_seed(123)
@@ -1274,40 +1920,94 @@ def test_rgenerator_family_rd_matches_r():
     mu = np.array([0.5, 1.5, 3.0, 6.0, 10.0])
     wt = np.array([1, 1, 2, 1, 3.0])
     mu2 = np.column_stack([[0.5, 1.5, 3, 6, 10], [0.8, 1.2, 1.5, 0.9, 2.0]])
-    mu4 = np.column_stack([[0.5, 1.5, 3, 6, 10], [-0.2, 0.1, 0.3, 0, 0.2],
-                           [0.1, -0.1, 0.2, 0, 0.3], [-0.3, 0, 0.1, 0.2, -0.1]])
+    mu4 = np.column_stack(
+        [
+            [0.5, 1.5, 3, 6, 10],
+            [-0.2, 0.1, 0.3, 0, 0.2],
+            [0.1, -0.1, 0.2, 0, 0.3],
+            [-0.3, 0, 0.1, 0.2, -0.1],
+        ]
+    )
 
     def chk(got, ref):
-        np.testing.assert_allclose(np.asarray(got, float), ref,
-                                   rtol=1e-9, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(got, float), ref, rtol=1e-9, atol=1e-12)
 
     chk(F.Poisson().rd(RGenerator(1), mu, wt, 1.0), [0, 1, 3, 9, 7])
-    chk(F.Gamma().rd(RGenerator(1), mu, wt, 0.7),
-        [0.148055784081653, 2.78469406100319, 5.37491660494231,
-         5.75866952765452, 16.3564500353662])
-    chk(F.Gaussian().rd(RGenerator(1), mu, wt, 2.0),
-        [-0.385939475352115, 1.75971087975415, 2.16437138758995,
-         8.2560677461767, 10.2690419690764])
-    chk(F.Binomial().rd(RGenerator(1), np.array([.2, .5, .8, .3, .6]),
-                        np.array([1, 2, 3, 1, 4.]), 1.0),
-        [0, 0.5, 0.666666666666667, 1, 0.75])
-    chk(F.gaulss().rd(RGenerator(1), mu2, wt, 1.0),
-        [-0.283067263427916, 1.6530361035184, 2.60608089440757,
-         7.77253422459755, 10.0951207003788])
-    chk(F.shash().rd(RGenerator(1), mu4, wt, 1.0),
-        [0.0675404284664644, 1.02120881215142, 3.52687189173171,
-         7.24982044353249, 9.4132951645412])
+    chk(
+        F.Gamma().rd(RGenerator(1), mu, wt, 0.7),
+        [
+            0.148055784081653,
+            2.78469406100319,
+            5.37491660494231,
+            5.75866952765452,
+            16.3564500353662,
+        ],
+    )
+    chk(
+        F.Gaussian().rd(RGenerator(1), mu, wt, 2.0),
+        [
+            -0.385939475352115,
+            1.75971087975415,
+            2.16437138758995,
+            8.2560677461767,
+            10.2690419690764,
+        ],
+    )
+    chk(
+        F.Binomial().rd(
+            RGenerator(1),
+            np.array([0.2, 0.5, 0.8, 0.3, 0.6]),
+            np.array([1, 2, 3, 1, 4.0]),
+            1.0,
+        ),
+        [0, 0.5, 0.666666666666667, 1, 0.75],
+    )
+    chk(
+        F.gaulss().rd(RGenerator(1), mu2, wt, 1.0),
+        [
+            -0.283067263427916,
+            1.6530361035184,
+            2.60608089440757,
+            7.77253422459755,
+            10.0951207003788,
+        ],
+    )
+    chk(
+        F.shash().rd(RGenerator(1), mu4, wt, 1.0),
+        [
+            0.0675404284664644,
+            1.02120881215142,
+            3.52687189173171,
+            7.24982044353249,
+            9.4132951645412,
+        ],
+    )
     chk(F.nb(theta=2.0).rd(RGenerator(1), mu, wt, 1.0), [1, 1, 1, 3, 6])
-    chk(F.Scat(theta=(4.0, 1.5)).rd(RGenerator(1), mu, wt, 1.0),
-        [-0.509374899947293, 0.623492442659397, 3.85817357273412,
-         5.48832450368482, 9.67291982150252])
+    chk(
+        F.Scat(theta=(4.0, 1.5)).rd(RGenerator(1), mu, wt, 1.0),
+        [
+            -0.509374899947293,
+            0.623492442659397,
+            3.85817357273412,
+            5.48832450368482,
+            9.67291982150252,
+        ],
+    )
 
-    chk(F.InverseGaussian().rd(RGenerator(1), mu, wt, 0.5),
-        [0.366005266522837, 1.2796574965637, 1.12218739016413,
-         0.62960207413193, 20.5664902471926])
-    chk(F.Tweedie(p=1.5).rd(RGenerator(1), mu, wt, 2.0),
-        [0, 2.21006742517074, 3.56580988134542, 6.63216281011408,
-         2.46511332727586])
+    chk(
+        F.InverseGaussian().rd(RGenerator(1), mu, wt, 0.5),
+        [
+            0.366005266522837,
+            1.2796574965637,
+            1.12218739016413,
+            0.62960207413193,
+            20.5664902471926,
+        ],
+    )
+    chk(
+        F.Tweedie(p=1.5).rd(RGenerator(1), mu, wt, 2.0),
+        [0, 2.21006742517074, 3.56580988134542, 6.63216281011408, 2.46511332727586],
+    )
 
 
 def test_rmvn_matches_r():
@@ -1326,14 +2026,16 @@ def test_rmvn_matches_r():
     get_difference test."""
     from hea.R.rng import RGenerator, RMersenneTwister
 
-    V = np.array([[2.0, 0.3, -0.4],
-                  [0.3, 1.5, 0.2],
-                  [-0.4, 0.2, 1.0]])
+    V = np.array([[2.0, 0.3, -0.4], [0.3, 1.5, 0.2], [-0.4, 0.2, 1.0]])
     mu = np.array([10.0, -5.0, 2.5])
 
     # vector-mu, n=2 -> (2, 3); zero mean
-    A_R = np.array([[-0.46108522671538527, 0.59723538372992691, -0.4195265282782813],
-                    [0.30315005420217234, 0.42033284459609094, 1.1035833980527343]])
+    A_R = np.array(
+        [
+            [-0.46108522671538527, 0.59723538372992691, -0.4195265282782813],
+            [0.30315005420217234, 0.42033284459609094, 1.1035833980527343],
+        ]
+    )
     A = RMersenneTwister(101).rmvn(2, np.zeros(3), V)
     assert A.shape == (2, 3)
     np.testing.assert_allclose(A, A_R, rtol=0, atol=1e-13)
@@ -1357,13 +2059,26 @@ def test_rmvn_matches_r():
 
 
 from hea.R import (  # noqa: E402  — grouped with the model-generic tests
-    AIC as R_AIC, BIC as R_BIC,
-    coef, coefficients, confint, deviance,
-    df_residual, fitted, fitted_values, fixef,
+    AIC as R_AIC,
+    BIC as R_BIC,
+    coef,
+    coefficients,
+    confint,
+    deviance,
+    df_residual,
+    fitted,
+    fitted_values,
+    fixef,
     formula as R_formula,
-    logLik, model_frame, model_matrix, nobs,
-    predict as R_predict, ranef, resid,
-    residuals as R_residuals, vcov,
+    logLik,
+    model_frame,
+    model_matrix,
+    nobs,
+    predict as R_predict,
+    ranef,
+    resid,
+    residuals as R_residuals,
+    vcov,
 )
 
 
@@ -1379,7 +2094,9 @@ def m_lm(gala):
 
 @pytest.fixture(scope="module")
 def m_glm(gala):
-    return hea.models.glm("Species ~ Area + Elevation", gala, family=hea.family.poisson())
+    return hea.models.glm(
+        "Species ~ Area + Elevation", gala, family=hea.family.poisson()
+    )
 
 
 @pytest.fixture(scope="module")
@@ -1400,6 +2117,7 @@ def m_lme():
 def test_coef_returns_named_vector(m_lm):
     c = coef(m_lm)
     from hea.R import NamedVector
+
     assert isinstance(c, NamedVector)
     assert set(c.names) == {"(Intercept)", "Area", "Elevation"}
     # Name and 0-based positional indexing both work.
@@ -1438,6 +2156,7 @@ def test_fixef_is_fixed_effects_only(m_lme):
     """gmm fixef() = fixed effects β̂ as a NamedVector — not the per-group
     coef.merMod dict."""
     from hea.R import NamedVector
+
     f = fixef(m_lme)
     assert isinstance(f, NamedVector)
     assert set(f.names) == {"(Intercept)", "Days"}
@@ -1496,9 +2215,7 @@ def test_predict_dispatches_to_method(m_lm):
     out = R_predict(m_lm)
     # lm.predict() returns a polars DataFrame with "fit" column
     assert isinstance(out, pl.DataFrame)
-    np.testing.assert_array_almost_equal(
-        out["fit"].to_numpy(), fitted(m_lm)
-    )
+    np.testing.assert_array_almost_equal(out["fit"].to_numpy(), fitted(m_lm))
 
 
 # ---- confint --------------------------------------------------------
@@ -1532,6 +2249,7 @@ def test_confint_dispatches_to_profile_object():
     """
     from hea.models import gmm
     from hea import data
+
     dye = data("Dyestuff")
     fm = gmm("Yield ~ 1 + (1 | Batch)", dye, REML=False)
     pr = fm.profile()
@@ -1592,9 +2310,7 @@ def test_deviance_glm_gam(m_glm, m_gam):
 def test_deviance_lm_falls_back_to_rss(m_lm):
     """``deviance.lm = sum(resid^2) = rss``."""
     assert deviance(m_lm) == pytest.approx(m_lm.rss)
-    np.testing.assert_allclose(
-        deviance(m_lm), float((resid(m_lm) ** 2).sum())
-    )
+    np.testing.assert_allclose(deviance(m_lm), float((resid(m_lm) ** 2).sum()))
 
 
 def test_nobs(m_lm, m_glm, m_gam, m_lme):
@@ -1679,8 +2395,13 @@ def test_R_AIC_does_not_print_or_return_none(m_lm, capsys):
 
 
 from hea.R import (  # noqa: E402  — grouped with the diagnostic tests
-    cooks_distance, dfbetas, dffits, hatvalues, influence,
-    rstandard, rstudent,
+    cooks_distance,
+    dfbetas,
+    dffits,
+    hatvalues,
+    influence,
+    rstandard,
+    rstudent,
 )
 
 
@@ -1697,12 +2418,8 @@ def test_hatvalues_in_unit_interval(m_lm, m_glm, m_gam):
 
 
 def test_rstandard_matches_cached_attribute(m_lm, m_glm):
-    np.testing.assert_array_equal(
-        rstandard(m_lm), m_lm.std_residuals
-    )
-    np.testing.assert_array_equal(
-        rstandard(m_glm), m_glm.std_dev_residuals
-    )
+    np.testing.assert_array_equal(rstandard(m_lm), m_lm.std_residuals)
+    np.testing.assert_array_equal(rstandard(m_glm), m_glm.std_dev_residuals)
 
 
 def test_rstandard_pearson_dispatch(m_glm):
@@ -1757,7 +2474,7 @@ def test_cooks_distance_matches_unified_formula_lm(m_lm):
     """``D_i = r_std_i^2 · h_i / ((1 − h_i) · p)`` for lm."""
     h = hatvalues(m_lm)
     r = rstandard(m_lm)
-    expected = r ** 2 * h / ((1 - h) * m_lm.p)
+    expected = r**2 * h / ((1 - h) * m_lm.p)
     np.testing.assert_allclose(cooks_distance(m_lm), expected, rtol=1e-12)
 
 
@@ -1765,7 +2482,7 @@ def test_cooks_distance_glm_uses_pearson_and_sum_hat(m_glm):
     """``cooks.distance.glm = std_pearson^2 · h / ((1−h) · sum(h))``."""
     h = hatvalues(m_glm)
     rp = rstandard(m_glm, type="pearson")
-    expected = rp ** 2 * h / ((1 - h) * h.sum())
+    expected = rp**2 * h / ((1 - h) * h.sum())
     np.testing.assert_allclose(cooks_distance(m_glm), expected, rtol=1e-12)
 
 
@@ -1842,9 +2559,7 @@ def test_weighted_lm_diagnostics_match_loo_refit(gala):
     m_w = hea.models.lm("Species ~ Area + Elevation", gala, weights=w)
 
     # Refit dropping observation 0
-    m_drop0 = hea.models.lm(
-        "Species ~ Area + Elevation", gala.slice(1), weights=w[1:]
-    )
+    m_drop0 = hea.models.lm("Species ~ Area + Elevation", gala.slice(1), weights=w[1:])
     b_full = coef(m_w).values
     b_drop = coef(m_drop0).values
     delta = b_full - b_drop
@@ -1883,15 +2598,33 @@ def test_weighted_lm_rstudent_dffits_consistent(gala):
 from hea.R import (  # noqa: E402  — grouped with the test-batch tests
     HTest,
     ansari_test,
-    bartlett_test, binom_test, chisq_test, cor_test, fisher_test,
-    fligner_test, friedman_test, ks_test,
-    mantelhaen_test, mcnemar_test, mood_test, oneway_test,
+    bartlett_test,
+    binom_test,
+    chisq_test,
+    cor_test,
+    fisher_test,
+    fligner_test,
+    friedman_test,
+    ks_test,
+    mantelhaen_test,
+    mcnemar_test,
+    mood_test,
+    oneway_test,
     p_adjust,
-    pairwise_prop_test, pairwise_t_test, pairwise_wilcox_test,
-    poisson_test, power_anova_test, power_prop_test, power_t_test,
-    prop_test, prop_trend_test, quade_test,
+    pairwise_prop_test,
+    pairwise_t_test,
+    pairwise_wilcox_test,
+    poisson_test,
+    power_anova_test,
+    power_prop_test,
+    power_t_test,
+    prop_test,
+    prop_trend_test,
+    quade_test,
     shapiro_test,
-    t_test, var_test, wilcox_test,
+    t_test,
+    var_test,
+    wilcox_test,
 )
 
 
@@ -1920,20 +2653,40 @@ def test_fisher_test_2x2_bit_exact_vs_r():
     res = fisher_test(tbl)
     assert res.method == "Fisher's Exact Test for Count Data"
     assert res.null_value == 1.0
-    _assert_r([
-        (res.p_value, "fisher.test(matrix(c(8,1,2,5),2,2))$p.value",
-         0.034965034965034968),
-        (res.estimate["odds ratio"],
-         "fisher.test(matrix(c(8,1,2,5),2,2))$estimate", 15.469687462886908),
-        (res.conf_int[0], "fisher.test(matrix(c(8,1,2,5),2,2))$conf.int[1]",
-         1.008849380396617),
-        (res.conf_int[1], "fisher.test(matrix(c(8,1,2,5),2,2))$conf.int[2]",
-         1049.7914461317548),
-    ])
+    _assert_r(
+        [
+            (
+                res.p_value,
+                "fisher.test(matrix(c(8,1,2,5),2,2))$p.value",
+                0.034965034965034968,
+            ),
+            (
+                res.estimate["odds ratio"],
+                "fisher.test(matrix(c(8,1,2,5),2,2))$estimate",
+                15.469687462886908,
+            ),
+            (
+                res.conf_int[0],
+                "fisher.test(matrix(c(8,1,2,5),2,2))$conf.int[1]",
+                1.008849380396617,
+            ),
+            (
+                res.conf_int[1],
+                "fisher.test(matrix(c(8,1,2,5),2,2))$conf.int[2]",
+                1049.7914461317548,
+            ),
+        ]
+    )
     res_g = fisher_test(tbl, alternative="greater")
-    _assert_r([(res_g.p_value,
+    _assert_r(
+        [
+            (
+                res_g.p_value,
                 'fisher.test(matrix(c(8,1,2,5),2,2), alternative="greater")$p.value',
-                0.024475524475524479)])
+                0.024475524475524479,
+            )
+        ]
+    )
 
 
 def test_fisher_test_from_two_vectors():
@@ -1951,35 +2704,62 @@ def test_fisher_test_exact_rxc_bit_exact_vs_r():
     sparsity, transposes, and zero cells."""
     r = fisher_test(np.array([[3, 5, 2], [7, 2, 8], [4, 6, 1]]))
     assert r.method == "Fisher's Exact Test for Count Data"
-    assert not r.statistic and not r.parameter        # p-value-only, df = NA
-    _assert_r([
-        (r.p_value,
-         "fisher.test(matrix(c(3,5,2,7,2,8,4,6,1),3,3,byrow=TRUE))$p.value",
-         0.07481072655669109),
-        (fisher_test(np.array([[1, 9, 3], [8, 2, 4]])).p_value,
-         "fisher.test(matrix(c(1,9,3,8,2,4),2,3,byrow=TRUE))$p.value",
-         0.0068231106325061432),
-        (fisher_test(np.array([[1, 8], [5, 3], [10, 1]])).p_value,
-         "fisher.test(matrix(c(1,8,5,3,10,1),3,2,byrow=TRUE))$p.value",
-         0.0010927377463923423),
-        (fisher_test(np.array([[10, 2, 3], [1, 8, 4],
-                               [2, 3, 9], [5, 1, 2]])).p_value,
-         "fisher.test(matrix(c(10,2,3,1,8,4,2,3,9,5,1,2),4,3,byrow=TRUE))$p.value",
-         0.0016923070283238997),
-        (fisher_test(np.array([[1, 8, 5, 4, 4, 2, 2], [5, 3, 3, 4, 3, 1, 0],
-                               [10, 1, 4, 0, 0, 0, 0]])).p_value,
-         "fisher.test(matrix(c(1,8,5,4,4,2,2,5,3,3,4,3,1,0,"
-         "10,1,4,0,0,0,0),3,7,byrow=TRUE))$p.value",
-         0.0035599802033163706),
-        (fisher_test(np.array([[0, 3, 2], [5, 1, 4], [2, 2, 6]])).p_value,
-         "fisher.test(matrix(c(0,3,2,5,1,4,2,2,6),3,3,byrow=TRUE))$p.value",
-         0.17749332374450155),
-        (fisher_test(np.array([[1, 2, 1, 0], [3, 3, 6, 1], [10, 10, 14, 9],
-                               [6, 7, 12, 11]])).p_value,
-         "fisher.test(matrix(c(1,2,1,0,3,3,6,1,10,10,14,9,6,7,12,11),"
-         "4,4,byrow=TRUE))$p.value",
-         0.78268493896653246),
-    ])
+    assert not r.statistic and not r.parameter  # p-value-only, df = NA
+    _assert_r(
+        [
+            (
+                r.p_value,
+                "fisher.test(matrix(c(3,5,2,7,2,8,4,6,1),3,3,byrow=TRUE))$p.value",
+                0.07481072655669109,
+            ),
+            (
+                fisher_test(np.array([[1, 9, 3], [8, 2, 4]])).p_value,
+                "fisher.test(matrix(c(1,9,3,8,2,4),2,3,byrow=TRUE))$p.value",
+                0.0068231106325061432,
+            ),
+            (
+                fisher_test(np.array([[1, 8], [5, 3], [10, 1]])).p_value,
+                "fisher.test(matrix(c(1,8,5,3,10,1),3,2,byrow=TRUE))$p.value",
+                0.0010927377463923423,
+            ),
+            (
+                fisher_test(
+                    np.array([[10, 2, 3], [1, 8, 4], [2, 3, 9], [5, 1, 2]])
+                ).p_value,
+                "fisher.test(matrix(c(10,2,3,1,8,4,2,3,9,5,1,2),4,3,byrow=TRUE))$p.value",
+                0.0016923070283238997,
+            ),
+            (
+                fisher_test(
+                    np.array(
+                        [
+                            [1, 8, 5, 4, 4, 2, 2],
+                            [5, 3, 3, 4, 3, 1, 0],
+                            [10, 1, 4, 0, 0, 0, 0],
+                        ]
+                    )
+                ).p_value,
+                "fisher.test(matrix(c(1,8,5,4,4,2,2,5,3,3,4,3,1,0,"
+                "10,1,4,0,0,0,0),3,7,byrow=TRUE))$p.value",
+                0.0035599802033163706,
+            ),
+            (
+                fisher_test(np.array([[0, 3, 2], [5, 1, 4], [2, 2, 6]])).p_value,
+                "fisher.test(matrix(c(0,3,2,5,1,4,2,2,6),3,3,byrow=TRUE))$p.value",
+                0.17749332374450155,
+            ),
+            (
+                fisher_test(
+                    np.array(
+                        [[1, 2, 1, 0], [3, 3, 6, 1], [10, 10, 14, 9], [6, 7, 12, 11]]
+                    )
+                ).p_value,
+                "fisher.test(matrix(c(1,2,1,0,3,3,6,1,10,10,14,9,6,7,12,11),"
+                "4,4,byrow=TRUE))$p.value",
+                0.78268493896653246,
+            ),
+        ]
+    )
     # transpose invariance (the algorithm sorts/swaps margins internally)
     a = fisher_test(np.array([[1, 9, 3], [8, 2, 4]])).p_value
     b = fisher_test(np.array([[1, 8], [9, 2], [3, 4]])).p_value
@@ -1992,12 +2772,16 @@ def test_fisher_test_exact_hybrid_vs_r():
     m = np.array([[3, 5, 2], [7, 2, 8], [4, 6, 1]])
     r = fisher_test(m, hybrid=True)
     assert "hybrid using asym.chisq." in r.method
-    _assert_r([
-        (r.p_value,
-         "fisher.test(matrix(c(3,5,2,7,2,8,4,6,1),3,3,byrow=TRUE),"
-         "hybrid=TRUE)$p.value",
-         0.07481072655669109),
-    ])
+    _assert_r(
+        [
+            (
+                r.p_value,
+                "fisher.test(matrix(c(3,5,2,7,2,8,4,6,1),3,3,byrow=TRUE),"
+                "hybrid=TRUE)$p.value",
+                0.07481072655669109,
+            ),
+        ]
+    )
 
 
 def test_fisher_test_exact_rejects_bad_input():
@@ -2026,82 +2810,123 @@ def test_p_adjust_bit_exact_vs_r():
     holm_na = p_adjust(pna, "holm")
     # explicit n larger than length(p).
     by10 = p_adjust(p, "BY", n=10)
-    _assert_r([
-        (holm[0], f'p.adjust({pv},"holm")[1]', 0.0599999999999999978),
-        (holm[2], f'p.adjust({pv},"holm")[3]', 0.0350000000000000033),
-        (homm[0], f'p.adjust({pv},"hommel")[1]', 0.0500000000000000028),
-        (homm[1], f'p.adjust({pv},"hommel")[2]', 0.0666666666666666657),
-        (homm[4], f'p.adjust({pv},"hommel")[5]', 0.0899999999999999967),
-        (hoch[1], f'p.adjust({pv},"hochberg")[2]', 0.0749999999999999972),
-        (bh[0], f'p.adjust({pv},"BH")[1]', 0.0266666666666666649),
-        (bh[5], f'p.adjust({pv},"BH")[6]', 0.2285714285714285643),
-        (by[0], f'p.adjust({pv},"BY")[1]', 0.072476190476190472),
-        (by[5], f'p.adjust({pv},"BY")[6]', 0.621224489795918378),
-        (by[7], f'p.adjust({pv},"BY")[8]', 0.021742857142857144),
-        (bonf[3], f'p.adjust({pv},"bonferroni")[4]', 0.3200000000000000067),
-        (holm_na[0], f'p.adjust({pnav},"holm")[1]', 0.0299999999999999989),
-        (holm_na[2], f'p.adjust({pnav},"holm")[3]', 0.0599999999999999978),
-        (by10[0], f'p.adjust({pv},"BY",n=10)[1]', 0.097632275132275126),
-    ])
+    _assert_r(
+        [
+            (holm[0], f'p.adjust({pv},"holm")[1]', 0.0599999999999999978),
+            (holm[2], f'p.adjust({pv},"holm")[3]', 0.0350000000000000033),
+            (homm[0], f'p.adjust({pv},"hommel")[1]', 0.0500000000000000028),
+            (homm[1], f'p.adjust({pv},"hommel")[2]', 0.0666666666666666657),
+            (homm[4], f'p.adjust({pv},"hommel")[5]', 0.0899999999999999967),
+            (hoch[1], f'p.adjust({pv},"hochberg")[2]', 0.0749999999999999972),
+            (bh[0], f'p.adjust({pv},"BH")[1]', 0.0266666666666666649),
+            (bh[5], f'p.adjust({pv},"BH")[6]', 0.2285714285714285643),
+            (by[0], f'p.adjust({pv},"BY")[1]', 0.072476190476190472),
+            (by[5], f'p.adjust({pv},"BY")[6]', 0.621224489795918378),
+            (by[7], f'p.adjust({pv},"BY")[8]', 0.021742857142857144),
+            (bonf[3], f'p.adjust({pv},"bonferroni")[4]', 0.3200000000000000067),
+            (holm_na[0], f'p.adjust({pnav},"holm")[1]', 0.0299999999999999989),
+            (holm_na[2], f'p.adjust({pnav},"holm")[3]', 0.0599999999999999978),
+            (by10[0], f'p.adjust({pv},"BY",n=10)[1]', 0.097632275132275126),
+        ]
+    )
     # NA slots pass through unchanged; fdr aliases BH.
     assert math.isnan(holm_na[1]) and math.isnan(holm_na[4])
     assert np.array_equal(p_adjust(p, "fdr"), p_adjust(p, "BH"))
     # n <= 1 returns input untouched; n == 2 hommel -> hochberg.
     assert np.array_equal(p_adjust([0.3], "holm"), np.array([0.3]))
-    assert np.array_equal(p_adjust([0.02, 0.03], "hommel"),
-                          p_adjust([0.02, 0.03], "hochberg"))
+    assert np.array_equal(
+        p_adjust([0.02, 0.03], "hommel"), p_adjust([0.02, 0.03], "hochberg")
+    )
     with pytest.raises(ValueError, match="one of"):
         p_adjust(p, "bogus")
 
 
 def test_oneway_fligner_mood_quade_bit_exact_vs_r():
-    OW = ('y<-c(23,25,21,30,28,35,33,31,40,42,38,29);'
-          'g<-factor(c("a","a","a","a","b","b","b","b","c","c","c","c"))')
-    yv = [23., 25, 21, 30, 28, 35, 33, 31, 40, 42, 38, 29]
+    OW = (
+        "y<-c(23,25,21,30,28,35,33,31,40,42,38,29);"
+        'g<-factor(c("a","a","a","a","b","b","b","b","c","c","c","c"))'
+    )
+    yv = [23.0, 25, 21, 30, 28, 35, 33, 31, 40, 42, 38, 29]
     gv = ["a", "a", "a", "a", "b", "b", "b", "b", "c", "c", "c", "c"]
     df = pl.DataFrame({"y": yv, "g": gv})
     ow = oneway_test("y ~ g", df)
     owe = oneway_test("y ~ g", df, var_equal=True)
     fl = fligner_test(np.array(yv), np.array(gv))
-    md = mood_test([1.1, 2.3, 4.5, 6.7, 8.9, 3.2],
-                   [2.2, 3.3, 5.5, 7.7, 1.6, 9.9, 10.1])
-    md2 = mood_test([1., 2, 2, 3, 4, 4], [2., 3, 3, 4, 5, 5, 1],
-                    alternative="greater")
-    M = np.array([[10., 12, 11, 9], [8, 7, 9, 6], [14, 15, 13, 12],
-                  [6, 5, 7, 8], [11, 13, 10, 9]])
+    md = mood_test([1.1, 2.3, 4.5, 6.7, 8.9, 3.2], [2.2, 3.3, 5.5, 7.7, 1.6, 9.9, 10.1])
+    md2 = mood_test(
+        [1.0, 2, 2, 3, 4, 4], [2.0, 3, 3, 4, 5, 5, 1], alternative="greater"
+    )
+    M = np.array(
+        [
+            [10.0, 12, 11, 9],
+            [8, 7, 9, 6],
+            [14, 15, 13, 12],
+            [6, 5, 7, 8],
+            [11, 13, 10, 9],
+        ]
+    )
     qd = quade_test(M)
-    MQ = ('matrix(c(10,12,11,9, 8,7,9,6, 14,15,13,12, 6,5,7,8, 11,13,10,9),'
-          'ncol=4, byrow=TRUE)')
+    MQ = (
+        "matrix(c(10,12,11,9, 8,7,9,6, 14,15,13,12, 6,5,7,8, 11,13,10,9),"
+        "ncol=4, byrow=TRUE)"
+    )
     x1 = "c(1.1,2.3,4.5,6.7,8.9,3.2)"
     y1 = "c(2.2,3.3,5.5,7.7,1.6,9.9,10.1)"
-    _assert_r([
-        (ow.statistic["F"], f'{{{OW}; oneway.test(y~g)$statistic}}',
-         6.7440675723575758),
-        (ow.parameter["denom df"], f'{{{OW}; oneway.test(y~g)$parameter[2]}}',
-         5.6748644038767537),
-        (ow.p_value, f'{{{OW}; oneway.test(y~g)$p.value}}', 0.03165150611520811),
-        (owe.statistic["F"],
-         f'{{{OW}; oneway.test(y~g,var.equal=TRUE)$statistic}}',
-         8.2995594713656384),
-        (owe.p_value, f'{{{OW}; oneway.test(y~g,var.equal=TRUE)$p.value}}',
-         0.0090589676833099844),
-        (fl.statistic["Fligner-Killeen:med chi-squared"],
-         f'{{{OW}; fligner.test(y,g)$statistic}}', 0.16629686472457417),
-        (fl.p_value, f'{{{OW}; fligner.test(y,g)$p.value}}',
-         0.92021454746337228),
-        (md.statistic["Z"], f'mood.test({x1},{y1})$statistic',
-         -0.64609573838092205),
-        (md.p_value, f'mood.test({x1},{y1})$p.value', 0.51821735512522893),
-        (md2.statistic["Z"],
-         'mood.test(c(1,2,2,3,4,4),c(2,3,3,4,5,5,1),alternative="greater")'
-         '$statistic', -0.65547418123743129),
-        (md2.p_value,
-         'mood.test(c(1,2,2,3,4,4),c(2,3,3,4,5,5,1),alternative="greater")'
-         '$p.value', 0.74391874786547685),
-        (qd.statistic["Quade F"], f'quade.test({MQ})$statistic',
-         1.4794520547945205),
-        (qd.p_value, f'quade.test({MQ})$p.value', 0.26972896132077295),
-    ])
+    _assert_r(
+        [
+            (
+                ow.statistic["F"],
+                f"{{{OW}; oneway.test(y~g)$statistic}}",
+                6.7440675723575758,
+            ),
+            (
+                ow.parameter["denom df"],
+                f"{{{OW}; oneway.test(y~g)$parameter[2]}}",
+                5.6748644038767537,
+            ),
+            (ow.p_value, f"{{{OW}; oneway.test(y~g)$p.value}}", 0.03165150611520811),
+            (
+                owe.statistic["F"],
+                f"{{{OW}; oneway.test(y~g,var.equal=TRUE)$statistic}}",
+                8.2995594713656384,
+            ),
+            (
+                owe.p_value,
+                f"{{{OW}; oneway.test(y~g,var.equal=TRUE)$p.value}}",
+                0.0090589676833099844,
+            ),
+            (
+                fl.statistic["Fligner-Killeen:med chi-squared"],
+                f"{{{OW}; fligner.test(y,g)$statistic}}",
+                0.16629686472457417,
+            ),
+            (fl.p_value, f"{{{OW}; fligner.test(y,g)$p.value}}", 0.92021454746337228),
+            (
+                md.statistic["Z"],
+                f"mood.test({x1},{y1})$statistic",
+                -0.64609573838092205,
+            ),
+            (md.p_value, f"mood.test({x1},{y1})$p.value", 0.51821735512522893),
+            (
+                md2.statistic["Z"],
+                'mood.test(c(1,2,2,3,4,4),c(2,3,3,4,5,5,1),alternative="greater")'
+                "$statistic",
+                -0.65547418123743129,
+            ),
+            (
+                md2.p_value,
+                'mood.test(c(1,2,2,3,4,4),c(2,3,3,4,5,5,1),alternative="greater")'
+                "$p.value",
+                0.74391874786547685,
+            ),
+            (
+                qd.statistic["Quade F"],
+                f"quade.test({MQ})$statistic",
+                1.4794520547945205,
+            ),
+            (qd.p_value, f"quade.test({MQ})$p.value", 0.26972896132077295),
+        ]
+    )
 
 
 def test_poisson_test_bit_exact_vs_r():
@@ -2111,24 +2936,39 @@ def test_poisson_test_bit_exact_vs_r():
     pl_ = poisson_test(10, 2.0, 4.0, alternative="less")
     pg = poisson_test(10, 2.0, 4.0, alternative="greater")
     p2s = poisson_test([11, 21], [800.0, 3011.0])
-    _assert_r([
-        (p1.p_value, "poisson.test(10,2,4)$p.value", 0.47461180335261433),
-        (p1.conf_int[0], "poisson.test(10,2,4)$conf.int[1]",
-         2.3976943480662172),
-        (p1.conf_int[1], "poisson.test(10,2,4)$conf.int[2]",
-         9.1951780210088891),
-        (p2.p_value, "poisson.test(137,24.19893,1)$p.value",
-         2.8452272641144545e-56),
-        (p3.p_value, "poisson.test(20,2,4)$p.value", 0.00025293940209195688),
-        (pl_.p_value, 'poisson.test(10,2,4,alternative="less")$p.value',
-         0.81588579255854643),
-        (pg.p_value, 'poisson.test(10,2,4,alternative="greater")$p.value',
-         0.28337574127298909),
-        (p2s.p_value, "poisson.test(c(11,21),c(800,3011))$p.value",
-         0.079668633033329522),
-        (p2s.estimate["rate ratio"],
-         "poisson.test(c(11,21),c(800,3011))$estimate", 1.9714880952380953),
-    ])
+    _assert_r(
+        [
+            (p1.p_value, "poisson.test(10,2,4)$p.value", 0.47461180335261433),
+            (p1.conf_int[0], "poisson.test(10,2,4)$conf.int[1]", 2.3976943480662172),
+            (p1.conf_int[1], "poisson.test(10,2,4)$conf.int[2]", 9.1951780210088891),
+            (
+                p2.p_value,
+                "poisson.test(137,24.19893,1)$p.value",
+                2.8452272641144545e-56,
+            ),
+            (p3.p_value, "poisson.test(20,2,4)$p.value", 0.00025293940209195688),
+            (
+                pl_.p_value,
+                'poisson.test(10,2,4,alternative="less")$p.value',
+                0.81588579255854643,
+            ),
+            (
+                pg.p_value,
+                'poisson.test(10,2,4,alternative="greater")$p.value',
+                0.28337574127298909,
+            ),
+            (
+                p2s.p_value,
+                "poisson.test(c(11,21),c(800,3011))$p.value",
+                0.079668633033329522,
+            ),
+            (
+                p2s.estimate["rate ratio"],
+                "poisson.test(c(11,21),c(800,3011))$estimate",
+                1.9714880952380953,
+            ),
+        ]
+    )
 
 
 def test_ansari_test_bit_exact_vs_r():
@@ -2140,23 +2980,37 @@ def test_ansari_test_bit_exact_vs_r():
     exl = ansari_test(xv, yv, alternative="less")
     exg = ansari_test(xv, yv, alternative="greater")
     an = ansari_test(xv, yv, exact=False)
-    xt = [1., 2, 3, 4, 5, 6, 3, 4]
-    yt = [2., 3, 4, 5, 6, 7, 4, 5, 3]
+    xt = [1.0, 2, 3, 4, 5, 6, 3, 4]
+    yt = [2.0, 3, 4, 5, 6, 7, 4, 5, 3]
     with pytest.warns(UserWarning, match="exact p-value with ties"):
         at = ansari_test(xt, yt, exact=True)
-    _assert_r([
-        (ex.statistic["AB"], f"ansari.test({X},{Y})$statistic", 27.0),
-        (ex.p_value, f"ansari.test({X},{Y})$p.value", 0.28205128205128216),
-        (exl.p_value, f'ansari.test({X},{Y},alternative="less")$p.value',
-         0.14102564102564108),
-        (exg.p_value, f'ansari.test({X},{Y},alternative="greater")$p.value',
-         0.91491841491841497),
-        (an.p_value, f"ansari.test({X},{Y},exact=FALSE)$p.value",
-         0.21431993135166527),
-        (at.p_value,
-         "suppressWarnings(ansari.test(c(1,2,3,4,5,6,3,4),"
-         "c(2,3,4,5,6,7,4,5,3),exact=TRUE))$p.value", 0.99117150596872883),
-    ])
+    _assert_r(
+        [
+            (ex.statistic["AB"], f"ansari.test({X},{Y})$statistic", 27.0),
+            (ex.p_value, f"ansari.test({X},{Y})$p.value", 0.28205128205128216),
+            (
+                exl.p_value,
+                f'ansari.test({X},{Y},alternative="less")$p.value',
+                0.14102564102564108,
+            ),
+            (
+                exg.p_value,
+                f'ansari.test({X},{Y},alternative="greater")$p.value',
+                0.91491841491841497,
+            ),
+            (
+                an.p_value,
+                f"ansari.test({X},{Y},exact=FALSE)$p.value",
+                0.21431993135166527,
+            ),
+            (
+                at.p_value,
+                "suppressWarnings(ansari.test(c(1,2,3,4,5,6,3,4),"
+                "c(2,3,4,5,6,7,4,5,3),exact=TRUE))$p.value",
+                0.99117150596872883,
+            ),
+        ]
+    )
 
 
 def test_mantelhaen_test_bit_exact_vs_r():
@@ -2171,33 +3025,59 @@ def test_mantelhaen_test_bit_exact_vs_r():
     ex = mantelhaen_test(arr, exact=True)
     exg = mantelhaen_test(arr, exact=True, alternative="greater")
     A = "array(c(10,3,5,12, 8,6,4,9, 11,2,3,14), dim=c(2,2,3))"
-    _assert_r([
-        (ex.statistic["S"], f"mantelhaen.test({A},exact=TRUE)$statistic", 29.0),
-        (ex.p_value, f"mantelhaen.test({A},exact=TRUE)$p.value",
-         1.5526722709029144e-05),
-        (ex.estimate["common odds ratio"],
-         f"mantelhaen.test({A},exact=TRUE)$estimate", 7.4243814778423571),
-        (ex.conf_int[0], f"mantelhaen.test({A},exact=TRUE)$conf.int[1]",
-         2.6804881596601513),
-        (ex.conf_int[1], f"mantelhaen.test({A},exact=TRUE)$conf.int[2]",
-         22.364348508028733),
-        (exg.conf_int[0],
-         f'mantelhaen.test({A},exact=TRUE,alternative="greater")$conf.int[1]',
-         3.0849851900035081),
-        (mh.statistic["Mantel-Haenszel X-squared"],
-         f"mantelhaen.test({A})$statistic", 17.052628013619071),
-        (mh.p_value, f"mantelhaen.test({A})$p.value", 3.6358023465528321e-05),
-        (mh.estimate["common odds ratio"],
-         f"mantelhaen.test({A})$estimate", 7.4265734265734276),
-        (mh.conf_int[0], f"mantelhaen.test({A})$conf.int[1]",
-         2.8608907863756419),
-        (mh.conf_int[1], f"mantelhaen.test({A})$conf.int[2]",
-         19.278608300234751),
-        (mh0.statistic["Mantel-Haenszel X-squared"],
-         f"mantelhaen.test({A},correct=FALSE)$statistic", 18.853825186038229),
-        (mhl.p_value, f'mantelhaen.test({A},alternative="less")$p.value',
-         0.99998182098826727),
-    ])
+    _assert_r(
+        [
+            (ex.statistic["S"], f"mantelhaen.test({A},exact=TRUE)$statistic", 29.0),
+            (
+                ex.p_value,
+                f"mantelhaen.test({A},exact=TRUE)$p.value",
+                1.5526722709029144e-05,
+            ),
+            (
+                ex.estimate["common odds ratio"],
+                f"mantelhaen.test({A},exact=TRUE)$estimate",
+                7.4243814778423571,
+            ),
+            (
+                ex.conf_int[0],
+                f"mantelhaen.test({A},exact=TRUE)$conf.int[1]",
+                2.6804881596601513,
+            ),
+            (
+                ex.conf_int[1],
+                f"mantelhaen.test({A},exact=TRUE)$conf.int[2]",
+                22.364348508028733,
+            ),
+            (
+                exg.conf_int[0],
+                f'mantelhaen.test({A},exact=TRUE,alternative="greater")$conf.int[1]',
+                3.0849851900035081,
+            ),
+            (
+                mh.statistic["Mantel-Haenszel X-squared"],
+                f"mantelhaen.test({A})$statistic",
+                17.052628013619071,
+            ),
+            (mh.p_value, f"mantelhaen.test({A})$p.value", 3.6358023465528321e-05),
+            (
+                mh.estimate["common odds ratio"],
+                f"mantelhaen.test({A})$estimate",
+                7.4265734265734276,
+            ),
+            (mh.conf_int[0], f"mantelhaen.test({A})$conf.int[1]", 2.8608907863756419),
+            (mh.conf_int[1], f"mantelhaen.test({A})$conf.int[2]", 19.278608300234751),
+            (
+                mh0.statistic["Mantel-Haenszel X-squared"],
+                f"mantelhaen.test({A},correct=FALSE)$statistic",
+                18.853825186038229,
+            ),
+            (
+                mhl.p_value,
+                f'mantelhaen.test({A},alternative="less")$p.value',
+                0.99998182098826727,
+            ),
+        ]
+    )
 
 
 def test_prop_trend_and_cmh_generalized_vs_r():
@@ -2205,44 +3085,60 @@ def test_prop_trend_and_cmh_generalized_vs_r():
     # ≤2-ulp/FMA residual; the generalized CMH quadratic form inherits a
     # ≤1-ulp residual from the linear solve. Both checked to a tight tol.
     pt = prop_trend_test([10, 15, 20, 25], [50, 55, 60, 50])
-    assert math.isclose(pt.statistic["X-squared"], 10.499880346588514,
-                        rel_tol=1e-12)
+    assert math.isclose(pt.statistic["X-squared"], 10.499880346588514, rel_tol=1e-12)
     assert math.isclose(pt.p_value, 0.0011938227500706187, rel_tol=1e-10)
     arr = np.zeros((3, 3, 2))
     arr[:, :, 0] = [[12, 5, 7], [3, 9, 4], [6, 2, 8]]
     arr[:, :, 1] = [[4, 11, 3], [8, 5, 10], [2, 7, 6]]
     cmh = mantelhaen_test(arr)
     assert cmh.parameter["df"] == 4
-    assert math.isclose(cmh.statistic["Cochran-Mantel-Haenszel M^2"],
-                        3.7347477319105886, rel_tol=1e-12)
+    assert math.isclose(
+        cmh.statistic["Cochran-Mantel-Haenszel M^2"], 3.7347477319105886, rel_tol=1e-12
+    )
 
 
 def test_pairwise_tests_bit_exact_vs_r():
-    xv = [23., 25, 21, 30, 28, 35, 33, 31, 40, 42, 38, 29]
+    xv = [23.0, 25, 21, 30, 28, 35, 33, 31, 40, 42, 38, 29]
     gv = ["a", "a", "a", "a", "b", "b", "b", "b", "c", "c", "c", "c"]
     X = "c(23,25,21,30, 28,35,33,31, 40,42,38,29)"
-    G = ('factor(c("a","a","a","a","b","b","b","b","c","c","c","c"))')
-    pt = pairwise_t_test(xv, gv)                              # pooled, holm
-    ptb = pairwise_t_test(xv, gv, p_adjust_method="bonferroni",
-                          pool_sd=False)
+    G = 'factor(c("a","a","a","a","b","b","b","b","c","c","c","c"))'
+    pt = pairwise_t_test(xv, gv)  # pooled, holm
+    ptb = pairwise_t_test(xv, gv, p_adjust_method="bonferroni", pool_sd=False)
     pw = pairwise_wilcox_test(xv, gv, p_adjust_method="BH")
     xs, ns = [83, 90, 129, 70], [86, 93, 136, 82]
     pp = pairwise_prop_test(xs, ns)
-    _assert_r([
-        # pooled-SD t: p[c,a] (row 3, col 1) and p[b,a] (row 2, col 1).
-        (pt.p_value[1, 0], f'pairwise.t.test({X},{G})$p.value[2,1]',
-         0.0084690099067981413),
-        (pt.p_value[0, 0], f'pairwise.t.test({X},{G})$p.value[1,1]',
-         0.0977468778971883612),
-        (pt.p_value[1, 1], f'pairwise.t.test({X},{G})$p.value[2,2]',
-         0.10734866167519812),
-        (ptb.p_value[1, 0],
-         f'pairwise.t.test({X},{G},p.adjust.method="bonferroni",'
-         'pool.sd=FALSE)$p.value[2,1]', 0.042118794320873593),
-        (pw.p_value[1, 0],
-         f'suppressWarnings(pairwise.wilcox.test({X},{G},'
-         'p.adjust.method="BH"))$p.value[2,1]', 0.085714285714285715),
-    ])
+    _assert_r(
+        [
+            # pooled-SD t: p[c,a] (row 3, col 1) and p[b,a] (row 2, col 1).
+            (
+                pt.p_value[1, 0],
+                f"pairwise.t.test({X},{G})$p.value[2,1]",
+                0.0084690099067981413,
+            ),
+            (
+                pt.p_value[0, 0],
+                f"pairwise.t.test({X},{G})$p.value[1,1]",
+                0.0977468778971883612,
+            ),
+            (
+                pt.p_value[1, 1],
+                f"pairwise.t.test({X},{G})$p.value[2,2]",
+                0.10734866167519812,
+            ),
+            (
+                ptb.p_value[1, 0],
+                f'pairwise.t.test({X},{G},p.adjust.method="bonferroni",'
+                "pool.sd=FALSE)$p.value[2,1]",
+                0.042118794320873593,
+            ),
+            (
+                pw.p_value[1, 0],
+                f"suppressWarnings(pairwise.wilcox.test({X},{G},"
+                'p.adjust.method="BH"))$p.value[2,1]',
+                0.085714285714285715,
+            ),
+        ]
+    )
     # pairwise.prop.test inherits the underlying prop.test X²/pchisq ≤2-ulp
     # residual → tolerance rather than strict bit-exact.
     assert math.isclose(pp.p_value[2, 0], 0.1185648198595505, rel_tol=1e-12)
@@ -2262,29 +3158,46 @@ def test_power_tests_vs_r():
     cases = [
         (power_t_test(n=20, delta=1.0).params["power"], 0.86895280169249778),
         (power_t_test(delta=1.0, power=0.8).params["n"], 16.714768142328293),
-        (power_t_test(n=20, delta=1.0, power=0.8, sd=None).params["sd"],
-         1.0999518232527679),
-        (power_t_test(n=20, delta=1.0, power=0.8,
-                      sig_level=None).params["sig.level"],
-         0.026623103259687371),
-        (power_t_test(n=20, delta=1.0, type="one.sample").params["power"],
-         0.98859129454456529),
-        (power_t_test(n=20, delta=1.0, strict=True).params["power"],
-         0.8689530277245856),
-        (power_t_test(n=20, delta=1.0,
-                      alternative="one.sided").params["power"],
-         0.92790247339534171),
-        (power_prop_test(n=50, p1=0.5, p2=0.75).params["power"],
-         0.74016590133138793),
-        (power_prop_test(p1=0.5, p2=0.75, power=0.9).params["n"],
-         76.706930114107664),
-        (power_prop_test(n=50, p1=0.5, power=0.8, p2=None).params["p2"],
-         0.76683004417656397),
-        (power_anova_test(groups=4, n=20, between_var=1.0,
-                          within_var=3.0).params["power"],
-         0.96790221226003825),
-        (power_anova_test(groups=4, between_var=1.0, within_var=3.0,
-                          power=0.8).params["n"], 11.926130957735564),
+        (
+            power_t_test(n=20, delta=1.0, power=0.8, sd=None).params["sd"],
+            1.0999518232527679,
+        ),
+        (
+            power_t_test(n=20, delta=1.0, power=0.8, sig_level=None).params[
+                "sig.level"
+            ],
+            0.026623103259687371,
+        ),
+        (
+            power_t_test(n=20, delta=1.0, type="one.sample").params["power"],
+            0.98859129454456529,
+        ),
+        (
+            power_t_test(n=20, delta=1.0, strict=True).params["power"],
+            0.8689530277245856,
+        ),
+        (
+            power_t_test(n=20, delta=1.0, alternative="one.sided").params["power"],
+            0.92790247339534171,
+        ),
+        (power_prop_test(n=50, p1=0.5, p2=0.75).params["power"], 0.74016590133138793),
+        (power_prop_test(p1=0.5, p2=0.75, power=0.9).params["n"], 76.706930114107664),
+        (
+            power_prop_test(n=50, p1=0.5, power=0.8, p2=None).params["p2"],
+            0.76683004417656397,
+        ),
+        (
+            power_anova_test(groups=4, n=20, between_var=1.0, within_var=3.0).params[
+                "power"
+            ],
+            0.96790221226003825,
+        ),
+        (
+            power_anova_test(
+                groups=4, between_var=1.0, within_var=3.0, power=0.8
+            ).params["n"],
+            11.926130957735564,
+        ),
     ]
     for got, ref in cases:
         assert math.isclose(got, ref, rel_tol=1e-12), f"{got!r} !~ R {ref!r}"
@@ -2367,8 +3280,9 @@ def test_get_all_vars_na_family_mfclass_vs_r():
     assert [None if np.isnan(v) else v for v in got2] == exp
     # naprint singular / plural, matching R's ngettext.
     assert naprint(oa) == "3 observations deleted due to missingness"
-    assert naprint(NAAction(np.array([2]))) == \
-        "1 observation deleted due to missingness"
+    assert (
+        naprint(NAAction(np.array([2]))) == "1 observation deleted due to missingness"
+    )
     assert naprint(None) == ""
 
     # na.pass / na.fail
@@ -2377,8 +3291,13 @@ def test_get_all_vars_na_family_mfclass_vs_r():
         na_fail(pl.Series([1.0, None, 3.0]))
     assert na_fail(pl.Series([1.0, 2.0, 3.0])) is not None
     cleaned, act = na_exclude(
-        pl.DataFrame({"y": [1.0, None, 3.0, 4.0, None, 6.0],
-                      "x": [1.0, 2.0, 3.0, None, 5.0, 6.0]}))
+        pl.DataFrame(
+            {
+                "y": [1.0, None, 3.0, 4.0, None, 6.0],
+                "x": [1.0, 2.0, 3.0, None, 5.0, 6.0],
+            }
+        )
+    )
     assert cleaned.height == 3
     assert list(act.omit) == [1, 3, 4] and act.kind == "exclude"
 
@@ -2405,30 +3324,48 @@ def test_poly_polym_vs_r():
     P = poly(x, 3)
     assert P.shape == (10, 3)
     assert P.colnames == ["1", "2", "3"]
-    _assert_r_tol([
-        (float(P[0, 0]), f"poly({X}, 3)[1,1]", -0.48794634266742815),
-        (float(P[0, 2]), f"poly({X}, 3)[1,3]", -0.48225328622075542),
-        (float(P[4, 1]), f"poly({X}, 3)[5,2]", -0.3374283855661212),
-        (float(P[9, 2]), f"poly({X}, 3)[10,3]", 0.47507769323390081),
-        (float(P.coefs["alpha"][2]),
-         f'attr(poly({X}, 3), "coefs")$alpha[3]', 6.1187536040618369),
-        (float(P.coefs["norm2"][2]),
-         f'attr(poly({X}, 3), "coefs")$norm2[3]', 110.96400000000006),
-    ])
+    _assert_r_tol(
+        [
+            (float(P[0, 0]), f"poly({X}, 3)[1,1]", -0.48794634266742815),
+            (float(P[0, 2]), f"poly({X}, 3)[1,3]", -0.48225328622075542),
+            (float(P[4, 1]), f"poly({X}, 3)[5,2]", -0.3374283855661212),
+            (float(P[9, 2]), f"poly({X}, 3)[10,3]", 0.47507769323390081),
+            (
+                float(P.coefs["alpha"][2]),
+                f'attr(poly({X}, 3), "coefs")$alpha[3]',
+                6.1187536040618369,
+            ),
+            (
+                float(P.coefs["norm2"][2]),
+                f'attr(poly({X}, 3), "coefs")$norm2[3]',
+                110.96400000000006,
+            ),
+        ]
+    )
     # raw = integer powers — 0-ulp.
     Rraw = poly(x, 3, raw=True)
-    _assert_r_tol([
-        (float(Rraw[1, 2]), f"poly({X}, 3, raw=TRUE)[2,3]", 15.625),
-        (float(Rraw[3, 1]), f"poly({X}, 3, raw=TRUE)[4,2]", 17.64),
-    ])
+    _assert_r_tol(
+        [
+            (float(Rraw[1, 2]), f"poly({X}, 3, raw=TRUE)[2,3]", 15.625),
+            (float(Rraw[3, 1]), f"poly({X}, 3, raw=TRUE)[4,2]", 17.64),
+        ]
+    )
     # predict.poly via the stored coefs (recurrence).
     pred = predict_poly(P, np.array([2.0, 5.5, 9.9]))
-    _assert_r_tol([
-        (float(pred[0, 2]),
-         f"predict(poly({X}, 3), c(2,5.5,9.9))[1,3]", 0.045658390552303328),
-        (float(pred[2, 0]),
-         f"predict(poly({X}, 3), c(2,5.5,9.9))[3,1]", 0.35694129346877995),
-    ])
+    _assert_r_tol(
+        [
+            (
+                float(pred[0, 2]),
+                f"predict(poly({X}, 3), c(2,5.5,9.9))[1,3]",
+                0.045658390552303328,
+            ),
+            (
+                float(pred[2, 0]),
+                f"predict(poly({X}, 3), c(2,5.5,9.9))[3,1]",
+                0.35694129346877995,
+            ),
+        ]
+    )
     # polym: tensor product, degree tuples as column names.
     X1 = "c(1,2,3,4,5)"
     X2 = "c(2,1,4,3,6)"
@@ -2437,11 +3374,13 @@ def test_poly_polym_vs_r():
     M = polym(x1, x2, degree=2)
     assert M.colnames == ["1.0", "2.0", "0.1", "1.1", "0.2"]
     assert M.shape == (5, 5)
-    _assert_r_tol([
-        (float(M[0, 0]), f"polym({X1}, {X2}, degree=2)[1,1]", -0.632455532033676),
-        (float(M[0, 3]), f"polym({X1}, {X2}, degree=2)[1,4]", 0.197278784766429),
-        (float(M[4, 4]), f"polym({X1}, {X2}, degree=2)[5,5]", 0.490729242320852),
-    ])
+    _assert_r_tol(
+        [
+            (float(M[0, 0]), f"polym({X1}, {X2}, degree=2)[1,1]", -0.632455532033676),
+            (float(M[0, 3]), f"polym({X1}, {X2}, degree=2)[1,4]", 0.197278784766429),
+            (float(M[4, 4]), f"polym({X1}, {X2}, degree=2)[5,5]", 0.490729242320852),
+        ]
+    )
 
 
 from hea.R import (  # noqa: E402  — grouped with the lm/aov-extras tests
@@ -2466,11 +3405,13 @@ _AOV_LSF = f"lsfit(cbind({_AOV_X1}, {_AOV_X2}), {_AOV_Y})"
 
 
 def _aov_frame():
-    return pl.DataFrame({
-        "y": [5.1, 6.3, 4.0, 9.9, 9.1, 12.2, 6.8, 7.7, 14.0, 11.1],
-        "x1": [2.1, 3.4, 1.9, 5.2, 4.4, 6.1, 3.3, 2.8, 7.0, 5.5],
-        "x2": [1.0, 0.5, 2.2, 1.7, 3.1, 2.4, 0.9, 4.0, 1.1, 2.9],
-    })
+    return pl.DataFrame(
+        {
+            "y": [5.1, 6.3, 4.0, 9.9, 9.1, 12.2, 6.8, 7.7, 14.0, 11.1],
+            "x1": [2.1, 3.4, 1.9, 5.2, 4.4, 6.1, 3.3, 2.8, 7.0, 5.5],
+            "x2": [1.0, 0.5, 2.2, 1.7, 3.1, 2.4, 0.9, 4.0, 1.1, 2.9],
+        }
+    )
 
 
 def test_sigma_cov2cor_weighted_residuals_covratio_vs_r():
@@ -2482,35 +3423,49 @@ def test_sigma_cov2cor_weighted_residuals_covratio_vs_r():
     m = lm("y ~ x1 + x2", d)
     mg = glm("y ~ x1 + x2", d, family=Gamma(link="log"))
     # sigma / weighted.residuals / covratio go through the lm-QR path → tol.
-    _assert_r_tol([
-        (sigma(m), f"sigma({_AOV_LM})", 0.5716136426669162),
-        (sigma(mg), f"sigma(glm(y ~ x1 + x2, {_AOV_DF}, "
-                    "family = Gamma(link = \"log\")))", 0.099308330006338305),
-        (float(weighted_residuals(m)[6]),
-         f"weighted.residuals({_AOV_LM})[7]", 0.17269690648941216),
-        (float(covratio(m)[7]), f"covratio({_AOV_LM})[8]", 0.36966985150973153),
-        (float(covratio(m)[0]), f"covratio({_AOV_LM})[1]", 1.0813620351622721),
-    ])
+    _assert_r_tol(
+        [
+            (sigma(m), f"sigma({_AOV_LM})", 0.5716136426669162),
+            (
+                sigma(mg),
+                f'sigma(glm(y ~ x1 + x2, {_AOV_DF}, family = Gamma(link = "log")))',
+                0.099308330006338305,
+            ),
+            (
+                float(weighted_residuals(m)[6]),
+                f"weighted.residuals({_AOV_LM})[7]",
+                0.17269690648941216,
+            ),
+            (float(covratio(m)[7]), f"covratio({_AOV_LM})[8]", 0.36966985150973153),
+            (float(covratio(m)[0]), f"covratio({_AOV_LM})[1]", 1.0813620351622721),
+        ]
+    )
     # cov2cor is pure arithmetic on shared libm → bit-exact.
     V = np.array([[4.0, 2.0, 1.0], [2.0, 9.0, 3.0], [1.0, 3.0, 16.0]])
     C = cov2cor(V)
     MAT = "matrix(c(4,2,1,2,9,3,1,3,16), 3, 3)"
-    _assert_r([
-        (float(C[0, 1]), f"cov2cor({MAT})[1,2]", 1 / 3),
-        (float(C[0, 2]), f"cov2cor({MAT})[1,3]", 0.125),
-        (float(C[1, 2]), f"cov2cor({MAT})[2,3]", 0.25),
-        (float(C[2, 2]), f"cov2cor({MAT})[3,3]", 1.0),
-    ])
+    _assert_r(
+        [
+            (float(C[0, 1]), f"cov2cor({MAT})[1,2]", 1 / 3),
+            (float(C[0, 2]), f"cov2cor({MAT})[1,3]", 0.125),
+            (float(C[1, 2]), f"cov2cor({MAT})[2,3]", 0.25),
+            (float(C[2, 2]), f"cov2cor({MAT})[3,3]", 1.0),
+        ]
+    )
     # weighted lm: weighted.residuals = sqrt(w) * response residual.
     w = np.array([1.0, 2.0, 1.0, 0.5, 1.0, 1.5, 1.0, 2.0, 1.0, 1.0])
     mw = lm("y ~ x1 + x2", d, weights=w)
-    WLM = (f"lm(y ~ x1 + x2, {_AOV_DF}, weights = "
-           "c(1,2,1,0.5,1,1.5,1,2,1,1))")
-    _assert_r_tol([
-        (sigma(mw), f"sigma({WLM})", 0.6124170195254237),
-        (float(weighted_residuals(mw)[0]),
-         f"weighted.residuals({WLM})[1]", 0.6295405349324259),
-    ])
+    WLM = f"lm(y ~ x1 + x2, {_AOV_DF}, weights = c(1,2,1,0.5,1,1.5,1,2,1,1))"
+    _assert_r_tol(
+        [
+            (sigma(mw), f"sigma({WLM})", 0.6124170195254237),
+            (
+                float(weighted_residuals(mw)[0]),
+                f"weighted.residuals({WLM})[1]",
+                0.6295405349324259,
+            ),
+        ]
+    )
 
 
 def test_influence_measures_vs_r():
@@ -2519,20 +3474,29 @@ def test_influence_measures_vs_r():
     im = influence_measures(lm("y ~ x1 + x2", _aov_frame()))
     # column labels are exactly R's (abbreviate: "(Intercept)" -> "1_").
     assert im.infmat.columns == [
-        "dfb.1_", "dfb.x1", "dfb.x2", "dffit", "cov.r", "cook.d", "hat"]
+        "dfb.1_",
+        "dfb.x1",
+        "dfb.x2",
+        "dffit",
+        "cov.r",
+        "cook.d",
+        "hat",
+    ]
     IM = f"influence.measures({_AOV_LM})$infmat"
-    _assert_r_tol([
-        (float(im.infmat["dfb.x1"][7]), f'{IM}[8,"dfb.x1"]', -1.0189642674),
-        (float(im.infmat["dfb.x2"][7]), f'{IM}[8,"dfb.x2"]', 2.2263450877),
-        (float(im.infmat["dffit"][7]), f'{IM}[8,"dffit"]', 2.6996421200),
-        (float(im.infmat["cov.r"][0]), f'{IM}[1,"cov.r"]', 1.0813620352),
-        (float(im.infmat["cook.d"][7]), f'{IM}[8,"cook.d"]', 1.3578356303),
-        (float(im.infmat["hat"][7]), f'{IM}[8,"hat"]', 0.5276606143),
-    ])
+    _assert_r_tol(
+        [
+            (float(im.infmat["dfb.x1"][7]), f'{IM}[8,"dfb.x1"]', -1.0189642674),
+            (float(im.infmat["dfb.x2"][7]), f'{IM}[8,"dfb.x2"]', 2.2263450877),
+            (float(im.infmat["dffit"][7]), f'{IM}[8,"dffit"]', 2.6996421200),
+            (float(im.infmat["cov.r"][0]), f'{IM}[1,"cov.r"]', 1.0813620352),
+            (float(im.infmat["cook.d"][7]), f'{IM}[8,"cook.d"]', 1.3578356303),
+            (float(im.infmat["hat"][7]), f'{IM}[8,"hat"]', 0.5276606143),
+        ]
+    )
     # is.inf flags are deterministic — compare the whole matrix to R's output.
     expected = np.zeros((10, 7), dtype=bool)
-    expected[7, [1, 2, 3, 5]] = True          # obs 8: dfb.x1/x2, dffit, cook.d
-    expected[8, 1] = True                      # obs 9: dfb.x1
+    expected[7, [1, 2, 3, 5]] = True  # obs 8: dfb.x1/x2, dffit, cook.d
+    expected[8, 1] = True  # obs 9: dfb.x1
     assert np.array_equal(im.is_inf.to_numpy(), expected)
 
 
@@ -2544,51 +3508,88 @@ def test_lsfit_ls_diag_ls_print_vs_r():
     assert list(ls1["coefficients"].keys()) == ["Intercept", "X1", "X2"]
     ld = ls_diag(ls1)
     lp = ls_print(ls1, print_it=False)
-    ct = lp["coef.table"][1]["values"]        # Estimate/Std.Err/t/Pr
-    _assert_r_tol([
-        (float(ls1["coefficients"]["X1"]), f"{_AOV_LSF}$coef[2]", 1.800753384270644),
-        (float(ls1["residuals"][0]), f"{_AOV_LSF}$residuals[1]", 0.59415268407955535),
-        (float(ld["std.dev"]), f"ls.diag({_AOV_LSF})$std.dev", 0.57161364266691617),
-        (float(ld["hat"][0]), f"ls.diag({_AOV_LSF})$hat[1]", 0.33557569172839014),
-        (float(ld["stud.res"][7]),
-         f"ls.diag({_AOV_LSF})$stud.res[8]", 2.5542060912640889),
-        (float(ld["cooks"][7]), f"ls.diag({_AOV_LSF})$cooks[8]", 1.3578356303464223),
-        (float(ld["std.err"].reshape(-1)[1]),
-         f"as.vector(ls.diag({_AOV_LSF})$std.err)[2]", 0.1094608023092585),
-        (float(ld["cov.unscaled"][0, 1]),
-         f"ls.diag({_AOV_LSF})$cov.unscaled[1,2]", -0.1506939600836976201),
-        # ls.print coef.table: t-value & Pr(>|t|) for x1.
-        (float(ct[1, 2]),
-         f"ls.print({_AOV_LSF}, print.it=FALSE)$coef.table[[1]][2,3]",
-         16.45112539174520094),
-        (float(ct[1, 3]),
-         f"ls.print({_AOV_LSF}, print.it=FALSE)$coef.table[[1]][2,4]",
-         7.4798786256017835e-07),
-    ])
+    ct = lp["coef.table"][1]["values"]  # Estimate/Std.Err/t/Pr
+    _assert_r_tol(
+        [
+            (
+                float(ls1["coefficients"]["X1"]),
+                f"{_AOV_LSF}$coef[2]",
+                1.800753384270644,
+            ),
+            (
+                float(ls1["residuals"][0]),
+                f"{_AOV_LSF}$residuals[1]",
+                0.59415268407955535,
+            ),
+            (float(ld["std.dev"]), f"ls.diag({_AOV_LSF})$std.dev", 0.57161364266691617),
+            (float(ld["hat"][0]), f"ls.diag({_AOV_LSF})$hat[1]", 0.33557569172839014),
+            (
+                float(ld["stud.res"][7]),
+                f"ls.diag({_AOV_LSF})$stud.res[8]",
+                2.5542060912640889,
+            ),
+            (
+                float(ld["cooks"][7]),
+                f"ls.diag({_AOV_LSF})$cooks[8]",
+                1.3578356303464223,
+            ),
+            (
+                float(ld["std.err"].reshape(-1)[1]),
+                f"as.vector(ls.diag({_AOV_LSF})$std.err)[2]",
+                0.1094608023092585,
+            ),
+            (
+                float(ld["cov.unscaled"][0, 1]),
+                f"ls.diag({_AOV_LSF})$cov.unscaled[1,2]",
+                -0.1506939600836976201,
+            ),
+            # ls.print coef.table: t-value & Pr(>|t|) for x1.
+            (
+                float(ct[1, 2]),
+                f"ls.print({_AOV_LSF}, print.it=FALSE)$coef.table[[1]][2,3]",
+                16.45112539174520094,
+            ),
+            (
+                float(ct[1, 3]),
+                f"ls.print({_AOV_LSF}, print.it=FALSE)$coef.table[[1]][2,4]",
+                7.4798786256017835e-07,
+            ),
+        ]
+    )
 
 
 def test_replications_vs_r():
     # Balanced design → R returns a named vector (dict of ints here).
-    dd = pl.DataFrame({
-        "A": ["a"] * 6 + ["b"] * 6,
-        "B": ["x", "y", "z"] * 4,
-        "resp": list(range(12)),
-    })
+    dd = pl.DataFrame(
+        {
+            "A": ["a"] * 6 + ["b"] * 6,
+            "B": ["x", "y", "z"] * 4,
+            "resp": list(range(12)),
+        }
+    )
     assert replications("resp ~ A + B", dd) == {"A": 6, "B": 4}
     assert replications("resp ~ A*B", dd) == {"A": 6, "B": 4, "A:B": 2}
     # Unbalanced → R returns a list of tables; hea returns per-term count dicts
     # in sorted factor-level order (matches R's tapply cell counts).
-    ub = pl.DataFrame({
-        "A": ["a", "a", "a", "b", "b", "b", "b", "b"],
-        "B": ["x", "y", "z", "x", "x", "y", "z", "z"],
-        "resp": list(range(1, 9)),
-    })
+    ub = pl.DataFrame(
+        {
+            "A": ["a", "a", "a", "b", "b", "b", "b", "b"],
+            "B": ["x", "y", "z", "x", "x", "y", "z", "z"],
+            "resp": list(range(1, 9)),
+        }
+    )
     rep = replications("resp ~ A + B", ub)
     assert rep["A"] == {"a": 3, "b": 5}
     assert rep["B"] == {"x": 3, "y": 2, "z": 3}
     rep_ab = replications("resp ~ A:B", ub)["A:B"]
-    assert rep_ab == {("a", "x"): 1, ("a", "y"): 1, ("a", "z"): 1,
-                      ("b", "x"): 2, ("b", "y"): 1, ("b", "z"): 2}
+    assert rep_ab == {
+        ("a", "x"): 1,
+        ("a", "y"): 1,
+        ("a", "z"): 1,
+        ("b", "x"): 2,
+        ("b", "y"): 1,
+        ("b", "z"): 2,
+    }
 
 
 def test_chisq_test_simulate_p_value():
@@ -2601,8 +3602,9 @@ def test_chisq_test_simulate_p_value():
     assert r.p_value == pytest.approx(0.00849575212393803)
     assert "df" not in r.parameter  # df = NA for the MC test
     set_seed(7)
-    r2 = chisq_test([12, 20, 8, 15], p=[0.25, 0.25, 0.25, 0.25],
-                    simulate_p_value=True, B=1000)
+    r2 = chisq_test(
+        [12, 20, 8, 15], p=[0.25, 0.25, 0.25, 0.25], simulate_p_value=True, B=1000
+    )
     assert r2.statistic["X-squared"] == pytest.approx(5.581818181818182)
     assert r2.p_value == pytest.approx(0.13886113886113885)
 
@@ -2641,6 +3643,7 @@ def test_prop_test_one_sample_continuity_correction():
 def test_prop_test_two_sample_returns_chisq():
     """2-sample prop.test on (5/10, 8/10) — verify against direct chi-sq."""
     from scipy import stats as ss
+
     tbl = np.array([[5, 5], [8, 2]])
     res = prop_test([5, 8], [10, 10])
     expected = ss.chi2_contingency(tbl, correction=True)
@@ -2717,6 +3720,7 @@ def test_var_test_one_sided():
 
 def test_bartlett_test_matches_scipy():
     from scipy import stats as ss
+
     rng = np.random.default_rng(3)
     a = rng.normal(0, 1, 30)
     b = rng.normal(0, 2, 30)
@@ -2725,9 +3729,7 @@ def test_bartlett_test_matches_scipy():
     g = ["A"] * 30 + ["B"] * 30 + ["C"] * 30
     res = bartlett_test(x, g)
     expected = ss.bartlett(a, b, c)
-    assert res.statistic["Bartlett's K-squared"] == pytest.approx(
-        expected.statistic
-    )
+    assert res.statistic["Bartlett's K-squared"] == pytest.approx(expected.statistic)
     assert res.p_value == pytest.approx(expected.pvalue)
     assert res.parameter == {"df": 2}
 
@@ -2770,13 +3772,26 @@ def test_cor_test_spearman_exact():
     xr = "c(" + ",".join(repr(v) for v in x) + ")"
     yr = "c(" + ",".join(repr(v) for v in y) + ")"
     res = cor_test(x, y, method="spearman")
-    _assert_r([(res.p_value,
+    _assert_r(
+        [
+            (
+                res.p_value,
                 f'cor.test({xr}, {yr}, method="spearman")$p.value',
-                0.0013802671414576686)])
+                0.0013802671414576686,
+            )
+        ]
+    )
     res_g = cor_test(x, y, method="spearman", alternative="greater")
-    _assert_r([(res_g.p_value,
+    _assert_r(
+        [
+            (
+                res_g.p_value,
                 f'cor.test({xr}, {yr}, method="spearman", '
-                f'alternative="greater")$p.value', 0.00069013357072883431)])
+                f'alternative="greater")$p.value',
+                0.00069013357072883431,
+            )
+        ]
+    )
 
 
 def test_cor_test_kendall_exact():
@@ -2787,12 +3802,25 @@ def test_cor_test_kendall_exact():
     yr = "c(" + ",".join(repr(v) for v in y) + ")"
     res = cor_test(x, y, method="kendall")
     assert res.statistic["T"] == 39.0
-    _assert_r([(res.p_value, f'cor.test({xr}, {yr}, method="kendall")$p.value',
-                0.0022128527336859882)])
+    _assert_r(
+        [
+            (
+                res.p_value,
+                f'cor.test({xr}, {yr}, method="kendall")$p.value',
+                0.0022128527336859882,
+            )
+        ]
+    )
     res_l = cor_test(x, y, method="kendall", alternative="less")
-    _assert_r([(res_l.p_value,
-                f'cor.test({xr}, {yr}, method="kendall", '
-                f'alternative="less")$p.value', 0.99952684082892418)])
+    _assert_r(
+        [
+            (
+                res_l.p_value,
+                f'cor.test({xr}, {yr}, method="kendall", alternative="less")$p.value',
+                0.99952684082892418,
+            )
+        ]
+    )
 
 
 def test_wilcox_test_one_sample_exact():
@@ -2811,8 +3839,9 @@ def test_wilcox_test_ties_permutation_exact():
     xr = "c(" + ",".join(repr(v) for v in x) + ")"
     res = wilcox_test(x, mu=3)
     assert res.statistic["V"] == 22.0
-    _assert_r([(res.p_value,
-                f"suppressWarnings(wilcox.test({xr}, mu=3))$p.value", 0.9375)])
+    _assert_r(
+        [(res.p_value, f"suppressWarnings(wilcox.test({xr}, mu=3))$p.value", 0.9375)]
+    )
 
 
 def test_wilcox_test_two_sample_exact():
@@ -2823,8 +3852,7 @@ def test_wilcox_test_two_sample_exact():
     yr = "c(" + ",".join(repr(v) for v in y) + ")"
     res = wilcox_test(x, y)
     assert res.statistic["W"] == 35.0
-    _assert_r([(res.p_value, f"wilcox.test({xr}, {yr})$p.value",
-                0.2544122544122544)])
+    _assert_r([(res.p_value, f"wilcox.test({xr}, {yr})$p.value", 0.2544122544122544)])
 
 
 def test_wilcox_test_two_sample_asymptotic():
@@ -2844,20 +3872,28 @@ def test_shapiro_test_bit_exact_vs_r():
     x = [2.1, 3.4, 1.9, 5.2, 4.8, 2.7, 3.3, 6.1, 0.8, 4.4, 3.9, 2.2, 5.5, 1.1, 3.7]
     res = shapiro_test(x)
     xr = "c(" + ",".join(repr(v) for v in x) + ")"
-    _assert_r([
-        (res.statistic["W"], f"shapiro.test({xr})$statistic", 0.97403652031051269),
-        (res.p_value, f"shapiro.test({xr})$p.value", 0.91267650064222361),
-    ])
+    _assert_r(
+        [
+            (res.statistic["W"], f"shapiro.test({xr})$statistic", 0.97403652031051269),
+            (res.p_value, f"shapiro.test({xr})$p.value", 0.91267650064222361),
+        ]
+    )
 
 
 def test_shapiro_test_n3_exact_p_branch():
     """n == 3 hits swilk's exact closed-form P value; bit-exact to R."""
     x = [1.0, 2.0, 10.0]
     res = shapiro_test(x)
-    _assert_r([
-        (res.statistic["W"], "shapiro.test(c(1,2,10))$statistic", 0.8321917808219178),
-        (res.p_value, "shapiro.test(c(1,2,10))$p.value", 0.19391752148144781),
-    ])
+    _assert_r(
+        [
+            (
+                res.statistic["W"],
+                "shapiro.test(c(1,2,10))$statistic",
+                0.8321917808219178,
+            ),
+            (res.p_value, "shapiro.test(c(1,2,10))$p.value", 0.19391752148144781),
+        ]
+    )
 
 
 # ---- ks_test --------------------------------------------------------
@@ -2871,10 +3907,12 @@ def test_ks_test_two_sample_exact_bit_exact_vs_r():
     br = "c(" + ",".join(repr(v) for v in b) + ")"
     res = ks_test(a, b)
     assert "Exact" in res.method
-    _assert_r([
-        (res.statistic["D"], f"ks.test({ar}, {br})$statistic", 0.3571428571428571),
-        (res.p_value, f"ks.test({ar}, {br})$p.value", 0.58461538461538454),
-    ])
+    _assert_r(
+        [
+            (res.statistic["D"], f"ks.test({ar}, {br})$statistic", 0.3571428571428571),
+            (res.p_value, f"ks.test({ar}, {br})$p.value", 0.58461538461538454),
+        ]
+    )
 
 
 def test_ks_test_two_sample_ties_bit_exact_vs_r():
@@ -2884,31 +3922,64 @@ def test_ks_test_two_sample_ties_bit_exact_vs_r():
     ar = "c(" + ",".join(repr(v) for v in a) + ")"
     br = "c(" + ",".join(repr(v) for v in b) + ")"
     res = ks_test(a, b)
-    _assert_r([
-        (res.statistic["D"],
-         f"suppressWarnings(ks.test({ar}, {br}))$statistic", 0.35714285714285715),
-        (res.p_value,
-         f"suppressWarnings(ks.test({ar}, {br}))$p.value", 0.51048951048951052),
-    ])
+    _assert_r(
+        [
+            (
+                res.statistic["D"],
+                f"suppressWarnings(ks.test({ar}, {br}))$statistic",
+                0.35714285714285715,
+            ),
+            (
+                res.p_value,
+                f"suppressWarnings(ks.test({ar}, {br}))$p.value",
+                0.51048951048951052,
+            ),
+        ]
+    )
 
 
 def test_ks_test_one_sample_exact_bit_exact_vs_r():
     """One-sample exact (n < 100, no ties) vs pnorm — D and p bit-exact to R."""
-    x = [-0.62, 0.41, 1.30, -1.05, 0.72, -0.31, 2.10, 0.05, -1.44, 0.88,
-         0.19, -0.77, 1.61, -0.23, 0.50]
+    x = [
+        -0.62,
+        0.41,
+        1.30,
+        -1.05,
+        0.72,
+        -0.31,
+        2.10,
+        0.05,
+        -1.44,
+        0.88,
+        0.19,
+        -0.77,
+        1.61,
+        -0.23,
+        0.50,
+    ]
     xr = "c(" + ",".join(repr(v) for v in x) + ")"
     res = ks_test(x, "pnorm")
     assert "Exact" in res.method
-    _assert_r([
-        (res.statistic["D"], f'ks.test({xr}, "pnorm")$statistic',
-         0.12576369289434408),
-        (res.p_value, f'ks.test({xr}, "pnorm")$p.value', 0.94765241386502763),
-    ])
+    _assert_r(
+        [
+            (
+                res.statistic["D"],
+                f'ks.test({xr}, "pnorm")$statistic',
+                0.12576369289434408,
+            ),
+            (res.p_value, f'ks.test({xr}, "pnorm")$p.value', 0.94765241386502763),
+        ]
+    )
     res_g = ks_test(x, "pnorm", alternative="greater")
-    _assert_r([
-        (res_g.p_value, f'ks.test({xr}, "pnorm", alternative="greater")$p.value',
-         0.97710988321079739),
-    ])
+    _assert_r(
+        [
+            (
+                res_g.p_value,
+                f'ks.test({xr}, "pnorm", alternative="greater")$p.value',
+                0.97710988321079739,
+            ),
+        ]
+    )
 
 
 # ---- mcnemar_test ---------------------------------------------------
@@ -2920,9 +3991,7 @@ def test_mcnemar_test_known_table():
     res = mcnemar_test(tbl, correct=False)
     # (b - c)^2 / (b + c) = (121 - 59)^2 / (121 + 59) = 3844 / 180
     expected_stat = (121 - 59) ** 2 / (121 + 59)
-    assert res.statistic["McNemar's chi-squared"] == pytest.approx(
-        expected_stat
-    )
+    assert res.statistic["McNemar's chi-squared"] == pytest.approx(expected_stat)
 
 
 def test_mcnemar_test_continuity_correction():
@@ -2931,9 +4000,10 @@ def test_mcnemar_test_continuity_correction():
     res_raw = mcnemar_test(tbl, correct=False)
     res_corr = mcnemar_test(tbl, correct=True)
     # (62 - 1)^2 / 180 < 62^2 / 180
-    assert res_corr.statistic["McNemar's chi-squared"] < res_raw.statistic[
-        "McNemar's chi-squared"
-    ]
+    assert (
+        res_corr.statistic["McNemar's chi-squared"]
+        < res_raw.statistic["McNemar's chi-squared"]
+    )
 
 
 def test_mcnemar_test_rejects_non_2x2():
@@ -2947,6 +4017,7 @@ def test_mcnemar_test_rejects_non_2x2():
 def test_friedman_test_matches_scipy_long_to_wide():
     """Long-form (y, groups, blocks) reshaped → ``friedmanchisquare(*samples)``."""
     from scipy import stats as ss
+
     # 3 groups × 5 blocks
     rng = np.random.default_rng(8)
     samples = [rng.normal(loc=mu, size=5) for mu in (0, 0.5, 1.0)]
@@ -2958,9 +4029,7 @@ def test_friedman_test_matches_scipy_long_to_wide():
             blocks.append(f"b{bi}")
     res = friedman_test(y, groups, blocks)
     expected = ss.friedmanchisquare(*samples)
-    assert res.statistic["Friedman chi-squared"] == pytest.approx(
-        expected.statistic
-    )
+    assert res.statistic["Friedman chi-squared"] == pytest.approx(expected.statistic)
     assert res.parameter == {"df": 2}
 
 
@@ -2986,7 +4055,12 @@ def test_htest_repr_contains_method_and_p():
 
 
 from hea.R import (  # noqa: E402  — grouped with the helper tests
-    addmargins, cut, findInterval, prop_table, table, xtabs,
+    addmargins,
+    cut,
+    findInterval,
+    prop_table,
+    table,
+    xtabs,
 )
 
 
@@ -3007,12 +4081,15 @@ def test_cut_left_closed_with_right_false():
 
 
 def test_cut_include_lowest_brings_in_boundary():
-    out = cut(
-        [1, 2, 5, 10, 0, 11], breaks=[0, 2, 5, 10], include_lowest=True
-    )
+    out = cut([1, 2, 5, 10, 0, 11], breaks=[0, 2, 5, 10], include_lowest=True)
     # x=0 now in [0,2]; lowest label changes from "(0,2]" to "[0,2]"
     assert out.to_list() == [
-        "[0,2]", "[0,2]", "(2,5]", "(5,10]", "[0,2]", None,
+        "[0,2]",
+        "[0,2]",
+        "(2,5]",
+        "(5,10]",
+        "[0,2]",
+        None,
     ]
 
 
@@ -3035,8 +4112,7 @@ def test_cut_labels_false_returns_codes():
 
 
 def test_cut_custom_labels():
-    out = cut([0.5, 2.5, 6.0], breaks=[0, 2, 5, 10],
-              labels=["lo", "med", "hi"])
+    out = cut([0.5, 2.5, 6.0], breaks=[0, 2, 5, 10], labels=["lo", "med", "hi"])
     assert out.to_list() == ["lo", "med", "hi"]
     assert out.dtype.categories.to_list() == ["lo", "med", "hi"]
 
@@ -3133,10 +4209,12 @@ def test_xtabs_one_way():
 
 
 def test_xtabs_two_way_uses_dnn():
-    df = pl.DataFrame({
-        "g": ["a", "b", "a", "b", "a"],
-        "h": ["x", "x", "y", "y", "y"],
-    })
+    df = pl.DataFrame(
+        {
+            "g": ["a", "b", "a", "b", "a"],
+            "h": ["x", "x", "y", "y", "y"],
+        }
+    )
     out = xtabs("~ g + h", df)
     # The first column carries the row variable's name (left side of +)
     assert out.columns[0] == "g"
@@ -3154,11 +4232,13 @@ def test_xtabs_lhs_weighted_one_way():
 
 def test_xtabs_lhs_weighted_two_way():
     """R: ``xtabs(w ~ a + b, df)`` sums ``w`` per (a, b) cell, wide."""
-    df = pl.DataFrame({
-        "w": [10, 20, 30, 40],
-        "a": ["x", "x", "y", "y"],
-        "b": ["p", "q", "p", "q"],
-    })
+    df = pl.DataFrame(
+        {
+            "w": [10, 20, 30, 40],
+            "a": ["x", "x", "y", "y"],
+            "b": ["p", "q", "p", "q"],
+        }
+    )
     out = xtabs("w ~ a + b", df)
     rows = {r["a"]: (r["p"], r["q"]) for r in out.iter_rows(named=True)}
     assert rows == {"x": (10, 20), "y": (30, 40)}
@@ -3241,7 +4321,9 @@ def test_addmargins_oneway_appends_sum_row():
 
 
 from hea.R import (  # noqa: E402  — grouped with the deferred-fn tests
-    Terms, terms, update,
+    Terms,
+    terms,
+    update,
 )
 
 
@@ -3251,7 +4333,9 @@ from hea.R import (  # noqa: E402  — grouped with the deferred-fn tests
 @pytest.fixture(scope="module")
 def m_glm_gauss(gala):
     """Gaussian glm — used to verify jackknife formulas reduce to lm's."""
-    return hea.models.glm("Species ~ Area + Elevation", gala, family=hea.family.gaussian())
+    return hea.models.glm(
+        "Species ~ Area + Elevation", gala, family=hea.family.gaussian()
+    )
 
 
 def test_glm_rstudent_returns_array(m_glm):

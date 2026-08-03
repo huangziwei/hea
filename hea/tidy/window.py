@@ -14,6 +14,7 @@ Every function dispatches on input type — ``pl.Expr`` in / ``pl.Expr``
 out for use inside ``mutate`` / ``summarize``; ``pl.Series`` /
 list / ndarray in eager Python code.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -22,6 +23,7 @@ from scipy import stats as _sps
 
 
 # ---- shared helpers (rank + sort dispatch) -------------------------
+
 
 def _as_array(x) -> np.ndarray:
     if isinstance(x, pl.Series):
@@ -54,6 +56,7 @@ def _eager_rank_out(x, arr: np.ndarray):
 
 
 # ---- dplyr rank family ----------------------------------------------
+
 
 def row_number(x=None):
     """dplyr's ``row_number()`` — 0-based row position, or ordinal rank.
@@ -162,9 +165,7 @@ def ntile(x, n):
         return (
             pl.when(r <= threshold)
             .then((r + larger_size - 1) // larger_size)
-            .otherwise(
-                (r - threshold + smaller_size - 1) // smaller_size + n_larger
-            )
+            .otherwise((r - threshold + smaller_size - 1) // smaller_size + n_larger)
         ) - 1
     if isinstance(x, pl.Series):
         r = x.rank("ordinal")
@@ -196,6 +197,7 @@ def ntile(x, n):
 
 
 # ---- dplyr window / mutate helpers --------------------------------
+
 
 def lag(x, n=1, default=None, order_by=None):
     """dplyr's ``lag()`` — value ``n`` positions before each entry.
@@ -242,7 +244,8 @@ def _lag_lead(x, k, default, order_by):
 
     if order_by is not None:
         ob_arr = (
-            order_by.to_numpy() if isinstance(order_by, pl.Series)
+            order_by.to_numpy()
+            if isinstance(order_by, pl.Series)
             else np.asarray(order_by)
         )
         order = np.argsort(ob_arr, kind="stable")
@@ -328,6 +331,7 @@ def near(x, y, tol=1.5e-8):
 
 # ---- dplyr cumulative helpers --------------------------------------
 
+
 def cummean(x):
     """dplyr's ``cummean()`` — cumulative mean.
 
@@ -371,11 +375,7 @@ def cumall(x):
         # has_false = any FALSE so far; has_na = any NA so far
         has_false = (x == False).fill_null(False).cum_max()  # noqa: E712
         has_na = x.is_null().cum_max()
-        return (
-            pl.when(has_false).then(False)
-            .when(has_na).then(None)
-            .otherwise(True)
-        )
+        return pl.when(has_false).then(False).when(has_na).then(None).otherwise(True)
     return _cumall_cumany_eager(x, all_=True)
 
 
@@ -395,11 +395,7 @@ def cumany(x):
     if isinstance(x, pl.Expr):
         has_true = x.fill_null(False).cum_max()
         has_na = x.is_null().cum_max()
-        return (
-            pl.when(has_true).then(True)
-            .when(has_na).then(None)
-            .otherwise(False)
-        )
+        return pl.when(has_true).then(True).when(has_na).then(None).otherwise(False)
     return _cumall_cumany_eager(x, all_=False)
 
 
@@ -413,9 +409,9 @@ def _cumall_cumany_eager(x, all_):
     is_ndarray = isinstance(x, np.ndarray)
     src = x.to_list() if is_series else list(x)
     if all_:
-        absorb, default_state = False, True   # FALSE absorbs; start TRUE
+        absorb, default_state = False, True  # FALSE absorbs; start TRUE
     else:
-        absorb, default_state = True, False   # TRUE absorbs; start FALSE
+        absorb, default_state = True, False  # TRUE absorbs; start FALSE
     state = default_state
     out = []
     for v in src:
@@ -439,6 +435,7 @@ def _cumall_cumany_eager(x, all_):
 
 
 # ---- dplyr positional pickers (first / last / nth, consecutive_id) -
+
 
 def first(x, default=None, order_by=None, na_rm=True):
     """dplyr's ``first()`` — first non-null element of ``x``.
@@ -501,8 +498,7 @@ def nth(x, n, order_by=None, default=None, na_rm=True):
 
 
 def _first_last_nth(x, k, default, order_by, na_rm):
-    """Shared logic. ``k`` is 0-based: 0 = first, -1 = last, 1 = second…
-    """
+    """Shared logic. ``k`` is 0-based: 0 = first, -1 = last, 1 = second…"""
     if isinstance(x, pl.Expr):
         return _first_last_nth_expr(x, k, default, order_by, na_rm)
     return _first_last_nth_eager(x, k, default, order_by, na_rm)
@@ -537,15 +533,13 @@ def _first_last_nth_eager(x, k, default, order_by, na_rm):
         arr = list(x)
     if order_by is not None:
         ob_list = (
-            order_by.to_list() if isinstance(order_by, pl.Series)
-            else list(order_by)
+            order_by.to_list() if isinstance(order_by, pl.Series) else list(order_by)
         )
         order = sorted(range(len(arr)), key=lambda i: ob_list[i])
         arr = [arr[i] for i in order]
     if na_rm:
         arr = [
-            v for v in arr
-            if not (v is None or (isinstance(v, float) and np.isnan(v)))
+            v for v in arr if not (v is None or (isinstance(v, float) and np.isnan(v)))
         ]
     idx = k if k >= 0 else len(arr) + k
     if 0 <= idx < len(arr):
@@ -554,6 +548,7 @@ def _first_last_nth_eager(x, k, default, order_by, na_rm):
 
 
 # ---- runs / consecutive identity (dplyr) ----------------------------
+
 
 def consecutive_id(*args):
     """dplyr's ``consecutive_id()`` — 0-based id for each run of consecutive
@@ -601,4 +596,3 @@ def consecutive_id(*args):
     out = df.select(pl.struct(pl.all()).rle_id()).to_series().rename("")
     is_ndarray = isinstance(first, np.ndarray)
     return out.to_numpy() if is_ndarray else out
-

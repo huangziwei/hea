@@ -120,8 +120,16 @@ fn n_blocks(n: usize) -> usize {
 /// is read in place with no transpose copy.
 #[allow(clippy::too_many_arguments)]
 fn tsqr_r(
-    x: &[f64], xrs: usize, xcs: usize, sqw: &[f64], n: usize, p: usize,
-    e: &[f64], ne: usize, ers: usize, ecs: usize,
+    x: &[f64],
+    xrs: usize,
+    xcs: usize,
+    sqw: &[f64],
+    n: usize,
+    p: usize,
+    e: &[f64],
+    ne: usize,
+    ers: usize,
+    ecs: usize,
 ) -> Vec<f64> {
     let k = n_blocks(n);
     if k == 1 {
@@ -499,7 +507,12 @@ pub fn pls_fit1<'py>(
     z: PyReadonlyArray1<'py, f64>,
     xtwz: PyReadonlyArray1<'py, f64>,
     use_xtwz: bool,
-) -> PyResult<(bool, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>, f64)> {
+) -> PyResult<(
+    bool,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray2<f64>>,
+    f64,
+)> {
     let xv = x.as_array();
     let (n, p) = (xv.nrows(), xv.ncols());
     let ev = e.as_array();
@@ -509,35 +522,30 @@ pub fn pls_fit1<'py>(
     // also be C-contiguous; either is borrowed with no transpose copy. Only a
     // non-contiguous / negatively-strided view (rare) is materialized C-order.
     let xowned;
-    let (x_s, xrs, xcs): (&[f64], usize, usize) = match (
-        xv.as_slice_memory_order(),
-        strides_usize(xv.strides()),
-    ) {
-        (Some(s), Some((rs, cs))) => (s, rs, cs),
-        _ => {
-            xowned = xv.iter().copied().collect::<Vec<f64>>();
-            (&xowned, p, 1)
-        }
-    };
+    let (x_s, xrs, xcs): (&[f64], usize, usize) =
+        match (xv.as_slice_memory_order(), strides_usize(xv.strides())) {
+            (Some(s), Some((rs, cs))) => (s, rs, cs),
+            _ => {
+                xowned = xv.iter().copied().collect::<Vec<f64>>();
+                (&xowned, p, 1)
+            }
+        };
     let eowned;
-    let (e_s, ers, ecs): (&[f64], usize, usize) = match (
-        ev.as_slice_memory_order(),
-        strides_usize(ev.strides()),
-    ) {
-        (Some(s), Some((rs, cs))) => (s, rs, cs),
-        _ => {
-            eowned = ev.iter().copied().collect::<Vec<f64>>();
-            (&eowned, p, 1)
-        }
-    };
+    let (e_s, ers, ecs): (&[f64], usize, usize) =
+        match (ev.as_slice_memory_order(), strides_usize(ev.strides())) {
+            (Some(s), Some((rs, cs))) => (s, rs, cs),
+            _ => {
+                eowned = ev.iter().copied().collect::<Vec<f64>>();
+                (&eowned, p, 1)
+            }
+        };
     let wvec: Vec<f64> = w.as_array().iter().copied().collect();
     let zvec: Vec<f64> = z.as_array().iter().copied().collect();
     let xtwzvec: Vec<f64> = xtwz.as_array().iter().copied().collect();
 
     let res = py.allow_threads(|| {
         pls_core(
-            x_s, xrs, xcs, &wvec, n, p, e_s, ne, ers, ecs, &zvec, &xtwzvec,
-            use_xtwz,
+            x_s, xrs, xcs, &wvec, n, p, e_s, ne, ers, ecs, &zvec, &xtwzvec, use_xtwz,
         )
     });
     match res {

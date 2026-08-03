@@ -28,6 +28,7 @@ polynomial helpers from R's ``stats`` package:
   the documented ≤2-ulp lm-QR/FMA residual; the ``raw=True`` and prediction
   (three-term recurrence, no QR) paths are 0-ulp.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -79,6 +80,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Formula algebra — operate on hea's canonical formula strings.
 # ---------------------------------------------------------------------------
+
 
 def _as_formula_node(obj) -> Formula:
     """Coerce ``obj`` (a formula string or already-parsed :class:`Formula`) to a
@@ -216,8 +218,7 @@ def _subst_dot(node, repl):
     if isinstance(node, UnaryOp):
         return UnaryOp(node.op, _subst_dot(node.operand, repl))
     if isinstance(node, BinOp):
-        return BinOp(node.op, _subst_dot(node.left, repl),
-                     _subst_dot(node.right, repl))
+        return BinOp(node.op, _subst_dot(node.left, repl), _subst_dot(node.right, repl))
     if isinstance(node, Call):
         return Call(
             node.fn,
@@ -227,8 +228,9 @@ def _subst_dot(node, repl):
     if isinstance(node, Paren):
         return Paren(_subst_dot(node.expr, repl))
     if isinstance(node, Subscript):
-        return Subscript(_subst_dot(node.obj, repl),
-                         [_subst_dot(i, repl) for i in node.idx])
+        return Subscript(
+            _subst_dot(node.obj, repl), [_subst_dot(i, repl) for i in node.idx]
+        )
     return node
 
 
@@ -295,14 +297,14 @@ def get_all_vars(formula, data) -> pl.DataFrame:
     _all_vars(f.rhs, names)
     missing = [n for n in names if n not in data.columns]
     if missing:
-        raise KeyError(
-            f"variable(s) {missing} not found in data (get_all_vars)")
+        raise KeyError(f"variable(s) {missing} not found in data (get_all_vars)")
     return data.select(names)
 
 
 # ---------------------------------------------------------------------------
 # NA handling — nafns.R
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class NAAction:
@@ -375,8 +377,7 @@ def na_exclude(object, **kwargs):
         keep = np.ones(arr.shape[0], dtype=bool)
         keep[omit] = False
         cleaned = arr[keep]
-    action = None if omit.size == 0 else NAAction(omit, kind="exclude",
-                                                  names=names)
+    action = None if omit.size == 0 else NAAction(omit, kind="exclude", names=names)
     return cleaned, action
 
 
@@ -443,6 +444,7 @@ def naprint(x, **kwargs) -> str:
 # Model-frame class — models.R
 # ---------------------------------------------------------------------------
 
+
 def _series_is_ordered(x: pl.Series) -> bool:
     """Whether a hea factor Series is an R-style *ordered* factor — the
     ``_hea_ordered`` local marker (from ``ordered()``) or the column name in the
@@ -452,6 +454,7 @@ def _series_is_ordered(x: pl.Series) -> bool:
     name = getattr(x, "name", None)
     if name:
         from ..formula import _ORDERED_COLS_CV
+
         return name in _ORDERED_COLS_CV.get()
     return False
 
@@ -497,6 +500,7 @@ def MFclass(x) -> str:
 # ---------------------------------------------------------------------------
 # Orthogonal polynomials — contr.poly.R
 # ---------------------------------------------------------------------------
+
 
 class Poly(np.ndarray):
     """R ``poly()`` result — the (n × degree) polynomial basis matrix carrying
@@ -544,20 +548,20 @@ def _poly_fit(x: np.ndarray, degree: int):
     xc = x - xbar
     n = x.size
     p = degree + 1
-    X = np.column_stack([xc ** d for d in range(p)])   # outer(x, 0:degree, ^)
+    X = np.column_stack([xc**d for d in range(p)])  # outer(x, 0:degree, ^)
     qr, qraux, jpvt, rank = dqrdc2(X, 1e-7)
     if rank < degree:
         raise ValueError("'degree' must be less than number of unique points")
     Z = np.empty((n, p))
-    for j in range(p):                                  # z <- QR$qr*(row==col)
+    for j in range(p):  # z <- QR$qr*(row==col)
         col = np.zeros(n)
         col[j] = qr[j, j]
         qy, *_ = dqrsl(qr, n, rank, qraux, col, 10000)  # qr.qy(QR, z)
         Z[:, j] = qy
     Zl = Z.astype(np.longdouble)
-    norm2 = np.asarray((Zl ** 2).sum(axis=0), dtype=np.longdouble)  # colSums LD
+    norm2 = np.asarray((Zl**2).sum(axis=0), dtype=np.longdouble)  # colSums LD
     alpha = np.asarray(
-        (xc.astype(np.longdouble)[:, None] * Zl ** 2).sum(axis=0) / norm2
+        (xc.astype(np.longdouble)[:, None] * Zl**2).sum(axis=0) / norm2
         + np.longdouble(xbar),
         dtype=float,
     )[:degree]
@@ -576,8 +580,9 @@ def _poly_predict(x: np.ndarray, degree: int, coefs: dict) -> np.ndarray:
     Z = np.ones((n, degree + 1))
     Z[:, 1] = x - alpha[0]
     for i in range(2, degree + 1):
-        Z[:, i] = (x - alpha[i - 1]) * Z[:, i - 1] \
-            - (norm2[i] / norm2[i - 1]) * Z[:, i - 2]
+        Z[:, i] = (x - alpha[i - 1]) * Z[:, i - 1] - (norm2[i] / norm2[i - 1]) * Z[
+            :, i - 2
+        ]
     Z = Z / np.sqrt(norm2[1:])
     return Z[:, 1:]
 
@@ -605,7 +610,7 @@ def poly(x, *args, degree=1, coefs=None, raw=False, simple=False):
         else:
             return polym(x, *args, degree=degree, coefs=coefs, raw=raw)
     x = np.asarray(x)
-    if x.ndim == 2:                                     # matrix x → polym
+    if x.ndim == 2:  # matrix x → polym
         cols = [x[:, j] for j in range(x.shape[1])]
         return polym(*cols, degree=degree, coefs=coefs, raw=raw)
     degree = int(degree)
@@ -613,12 +618,13 @@ def poly(x, *args, degree=1, coefs=None, raw=False, simple=False):
         raise ValueError("'degree' must be at least 1")
     x = x.astype(float)
     if raw:
-        Z = np.column_stack([x ** d for d in range(1, degree + 1)])
+        Z = np.column_stack([x**d for d in range(1, degree + 1)])
         names = [str(d) for d in range(1, degree + 1)]
         if simple:
             return Z
-        return Poly(Z, coefs=None, degree=np.arange(1, degree + 1),
-                    colnames=names, raw=True)
+        return Poly(
+            Z, coefs=None, degree=np.arange(1, degree + 1), colnames=names, raw=True
+        )
     if coefs is None:
         Z, alpha, norm2 = _poly_fit(x, degree)
         co = {"alpha": alpha, "norm2": norm2}
@@ -680,7 +686,7 @@ def polym(*vecs, degree=1, coefs=None, raw=False):
                 co_list.append(_poly_coefs(a_i))
         names = [".".join(str(v) for v in row) for row in z]
         return Poly(res, coefs=co_list, degree=s, colnames=names, raw=raw)
-    else:                                               # prediction
+    else:  # prediction
         n = dots[0].size
         res = np.ones(n)
         for i in range(nd):

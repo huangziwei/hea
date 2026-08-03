@@ -29,6 +29,7 @@ vectorizing across the independent pairs (``for j: dist = rfma(dev, dev, dist)``
 over the whole pair vector) — identical arithmetic to the C loop, so the
 pure-Python kernel is the 0-ulp spec the Rust kernel is checked against.
 """
+
 from __future__ import annotations
 
 import warnings
@@ -263,8 +264,17 @@ class Dist:
 
     __slots__ = ("data", "Size", "Labels", "Diag", "Upper", "method", "p", "call")
 
-    def __init__(self, data, Size, Labels=None, Diag=False, Upper=False,
-                 method=None, p=None, call=None):
+    def __init__(
+        self,
+        data,
+        Size,
+        Labels=None,
+        Diag=False,
+        Upper=False,
+        method=None,
+        p=None,
+        call=None,
+    ):
         self.data = np.ascontiguousarray(data, dtype=float)
         self.Size = int(Size)
         self.Labels = list(Labels) if Labels is not None else None
@@ -319,8 +329,15 @@ def dist(x, method="euclidean", diag=False, upper=False, p=2):
     else:
         data = _cdist(arr, mi, float(p))
 
-    return Dist(data, Size=n, Labels=labels, Diag=diag, Upper=upper,
-                method=_METHODS[mi], p=(float(p) if mi == 5 else None))
+    return Dist(
+        data,
+        Size=n,
+        Labels=labels,
+        Diag=diag,
+        Upper=upper,
+        method=_METHODS[mi],
+        p=(float(p) if mi == 5 else None),
+    )
 
 
 _MISSING = object()
@@ -402,7 +419,7 @@ def cmdscale(d, k=2, eig=False, add=False, x_ret=False, list_=None):
         n = d.Size
         rows, cols = _lower_tri_ij(n)
         x = np.zeros((n, n))
-        x[rows, cols] = d.data ** 2
+        x[rows, cols] = d.data**2
         x = x + x.T
         dfull = None
         if add:
@@ -414,7 +431,7 @@ def cmdscale(d, k=2, eig=False, add=False, x_ret=False, list_=None):
         if np.any(np.isnan(mat)):
             raise ValueError("NA values not allowed in 'd'")
         dfull = mat if add else None
-        x = mat ** 2
+        x = mat**2
         if x.ndim != 2 or x.shape[0] != x.shape[1]:
             raise ValueError("distances must be result of 'dist' or a square matrix")
         n = x.shape[0]
@@ -442,14 +459,13 @@ def cmdscale(d, k=2, eig=False, add=False, x_ret=False, list_=None):
         x = _double_centre(x2)
 
     w, v = np.linalg.eigh(-x / 2.0)
-    evalues = w[::-1]        # R eigen(symmetric=TRUE): descending eigenvalues
+    evalues = w[::-1]  # R eigen(symmetric=TRUE): descending eigenvalues
     evectors = v[:, ::-1]
     ev = evalues[:k]
     evec = evectors[:, :k]
     k1 = int(np.sum(ev > 0))
     if k1 < k:
-        warnings.warn(
-            f"only {k1} of the first {k} eigenvalues are > 0", stacklevel=2)
+        warnings.warn(f"only {k1} of the first {k} eigenvalues are > 0", stacklevel=2)
         evec = evec[:, ev > 0]
         ev = ev[ev > 0]
     points = evec * np.sqrt(ev)
@@ -460,10 +476,12 @@ def cmdscale(d, k=2, eig=False, add=False, x_ret=False, list_=None):
             "eig": evalues if eig else None,
             "x": x if x_ret else None,
             "ac": add_c if add else 0,
-            "GOF": np.array([
-                ev.sum() / np.abs(evalues).sum(),
-                ev.sum() / np.maximum(evalues, 0).sum(),
-            ]),
+            "GOF": np.array(
+                [
+                    ev.sum() / np.abs(evalues).sum(),
+                    ev.sum() / np.maximum(evalues, 0).sum(),
+                ]
+            ),
         }
     return points
 
@@ -545,15 +563,22 @@ def print_dist(x, diag=None, upper=None, _return=False):
     else:
         ri, ci = range(1, n), range(0, n - 1)  # drop empty first row / last col
 
-    widths = [max(len(labels[j]), max((len(cells[i][j]) for i in ri), default=0))
-              for j in ci]
+    widths = [
+        max(len(labels[j]), max((len(cells[i][j]) for i in ri), default=0)) for j in ci
+    ]
     rowlab_w = max(len(labels[i]) for i in ri)
 
-    lines = [" " * rowlab_w + " " + " ".join(
-        labels[j].rjust(widths[k]) for k, j in enumerate(ci))]
+    lines = [
+        " " * rowlab_w
+        + " "
+        + " ".join(labels[j].rjust(widths[k]) for k, j in enumerate(ci))
+    ]
     for i in ri:
-        lines.append(labels[i].rjust(rowlab_w) + " " + " ".join(
-            cells[i][j].rjust(widths[k]) for k, j in enumerate(ci)))
+        lines.append(
+            labels[i].rjust(rowlab_w)
+            + " "
+            + " ".join(cells[i][j].rjust(widths[k]) for k, j in enumerate(ci))
+        )
     s = "\n".join(lines) + "\n"
     if _return:
         return s

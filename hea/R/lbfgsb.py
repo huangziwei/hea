@@ -37,6 +37,7 @@ Layout notes (f2c 1-based → Python 0-based):
 Entry point: :func:`lbfgsb` (the driver); the ``optim()``-level
 fnscale/parscale semantics live in :mod:`hea.R.optimize`.
 """
+
 from __future__ import annotations
 
 import math
@@ -81,8 +82,7 @@ def _active(n, lo, u, nbd, x, iwhere, iprint, state):
                 iwhere[i] = 0
     if iprint >= 0:
         if state["prjctd"]:
-            print("The initial X is infeasible.  "
-                  "Restart with its projection.")
+            print("The initial X is infeasible.  Restart with its projection.")
         if not state["cnstnd"]:
             print("This problem is unconstrained.")
     if iprint > 0:
@@ -101,29 +101,31 @@ def _bmv(m, sy, wt, col, v, p, ov=0, op=0):
         i2 = col + i
         s = 0.0
         for k in range(1, i):
-            s += (float(sy[i - 1, k - 1]) * float(v[ov + k - 1])
-                  / float(sy[k - 1, k - 1]))
+            s += (
+                float(sy[i - 1, k - 1]) * float(v[ov + k - 1]) / float(sy[k - 1, k - 1])
+            )
         p[op + i2 - 1] = float(v[ov + i2 - 1]) + s
-    info = _dtrsl(wt, col, p[op + col:op + 2 * col], 11)
+    info = _dtrsl(wt, col, p[op + col : op + 2 * col], 11)
     if info != 0:
         return info
     # solve D^(1/2) p1 = v1
     for i in range(1, col + 1):
-        p[op + i - 1] = float(v[ov + i - 1]) / math.sqrt(
-            float(sy[i - 1, i - 1]))
+        p[op + i - 1] = float(v[ov + i - 1]) / math.sqrt(float(sy[i - 1, i - 1]))
     # PART II: solve J' p2 = p2
-    info = _dtrsl(wt, col, p[op + col:op + 2 * col], 1)
+    info = _dtrsl(wt, col, p[op + col : op + 2 * col], 1)
     if info != 0:
         return info
     # p1 = -D^(-1/2)(p1 - D^(-1/2) L' p2)
     for i in range(1, col + 1):
-        p[op + i - 1] = -float(p[op + i - 1]) / math.sqrt(
-            float(sy[i - 1, i - 1]))
+        p[op + i - 1] = -float(p[op + i - 1]) / math.sqrt(float(sy[i - 1, i - 1]))
     for i in range(1, col + 1):
         s = 0.0
         for k in range(i + 1, col + 1):
-            s += (float(sy[k - 1, i - 1]) * float(p[op + col + k - 1])
-                  / float(sy[i - 1, i - 1]))
+            s += (
+                float(sy[k - 1, i - 1])
+                * float(p[op + col + k - 1])
+                / float(sy[i - 1, i - 1])
+            )
         p[op + i - 1] = float(p[op + i - 1]) + s
     return 0
 
@@ -170,8 +172,31 @@ def _hpsolb(n, t, iorder, iheap):
         iorder[n - 1] = indxou
 
 
-def _cauchy(n, x, lo, u, nbd, g, iorder, iwhere, t, d, xcp, m, wy, ws,
-            sy, wt, theta, col, head, wa, iprint, sbgnrm, epsmch):
+def _cauchy(
+    n,
+    x,
+    lo,
+    u,
+    nbd,
+    g,
+    iorder,
+    iwhere,
+    t,
+    d,
+    xcp,
+    m,
+    wy,
+    ws,
+    sy,
+    wt,
+    theta,
+    col,
+    head,
+    wa,
+    iprint,
+    sbgnrm,
+    epsmch,
+):
     """lbfgsb.c ``cauchy`` (:1154): generalized Cauchy point along the
     projected gradient path. Fills ``xcp`` (and iwhere/t/d/wa); returns
     ``(nint, info)``. ``wa`` blocks: p=0, c=2m, wbp=4m, v=6m."""
@@ -225,13 +250,14 @@ def _cauchy(n, x, lo, u, nbd, g, iorder, iwhere, t, d, xcp, m, wy, ws,
             f1 = _rfma(-neggi, neggi, f1)
             # p := p - W'e_i * g_i
             for j in range(1, col + 1):
-                wa[op + j - 1] = _rfma(float(wy[i - 1, pointr - 1]),
-                                       neggi, float(wa[op + j - 1]))
+                wa[op + j - 1] = _rfma(
+                    float(wy[i - 1, pointr - 1]), neggi, float(wa[op + j - 1])
+                )
                 wa[op + col + j - 1] = _rfma(
-                    float(ws[i - 1, pointr - 1]), neggi,
-                    float(wa[op + col + j - 1]))
+                    float(ws[i - 1, pointr - 1]), neggi, float(wa[op + col + j - 1])
+                )
                 pointr = pointr % m + 1
-            if (nbd[i - 1] <= 2 and nbd[i - 1] != 0 and neggi < 0.0):
+            if nbd[i - 1] <= 2 and nbd[i - 1] != 0 and neggi < 0.0:
                 nbreak += 1
                 iorder[nbreak - 1] = i
                 t[nbreak - 1] = tl / (-neggi)
@@ -296,8 +322,7 @@ def _cauchy(n, x, lo, u, nbd, g, iorder, iwhere, t, d, xcp, m, wy, ws,
                 ibp = int(iorder[nleft - 1])
             dt = tj - tj0
             if dt != 0 and iprint >= 100:
-                print(f"\nPiece    {nint} f1, f2 at start point "
-                      f"{f1:.4e} {f2:.4e}")
+                print(f"\nPiece    {nint} f1, f2 at start point {f1:.4e} {f2:.4e}")
                 print(f"Distance to the next break point =  {dt:.4e}")
                 print(f"Distance to the stationary point =  {dtm:.4e}")
             # minimizer within this interval?
@@ -328,8 +353,7 @@ def _cauchy(n, x, lo, u, nbd, g, iorder, iwhere, t, d, xcp, m, wy, ws,
                 if iprint >= 100:
                     print("Cauchy X = ", np.asarray(xcp[:n]))
                 if iprint >= 99:
-                    print("\n---------------- exit CAUCHY"
-                          "----------------------\n")
+                    print("\n---------------- exit CAUCHY----------------------\n")
                 return nint, 0
             # update the derivative information
             nint += 1
@@ -337,8 +361,7 @@ def _cauchy(n, x, lo, u, nbd, g, iorder, iwhere, t, d, xcp, m, wy, ws,
             # f1 += dt*f2 + dibp2 - theta*dibp*zibp: clang emits
             # fma(dt, f2, dibp2), then fma of the negated (rounded)
             # theta*dibp product, then a plain add into f1
-            f1 = f1 + _rfma(-(theta * dibp), zibp,
-                            _rfma(dt, f2, dibp2))
+            f1 = f1 + _rfma(-(theta * dibp), zibp, _rfma(dt, f2, dibp2))
             f2 = _rfma(-theta, dibp2, f2)
             if col > 0:
                 # c = c + dt*p
@@ -347,9 +370,7 @@ def _cauchy(n, x, lo, u, nbd, g, iorder, iwhere, t, d, xcp, m, wy, ws,
                 pointr = head
                 for j in range(1, col + 1):
                     wa[owbp + j - 1] = float(wy[ibp - 1, pointr - 1])
-                    wa[owbp + col + j - 1] = (theta
-                                              * float(ws[ibp - 1,
-                                                         pointr - 1]))
+                    wa[owbp + col + j - 1] = theta * float(ws[ibp - 1, pointr - 1])
                     pointr = pointr % m + 1
                 info = _bmv(m, sy, wt, col, wa, wa, ov=owbp, op=ov)
                 if info != 0:
@@ -378,8 +399,7 @@ def _cauchy(n, x, lo, u, nbd, g, iorder, iwhere, t, d, xcp, m, wy, ws,
     # L888
     if iprint >= 99:
         print("\nGCP found in this segment")
-        print(f"Piece    {nint} f1, f2 at start point "
-              f"{f1:.4e} {f2:.4e}")
+        print(f"Piece    {nint} f1, f2 at start point {f1:.4e} {f2:.4e}")
         print(f"Distance to the stationary point =  {dtm:.4e}")
     if dtm <= 0.0:
         dtm = 0.0
@@ -396,8 +416,9 @@ def _cauchy(n, x, lo, u, nbd, g, iorder, iwhere, t, d, xcp, m, wy, ws,
     return nint, 0
 
 
-def _cmprlb(n, m, x, g, ws, wy, sy, wt, z, r, wa, indx, theta, col,
-            head, nfree, cnstnd):
+def _cmprlb(
+    n, m, x, g, ws, wy, sy, wt, z, r, wa, indx, theta, col, head, nfree, cnstnd
+):
     """lbfgsb.c ``cmprlb`` (:1652): r = -Z'B(xcp-x) - Z'g using
     ``wa[2m:]`` = W'(xcp-x) from cauchy. Returns info (−8 on singular
     bmv system)."""
@@ -408,8 +429,7 @@ def _cmprlb(n, m, x, g, ws, wy, sy, wt, z, r, wa, indx, theta, col,
     for i in range(1, nfree + 1):
         k = int(indx[i - 1])
         # -theta*(z-x) - g fuses into a single-rounding multiply-subtract
-        r[i - 1] = _rfma(-theta, float(z[k - 1]) - float(x[k - 1]),
-                         -float(g[k - 1]))
+        r[i - 1] = _rfma(-theta, float(z[k - 1]) - float(x[k - 1]), -float(g[k - 1]))
     info = _bmv(m, sy, wt, col, wa, wa, ov=2 * m, op=0)
     if info != 0:
         return -8
@@ -422,8 +442,8 @@ def _cmprlb(n, m, x, g, ws, wy, sy, wt, z, r, wa, indx, theta, col,
             # r += wy*a1 + ws*a2: the inner two-product add fuses on
             # its first product
             r[i - 1] = float(r[i - 1]) + _rfma(
-                float(wy[k - 1, pointr - 1]), a1,
-                float(ws[k - 1, pointr - 1]) * a2)
+                float(wy[k - 1, pointr - 1]), a1, float(ws[k - 1, pointr - 1]) * a2
+            )
         pointr = pointr % m + 1
     return 0
 
@@ -452,8 +472,25 @@ def _errclb(n, m, factr, lo, u, nbd, task):
     return task, info, k
 
 
-def _formk(n, nsub, ind, nenter, ileave, indx2, iupdat, updatd, wn, wn1,
-           m, ws, wy, sy, theta, col, head):
+def _formk(
+    n,
+    nsub,
+    ind,
+    nenter,
+    ileave,
+    indx2,
+    iupdat,
+    updatd,
+    wn,
+    wn1,
+    m,
+    ws,
+    wy,
+    sy,
+    theta,
+    col,
+    head,
+):
     """lbfgsb.c ``formk`` (:1800): form the LEL' factorization of the
     middle indefinite matrix K into ``wn`` (upper triangle), maintaining
     the inner-product table ``wn1``. Returns info (−1/−2 on Cholesky
@@ -464,12 +501,13 @@ def _formk(n, nsub, ind, nenter, ileave, indx2, iupdat, updatd, wn, wn1,
             for jy in range(1, m):
                 js = m + jy
                 i2 = m - jy
-                _dcopy(i2, wn1[jy:jy + i2, jy], wn1[jy - 1:jy - 1 + i2,
-                                                    jy - 1])
-                _dcopy(i2, wn1[js:js + i2, js], wn1[js - 1:js - 1 + i2,
-                                                    js - 1])
-                _dcopy(m - 1, wn1[m + 1:m + 1 + (m - 1), jy],
-                       wn1[m:m + (m - 1), jy - 1])
+                _dcopy(i2, wn1[jy : jy + i2, jy], wn1[jy - 1 : jy - 1 + i2, jy - 1])
+                _dcopy(i2, wn1[js : js + i2, js], wn1[js - 1 : js - 1 + i2, js - 1])
+                _dcopy(
+                    m - 1,
+                    wn1[m + 1 : m + 1 + (m - 1), jy],
+                    wn1[m : m + (m - 1), jy - 1],
+                )
         # put new rows in blocks (1,1), (2,1) and (2,2)
         pbegin = 1
         pend = nsub
@@ -488,14 +526,17 @@ def _formk(n, nsub, ind, nenter, ileave, indx2, iupdat, updatd, wn, wn1,
             temp3 = 0.0
             for k in range(pbegin, pend + 1):
                 k1 = int(ind[k - 1])
-                temp1 = _rfma(float(wy[k1 - 1, ipntr - 1]),
-                              float(wy[k1 - 1, jpntr - 1]), temp1)
+                temp1 = _rfma(
+                    float(wy[k1 - 1, ipntr - 1]), float(wy[k1 - 1, jpntr - 1]), temp1
+                )
             for k in range(dbegin, dend + 1):
                 k1 = int(ind[k - 1])
-                temp2 = _rfma(float(ws[k1 - 1, ipntr - 1]),
-                              float(ws[k1 - 1, jpntr - 1]), temp2)
-                temp3 = _rfma(float(ws[k1 - 1, ipntr - 1]),
-                              float(wy[k1 - 1, jpntr - 1]), temp3)
+                temp2 = _rfma(
+                    float(ws[k1 - 1, ipntr - 1]), float(ws[k1 - 1, jpntr - 1]), temp2
+                )
+                temp3 = _rfma(
+                    float(ws[k1 - 1, ipntr - 1]), float(wy[k1 - 1, jpntr - 1]), temp3
+                )
             wn1[iy - 1, jy - 1] = temp1
             wn1[is_ - 1, js - 1] = temp2
             wn1[is_ - 1, jy - 1] = temp3
@@ -511,8 +552,9 @@ def _formk(n, nsub, ind, nenter, ileave, indx2, iupdat, updatd, wn, wn1,
             temp3 = 0.0
             for k in range(pbegin, pend + 1):
                 k1 = int(ind[k - 1])
-                temp3 = _rfma(float(ws[k1 - 1, ipntr - 1]),
-                              float(wy[k1 - 1, jpntr - 1]), temp3)
+                temp3 = _rfma(
+                    float(ws[k1 - 1, ipntr - 1]), float(wy[k1 - 1, jpntr - 1]), temp3
+                )
             ipntr = ipntr % m + 1
             wn1[is_ - 1, jy - 1] = temp3
         upcl = col - 1
@@ -531,19 +573,22 @@ def _formk(n, nsub, ind, nenter, ileave, indx2, iupdat, updatd, wn, wn1,
             temp4 = 0.0
             for k in range(1, nenter + 1):
                 k1 = int(indx2[k - 1])
-                temp1 = _rfma(float(wy[k1 - 1, ipntr - 1]),
-                              float(wy[k1 - 1, jpntr - 1]), temp1)
-                temp2 = _rfma(float(ws[k1 - 1, ipntr - 1]),
-                              float(ws[k1 - 1, jpntr - 1]), temp2)
+                temp1 = _rfma(
+                    float(wy[k1 - 1, ipntr - 1]), float(wy[k1 - 1, jpntr - 1]), temp1
+                )
+                temp2 = _rfma(
+                    float(ws[k1 - 1, ipntr - 1]), float(ws[k1 - 1, jpntr - 1]), temp2
+                )
             for k in range(ileave, n + 1):
                 k1 = int(indx2[k - 1])
-                temp3 = _rfma(float(wy[k1 - 1, ipntr - 1]),
-                              float(wy[k1 - 1, jpntr - 1]), temp3)
-                temp4 = _rfma(float(ws[k1 - 1, ipntr - 1]),
-                              float(ws[k1 - 1, jpntr - 1]), temp4)
+                temp3 = _rfma(
+                    float(wy[k1 - 1, ipntr - 1]), float(wy[k1 - 1, jpntr - 1]), temp3
+                )
+                temp4 = _rfma(
+                    float(ws[k1 - 1, ipntr - 1]), float(ws[k1 - 1, jpntr - 1]), temp4
+                )
             wn1[iy - 1, jy - 1] = float(wn1[iy - 1, jy - 1]) + temp1 - temp3
-            wn1[is_ - 1, js - 1] = (float(wn1[is_ - 1, js - 1])
-                                    - temp2 + temp4)
+            wn1[is_ - 1, js - 1] = float(wn1[is_ - 1, js - 1]) - temp2 + temp4
             jpntr = jpntr % m + 1
         ipntr = ipntr % m + 1
     # modify the old parts in block (2,1)
@@ -555,18 +600,18 @@ def _formk(n, nsub, ind, nenter, ileave, indx2, iupdat, updatd, wn, wn1,
             temp3 = 0.0
             for k in range(1, nenter + 1):
                 k1 = int(indx2[k - 1])
-                temp1 = _rfma(float(ws[k1 - 1, ipntr - 1]),
-                              float(wy[k1 - 1, jpntr - 1]), temp1)
+                temp1 = _rfma(
+                    float(ws[k1 - 1, ipntr - 1]), float(wy[k1 - 1, jpntr - 1]), temp1
+                )
             for k in range(ileave, n + 1):
                 k1 = int(indx2[k - 1])
-                temp3 = _rfma(float(ws[k1 - 1, ipntr - 1]),
-                              float(wy[k1 - 1, jpntr - 1]), temp3)
+                temp3 = _rfma(
+                    float(ws[k1 - 1, ipntr - 1]), float(wy[k1 - 1, jpntr - 1]), temp3
+                )
             if is_ <= jy + m:
-                wn1[is_ - 1, jy - 1] = (float(wn1[is_ - 1, jy - 1])
-                                        + temp1 - temp3)
+                wn1[is_ - 1, jy - 1] = float(wn1[is_ - 1, jy - 1]) + temp1 - temp3
             else:
-                wn1[is_ - 1, jy - 1] = (float(wn1[is_ - 1, jy - 1])
-                                        - temp1 + temp3)
+                wn1[is_ - 1, jy - 1] = float(wn1[is_ - 1, jy - 1]) - temp1 + temp3
             jpntr = jpntr % m + 1
         ipntr = ipntr % m + 1
     # form the upper triangle of WN
@@ -583,8 +628,7 @@ def _formk(n, nsub, ind, nenter, ileave, indx2, iupdat, updatd, wn, wn1,
             wn[jy - 1, is_ - 1] = -float(wn1[is1 - 1, jy - 1])
         for jy in range(iy, col + 1):
             wn[jy - 1, is_ - 1] = float(wn1[is1 - 1, jy - 1])
-        wn[iy - 1, iy - 1] = (float(wn[iy - 1, iy - 1])
-                              + float(sy[iy - 1, iy - 1]))
+        wn[iy - 1, iy - 1] = float(wn[iy - 1, iy - 1]) + float(sy[iy - 1, iy - 1])
     # Cholesky-factor the (1,1) block to LL', L' in the upper triangle
     info = _dpofa(wn, col)
     if info != 0:
@@ -596,9 +640,9 @@ def _formk(n, nsub, ind, nenter, ileave, indx2, iupdat, updatd, wn, wn1,
     # (2,2) block: S'AA'S*theta + (L^-1(-L_a'+R_z'))'L^-1(-L_a'+R_z')
     for is_ in range(col + 1, col2 + 1):
         for js in range(is_, col2 + 1):
-            wn[is_ - 1, js - 1] = (
-                float(wn[is_ - 1, js - 1])
-                + _ddot(col, wn[0:col, is_ - 1], wn[0:col, js - 1]))
+            wn[is_ - 1, js - 1] = float(wn[is_ - 1, js - 1]) + _ddot(
+                col, wn[0:col, is_ - 1], wn[0:col, js - 1]
+            )
     # Cholesky factorization of the (2,2) block (leading dim m2 view)
     info = _dpofa(wn[col:m2, col:m2], col)
     if info != 0:
@@ -618,10 +662,12 @@ def _formt(m, wt, sy, ss, col, theta):
             ddum = 0.0
             for k in range(1, k1 + 1):
                 # division feeds the add: no contraction
-                ddum += (float(sy[i - 1, k - 1]) * float(sy[j - 1, k - 1])
-                         / float(sy[k - 1, k - 1]))
-            wt[i - 1, j - 1] = _rfma(theta, float(ss[i - 1, j - 1]),
-                                     ddum)
+                ddum += (
+                    float(sy[i - 1, k - 1])
+                    * float(sy[j - 1, k - 1])
+                    / float(sy[k - 1, k - 1])
+                )
+            wt[i - 1, j - 1] = _rfma(theta, float(ss[i - 1, j - 1]), ddum)
     info = _dpofa(wt, col)
     if info != 0:
         return -3
@@ -641,19 +687,16 @@ def _freev(n, nfree, indx, indx2, iwhere, updatd, cnstnd, iprint, iter_):
                 ileave -= 1
                 indx2[ileave - 1] = k
                 if iprint >= 100:
-                    print(f"Variable {k} leaves the set of free "
-                          "variables")
+                    print(f"Variable {k} leaves the set of free variables")
         for i in range(nfree + 1, n + 1):
             k = int(indx[i - 1])
             if iwhere[k - 1] <= 0:
                 nenter += 1
                 indx2[nenter - 1] = k
                 if iprint >= 100:
-                    print(f"Variable {k} enters the set of free "
-                          "variables")
+                    print(f"Variable {k} enters the set of free variables")
             if iprint >= 100:
-                print(f"{n + 1 - ileave} variables leave; "
-                      f"{nenter} variables enter")
+                print(f"{n + 1 - ileave} variables leave; {nenter} variables enter")
     wrk = (ileave < n + 1) or (nenter > 0) or updatd
     nfree = 0
     iact = n + 1
@@ -665,13 +708,11 @@ def _freev(n, nfree, indx, indx2, iwhere, updatd, cnstnd, iprint, iter_):
             iact -= 1
             indx[iact - 1] = i
     if iprint >= 99:
-        print(f"{nfree}  variables are free at GCP on iteration "
-              f"{iter_ + 1}")
+        print(f"{nfree}  variables are free at GCP on iteration {iter_ + 1}")
     return nfree, nenter, ileave, wrk
 
 
-def _dcstep(stx, fx, dx, sty, fy, dy, stp, fp, dp, brackt, stpmin,
-            stpmax):
+def _dcstep(stx, fx, dx, sty, fy, dy, stp, fp, dp, brackt, stpmin, stpmax):
     """lbfgsb.c ``dcstep`` (:3237): MINPACK-2 safeguarded step update.
     Returns the updated ``(stx, fx, dx, sty, fy, dy, stp, brackt)``."""
     sgnd = dp * (dx / abs(dx))
@@ -687,8 +728,7 @@ def _dcstep(stx, fx, dx, sty, fy, dy, stp, fp, dp, brackt, stpmin,
         q = gamm - dx + gamm + dp
         r = p / q
         stpc = _rfma(r, stp - stx, stx)
-        stpq = _rfma(dx / ((fx - fp) / (stp - stx) + dx) / 2.0,
-                     stp - stx, stx)
+        stpq = _rfma(dx / ((fx - fp) / (stp - stx) + dx) / 2.0, stp - stx, stx)
         if abs(stpc - stx) < abs(stpq - stx):
             stpf = stpc
         else:
@@ -846,20 +886,48 @@ def _dcsrch(f, g, stp, ftol, gtol, xtol, stpmin, stpmax, task, ls):
         gm = g - ls["gtest"]
         gxm = ls["gx"] - ls["gtest"]
         gym = ls["gy"] - ls["gtest"]
-        (ls["stx"], fxm, gxm, ls["sty"], fym, gym, stp,
-         ls["brackt"]) = _dcstep(ls["stx"], fxm, gxm, ls["sty"], fym,
-                                 gym, stp, fm, gm, ls["brackt"],
-                                 ls["stmin"], ls["stmax"])
+        (ls["stx"], fxm, gxm, ls["sty"], fym, gym, stp, ls["brackt"]) = _dcstep(
+            ls["stx"],
+            fxm,
+            gxm,
+            ls["sty"],
+            fym,
+            gym,
+            stp,
+            fm,
+            gm,
+            ls["brackt"],
+            ls["stmin"],
+            ls["stmax"],
+        )
         ls["fx"] = _rfma(ls["stx"], ls["gtest"], fxm)
         ls["fy"] = _rfma(ls["sty"], ls["gtest"], fym)
         ls["gx"] = gxm + ls["gtest"]
         ls["gy"] = gym + ls["gtest"]
     else:
-        (ls["stx"], ls["fx"], ls["gx"], ls["sty"], ls["fy"], ls["gy"],
-         stp, ls["brackt"]) = _dcstep(ls["stx"], ls["fx"], ls["gx"],
-                                      ls["sty"], ls["fy"], ls["gy"],
-                                      stp, f, g, ls["brackt"],
-                                      ls["stmin"], ls["stmax"])
+        (
+            ls["stx"],
+            ls["fx"],
+            ls["gx"],
+            ls["sty"],
+            ls["fy"],
+            ls["gy"],
+            stp,
+            ls["brackt"],
+        ) = _dcstep(
+            ls["stx"],
+            ls["fx"],
+            ls["gx"],
+            ls["sty"],
+            ls["fy"],
+            ls["gy"],
+            stp,
+            f,
+            g,
+            ls["brackt"],
+            ls["stmin"],
+            ls["stmax"],
+        )
     # bisection step if needed
     if ls["brackt"]:
         if abs(ls["sty"] - ls["stx"]) >= ls["width1"] * 0.66:
@@ -879,9 +947,9 @@ def _dcsrch(f, g, stp, ftol, gtol, xtol, stpmin, stpmax, task, ls):
     if stp > stpmax:
         stp = stpmax
     # if no further progress, take the best point so far
-    if (ls["brackt"] and (stp <= ls["stmin"] or stp >= ls["stmax"])) or \
-            (ls["brackt"]
-             and ls["stmax"] - ls["stmin"] <= xtol * ls["stmax"]):
+    if (ls["brackt"] and (stp <= ls["stmin"] or stp >= ls["stmax"])) or (
+        ls["brackt"] and ls["stmax"] - ls["stmin"] <= xtol * ls["stmax"]
+    ):
         stp = ls["stx"]
     return stp, "FG"
 
@@ -937,11 +1005,19 @@ def _lnsrlb(n, lo, u, nbd, x, f, g, d, r, t, z, task, st):
             st["info"] = -4
             return f, task
     st["stp"], st["csave"] = _dcsrch(
-        f, st["gd"], st["stp"], ftol, gtol, xtol, stpmin, st["stpmx"],
-        st["csave"], st["dcsrch"])
+        f,
+        st["gd"],
+        st["stp"],
+        ftol,
+        gtol,
+        xtol,
+        stpmin,
+        st["stpmx"],
+        st["csave"],
+        st["dcsrch"],
+    )
     st["xstep"] = st["stp"] * st["dnorm"]
-    if (not st["csave"].startswith("CONV")
-            and not st["csave"].startswith("WARN")):
+    if not st["csave"].startswith("CONV") and not st["csave"].startswith("WARN"):
         task = "FG_LNSRCH"
         st["ifun"] += 1
         st["nfgv"] += 1
@@ -950,8 +1026,7 @@ def _lnsrlb(n, lo, u, nbd, x, f, g, d, r, t, z, task, st):
             _dcopy(n, z, x)
         else:
             for i in range(1, n + 1):
-                x[i - 1] = _rfma(st["stp"], float(d[i - 1]),
-                                 float(t[i - 1]))
+                x[i - 1] = _rfma(st["stp"], float(d[i - 1]), float(t[i - 1]))
     else:
         task = "NEW_X"
     return f, task
@@ -974,9 +1049,9 @@ def _matupd(n, m, ws, wy, sy, ss, d, r, st):
     if st["iupdat"] > m:
         # move old information
         for j in range(1, st["col"]):
-            _dcopy(j, ss[1:j + 1, j], ss[0:j, j - 1])
+            _dcopy(j, ss[1 : j + 1, j], ss[0:j, j - 1])
             i2 = st["col"] - j
-            _dcopy(i2, sy[j:j + i2, j], sy[j - 1:j - 1 + i2, j - 1])
+            _dcopy(i2, sy[j : j + i2, j], sy[j - 1 : j - 1 + i2, j - 1])
     # add the last row of SY and last column of SS
     pointr = st["head"]
     col = st["col"]
@@ -1013,8 +1088,7 @@ def _projgr(n, lo, u, nbd, x, g):
     return sbgnrm
 
 
-def _subsm(n, m, nsub, ind, lo, u, nbd, x, d, ws, wy, theta, col, head,
-           wv, wn, iprint):
+def _subsm(n, m, nsub, ind, lo, u, nbd, x, d, ws, wy, theta, col, head, wv, wn, iprint):
     """lbfgsb.c ``subsm`` (:2708): direct subspace minimization over the
     free variables, backtracking into the box. Mutates ``x``/``d``;
     returns ``(iword, info)``."""
@@ -1027,10 +1101,8 @@ def _subsm(n, m, nsub, ind, lo, u, nbd, x, d, ws, wy, theta, col, head,
         temp2 = 0.0
         for j in range(1, nsub + 1):
             k = int(ind[j - 1])
-            temp1 = _rfma(float(wy[k - 1, pointr - 1]),
-                          float(d[j - 1]), temp1)
-            temp2 = _rfma(float(ws[k - 1, pointr - 1]),
-                          float(d[j - 1]), temp2)
+            temp1 = _rfma(float(wy[k - 1, pointr - 1]), float(d[j - 1]), temp1)
+            temp2 = _rfma(float(ws[k - 1, pointr - 1]), float(d[j - 1]), temp2)
         wv[i - 1] = temp1
         wv[col + i - 1] = theta * temp2
         pointr = pointr % m + 1
@@ -1053,9 +1125,10 @@ def _subsm(n, m, nsub, ind, lo, u, nbd, x, d, ws, wy, theta, col, head,
             # d += wy*wv/theta + ws*wv: the add of (division, product)
             # fuses only the product child
             d[i - 1] = float(d[i - 1]) + _rfma(
-                float(ws[k - 1, pointr - 1]), float(wv[js - 1]),
-                float(wy[k - 1, pointr - 1]) * float(wv[jy - 1])
-                / theta)
+                float(ws[k - 1, pointr - 1]),
+                float(wv[js - 1]),
+                float(wy[k - 1, pointr - 1]) * float(wv[jy - 1]) / theta,
+            )
         pointr = pointr % m + 1
     for i in range(1, nsub + 1):
         d[i - 1] = float(d[i - 1]) / theta
@@ -1092,44 +1165,43 @@ def _subsm(n, m, nsub, ind, lo, u, nbd, x, d, ws, wy, theta, col, head,
             x[k - 1] = float(lo[k - 1])
             d[ibd - 1] = 0.0
     for i in range(1, nsub + 1):
-        x[int(ind[i - 1]) - 1] = _rfma(alpha, float(d[i - 1]),
-                                       float(x[int(ind[i - 1]) - 1]))
+        x[int(ind[i - 1]) - 1] = _rfma(
+            alpha, float(d[i - 1]), float(x[int(ind[i - 1]) - 1])
+        )
     iword = 1 if alpha < 1.0 else 0
     return iword, 0
 
 
-def _prn3lb(n, x, f, task, iprint, info, iter_, nfgv, nintol, nskip,
-            nact, sbgnrm, k):
+def _prn3lb(n, x, f, task, iprint, info, iter_, nfgv, nintol, nskip, nact, sbgnrm, k):
     """lbfgsb.c ``prn3lb`` (:3546): final report (iprint >= 0 only)."""
     if task.startswith("CONV"):
         if iprint >= 0:
-            print(f"\niterations {iter_}\nfunction evaluations {nfgv}\n"
-                  f"segments explored during Cauchy searches {nintol}\n"
-                  f"BFGS updates skipped {nskip}\n"
-                  f"active bounds at final generalized Cauchy point "
-                  f"{nact}\n"
-                  f"norm of the final projected gradient {sbgnrm:g}\n"
-                  f"final function value {f:g}\n")
+            print(
+                f"\niterations {iter_}\nfunction evaluations {nfgv}\n"
+                f"segments explored during Cauchy searches {nintol}\n"
+                f"BFGS updates skipped {nskip}\n"
+                f"active bounds at final generalized Cauchy point "
+                f"{nact}\n"
+                f"norm of the final projected gradient {sbgnrm:g}\n"
+                f"final function value {f:g}\n"
+            )
         if iprint >= 100:
             print("X =", np.asarray(x[:n]))
         if iprint >= 1:
             print(f"F = {f:g}")
     if iprint >= 0:
         msgs = {
-            -1: "Matrix in 1st Cholesky factorization in formk is not "
-                "Pos. Def.",
-            -2: "Matrix in 2st Cholesky factorization in formk is not "
-                "Pos. Def.",
-            -3: "Matrix in the Cholesky factorization in formt is not "
-                "Pos. Def.",
+            -1: "Matrix in 1st Cholesky factorization in formk is not Pos. Def.",
+            -2: "Matrix in 2st Cholesky factorization in formk is not Pos. Def.",
+            -3: "Matrix in the Cholesky factorization in formt is not Pos. Def.",
             -4: "Derivative >= 0, backtracking line search impossible.",
             -5: "Warning:  more than 10 function and gradient "
-                "evaluations\n   in the last line search",
+            "evaluations\n   in the last line search",
             -6: f"Input nbd({k}) is invalid",
             -7: f"l({k}) > u({k}).  No feasible solution",
             -8: "The triangular system is singular.",
             -9: "Line search cannot locate an adequate point after 20 "
-                "function\nand gradient evaluations",
+            "function\nand gradient evaluations",
         }
         if info in msgs:
             print(msgs[info])
@@ -1191,13 +1263,24 @@ def _mainlb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task, iprint, st):
         st["csave"] = ""
         task, st["info"], k = _errclb(n, m, factr, lo, u, nbd, task)
         if task.startswith("ERROR"):
-            _prn3lb(n, x, f, task, iprint, st["info"], st["iter"],
-                    st["nfgv"], st["nintol"], st["nskip"], st["nact"],
-                    st["sbgnrm"], k)
+            _prn3lb(
+                n,
+                x,
+                f,
+                task,
+                iprint,
+                st["info"],
+                st["iter"],
+                st["nfgv"],
+                st["nintol"],
+                st["nskip"],
+                st["nact"],
+                st["sbgnrm"],
+                k,
+            )
             return f, task
         if iprint >= 0:
-            print(f"N = {n}, M = {m} machine precision = "
-                  f"{st['epsmch']:g}")
+            print(f"N = {n}, M = {m} machine precision = {st['epsmch']:g}")
         _active(n, lo, u, nbd, x, iwhere, iprint, st)
         # end of initialization: request f0, g0
         task = "FG_START"
@@ -1229,11 +1312,12 @@ def _mainlb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task, iprint, st):
             st["nfgv"] = 1
             st["sbgnrm"] = _projgr(n, lo, u, nbd, x, g)
             if iprint >= 1:
-                print(f"At iterate {st['iter']:5d}  f= {f:12.5g}  "
-                      f"|proj g|= {st['sbgnrm']:12.5g}")
+                print(
+                    f"At iterate {st['iter']:5d}  f= {f:12.5g}  "
+                    f"|proj g|= {st['sbgnrm']:12.5g}"
+                )
             if st["sbgnrm"] <= pgtol:
-                task = ("CONVERGENCE: NORM OF PROJECTED GRADIENT "
-                        "<= PGTOL")
+                task = "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL"
                 break
             jump = "L222"
             continue
@@ -1250,15 +1334,38 @@ def _mainlb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task, iprint, st):
                 continue
             # compute the generalized Cauchy point
             st["nint"], st["info"] = _cauchy(
-                n, x, lo, u, nbd, g, indx2, iwhere, t, d, z, m, wy, ws,
-                sy, wt, st["theta"], st["col"], st["head"], wa, iprint,
-                st["sbgnrm"], st["epsmch"])
+                n,
+                x,
+                lo,
+                u,
+                nbd,
+                g,
+                indx2,
+                iwhere,
+                t,
+                d,
+                z,
+                m,
+                wy,
+                ws,
+                sy,
+                wt,
+                st["theta"],
+                st["col"],
+                st["head"],
+                wa,
+                iprint,
+                st["sbgnrm"],
+                st["epsmch"],
+            )
             if st["info"] != 0:
                 # singular triangular system: refresh lbfgs memory
                 if iprint >= 1:
-                    print("Singular triangular system detected;\n"
-                          "   refresh the lbfgs memory and restart the "
-                          "iteration.")
+                    print(
+                        "Singular triangular system detected;\n"
+                        "   refresh the lbfgs memory and restart the "
+                        "iteration."
+                    )
                 st["info"] = 0
                 st["col"] = 0
                 st["head"] = 1
@@ -1269,8 +1376,16 @@ def _mainlb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task, iprint, st):
                 continue
             st["nintol"] += st["nint"]
             st["nfree"], st["nenter"], st["ileave"], wrk = _freev(
-                n, st["nfree"], indx, indx2, iwhere, st["updatd"],
-                st["cnstnd"], iprint, st["iter"])
+                n,
+                st["nfree"],
+                indx,
+                indx2,
+                iwhere,
+                st["updatd"],
+                st["cnstnd"],
+                iprint,
+                st["iter"],
+            )
             st["nact"] = n - st["nfree"]
             jump = "L333"
             continue
@@ -1281,14 +1396,31 @@ def _mainlb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task, iprint, st):
                 continue
             if wrk:
                 st["info"] = _formk(
-                    n, st["nfree"], indx, st["nenter"], st["ileave"],
-                    indx2, st["iupdat"], st["updatd"], wn, snd, m, ws,
-                    wy, sy, st["theta"], st["col"], st["head"])
+                    n,
+                    st["nfree"],
+                    indx,
+                    st["nenter"],
+                    st["ileave"],
+                    indx2,
+                    st["iupdat"],
+                    st["updatd"],
+                    wn,
+                    snd,
+                    m,
+                    ws,
+                    wy,
+                    sy,
+                    st["theta"],
+                    st["col"],
+                    st["head"],
+                )
             if st["info"] != 0:
                 if iprint >= 0:
-                    print("Nonpositive definiteness in Cholesky "
-                          "factorization in formk;\n   refresh the "
-                          "lbfgs memory and restart the iteration.")
+                    print(
+                        "Nonpositive definiteness in Cholesky "
+                        "factorization in formk;\n   refresh the "
+                        "lbfgs memory and restart the iteration."
+                    )
                 st["info"] = 0
                 st["col"] = 0
                 st["head"] = 1
@@ -1297,19 +1429,53 @@ def _mainlb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task, iprint, st):
                 st["updatd"] = False
                 jump = "L222"
                 continue
-            st["info"] = _cmprlb(n, m, x, g, ws, wy, sy, wt, z, r, wa,
-                                 indx, st["theta"], st["col"],
-                                 st["head"], st["nfree"], st["cnstnd"])
+            st["info"] = _cmprlb(
+                n,
+                m,
+                x,
+                g,
+                ws,
+                wy,
+                sy,
+                wt,
+                z,
+                r,
+                wa,
+                indx,
+                st["theta"],
+                st["col"],
+                st["head"],
+                st["nfree"],
+                st["cnstnd"],
+            )
             if st["info"] == 0:
                 st["iword"], st["info"] = _subsm(
-                    n, m, st["nfree"], indx, lo, u, nbd, z, r, ws, wy,
-                    st["theta"], st["col"], st["head"], wa, wn, iprint)
+                    n,
+                    m,
+                    st["nfree"],
+                    indx,
+                    lo,
+                    u,
+                    nbd,
+                    z,
+                    r,
+                    ws,
+                    wy,
+                    st["theta"],
+                    st["col"],
+                    st["head"],
+                    wa,
+                    wn,
+                    iprint,
+                )
             # L444
             if st["info"] != 0:
                 if iprint >= 1:
-                    print("Singular triangular system detected;\n"
-                          "   refresh the lbfgs memory and restart the "
-                          "iteration.")
+                    print(
+                        "Singular triangular system detected;\n"
+                        "   refresh the lbfgs memory and restart the "
+                        "iteration."
+                    )
                 st["info"] = 0
                 st["col"] = 0
                 st["head"] = 1
@@ -1327,8 +1493,7 @@ def _mainlb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task, iprint, st):
             jump = "L666"
             continue
         if jump == "L666":
-            f, task = _lnsrlb(n, lo, u, nbd, x, f, g, d, r, t, z, task,
-                              st)
+            f, task = _lnsrlb(n, lo, u, nbd, x, f, g, d, r, t, z, task, st)
             if st["info"] != 0 or st["iback"] >= 20:
                 # restore the previous iterate
                 _dcopy(n, t, x)
@@ -1347,9 +1512,11 @@ def _mainlb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task, iprint, st):
                 else:
                     # refresh the lbfgs memory and restart the iteration
                     if iprint >= 1:
-                        print("Bad direction in the line search;\n"
-                              "   refresh the lbfgs memory and restart "
-                              "the iteration.")
+                        print(
+                            "Bad direction in the line search;\n"
+                            "   refresh the lbfgs memory and restart "
+                            "the iteration."
+                        )
                     if st["info"] == 0:
                         st["nfgv"] -= 1
                     st["info"] = 0
@@ -1369,19 +1536,19 @@ def _mainlb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task, iprint, st):
                 st["iter"] += 1
                 st["sbgnrm"] = _projgr(n, lo, u, nbd, x, g)
                 if iprint > 0 and st["iter"] % iprint == 0:
-                    print(f"At iterate {st['iter']:5d}  f = {f:12.5g}  "
-                          f"|proj g|=  {st['sbgnrm']:12.5g}")
+                    print(
+                        f"At iterate {st['iter']:5d}  f = {f:12.5g}  "
+                        f"|proj g|=  {st['sbgnrm']:12.5g}"
+                    )
                 break
         if jump == "L777":
             # test for termination
             if st["sbgnrm"] <= pgtol:
-                task = ("CONVERGENCE: NORM OF PROJECTED GRADIENT "
-                        "<= PGTOL")
+                task = "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL"
                 break
             ddum = max(abs(st["fold"]), abs(f), 1.0)
             if st["fold"] - f <= st["tol"] * ddum:
-                task = ("CONVERGENCE: REL_REDUCTION_OF_F <= "
-                        "FACTR*EPSMCH")
+                task = "CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH"
                 if st["iback"] >= 10:
                     st["info"] = -5
                 break
@@ -1401,8 +1568,7 @@ def _mainlb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task, iprint, st):
                 st["nskip"] += 1
                 st["updatd"] = False
                 if iprint >= 1:
-                    print(f"ys={st['dr']:10.3e}  -gs={ddum:10.3e}, "
-                          "BFGS update SKIPPED")
+                    print(f"ys={st['dr']:10.3e}  -gs={ddum:10.3e}, BFGS update SKIPPED")
                 jump = "L222"
                 continue
             # update the L-BFGS matrix
@@ -1412,9 +1578,11 @@ def _mainlb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task, iprint, st):
             st["info"] = _formt(m, wt, sy, ss, st["col"], st["theta"])
             if st["info"] != 0:
                 if iprint >= 0:
-                    print("Nonpositive definiteness in Cholesky "
-                          "factorization in formt();\n   refresh the "
-                          "lbfgs memory and restart the iteration.")
+                    print(
+                        "Nonpositive definiteness in Cholesky "
+                        "factorization in formt();\n   refresh the "
+                        "lbfgs memory and restart the iteration."
+                    )
                 st["info"] = 0
                 st["col"] = 0
                 st["head"] = 1
@@ -1427,8 +1595,21 @@ def _mainlb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task, iprint, st):
         break
     # L999/L1000: save local variables
     st["isave13"] = st["nfgv"]
-    _prn3lb(n, x, f, task, iprint, st["info"], st["iter"], st["nfgv"],
-            st["nintol"], st["nskip"], st["nact"], st["sbgnrm"], k)
+    _prn3lb(
+        n,
+        x,
+        f,
+        task,
+        iprint,
+        st["info"],
+        st["iter"],
+        st["nfgv"],
+        st["nintol"],
+        st["nskip"],
+        st["nact"],
+        st["sbgnrm"],
+        k,
+    )
     return f, task
 
 
@@ -1455,12 +1636,10 @@ def setulb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task, iprint, state):
         state["iwhere"] = np.zeros(n, dtype=np.int64)
         state["indx2"] = np.zeros(n, dtype=np.int64)
         state["isave13"] = 0
-    return _mainlb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task, iprint,
-                   state)
+    return _mainlb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task, iprint, state)
 
 
-def lbfgsb(n, m, x, lo, u, nbd, fminfn, fmingr, factr, pgtol, maxit,
-           trace, nREPORT):
+def lbfgsb(n, m, x, lo, u, nbd, fminfn, fmingr, factr, pgtol, maxit, trace, nREPORT):
     """R's ``lbfgsb()`` driver (src/appl/optim.c:642): the reverse-
     communication loop around :func:`setulb`. ``fminfn(x) -> float`` and
     ``fmingr(x, g) -> None`` are the (already fnscale/parscale-wrapped)
@@ -1479,8 +1658,7 @@ def lbfgsb(n, m, x, lo, u, nbd, fminfn, fmingr, factr, pgtol, maxit,
     f = 0.0
     iter_ = 0
     while True:
-        f, task = setulb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task,
-                         tr, state)
+        f, task = setulb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task, tr, state)
         if task.startswith("FG"):
             f = fminfn(x)
             if not np.isfinite(f):

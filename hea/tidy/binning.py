@@ -7,6 +7,7 @@ Each accepts either eager input (Series / ndarray / list) or a column
 reference (string or ``pl.Expr``); the reference form returns a callable
 that resolves against layer data inside the ggplot build pipeline.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -49,8 +50,10 @@ def _cut_maybe_lazy(x, eager_fn):
     """Run ``eager_fn`` now if ``x`` is concrete; otherwise return a
     closure for the build pipeline to invoke against the layer data."""
     if isinstance(x, (str, pl.Expr)):
+
         def _lazy(data):
             return eager_fn(_cut_resolve(x, data))
+
         return _lazy
     return eager_fn(_cut_resolve(x))
 
@@ -117,9 +120,7 @@ def cut_interval(x, n=None, length=None, *, closed="right"):
     Mirrors ``ggplot2::cut_interval``.
     """
     if (n is None) == (length is None):
-        raise ValueError(
-            "cut_interval: specify exactly one of `n` and `length`"
-        )
+        raise ValueError("cut_interval: specify exactly one of `n` and `length`")
 
     def _eager(arr):
         finite = arr[np.isfinite(arr)]
@@ -149,6 +150,7 @@ def cut_number(x, n, *, closed="right"):
     in the data to produce ``n`` distinct breaks (ggplot2 raises the
     same way).
     """
+
     def _eager(arr):
         finite = arr[np.isfinite(arr)]
         if len(finite) == 0:

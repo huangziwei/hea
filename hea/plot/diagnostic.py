@@ -30,8 +30,10 @@ def plot_lm(
     # would override per-panel; we honor neither yet — panels carry their
     # own titles. Quiet pass-through avoids tripping translated scripts.
     del caption
-    panels = (0, 1, 2, 4) if which is None else (
-        (which,) if isinstance(which, int) else tuple(which)
+    panels = (
+        (0, 1, 2, 4)
+        if which is None
+        else ((which,) if isinstance(which, int) else tuple(which))
     )
 
     n = len(panels)

@@ -10,6 +10,7 @@ and BOTH the serial (n < 64) and parallel (n >= 64) branches.
 Platform-independent (Rust vs pure-Python hea, not vs R), so it runs in CI —
 unlike the macOS-only Rust==R d/p/q gate.
 """
+
 import numpy as np
 import pytest
 
@@ -30,14 +31,18 @@ def _pyref(xq, x, y, span, degree, w, want_var=True):
 
 def _rust(xq, x, y, span, degree, w, want_var=True):
     f, v = rs.loess_eval(
-        np.ascontiguousarray(xq), np.ascontiguousarray(x),
-        np.ascontiguousarray(y), float(span), int(degree),
-        np.ascontiguousarray(w), bool(want_var),
+        np.ascontiguousarray(xq),
+        np.ascontiguousarray(x),
+        np.ascontiguousarray(y),
+        float(span),
+        int(degree),
+        np.ascontiguousarray(w),
+        bool(want_var),
     )
     return np.asarray(f), np.asarray(v)
 
 
-@pytest.mark.parametrize("n", [40, 400])      # 40 -> serial branch, 400 -> parallel
+@pytest.mark.parametrize("n", [40, 400])  # 40 -> serial branch, 400 -> parallel
 @pytest.mark.parametrize("degree", [1, 2])
 @pytest.mark.parametrize("span", [0.3, 0.5, 0.75])
 def test_loess_eval_matches_python(n, degree, span):

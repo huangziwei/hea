@@ -13,6 +13,7 @@ exactly. That order is load-bearing for bit-exact ``$merge``/``$height``/
 ``$order`` against ``stats::hclust``, and it is inherently sequential — the Rust
 end-goal kernel (plan step 10) must mirror it and must **not** be parallelized.
 """
+
 from __future__ import annotations
 
 import math
@@ -57,8 +58,16 @@ __all__ = [
 ]
 
 # order --> i.meth --> Fortran iOpt codes (1..8)
-_METHODS = ("ward.D", "single", "complete", "average", "mcquitty",
-            "median", "centroid", "ward.D2")
+_METHODS = (
+    "ward.D",
+    "single",
+    "complete",
+    "average",
+    "mcquitty",
+    "median",
+    "centroid",
+    "ward.D2",
+)
 
 # Rust seam (plan build-order step 10): a serial ``hclust`` kernel mirroring
 # ``_hclust_fortran``/``_hcass2`` 1:1. Inherently sequential (NN-chain
@@ -92,7 +101,7 @@ def _hclust_fortran(n, diss, iopt, membr0):
 
     # 1-based working arrays (index 0 unused), mirroring the Fortran declarations.
     d = np.empty(length + 1, dtype=float)
-    d[1:length + 1] = diss
+    d[1 : length + 1] = diss
     ia = [0] * (n + 1)
     ib = [0] * (n + 1)
     crit = [0.0] * (n + 1)
@@ -113,7 +122,7 @@ def _hclust_fortran(n, diss, iopt, membr0):
         flag[i] = True
     ncl = n
 
-    isward = (iopt == 1 or iopt == 8)
+    isward = iopt == 1 or iopt == 8
     if iopt == 8:  # Ward "D2": use squared distances
         for i in range(1, length + 1):
             d[i] = d[i] * d[i]
@@ -159,8 +168,9 @@ def _hclust_fortran(n, diss, iopt, membr0):
                 if isward:
                     # R's gfortran fuses the LW update to fmadd on arm64;
                     # ``_rfma`` mirrors it per-arch (plain a*b+c on x86).
-                    d[ind1] = _rfma(membr[i2] + membr[k], d[ind1],
-                                    (membr[j2] + membr[k]) * d[ind2])
+                    d[ind1] = _rfma(
+                        membr[i2] + membr[k], d[ind1], (membr[j2] + membr[k]) * d[ind2]
+                    )
                     d[ind1] = _rfma(-membr[k], d12, d[ind1])
                     d[ind1] = d[ind1] / (membr[i2] + membr[j2] + membr[k])
                 elif iopt == 2:  # single
@@ -168,17 +178,18 @@ def _hclust_fortran(n, diss, iopt, membr0):
                 elif iopt == 3:  # complete
                     d[ind1] = max(d[ind1], d[ind2])
                 elif iopt == 4:  # average (UPGMA)
-                    d[ind1] = (_rfma(membr[i2], d[ind1], membr[j2] * d[ind2])
-                               / (membr[i2] + membr[j2]))
+                    d[ind1] = _rfma(membr[i2], d[ind1], membr[j2] * d[ind2]) / (
+                        membr[i2] + membr[j2]
+                    )
                 elif iopt == 5:  # mcquitty (WPGMA)
                     d[ind1] = (d[ind1] + d[ind2]) / 2
                 elif iopt == 6:  # median (WPGMC)
                     d[ind1] = ((d[ind1] + d[ind2]) - d12 / 2) / 2
                 elif iopt == 7:  # centroid (UPGMC)
-                    d[ind1] = ((_rfma(membr[i2], d[ind1], membr[j2] * d[ind2])
-                                - membr[i2] * membr[j2] * d12
-                                / (membr[i2] + membr[j2]))
-                               / (membr[i2] + membr[j2]))
+                    d[ind1] = (
+                        _rfma(membr[i2], d[ind1], membr[j2] * d[ind2])
+                        - membr[i2] * membr[j2] * d12 / (membr[i2] + membr[j2])
+                    ) / (membr[i2] + membr[j2])
 
                 if i2 < k:
                     if d[ind1] < dmin:
@@ -279,8 +290,8 @@ def _cutree_c(merge, which):
     col2 = merge[:, 1]
 
     # 1-based working arrays (index 0 unused), as in the C "--" pointers.
-    sing = [True] * (n + 1)   # is k-th obs still alone in a cluster?
-    m_nr = [0] * (n + 1)      # last merge-step number containing k-th obs
+    sing = [True] * (n + 1)  # is k-th obs still alone in a cluster?
+    m_nr = [0] * (n + 1)  # last merge-step number containing k-th obs
     z = [0] * (n + 1)
     ans = np.zeros((n, nw), dtype=np.int64)
 
@@ -594,10 +605,12 @@ def _kmns(x, centers, k, iter_max, trace=0):
                     al2 = float(nc[l2])
                     alt = al2 + 1.0
                     for j in range(1, p + 1):
-                        cen[l1 - 1, j - 1] = (cen[l1 - 1, j - 1] * al1
-                                              - x[i - 1, j - 1]) / alw
-                        cen[l2 - 1, j - 1] = (cen[l2 - 1, j - 1] * al2
-                                              + x[i - 1, j - 1]) / alt
+                        cen[l1 - 1, j - 1] = (
+                            cen[l1 - 1, j - 1] * al1 - x[i - 1, j - 1]
+                        ) / alw
+                        cen[l2 - 1, j - 1] = (
+                            cen[l2 - 1, j - 1] * al2 + x[i - 1, j - 1]
+                        ) / alt
                     nc[l1] -= 1
                     nc[l2] += 1
                     an2[l1] = alw / al1
@@ -657,10 +670,12 @@ def _kmns(x, centers, k, iter_max, trace=0):
                             al2 = float(nc[l2])
                             alt = al2 + 1.0
                             for j in range(1, p + 1):
-                                cen[l1 - 1, j - 1] = (cen[l1 - 1, j - 1] * al1
-                                                      - x[i - 1, j - 1]) / alw
-                                cen[l2 - 1, j - 1] = (cen[l2 - 1, j - 1] * al2
-                                                      + x[i - 1, j - 1]) / alt
+                                cen[l1 - 1, j - 1] = (
+                                    cen[l1 - 1, j - 1] * al1 - x[i - 1, j - 1]
+                                ) / alw
+                                cen[l2 - 1, j - 1] = (
+                                    cen[l2 - 1, j - 1] * al2 + x[i - 1, j - 1]
+                                ) / alt
                             nc[l1] -= 1
                             nc[l2] += 1
                             an2[l1] = alw / al1
@@ -714,10 +729,10 @@ def _kmns(x, centers, k, iter_max, trace=0):
             wss[ii] = _rfma(da, da, wss[ii])
 
     return {
-        "cluster": np.array(ic1[1:m + 1], dtype=np.int64),
+        "cluster": np.array(ic1[1 : m + 1], dtype=np.int64),
         "centers": cen,
-        "nc": np.array(nc[1:k + 1], dtype=np.int64),
-        "wss": np.array(wss[1:k + 1], dtype=float),
+        "nc": np.array(nc[1 : k + 1], dtype=np.int64),
+        "wss": np.array(wss[1 : k + 1], dtype=float),
         "iter": iter_returned,
         "ifault": ifault,
     }
@@ -739,11 +754,18 @@ class Hclust:
     * ``labels`` / ``method`` / ``call`` / ``dist_method``.
     """
 
-    __slots__ = ("merge", "height", "order", "labels", "method", "call",
-                 "dist_method")
+    __slots__ = ("merge", "height", "order", "labels", "method", "call", "dist_method")
 
-    def __init__(self, merge, height, order, labels=None, method=None,
-                 call=None, dist_method=None):
+    def __init__(
+        self,
+        merge,
+        height,
+        order,
+        labels=None,
+        method=None,
+        call=None,
+        dist_method=None,
+    ):
         self.merge = np.asarray(merge, dtype=np.int64).reshape(-1, 2)
         self.height = np.asarray(height, dtype=float)
         self.order = np.asarray(order, dtype=np.int64)
@@ -770,7 +792,8 @@ def hclust(d, method="complete", members=None):
     if method == "ward":  # do not deprecate earlier than 2015!
         warnings.warn(
             'The "ward" method has been renamed to "ward.D"; note new "ward.D2"',
-            stacklevel=2)
+            stacklevel=2,
+        )
         method = "ward.D"
     i_meth = _pmatch(method, _METHODS)
     if i_meth is None:
@@ -814,7 +837,8 @@ def hclust(d, method="complete", members=None):
         # returning the final columns directly — no O(n^2) Python post-processing.
         # The pure-Python ``_hclust_fortran``/``_hcass2`` below stay the spec.
         iia, iib, height, order = _rs_hclust(
-            n, np.ascontiguousarray(data), iopt, members)
+            n, np.ascontiguousarray(data), iopt, members
+        )
         merge[:, 0] = iia
         merge[:, 1] = iib
         height = np.asarray(height, dtype=float)
@@ -825,10 +849,16 @@ def hclust(d, method="complete", members=None):
         merge[:, 0] = iia[1:n]
         merge[:, 1] = iib[1:n]
         height = np.asarray(crit[1:n], dtype=float)
-        order = np.asarray(iorder[1:n + 1], dtype=np.int64)
+        order = np.asarray(iorder[1 : n + 1], dtype=np.int64)
 
-    return Hclust(merge, height, order, labels=labels, method=_METHODS[i_meth],
-                  dist_method=dist_method)
+    return Hclust(
+        merge,
+        height,
+        order,
+        labels=labels,
+        method=_METHODS[i_meth],
+        dist_method=dist_method,
+    )
 
 
 def cutree(tree, k=None, h=None):
@@ -852,7 +882,8 @@ def cutree(tree, k=None, h=None):
         height = np.asarray(tree.height, dtype=float)
         if np.any(np.diff(height) < 0):
             raise ValueError(
-                "the 'height' component of 'tree' is not sorted (increasingly)")
+                "the 'height' component of 'tree' is not sorted (increasingly)"
+            )
         hvals = np.atleast_1d(np.asarray(h, dtype=float))
         heights_inf = np.concatenate([height, [np.inf]])
         which = np.empty(hvals.size, dtype=np.int64)
@@ -977,11 +1008,30 @@ class Kmeans:
     ``size``/``iter``/``ifault``, mirroring R.
     """
 
-    __slots__ = ("cluster", "centers", "totss", "withinss", "tot_withinss",
-                 "betweenss", "size", "iter", "ifault")
+    __slots__ = (
+        "cluster",
+        "centers",
+        "totss",
+        "withinss",
+        "tot_withinss",
+        "betweenss",
+        "size",
+        "iter",
+        "ifault",
+    )
 
-    def __init__(self, cluster, centers, totss, withinss, tot_withinss,
-                 betweenss, size, iter, ifault=None):
+    def __init__(
+        self,
+        cluster,
+        centers,
+        totss,
+        withinss,
+        tot_withinss,
+        betweenss,
+        size,
+        iter,
+        ifault=None,
+    ):
         self.cluster = np.asarray(cluster, dtype=np.int64)
         self.centers = np.asarray(centers, dtype=float)
         self.totss = float(totss)
@@ -1002,7 +1052,9 @@ def _kmns_rs(x, centers, k, iter_max):
     ifault, cluster, cen_flat, nc, wss, it = _rs_kmns(
         np.ascontiguousarray(x, dtype=float),
         np.ascontiguousarray(centers, dtype=float),
-        int(k), int(iter_max))
+        int(k),
+        int(iter_max),
+    )
     if ifault in (1, 3):
         return {"ifault": int(ifault)}
     return {
@@ -1021,12 +1073,16 @@ def _kmeans_cd_rs(rs_kernel, x, centers, k, iter_max):
     cl, cen, nc, wss, it = rs_kernel(
         np.ascontiguousarray(x, dtype=float),
         np.ascontiguousarray(centers, dtype=float),
-        int(k), int(iter_max))
-    return (np.asarray(cl, dtype=np.int64),
-            np.asarray(cen, dtype=float).reshape(k, x.shape[1]),
-            np.asarray(nc, dtype=np.int64),
-            np.asarray(wss, dtype=float),
-            int(it))
+        int(k),
+        int(iter_max),
+    )
+    return (
+        np.asarray(cl, dtype=np.int64),
+        np.asarray(cen, dtype=float).reshape(k, x.shape[1]),
+        np.asarray(nc, dtype=np.int64),
+        np.asarray(wss, dtype=float),
+        int(it),
+    )
 
 
 def _do_one(nmeth, x, centers, k, iter_max, trace):
@@ -1038,18 +1094,17 @@ def _do_one(nmeth, x, centers, k, iter_max, trace):
             z = _kmns(x, centers, k, iter_max, 1 if trace else 0)
         ifault = z.get("ifault")
         if ifault == 1:
-            raise ValueError(
-                "empty cluster: try a better set of initial centers")
+            raise ValueError("empty cluster: try a better set of initial centers")
         if ifault == 3:
-            raise ValueError(
-                "number of cluster centres must lie between 1 and nrow(x)")
+            raise ValueError("number of cluster centres must lie between 1 and nrow(x)")
         if ifault == 4:
             warnings.warn(
                 "Quick-TRANSfer stage steps exceeded maximum "
-                f"(= {min(2147483647, 50 * x.shape[0])})", stacklevel=2)
+                f"(= {min(2147483647, 50 * x.shape[0])})",
+                stacklevel=2,
+            )
         if z["iter"] > iter_max:
-            warnings.warn(f"did not converge in {iter_max} iterations",
-                          stacklevel=2)
+            warnings.warn(f"did not converge in {iter_max} iterations", stacklevel=2)
         return z
 
     if nmeth == 2:  # Lloyd / Forgy
@@ -1059,23 +1114,28 @@ def _do_one(nmeth, x, centers, k, iter_max, trace):
             cl, cen, nc, wss, it = _kmeans_lloyd(x, centers, k, iter_max)
     else:  # MacQueen
         if _rs_macqueen is not None:
-            cl, cen, nc, wss, it = _kmeans_cd_rs(
-                _rs_macqueen, x, centers, k, iter_max)
+            cl, cen, nc, wss, it = _kmeans_cd_rs(_rs_macqueen, x, centers, k, iter_max)
         else:
             cl, cen, nc, wss, it = _kmeans_macqueen(x, centers, k, iter_max)
     ifault = None
     if np.any(nc == 0):
-        warnings.warn("empty cluster: try a better set of initial centers",
-                      stacklevel=2)
+        warnings.warn(
+            "empty cluster: try a better set of initial centers", stacklevel=2
+        )
     if it > iter_max:
         warnings.warn(f"did not converge in {iter_max} iterations", stacklevel=2)
         ifault = 2
-    return {"cluster": cl, "centers": cen, "nc": nc, "wss": wss, "iter": it,
-            "ifault": ifault}
+    return {
+        "cluster": cl,
+        "centers": cen,
+        "nc": nc,
+        "wss": wss,
+        "iter": it,
+        "ifault": ifault,
+    }
 
 
-def kmeans(x, centers, iter_max=10, nstart=1, algorithm="Hartigan-Wong",
-           trace=False):
+def kmeans(x, centers, iter_max=10, nstart=1, algorithm="Hartigan-Wong", trace=False):
     """R ``stats::kmeans(x, centers, iter.max, nstart, algorithm)`` — k-means.
 
     ``centers`` is either the number of clusters ``k`` (initial centres drawn
@@ -1089,7 +1149,8 @@ def kmeans(x, centers, iter_max=10, nstart=1, algorithm="Hartigan-Wong",
         x = x.reshape(-1, 1)
     m, p = x.shape
     nmeth = {"Hartigan-Wong": 1, "Lloyd": 2, "Forgy": 2, "MacQueen": 3}[
-        _match_arg(algorithm, ("Hartigan-Wong", "Lloyd", "Forgy", "MacQueen"))]
+        _match_arg(algorithm, ("Hartigan-Wong", "Lloyd", "Forgy", "MacQueen"))
+    ]
 
     cn = None
     mm = None
@@ -1101,8 +1162,7 @@ def kmeans(x, centers, iter_max=10, nstart=1, algorithm="Hartigan-Wong",
             cn = _unique_rows(x)
             mm = cn.shape[0]
             if mm < k:
-                raise ValueError(
-                    "more cluster centers than distinct data points.")
+                raise ValueError("more cluster centers than distinct data points.")
             centers_mat = cn[_r_rng().sample_int(mm, k), :]
     else:
         centers_mat = np.atleast_2d(np.asarray(centers, dtype=float))
@@ -1134,9 +1194,16 @@ def kmeans(x, centers, iter_max=10, nstart=1, algorithm="Hartigan-Wong",
 
     totss = float(((x - x.mean(axis=0)) ** 2).sum())
     return Kmeans(
-        cluster=z["cluster"], centers=z["centers"], totss=totss,
-        withinss=z["wss"], tot_withinss=best, betweenss=totss - best,
-        size=z["nc"], iter=z["iter"], ifault=z.get("ifault"))
+        cluster=z["cluster"],
+        centers=z["centers"],
+        totss=totss,
+        withinss=z["wss"],
+        tot_withinss=best,
+        betweenss=totss - best,
+        size=z["nc"],
+        iter=z["iter"],
+        ifault=z.get("ifault"),
+    )
 
 
 def fitted_kmeans(object, method="centers"):
@@ -1165,8 +1232,7 @@ def print_kmeans(x, _return=False):
         f" (between_SS / total_SS = {100 * x.betweenss / x.totss:5.1f} %)",
     ]
     if x.ifault == 2:
-        lines.append(
-            "Warning: did *not* converge in specified number of iterations")
+        lines.append("Warning: did *not* converge in specified number of iterations")
     s = "\n".join(lines) + "\n"
     if _return:
         return s
@@ -1251,8 +1317,9 @@ def _clone(d):
     we mirror that by cloning where R would copy."""
     if d.children is None:
         return Dendrogram(children=None, value=d.value, attrs=dict(d.attrs))
-    return Dendrogram(children=[_clone(c) for c in d.children],
-                      value=d.value, attrs=dict(d.attrs))
+    return Dendrogram(
+        children=[_clone(c) for c in d.children], value=d.value, attrs=dict(d.attrs)
+    )
 
 
 def _unlist(d):
@@ -1288,8 +1355,9 @@ def _fmt_digits(v, digits):
         return str(v)
     if f == 0:
         return "0"
-    return np.format_float_positional(f, precision=int(digits),
-                                      fractional=False, trim="-")
+    return np.format_float_positional(
+        f, precision=int(digits), fractional=False, trim="-"
+    )
 
 
 def nleaves(node):
@@ -1302,7 +1370,7 @@ def nleaves(node):
     cur = list(node.children)
     while True:
         while cur:
-            child = cur.pop(0)          # node[[1L]] ; node <- node[-1L]
+            child = cur.pop(0)  # node[[1L]] ; node <- node[-1L]
             if is_leaf(child):
                 count += 1
             else:
@@ -1363,7 +1431,7 @@ def _as_dendrogram_hclust(object, hang=-1, check=True):
     else:
         labels = object.labels
 
-    z = {}                                            # keyed by str(merge step)
+    z = {}  # keyed by str(merge step)
     oHgt = object.height
     nMerge = len(oHgt)
     hMax = oHgt[nMerge - 1]
@@ -1375,7 +1443,7 @@ def _as_dendrogram_hclust(object, hang=-1, check=True):
         h0 = None
         if n0 or n1:
             h0 = 0 if hang < 0 else max(0, oHgt[k - 1] - hang * hMax)
-        if n0 and n1:                                 # two leaves
+        if n0 and n1:  # two leaves
             left = Dendrogram(value=-x0)
             right = Dendrogram(value=-x1)
             zk = Dendrogram(children=[left, right])
@@ -1386,9 +1454,9 @@ def _as_dendrogram_hclust(object, hang=-1, check=True):
             left.attrs["members"] = right.attrs["members"] = 1
             left.attrs["height"] = right.attrs["height"] = h0
             left.attrs["leaf"] = right.attrs["leaf"] = True
-        elif n0 or n1:                                # one leaf, one node
-            isL = n0                                  # leaf on the left?
-            node = z[str(x1 if isL else x0)]          # z[[X[1 + isL]]]
+        elif n0 or n1:  # one leaf, one node
+            isL = n0  # leaf on the left?
+            node = z[str(x1 if isL else x0)]  # z[[X[1 + isL]]]
             if isL:
                 leaf = Dendrogram(value=-x0)
                 zk = Dendrogram(children=[leaf, node])
@@ -1397,20 +1465,21 @@ def _as_dendrogram_hclust(object, hang=-1, check=True):
                 zk = Dendrogram(children=[node, leaf])
             zk.attrs["members"] = node.attrs["members"] + 1
             zk.attrs["midpoint"] = (
-                _member_dend(zk.children[0]) + node.attrs["midpoint"]) / 2
-            leaf.attrs["members"] = 1                 # set AFTER midpoint (as in R)
+                _member_dend(zk.children[0]) + node.attrs["midpoint"]
+            ) / 2
+            leaf.attrs["members"] = 1  # set AFTER midpoint (as in R)
             leaf.attrs["height"] = h0
             leaf.attrs["label"] = labels[leaf.value - 1]
             leaf.attrs["leaf"] = True
             del z[str(x1 if isL else x0)]
-        else:                                         # two non-leaf nodes
+        else:  # two non-leaf nodes
             ln = z[str(x0)]
             rn = z[str(x1)]
             zk = Dendrogram(children=[ln, rn])
             zk.attrs["members"] = ln.attrs["members"] + rn.attrs["members"]
-            zk.attrs["midpoint"] = (ln.attrs["members"]
-                                    + ln.attrs["midpoint"]
-                                    + rn.attrs["midpoint"]) / 2
+            zk.attrs["midpoint"] = (
+                ln.attrs["members"] + ln.attrs["midpoint"] + rn.attrs["midpoint"]
+            ) / 2
             del z[str(x0)]
             del z[str(x1)]
         zk.attrs["height"] = oHgt[k - 1]
@@ -1433,10 +1502,10 @@ def as_hclust_dendrogram(x, **kwargs):
     labsu = [None] * n
     n_h = n - 1
     height = np.zeros(n_h, dtype=float)
-    myIdx = np.zeros((2, n_h), dtype=np.int64)        # NA -> 0 (root col unused)
-    merge = np.zeros((2, n_h), dtype=np.int64)        # NA -> 0 (filled later)
+    myIdx = np.zeros((2, n_h), dtype=np.int64)  # NA -> 0 (root col unused)
+    merge = np.zeros((2, n_h), dtype=np.int64)  # NA -> 0 (filled later)
 
-    rem = list(x.children)                            # remaining children of node
+    rem = list(x.children)  # remaining children of node
     cur_height = x.attrs["height"]
     position = 0
     stack = None
@@ -1445,7 +1514,7 @@ def as_hclust_dendrogram(x, **kwargs):
     myNodeIndex = 0
     while True:
         while len(rem):
-            if position == 0:                         # first visit to this node
+            if position == 0:  # first visit to this node
                 nodeCount += 1
                 myNodeIndex = nodeCount
                 if nodeCount != 1:
@@ -1453,7 +1522,7 @@ def as_hclust_dendrogram(x, **kwargs):
                     myIdx[1, nodeCount - 1] = stack["myNodeIndex"]
                 height[nodeCount - 1] = cur_height
             position += 1
-            child = rem.pop(0)                        # x[[1L]] ; x <- x[-1L]
+            child = rem.pop(0)  # x[[1L]] ; x <- x[-1L]
             if is_leaf(child):
                 leafCount += 1
                 labsu[leafCount - 1] = child.attrs.get("label")
@@ -1462,8 +1531,12 @@ def as_hclust_dendrogram(x, **kwargs):
             else:
                 if len(child.children) != 2:
                     raise ValueError("as.hclust.dendrogram: non-binary node")
-                stack = {"node": rem, "position": position,
-                         "myNodeIndex": myNodeIndex, "stack": stack}
+                stack = {
+                    "node": rem,
+                    "position": position,
+                    "myNodeIndex": myNodeIndex,
+                    "stack": stack,
+                }
                 rem = list(child.children)
                 cur_height = child.attrs["height"]
                 position = 0
@@ -1474,26 +1547,33 @@ def as_hclust_dendrogram(x, **kwargs):
         myNodeIndex = stack["myNodeIndex"]
         stack = stack["stack"]
 
-    iOrd = np.argsort(ord_, kind="stable")            # sort.list(ord)
+    iOrd = np.argsort(ord_, kind="stable")  # sort.list(ord)
     if not np.array_equal(ord_[iOrd], np.arange(1, n + 1)):
         raise ValueError(
             f"dendrogram entries must be 1,2,..,{n} (in any order), "
-            'to be coercible to "hclust"')
+            'to be coercible to "hclust"'
+        )
     # ii <- sort.list(height, decreasing=TRUE)[n.h:1L]  (stable; ties reversed)
     ii = np.argsort(-height, kind="stable")[::-1]
     if not (n_h == 0 or ii[n_h - 1] == 0):
         raise ValueError("internal: root is not the last (tallest) node")
-    for kk in range(1, n_h):                          # k <- seq_len(n.h-1L)
+    for kk in range(1, n_h):  # k <- seq_len(n.h-1L)
         col = ii[kk - 1]
         pos = myIdx[0, col]
         node_idx = myIdx[1, col]
-        merge[pos - 1, node_idx - 1] = kk             # merge[t(myIdx[,ii[k]])] <- +k
+        merge[pos - 1, node_idx - 1] = kk  # merge[t(myIdx[,ii[k]])] <- +k
 
-    final_merge = merge[:, ii].T                      # t(merge[,ii])
+    final_merge = merge[:, ii].T  # t(merge[,ii])
     final_height = height[ii]
-    final_labels = [labsu[i] for i in iOrd]           # labsu[iOrd]
-    return Hclust(merge=final_merge, height=final_height, order=ord_,
-                  labels=final_labels, method=None, dist_method=None)
+    final_labels = [labsu[i] for i in iOrd]  # labsu[iOrd]
+    return Hclust(
+        merge=final_merge,
+        height=final_height,
+        order=ord_,
+        labels=final_labels,
+        method=None,
+        dist_method=None,
+    )
 
 
 def nobs_dendrogram(object):
@@ -1527,14 +1607,15 @@ def midcache_dendrogram(x, type="hclust", quiet=False):
         raise TypeError("'midcache.dendrogram' requires a dendrogram")
 
     def setmid(d):
-        if is_leaf(d):                                # no "midpoint" for a leaf
+        if is_leaf(d):  # no "midpoint" for a leaf
             return Dendrogram(children=None, value=d.value, attrs=dict(d.attrs))
         new_children = [setmid(c) for c in d.children]
         k = len(new_children)
         if (not quiet) and type == "hclust" and k != 2:
             warnings.warn(
                 "midcache() of non-binary dendrograms only partly implemented",
-                stacklevel=2)
+                stacklevel=2,
+            )
         midS = math.fsum(_mid_dend(c) for c in new_children)
         new = Dendrogram(children=new_children, value=d.value, attrs=dict(d.attrs))
         new.attrs["midpoint"] = (_member_dend(new_children[0]) + midS) / 2
@@ -1546,13 +1627,14 @@ def midcache_dendrogram(x, type="hclust", quiet=False):
 def rev_dendrogram(x):
     """R ``rev.dendrogram`` — reverse the order of branches recursively, then
     recompute midpoints (``cluster_dendrogram.R:755``)."""
+
     def _rev(d):
         if is_leaf(d):
             return Dendrogram(children=None, value=d.value, attrs=dict(d.attrs))
         k = len(d.children)
         new_children = [_rev(d.children[k - 1 - j]) for j in range(k)]
-        return Dendrogram(children=new_children, value=d.value,
-                          attrs=dict(d.attrs))
+        return Dendrogram(children=new_children, value=d.value, attrs=dict(d.attrs))
+
     return midcache_dendrogram(_rev(x))
 
 
@@ -1567,14 +1649,13 @@ def reorder_dendrogram(x, wts, agglo_FUN=np.sum):
     def oV(d):
         if is_leaf(d):
             new = Dendrogram(children=None, value=d.value, attrs=dict(d.attrs))
-            new.attrs["value"] = wts[d.value - 1]     # wts[x[1L]]
+            new.attrs["value"] = wts[d.value - 1]  # wts[x[1L]]
             return new
         new_children = [oV(c) for c in d.children]
         vals = np.array([c.attrs["value"] for c in new_children])
-        iOrd = np.argsort(vals, kind="stable")        # sort.list(vals)
+        iOrd = np.argsort(vals, kind="stable")  # sort.list(vals)
         new_children = [new_children[i] for i in iOrd]
-        new = Dendrogram(children=new_children, value=d.value,
-                         attrs=dict(d.attrs))
+        new = Dendrogram(children=new_children, value=d.value, attrs=dict(d.attrs))
         new.attrs["value"] = float(agglo_FUN(vals[iOrd]))
         return new
 
@@ -1607,8 +1688,9 @@ def merge_dendrogram(x, y, *others, height=None, adjust="auto"):
         raise TypeError("merge: 'x' and 'y' must be dendrograms")
     adjust = _match_arg(adjust, ("auto", "add.max", "none"))
     if adjust == "auto":
-        adjust = ("add.max" if (min(_unlist(x)) == 1 and min(_unlist(y)) == 1)
-                  else "none")
+        adjust = (
+            "add.max" if (min(_unlist(x)) == 1 and min(_unlist(y)) == 1) else "none"
+        )
     add = None
     if adjust == "add.max":
         add = max(_unlist(x))
@@ -1633,8 +1715,8 @@ def merge_dendrogram(x, y, *others, height=None, adjust="auto"):
         height = 1.1 * h_max
     elif height < h_max:
         raise ValueError(
-            f"'height' must be at least {h_max}, "
-            "the maximal height of its components")
+            f"'height' must be at least {h_max}, the maximal height of its components"
+        )
     r.attrs["height"] = height
     return midcache_dendrogram(r, quiet=True)
 
@@ -1651,8 +1733,9 @@ def dendrapply(X, FUN, *args, **kwargs):
         if not is_leaf(d):
             new_children = [napply(c) for c in d.children]
             if isinstance(r, Dendrogram):
-                r = Dendrogram(children=new_children, value=r.value,
-                               attrs=dict(r.attrs))
+                r = Dendrogram(
+                    children=new_children, value=r.value, attrs=dict(r.attrs)
+                )
             else:
                 r = Dendrogram(children=new_children)
         return r
@@ -1679,22 +1762,23 @@ def cut_dendrogram(x, h):
             sub = subtree.children[k]
             if sub.attrs.get("height") <= h:
                 X = counter[0]
-                at = dict(sub.attrs)                  # attributes(sub)
+                at = dict(sub.attrs)  # attributes(sub)
                 at["leaf"] = True
                 at.pop("class", None)
-                at["x.member"] = at.get("members")    # before members <- 1
+                at["x.member"] = at.get("members")  # before members <- 1
                 at["members"] = 1
                 new_mem += 1
                 at["label"] = f"Branch {X}"
                 new_children.append(Dendrogram(children=None, value=X, attrs=at))
-                lower.append(_clone(sub))             # LOWER[[X]] <- sub
+                lower.append(_clone(sub))  # LOWER[[X]] <- sub
                 counter[0] += 1
             else:
                 child = assign_nodes(sub)
                 new_children.append(child)
                 new_mem += child.attrs.get("members")
-        new = Dendrogram(children=new_children, value=subtree.value,
-                         attrs=dict(subtree.attrs))
+        new = Dendrogram(
+            children=new_children, value=subtree.value, attrs=dict(subtree.attrs)
+        )
         new.attrs["x.member"] = new.attrs.get("members")
         new.attrs["members"] = new_mem
         return new
@@ -1709,8 +1793,9 @@ def print_dendrogram(x, digits=7, _return=False):
     if is_leaf(x):
         parts.append("leaf '" + _fmt_digits(x.attrs.get("label"), digits) + "'")
     else:
-        parts.append(f"with {len(x)} branches and "
-                     f"{x.attrs.get('members')} members total")
+        parts.append(
+            f"with {len(x)} branches and {x.attrs.get('members')} members total"
+        )
     parts.append(", at height " + _fmt_digits(x.attrs.get("height"), digits) + " ")
     s = "".join(parts) + "\n"
     if _return:
@@ -1719,9 +1804,17 @@ def print_dendrogram(x, digits=7, _return=False):
     return None
 
 
-def str_dendrogram(object, max_level=None, digits_d=3, give_attr=False,
-                   nest_lev=0, indent_str="", last_str="`", stem="--",
-                   _return=False):
+def str_dendrogram(
+    object,
+    max_level=None,
+    digits_d=3,
+    give_attr=False,
+    nest_lev=0,
+    indent_str="",
+    last_str="`",
+    stem="--",
+    _return=False,
+):
     """R ``str.dendrogram`` (``cluster_dendrogram.R:298``) — the nested-tree
     text rendering (display only; not byte-pinned to R)."""
     out = []
@@ -1732,8 +1825,7 @@ def str_dendrogram(object, max_level=None, digits_d=3, give_attr=False,
 
     todo = None
     while True:
-        istr = (indent_str[:-1] + last_str) if indent_str.endswith(" ") \
-            else indent_str
+        istr = (indent_str[:-1] + last_str) if indent_str.endswith(" ") else indent_str
         out.append(istr + stem)
         at = object.attrs
         memb = at.get("members")
@@ -1745,20 +1837,20 @@ def str_dendrogram(object, max_level=None, digits_d=3, give_attr=False,
                 extra = pasteLis(at, ("class", "height", "members"))
                 if extra:
                     extra = ", " + extra
-            tail = (" .." if (max_level is not None and nest_lev == max_level)
-                    else "")
-            out.append(f"[dendrogram w/ {le} branches and {memb} members at h = "
-                       f"{_fmt_digits(hgt, digits_d)}{extra}]{tail}\n")
+            tail = " .." if (max_level is not None and nest_lev == max_level) else ""
+            out.append(
+                f"[dendrogram w/ {le} branches and {memb} members at h = "
+                f"{_fmt_digits(hgt, digits_d)}{extra}]{tail}\n"
+            )
             if max_level is None or nest_lev < max_level:
                 nest_lev += 1
-                todo = (object.children[le - 1], nest_lev,
-                        indent_str + "  ", todo)
+                todo = (object.children[le - 1], nest_lev, indent_str + "  ", todo)
                 indent_str = indent_str + " |"
                 le -= 1
                 while le > 0:
                     todo = (object.children[le - 1], nest_lev, indent_str, todo)
                     le -= 1
-        else:                                         # leaf
+        else:  # leaf
             label = at.get("label")
             if isinstance(label, str):
                 out.append('leaf "' + label + '" ')
@@ -1806,7 +1898,7 @@ def cophenetic_dendrogram(x):
     hi = np.cumsum(lens)
     lo = np.concatenate([[0], hi[:-1]]).astype(int)
     for i, c in enumerate(children):
-        m[lo[i]:hi[i], lo[i]:hi[i]] = as_matrix_dist(c)
+        m[lo[i] : hi[i], lo[i] : hi[i]] = as_matrix_dist(c)
     labels = []
     for c in children:
         if c.Labels is not None:

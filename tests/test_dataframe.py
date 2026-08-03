@@ -115,6 +115,7 @@ def test_desc_negates_list():
     composable forms like ``min_rank(desc(x))``."""
     import numpy as np
     from hea.tidy import min_rank
+
     out = desc([1, 5, 5, 17, 22, None])
     assert isinstance(out, np.ndarray)
     # NaN propagates through negation
@@ -234,10 +235,14 @@ def test_mutate_keep_used_keeps_referenced_only():
     """The r4ds example: keep originals referenced by new expressions
     plus the new columns. Self-references (gain_per_hour → gain) don't
     cause `gain` to be doubled — it's already a new column."""
-    df = DataFrame({
-        "dep_delay": [1.0], "arr_delay": [2.0], "air_time": [60.0],
-        "extra": [99],  # NOT referenced — should be dropped
-    })
+    df = DataFrame(
+        {
+            "dep_delay": [1.0],
+            "arr_delay": [2.0],
+            "air_time": [60.0],
+            "extra": [99],  # NOT referenced — should be dropped
+        }
+    )
     out = df.mutate(
         gain=pl.col("dep_delay") - pl.col("arr_delay"),
         hours=pl.col("air_time") / 60,
@@ -245,8 +250,12 @@ def test_mutate_keep_used_keeps_referenced_only():
         _keep="used",
     )
     assert out.columns == [
-        "dep_delay", "arr_delay", "air_time",  # referenced originals
-        "gain", "hours", "gain_per_hour",      # new
+        "dep_delay",
+        "arr_delay",
+        "air_time",  # referenced originals
+        "gain",
+        "hours",
+        "gain_per_hour",  # new
     ]
 
 
@@ -263,10 +272,14 @@ def test_mutate_is_sequential():
 
 def test_mutate_keep_unused_drops_referenced():
     """Inverse of `used`: drop the originals referenced; keep the rest."""
-    df = DataFrame({
-        "dep_delay": [1.0], "arr_delay": [2.0], "air_time": [60.0],
-        "extra": [99],
-    })
+    df = DataFrame(
+        {
+            "dep_delay": [1.0],
+            "arr_delay": [2.0],
+            "air_time": [60.0],
+            "extra": [99],
+        }
+    )
     out = df.mutate(
         gain=pl.col("dep_delay") - pl.col("arr_delay"),
         _keep="unused",
@@ -366,6 +379,7 @@ def test_relocate_accepts_list_from_cols_between():
 def test_relocate_accepts_selector():
     """Polars selectors expand against the frame schema."""
     import polars.selectors as cs
+
     d = DataFrame({"arr_a": [1], "arr_b": [2], "dep_a": [3], "x": [4]})
     out = d.relocate(cs.starts_with("arr"), _before="x")
     # arr columns moved to right before x; dep_a stays where it was.
@@ -429,10 +443,12 @@ def test_group_by_derived_kwarg_column():
 
 def test_group_by_mixed_positional_and_derived():
     """Positional col plus kwarg-derived col are both grouping keys."""
-    df = DataFrame({
-        "g": ["a", "a", "a", "b"],
-        "x": [10, 12, 25, 11],
-    })
+    df = DataFrame(
+        {
+            "g": ["a", "a", "a", "b"],
+            "x": [10, 12, 25, 11],
+        }
+    )
     out = (
         df.group_by("g", bucket=pl.col("x") // 10)
         .summarize(n=pl.len())
@@ -504,7 +520,9 @@ def test_summarize_groups_keep_returns_grouped_for_chaining():
     """``_groups="keep"`` returns a GroupBy on all original group vars so
     downstream verbs see the same grouping. Verified by computing a
     per-group derived column after summarize."""
-    d = DataFrame({"g": ["a","a","b","b","c"], "h": [1,2,1,2,1], "x": [1,2,3,4,5]})
+    d = DataFrame(
+        {"g": ["a", "a", "b", "b", "c"], "h": [1, 2, 1, 2, 1], "x": [1, 2, 3, 4, 5]}
+    )
     out = d.group_by("g", "h").summarize(m=pl.col("x").mean(), _groups="keep")
     assert isinstance(out, GroupBy)
     assert out._by == ["g", "h"]
@@ -513,7 +531,9 @@ def test_summarize_groups_keep_returns_grouped_for_chaining():
 def test_summarize_groups_drop_last_drops_one_level():
     """``_groups="drop_last"`` keeps n-1 group vars. With a single group
     var, collapses to ungrouped (matches dplyr)."""
-    d = DataFrame({"g": ["a","a","b","b","c"], "h": [1,2,1,2,1], "x": [1,2,3,4,5]})
+    d = DataFrame(
+        {"g": ["a", "a", "b", "b", "c"], "h": [1, 2, 1, 2, 1], "x": [1, 2, 3, 4, 5]}
+    )
     out = d.group_by("g", "h").summarize(m=pl.col("x").mean(), _groups="drop_last")
     assert isinstance(out, GroupBy)
     assert out._by == ["g"]
@@ -530,7 +550,9 @@ def test_summarize_groups_rowwise_groups_each_row():
     """``_groups="rowwise"`` produces a GroupBy where each output row is
     its own group (operationally equivalent to grouping by all original
     by-cols after summarize, since each row is already unique in those)."""
-    d = DataFrame({"g": ["a","a","b","b","c"], "h": [1,2,1,2,1], "x": [1,2,3,4,5]})
+    d = DataFrame(
+        {"g": ["a", "a", "b", "b", "c"], "h": [1, 2, 1, 2, 1], "x": [1, 2, 3, 4, 5]}
+    )
     out = d.group_by("g", "h").summarize(m=pl.col("x").mean(), _groups="rowwise")
     assert isinstance(out, GroupBy)
     assert out._by == ["g", "h"]
@@ -648,10 +670,12 @@ def test_groupby_slice_max_keeps_all_null_group():
     |> slice_max(arr_delay, n=1)`` → 108 rows because LGA has a single
     null-arr_delay row that must survive.
     """
-    df = DataFrame({
-        "g": ["a", "a", "a", "b"],
-        "x": [3, 1, 2, None],  # b has only a null
-    })
+    df = DataFrame(
+        {
+            "g": ["a", "a", "a", "b"],
+            "x": [3, 1, 2, None],  # b has only a null
+        }
+    )
     out = df.group_by("g").slice_max("x", n=1)
     # a's max=3 (1 row); b's only row is null → kept.
     assert out.height == 2
@@ -680,8 +704,8 @@ def test_groupby_slice_max_n_gt_1(df):
 def test_slice_polars_contiguous_preserved(df):
     """Scalar args keep polars' ``slice(offset, length)`` — superset holds."""
     assert df.slice(0, 2)["x"].to_list() == [1, 2]
-    assert df.slice(2)["x"].to_list() == [3, 4, 5, 6]   # offset → end
-    assert df.slice(-2)["x"].to_list() == [5, 6]        # negative offset = last 2
+    assert df.slice(2)["x"].to_list() == [3, 4, 5, 6]  # offset → end
+    assert df.slice(-2)["x"].to_list() == [5, 6]  # negative offset = last 2
     assert isinstance(df.slice(0, 2), DataFrame)
 
 
@@ -700,7 +724,7 @@ def test_slice_positional_from_end(df):
 def test_slice_positional_oob_dropped(df):
     """Out-of-range positions are silently skipped (dplyr-faithful)."""
     assert df.slice([100, 0])["x"].to_list() == [1]
-    assert df.slice([100, -100]).height == 0   # all OOB → empty
+    assert df.slice([100, -100]).height == 0  # all OOB → empty
     assert df.slice([]).height == 0
 
 
@@ -727,7 +751,12 @@ def test_groupby_slice_positional(df):
     # 2nd row of each group.
     assert sorted(df.group_by("g").slice([1]).ungroup()["x"].to_list()) == [2, 5]
     # First + last of each group (from-end negative is per-group).
-    assert sorted(df.group_by("g").slice([0, -1]).ungroup()["x"].to_list()) == [1, 3, 4, 6]
+    assert sorted(df.group_by("g").slice([0, -1]).ungroup()["x"].to_list()) == [
+        1,
+        3,
+        4,
+        6,
+    ]
     # Out-of-range per-group position → empty (groups have 3 rows each).
     assert df.group_by("g").slice([5]).ungroup().height == 0
 
@@ -744,13 +773,13 @@ def test_groupby_slice_preserves_grouping(df):
 def test_slice_drop_marker(df):
     """drop([...]) keeps the complement — hea's spelling of slice(df, -c(1,2))."""
     assert df.slice(drop([0, 1]))["x"].to_list() == [3, 4, 5, 6]
-    assert df.slice(drop(0))["x"].to_list() == [2, 3, 4, 5, 6]   # scalar position
+    assert df.slice(drop(0))["x"].to_list() == [2, 3, 4, 5, 6]  # scalar position
     assert isinstance(df.slice(drop([0, 1])), DataFrame)
 
 
 def test_slice_drop_from_end_and_oob(df):
     assert df.slice(drop([-1]))["x"].to_list() == [1, 2, 3, 4, 5]  # drop last row
-    assert df.slice(drop([100])).height == 6                       # OOB → no-op
+    assert df.slice(drop([100])).height == 6  # OOB → no-op
     assert df.slice(drop([])).height == 6
 
 
@@ -771,9 +800,19 @@ def test_slice_keep_drop_are_complementary(df):
 def test_groupby_slice_drop(df):
     """Per-group drop. Group a = x[1,2,3], group b = x[4,5,6]."""
     # Drop each group's first row.
-    assert sorted(df.group_by("g").slice(drop([0])).ungroup()["x"].to_list()) == [2, 3, 5, 6]
+    assert sorted(df.group_by("g").slice(drop([0])).ungroup()["x"].to_list()) == [
+        2,
+        3,
+        5,
+        6,
+    ]
     # Drop each group's last row (from-end, per group).
-    assert sorted(df.group_by("g").slice(drop([-1])).ungroup()["x"].to_list()) == [1, 2, 4, 5]
+    assert sorted(df.group_by("g").slice(drop([-1])).ungroup()["x"].to_list()) == [
+        1,
+        2,
+        4,
+        5,
+    ]
 
 
 def test_groupby_slice_head_per_group(df):
@@ -820,7 +859,9 @@ def test_pivot_longer_basic():
     Row-major output matches dplyr: each input row's pivoted values
     appear contiguously, in the original column order.
     """
-    d = DataFrame({"id": ["A", "B", "C"], "bp1": [100, 140, 120], "bp2": [120, 115, 125]})
+    d = DataFrame(
+        {"id": ["A", "B", "C"], "bp1": [100, 140, 120], "bp2": [120, 115, 125]}
+    )
     out = d.pivot_longer(
         ["bp1", "bp2"],
         names_to="measurement",
@@ -844,8 +885,7 @@ def test_pivot_longer_billboard_row_order():
             pl.selectors.starts_with("wk"),
             names_to="week",
             values_to="rank",
-        )
-        .slice_head(76)  # all weeks of the first song
+        ).slice_head(76)  # all weeks of the first song
     )
     # All 76 rows belong to the first artist (2 Pac).
     assert out["artist"].n_unique() == 1
@@ -884,14 +924,16 @@ def test_pivot_longer_names_prefix():
 
 def test_pivot_longer_names_sep_multi():
     """The who2 case: multi-piece name split into multiple new columns."""
-    d = DataFrame({
-        "country": ["X", "X"],
-        "year": [2000, 2001],
-        "sp_m_014": [1, 5],
-        "sp_f_014": [2, 6],
-        "ep_m_014": [3, 7],
-        "ep_f_014": [4, 8],
-    })
+    d = DataFrame(
+        {
+            "country": ["X", "X"],
+            "year": [2000, 2001],
+            "sp_m_014": [1, 5],
+            "sp_f_014": [2, 6],
+            "ep_m_014": [3, 7],
+            "ep_f_014": [4, 8],
+        }
+    )
     out = d.pivot_longer(
         pl.exclude(["country", "year"]),
         names_to=["diagnosis", "gender", "age"],
@@ -921,13 +963,15 @@ def test_pivot_longer_names_pattern():
 
 def test_pivot_longer_dot_value_sentinel():
     """The household example: ``.value`` makes name-pieces into output columns."""
-    d = DataFrame({
-        "family": [1, 2],
-        "name_child1": ["A", "C"],
-        "name_child2": ["B", None],
-        "dob_child1": ["2000", "2001"],
-        "dob_child2": ["2010", None],
-    })
+    d = DataFrame(
+        {
+            "family": [1, 2],
+            "name_child1": ["A", "C"],
+            "name_child2": ["B", None],
+            "dob_child1": ["2000", "2001"],
+            "dob_child2": ["2010", None],
+        }
+    )
     out = d.pivot_longer(
         pl.exclude("family"),
         names_to=[".value", "child"],
@@ -962,11 +1006,13 @@ def test_pivot_longer_requires_split_when_multi():
 
 def test_pivot_wider_basic():
     """Inverse of pivot_longer for the same bp dataset."""
-    long = DataFrame({
-        "id": ["A", "B", "B", "A", "A"],
-        "measurement": ["bp1", "bp1", "bp2", "bp2", "bp3"],
-        "value": [100, 140, 115, 120, 105],
-    })
+    long = DataFrame(
+        {
+            "id": ["A", "B", "B", "A", "A"],
+            "measurement": ["bp1", "bp1", "bp2", "bp2", "bp3"],
+            "value": [100, 140, 115, 120, 105],
+        }
+    )
     wide = long.pivot_wider(names_from="measurement", values_from="value")
     assert wide.height == 2
     assert {"id", "bp1", "bp2", "bp3"}.issubset(wide.columns)
@@ -974,12 +1020,14 @@ def test_pivot_wider_basic():
 
 def test_pivot_wider_id_cols_selector():
     """``id_cols`` accepts a selector — the cms example pattern."""
-    d = DataFrame({
-        "org_id": [1, 1, 2, 2],
-        "org_name": ["a", "a", "b", "b"],
-        "metric": ["x", "y", "x", "y"],
-        "score": [10, 20, 30, 40],
-    })
+    d = DataFrame(
+        {
+            "org_id": [1, 1, 2, 2],
+            "org_name": ["a", "a", "b", "b"],
+            "metric": ["x", "y", "x", "y"],
+            "score": [10, 20, 30, 40],
+        }
+    )
     out = d.pivot_wider(
         id_cols=pl.selectors.starts_with("org"),
         names_from="metric",
@@ -1007,8 +1055,10 @@ def test_pivot_round_trip():
     wide = DataFrame({"id": [1, 2, 3], "x": [10, 20, 30], "y": [100, 200, 300]})
     long = wide.pivot_longer(["x", "y"], names_to="k", values_to="v")
     back = long.pivot_wider(names_from="k", values_from="v")
-    assert back.sort("id").select(["id", "x", "y"]).equals(
-        wide.sort("id").select(["id", "x", "y"])
+    assert (
+        back.sort("id")
+        .select(["id", "x", "y"])
+        .equals(wide.sort("id").select(["id", "x", "y"]))
     )
 
 
@@ -1065,7 +1115,12 @@ def test_summary_numeric_six_stats():
     df = DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0]})
     e = _entries(df.summary(width=80), "x")
     assert [lbl for lbl, _ in e] == [
-        "Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max.",
+        "Min.",
+        "1st Qu.",
+        "Median",
+        "Mean",
+        "3rd Qu.",
+        "Max.",
     ]
     by_label = dict(e)
     assert by_label["Min."] == "1"
@@ -1229,9 +1284,12 @@ def test_summary_dates_stay_as_dates():
     into Median / Quartile / Mean rows just because polars promotes
     those stats to datetime internally."""
     import datetime as dt
-    df = DataFrame({
-        "d": [dt.date(2020, 1, 1), dt.date(2020, 6, 1), dt.date(2020, 12, 31)],
-    })
+
+    df = DataFrame(
+        {
+            "d": [dt.date(2020, 1, 1), dt.date(2020, 6, 1), dt.date(2020, 12, 31)],
+        }
+    )
     e = dict(_entries(df.summary(), "d"))
     for lbl in ("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max."):
         assert " " not in e[lbl], f"{lbl} = {e[lbl]!r} has time component"
@@ -1297,25 +1355,35 @@ def test_case_when_drive_type():
         )
     )
     assert out["drive_type"].to_list() == [
-        "front-wheel drive", "rear-wheel drive", "4-wheel drive",
-        "front-wheel drive", "rear-wheel drive",
+        "front-wheel drive",
+        "rear-wheel drive",
+        "4-wheel drive",
+        "front-wheel drive",
+        "rear-wheel drive",
     ]
 
 
 def test_case_when_unmatched_default_null():
     """No matching branch + no ``default`` → null (dplyr's ``.default = NA``)."""
     df = DataFrame({"x": [1, 2, 3, 4]})
-    out = df.mutate(g=hea.tidy.case_when(
-        (pl.col("x") < 2, "low"), (pl.col("x") > 3, "high"),
-    ))
+    out = df.mutate(
+        g=hea.tidy.case_when(
+            (pl.col("x") < 2, "low"),
+            (pl.col("x") > 3, "high"),
+        )
+    )
     assert out["g"].to_list() == ["low", None, None, "high"]
 
 
 def test_case_when_default_fills_unmatched():
     df = DataFrame({"x": [1, 2, 3, 4]})
-    out = df.mutate(g=hea.tidy.case_when(
-        (pl.col("x") < 2, "low"), (pl.col("x") > 3, "high"), default="mid",
-    ))
+    out = df.mutate(
+        g=hea.tidy.case_when(
+            (pl.col("x") < 2, "low"),
+            (pl.col("x") > 3, "high"),
+            default="mid",
+        )
+    )
     assert out["g"].to_list() == ["low", "mid", "mid", "high"]
 
 
@@ -1323,17 +1391,24 @@ def test_case_when_null_condition_falls_through_to_default():
     """Null condition (NA == anything → NA) falls through to ``default`` —
     matches dplyr 1.1+ semantics. Use ``if_else`` for null-in → null-out."""
     df = DataFrame({"x": [1, None, 4]})
-    out = df.mutate(g=hea.tidy.case_when(
-        (pl.col("x") < 2, "low"), (pl.col("x") > 3, "high"), default="mid",
-    ))
+    out = df.mutate(
+        g=hea.tidy.case_when(
+            (pl.col("x") < 2, "low"),
+            (pl.col("x") > 3, "high"),
+            default="mid",
+        )
+    )
     assert out["g"].to_list() == ["low", "mid", "high"]
 
 
 def test_case_when_bare_strings_lifted():
     df = DataFrame({"label": ["x", "y", "z"]})
-    out = df.mutate(g=hea.tidy.case_when(
-        (pl.col("label") == "x", "first"), default="other",
-    ))
+    out = df.mutate(
+        g=hea.tidy.case_when(
+            (pl.col("label") == "x", "first"),
+            default="other",
+        )
+    )
     assert out["g"].to_list() == ["first", "other", "other"]
 
 
@@ -1350,10 +1425,16 @@ def test_case_when_usage_errors():
 def test_parse_double_strict_list():
     """Whole string must be a valid double; otherwise null."""
     assert hea.tidy.parse_double(["1.2", "5.6", "1e3", "-0.5"]) == [
-        1.2, 5.6, 1000.0, -0.5
+        1.2,
+        5.6,
+        1000.0,
+        -0.5,
     ]
     assert hea.tidy.parse_double(["$1.99", "1,234", "abc", ""]) == [
-        None, None, None, None
+        None,
+        None,
+        None,
+        None,
     ]
 
 
@@ -1377,7 +1458,10 @@ def test_parse_double_expr_in_expr_out():
 def test_parse_number_list_returns_list():
     """Regression: list input must not hit ``.cast`` AttributeError."""
     assert hea.tidy.parse_number(["$1,234.56", "30 yo", "five", "5"]) == [
-        1234.56, 30.0, None, 5.0
+        1234.56,
+        30.0,
+        None,
+        5.0,
     ]
 
 
@@ -1444,7 +1528,12 @@ def test_dense_rank_eager_list():
 
 def test_percent_rank_eager_list():
     assert hea.tidy.percent_rank(_RANK_X).to_list() == [
-        0.0, 0.25, 0.25, 0.75, 1.0, None
+        0.0,
+        0.25,
+        0.25,
+        0.75,
+        1.0,
+        None,
     ]
 
 
@@ -1460,10 +1549,28 @@ def test_ntile_eager_size_imbalance():
     """``ntile(0..10, 3)`` puts the extras in the earlier buckets.
     Bucket labels are 0-based."""
     assert hea.tidy.ntile(list(range(1, 11)), 3).to_list() == [
-        0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        1.0,
+        2.0,
+        2.0,
+        2.0,
     ]
     assert hea.tidy.ntile(list(range(1, 11)), 4).to_list() == [
-        0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        1.0,
+        2.0,
+        2.0,
+        3.0,
+        3.0,
     ]
 
 
@@ -1486,8 +1593,12 @@ def test_eager_rank_into_mutate_produces_null_not_nan():
 
 def test_rank_verbs_series_in_series_out():
     s = pl.Series(_RANK_X)
-    for fn in (hea.tidy.min_rank, hea.tidy.dense_rank,
-               hea.tidy.percent_rank, hea.tidy.cume_dist):
+    for fn in (
+        hea.tidy.min_rank,
+        hea.tidy.dense_rank,
+        hea.tidy.percent_rank,
+        hea.tidy.cume_dist,
+    ):
         out = fn(s)
         assert isinstance(out, pl.Series), f"{fn.__name__} did not return Series"
     assert isinstance(hea.tidy.ntile(s, 3), pl.Series)
@@ -1563,9 +1674,7 @@ def test_lead_default_n1_fills_null():
 
 
 def test_lead_with_n_and_default():
-    assert hea.tidy.lead(_LAG_X, n=2, default=-1).to_list() == [
-        11, 11, 19, 35, -1, -1
-    ]
+    assert hea.tidy.lead(_LAG_X, n=2, default=-1).to_list() == [11, 11, 19, 35, -1, -1]
 
 
 def test_lag_inside_mutate_per_group():
@@ -1578,8 +1687,8 @@ def test_lag_inside_mutate_per_group():
 
 def test_lag_with_order_by_string_column():
     """``order_by`` reorders, computes lag, restores. R reference (verified):
-        tibble(t=c(3,1,2), x=c("c","a","b")) %>% mutate(prev=lag(x, order_by=t))
-        -> c("b", NA, "a")  # row at t=3 gets the row at t=2; t=1 has no predecessor
+    tibble(t=c(3,1,2), x=c("c","a","b")) %>% mutate(prev=lag(x, order_by=t))
+    -> c("b", NA, "a")  # row at t=3 gets the row at t=2; t=1 has no predecessor
     """
     df = DataFrame({"t": [3, 1, 2], "x": ["c", "a", "b"]})
     out = df.mutate(prev=hea.tidy.lag(pl.col("x"), order_by="t"))
@@ -1840,9 +1949,8 @@ def test_lag_with_first_default_canonical_pattern():
     """
     events = DataFrame({"time": [1, 3, 8, 15, 20]})
     out = events.mutate(
-        diff=pl.col("time") - hea.tidy.lag(
-            pl.col("time"), default=hea.tidy.first(pl.col("time"))
-        ),
+        diff=pl.col("time")
+        - hea.tidy.lag(pl.col("time"), default=hea.tidy.first(pl.col("time"))),
         has_gap=pl.col("diff") >= 5,
     )
     assert out["diff"].to_list() == [0, 2, 5, 7, 5]
@@ -1904,7 +2012,7 @@ def test_groupby_mutate_returns_groupby():
     """dplyr keeps grouping through mutate; hea now matches.
     ``df.group_by(g).mutate(...)`` returns a GroupBy so downstream
     ``filter`` / ``arrange`` / etc. operate per-group automatically."""
-    df = DataFrame({"g": ["a","a","b","b"], "x": [1,2,3,4]})
+    df = DataFrame({"g": ["a", "a", "b", "b"], "x": [1, 2, 3, 4]})
     out = df.group_by("g").mutate(y=pl.col("x") * 2)
     assert isinstance(out, GroupBy)
     assert out.groups == ["g"]
@@ -1927,15 +2035,16 @@ def test_groupby_filter_reductions_are_per_group():
       ``[1, col("r").max()]`` reads symbol-for-symbol the same as R's
       ``c(1, max(r))``.
     """
-    flights = DataFrame({
-        "year": [2013]*8,
-        "month": [1]*8,
-        "day":   [1, 1, 1, 1, 1, 2, 2, 2],
-        "sched_dep_time": [515, 540, 600, 700, 2359, 500, 800, 2300],
-    })
+    flights = DataFrame(
+        {
+            "year": [2013] * 8,
+            "month": [1] * 8,
+            "day": [1, 1, 1, 1, 1, 2, 2, 2],
+            "sched_dep_time": [515, 540, 600, 700, 2359, 500, 800, 2300],
+        }
+    )
     out = (
-        flights
-        .group_by("year", "month", "day")
+        flights.group_by("year", "month", "day")
         .mutate(r=hea.tidy.min_rank(pl.col("sched_dep_time")))
         .filter(pl.col("r").is_in([0, pl.col("r").max()]))
     )
@@ -1970,9 +2079,7 @@ def test_is_in_all_literal_path_unchanged():
 def test_is_in_mixed_list_with_nulls_equal_uses_eq_missing():
     """``nulls_equal=True`` propagates into the OR-chain via ``eq_missing``."""
     df = DataFrame({"x": [1, None, 3]})
-    out = df.with_columns(
-        m=pl.col("x").is_in([1, pl.col("x").max()], nulls_equal=True)
-    )
+    out = df.with_columns(m=pl.col("x").is_in([1, pl.col("x").max()], nulls_equal=True))
     # 1 matches 1; null matches neither (the null in x doesn't equal max=3,
     # and the literal 1 is not null); 3 matches max=3.
     assert out["m"].to_list() == [True, False, True]
@@ -1991,7 +2098,7 @@ def test_is_in_patch_only_affects_expr_not_series():
 def test_groupby_repr_shows_data_and_groups_banner():
     """dplyr's grouped tibble prints as the tibble with a ``# Groups:``
     header. hea matches — the data is visible, grouping is just metadata."""
-    df = DataFrame({"g": ["a","a","b","b","c"], "x": [1, 2, 3, 4, 5]})
+    df = DataFrame({"g": ["a", "a", "b", "b", "c"], "x": [1, 2, 3, 4, 5]})
     out = df.group_by("g").mutate(y=pl.col("x") * 2)
     rendered = repr(out)
     # The Groups: banner appears first
@@ -2002,7 +2109,7 @@ def test_groupby_repr_shows_data_and_groups_banner():
 
 
 def test_groupby_repr_html_includes_groups_banner():
-    df = DataFrame({"g": ["a","a","b"], "x": [1, 2, 3]})
+    df = DataFrame({"g": ["a", "a", "b"], "x": [1, 2, 3]})
     out = df.group_by("g")
     html = out._repr_html_()
     assert "<small>Groups: g [2]</small>" in html
@@ -2012,7 +2119,7 @@ def test_groupby_repr_html_includes_groups_banner():
 
 def test_groupby_filter_with_multiple_predicates_anded():
     """Multiple positional predicates are AND-ed (matches dplyr/polars)."""
-    df = DataFrame({"g": ["a","a","b","b","b"], "x": [1, 5, 2, 6, 3]})
+    df = DataFrame({"g": ["a", "a", "b", "b", "b"], "x": [1, 5, 2, 6, 3]})
     out = df.group_by("g").filter(
         pl.col("x") > pl.col("x").min(),  # not the per-group min
         pl.col("x") < pl.col("x").max(),  # not the per-group max
@@ -2023,7 +2130,7 @@ def test_groupby_filter_with_multiple_predicates_anded():
 
 
 def test_groupby_arrange_preserves_grouping():
-    df = DataFrame({"g": ["b","a","b","a"], "x": [10, 20, 30, 40]})
+    df = DataFrame({"g": ["b", "a", "b", "a"], "x": [10, 20, 30, 40]})
     out = df.group_by("g").arrange("x")
     assert isinstance(out, GroupBy)
     assert out["x"].to_list() == [10, 20, 30, 40]
@@ -2032,14 +2139,14 @@ def test_groupby_arrange_preserves_grouping():
 
 def test_groupby_select_auto_keeps_group_cols():
     """dplyr: grouping variables are retained on select even if not listed."""
-    df = DataFrame({"g": ["a","b"], "x": [1,2], "y": [10,20]})
+    df = DataFrame({"g": ["a", "b"], "x": [1, 2], "y": [10, 20]})
     out = df.group_by("g").select("x")
     assert set(out.columns) == {"g", "x"}
     assert isinstance(out, GroupBy)
 
 
 def test_groupby_transmute_keeps_group_cols_drops_others():
-    df = DataFrame({"g": ["a","a","b"], "x": [1,2,3], "y": [10,20,30]})
+    df = DataFrame({"g": ["a", "a", "b"], "x": [1, 2, 3], "y": [10, 20, 30]})
     out = df.group_by("g").transmute(z=pl.col("x") * 2)
     assert set(out.columns) == {"g", "z"}
     assert out["z"].to_list() == [2, 4, 6]
@@ -2047,7 +2154,7 @@ def test_groupby_transmute_keeps_group_cols_drops_others():
 
 def test_groupby_distinct_includes_group_cols_in_key():
     """``df.group_by(g).distinct(x)`` is distinct on ``(g, x)``."""
-    df = DataFrame({"g": ["a","a","a","b"], "x": [1,1,2,1]})
+    df = DataFrame({"g": ["a", "a", "a", "b"], "x": [1, 1, 2, 1]})
     out = df.group_by("g").distinct("x").ungroup().sort("g", "x")
     # (a,1), (a,2), (b,1) — three rows
     assert out.shape == (3, 2)
@@ -2055,14 +2162,14 @@ def test_groupby_distinct_includes_group_cols_in_key():
 
 def test_groupby_rename_remaps_group_vars():
     """If a grouping column is renamed, ``GroupBy._by`` follows."""
-    df = DataFrame({"g": ["a","b"], "x": [1,2]})
+    df = DataFrame({"g": ["a", "b"], "x": [1, 2]})
     out = df.group_by("g").rename(group="g")  # new=old
     assert out.groups == ["group"]
     assert "g" not in out.columns and "group" in out.columns
 
 
 def test_groupby_drop_refuses_group_cols():
-    df = DataFrame({"g": ["a","b"], "x": [1,2]})
+    df = DataFrame({"g": ["a", "b"], "x": [1, 2]})
     with pytest.raises(ValueError, match="grouping variable"):
         df.group_by("g").drop("g")
 
@@ -2070,16 +2177,17 @@ def test_groupby_drop_refuses_group_cols():
 def test_IQR_in_grouped_summarize():
     """IQR inside summarize, including the string-as-column shorthand
     that matches polars' ``pl.quantile("col", p)`` ergonomic."""
-    flights = DataFrame({
-        "origin":   ["A", "A", "A", "B", "B", "B", "C", "C"],
-        "dest":     ["X", "X", "Y", "X", "X", "X", "Y", "Y"],
-        "distance": [100, 150, 100, 50, 50, 50, 200, 200],
-    })
+    flights = DataFrame(
+        {
+            "origin": ["A", "A", "A", "B", "B", "B", "C", "C"],
+            "dest": ["X", "X", "Y", "X", "X", "X", "Y", "Y"],
+            "distance": [100, 150, 100, 50, 50, 50, 200, 200],
+        }
+    )
     out = (
-        flights
-        .group_by("origin", "dest")
+        flights.group_by("origin", "dest")
         .summarize(
-            distance_iqr=hea.R.IQR("distance"),   # string shorthand
+            distance_iqr=hea.R.IQR("distance"),  # string shorthand
             iqr_expr=hea.R.IQR(pl.col("distance")),
             n=hea.tidy.n(),
             _groups="drop",
@@ -2105,19 +2213,31 @@ def test_lag_then_cumsum_group_pattern():
 
     Verified against the R output shown in the dplyr docs.
     """
-    events = DataFrame({
-        "time": [0, 1, 2, 3, 5, 10, 11, 12, 14, 15, 20, 21, 24, 25],
-    })
+    events = DataFrame(
+        {
+            "time": [0, 1, 2, 3, 5, 10, 11, 12, 14, 15, 20, 21, 24, 25],
+        }
+    )
     out = events.mutate(
-        diff=pl.col("time") - hea.tidy.lag(
-            pl.col("time"), default=hea.tidy.first(pl.col("time"))
-        ),
+        diff=pl.col("time")
+        - hea.tidy.lag(pl.col("time"), default=hea.tidy.first(pl.col("time"))),
         has_gap=pl.col("diff") >= 5,
         group=hea.R.cumsum(pl.col("has_gap")),
     )
     # has_gap True only at time=10 and time=20 → group jumps there
     assert out["group"].to_list() == [
-        0, 0, 0, 0, 0,    # 0..5
-        1, 1, 1, 1, 1,    # 10..15
-        2, 2, 2, 2,       # 20..25
+        0,
+        0,
+        0,
+        0,
+        0,  # 0..5
+        1,
+        1,
+        1,
+        1,
+        1,  # 10..15
+        2,
+        2,
+        2,
+        2,  # 20..25
     ]

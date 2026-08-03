@@ -82,13 +82,15 @@ class StatDensity(Stat):
         max_d = float(density.max()) if density.size else 0.0
         ndensity = density / max_d if max_d > 0 else density
 
-        return pl.DataFrame({
-            "x": grid,
-            "y": density,
-            "density": density,
-            "ndensity": ndensity,
-            "count": density * len(x),
-        })
+        return pl.DataFrame(
+            {
+                "x": grid,
+                "y": density,
+                "density": density,
+                "ndensity": ndensity,
+                "count": density * len(x),
+            }
+        )
 
     def _bandwidth(self, x: np.ndarray) -> float:
         if isinstance(self.bw, str):

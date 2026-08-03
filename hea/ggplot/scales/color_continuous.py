@@ -76,25 +76,56 @@ class ScaleContinuousColor(Scale):
 # Factories — gradient family
 # ---------------------------------------------------------------------------
 
-def scale_color_gradient(*, low="#132B43", high="#56B1F7", name=_NAME_MISSING,
-                        breaks="default", labels="default", limits=None):
+
+def scale_color_gradient(
+    *,
+    low="#132B43",
+    high="#56B1F7",
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     return ScaleContinuousColor(
-        aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=gradient_pal(low=low, high=high),
+        aesthetics=("colour",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=gradient_pal(low=low, high=high),
     )
 
 
-def scale_fill_gradient(*, low="#132B43", high="#56B1F7", name=_NAME_MISSING,
-                       breaks="default", labels="default", limits=None):
+def scale_fill_gradient(
+    *,
+    low="#132B43",
+    high="#56B1F7",
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     return ScaleContinuousColor(
-        aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=gradient_pal(low=low, high=high),
+        aesthetics=("fill",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=gradient_pal(low=low, high=high),
     )
 
 
-def scale_color_gradient2(*, low="#832424", mid="white", high="#3A3A98",
-                         midpoint=0, name=_NAME_MISSING, breaks="default",
-                         labels="default", limits=None):
+def scale_color_gradient2(
+    *,
+    low="#832424",
+    mid="white",
+    high="#3A3A98",
+    midpoint=0,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     # Mirrors ggplot2's ``scale_colour_gradient2()`` defaults:
     # ``low = scales::muted("red") = "#832424"``,
     # ``mid = "white"``,
@@ -102,35 +133,59 @@ def scale_color_gradient2(*, low="#832424", mid="white", high="#3A3A98",
     # ``midpoint = 0`` (NOT 0.5; users want the diverging midpoint at the
     # data scale's zero, not at 50% of the [0, 1] normalised range).
     return ScaleContinuousColor(
-        aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
+        aesthetics=("colour",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
         limits=limits,
         palette=gradient2_pal(low=low, mid=mid, high=high, midpoint=midpoint),
     )
 
 
-def scale_fill_gradient2(*, low="#832424", mid="white", high="#3A3A98",
-                        midpoint=0, name=_NAME_MISSING, breaks="default",
-                        labels="default", limits=None):
+def scale_fill_gradient2(
+    *,
+    low="#832424",
+    mid="white",
+    high="#3A3A98",
+    midpoint=0,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     return ScaleContinuousColor(
-        aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
+        aesthetics=("fill",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
         limits=limits,
         palette=gradient2_pal(low=low, mid=mid, high=high, midpoint=midpoint),
     )
 
 
-def scale_color_gradientn(*, colours, name=_NAME_MISSING, breaks="default",
-                         labels="default", limits=None):
+def scale_color_gradientn(
+    *, colours, name=_NAME_MISSING, breaks="default", labels="default", limits=None
+):
     return ScaleContinuousColor(
-        aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=gradientn_pal(colours),
+        aesthetics=("colour",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=gradientn_pal(colours),
     )
 
 
-def scale_fill_gradientn(*, colours, name=_NAME_MISSING, breaks="default",
-                        labels="default", limits=None):
+def scale_fill_gradientn(
+    *, colours, name=_NAME_MISSING, breaks="default", labels="default", limits=None
+):
     return ScaleContinuousColor(
-        aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=gradientn_pal(colours),
+        aesthetics=("fill",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=gradientn_pal(colours),
     )
 
 
@@ -177,8 +232,7 @@ class ScaleBinnedColor(ScaleContinuousColor):
         # Bin index per value (0 … n_breaks-1). ``np.digitize`` returns
         # 1-based bin indices; clip + shift so values exactly at ``hi``
         # land in the last bin.
-        idx = np.clip(np.digitize(arr, edges[1:-1], right=False),
-                      0, self.n_breaks - 1)
+        idx = np.clip(np.digitize(arr, edges[1:-1], right=False), 0, self.n_breaks - 1)
         # Normalised position is each bin's centre.
         bin_centres = (np.arange(self.n_breaks) + 0.5) / self.n_breaks
         normalised = bin_centres[idx]
@@ -198,32 +252,66 @@ class ScaleBinnedColor(ScaleContinuousColor):
 # Factories — viridis family
 # ---------------------------------------------------------------------------
 
-def scale_color_viridis_c(*, option="viridis", direction=1, name=_NAME_MISSING,
-                         breaks="default", labels="default", limits=None):
+
+def scale_color_viridis_c(
+    *,
+    option="viridis",
+    direction=1,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     return ScaleContinuousColor(
-        aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=viridis_pal(option=option, direction=direction),
+        aesthetics=("colour",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=viridis_pal(option=option, direction=direction),
     )
 
 
-def scale_color_viridis_b(*, option="viridis", direction=1, n_breaks=10,
-                         name=_NAME_MISSING, breaks="default",
-                         labels="default", limits=None):
+def scale_color_viridis_b(
+    *,
+    option="viridis",
+    direction=1,
+    n_breaks=10,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     """Binned viridis colour scale — discretises into ``n_breaks`` bins."""
     return ScaleBinnedColor(
-        aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=viridis_pal(option=option, direction=direction),
+        aesthetics=("colour",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=viridis_pal(option=option, direction=direction),
         n_breaks=n_breaks,
     )
 
 
-def scale_fill_viridis_b(*, option="viridis", direction=1, n_breaks=10,
-                        name=_NAME_MISSING, breaks="default",
-                        labels="default", limits=None):
+def scale_fill_viridis_b(
+    *,
+    option="viridis",
+    direction=1,
+    n_breaks=10,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     """Binned viridis fill scale — discretises into ``n_breaks`` bins."""
     return ScaleBinnedColor(
-        aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=viridis_pal(option=option, direction=direction),
+        aesthetics=("fill",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=viridis_pal(option=option, direction=direction),
         n_breaks=n_breaks,
     )
 
@@ -231,11 +319,22 @@ def scale_fill_viridis_b(*, option="viridis", direction=1, n_breaks=10,
 scale_colour_viridis_b = scale_color_viridis_b
 
 
-def scale_fill_viridis_c(*, option="viridis", direction=1, name=_NAME_MISSING,
-                        breaks="default", labels="default", limits=None):
+def scale_fill_viridis_c(
+    *,
+    option="viridis",
+    direction=1,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     return ScaleContinuousColor(
-        aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=viridis_pal(option=option, direction=direction),
+        aesthetics=("fill",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=viridis_pal(option=option, direction=direction),
     )
 
 
@@ -250,19 +349,40 @@ scale_colour_viridis_c = scale_color_viridis_c
 # Factories — brewer continuous (a.k.a. distiller in ggplot2 nomenclature)
 # ---------------------------------------------------------------------------
 
-def scale_color_distiller(*, palette="Blues", direction=1, name=_NAME_MISSING,
-                         breaks="default", labels="default", limits=None):
+
+def scale_color_distiller(
+    *,
+    palette="Blues",
+    direction=1,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     return ScaleContinuousColor(
-        aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
+        aesthetics=("colour",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
         limits=limits,
         palette=brewer_pal_continuous(palette=palette, direction=direction),
     )
 
 
-def scale_fill_distiller(*, palette="Blues", direction=1, name=_NAME_MISSING,
-                        breaks="default", labels="default", limits=None):
+def scale_fill_distiller(
+    *,
+    palette="Blues",
+    direction=1,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     return ScaleContinuousColor(
-        aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
+        aesthetics=("fill",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
         limits=limits,
         palette=brewer_pal_continuous(palette=palette, direction=direction),
     )

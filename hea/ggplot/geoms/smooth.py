@@ -22,14 +22,16 @@ from .ribbon import GeomRibbon
 
 @dataclass
 class GeomSmooth(Geom):
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "#3366FF",  # ggplot2 default smooth colour
-        "fill": "grey60",
-        "size": 1.0,
-        "linetype": "solid",
-        "alpha": 0.4,
-        "weight": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "#3366FF",  # ggplot2 default smooth colour
+            "fill": "grey60",
+            "size": 1.0,
+            "linetype": "solid",
+            "alpha": 0.4,
+            "weight": 1.0,
+        }
+    )
     required_aes: tuple = ("x", "y")
     key_glyph: str = "path"
 
@@ -43,17 +45,37 @@ class GeomSmooth(Geom):
         path.draw_panel(data, ax)
 
 
-def geom_smooth(mapping=None, data=None, *, stat="smooth", method="loess", formula=None,
-                se=True, level=0.95, span=0.75, n=80, family=None,
-                position="identity", na_rm=False, **kwargs):
+def geom_smooth(
+    mapping=None,
+    data=None,
+    *,
+    stat="smooth",
+    method="loess",
+    formula=None,
+    se=True,
+    level=0.95,
+    span=0.75,
+    n=80,
+    family=None,
+    position="identity",
+    na_rm=False,
+    **kwargs,
+):
     from ..layer import Layer
     from ..positions import resolve_position
     from ..stats import resolve_stat
     from ..stats.smooth import StatSmooth
 
     if stat == "smooth":
-        stat_obj = StatSmooth(method=method, formula=formula, se=se,
-                              level=level, span=span, n=n, family=family)
+        stat_obj = StatSmooth(
+            method=method,
+            formula=formula,
+            se=se,
+            level=level,
+            span=span,
+            n=n,
+            family=family,
+        )
     elif isinstance(stat, str):
         stat_obj = resolve_stat(stat)
     else:

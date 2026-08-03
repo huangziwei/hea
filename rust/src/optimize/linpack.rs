@@ -18,7 +18,15 @@ const ACCEL_PAIR4: bool = cfg!(all(target_os = "macos", target_arch = "aarch64")
 
 /// `_ddot`: sequential everywhere, except the probed Accelerate pair
 /// tree at n = 4 on darwin/arm64.
-pub fn ddot(n: usize, dx: &[f64], ox: usize, incx: usize, dy: &[f64], oy: usize, incy: usize) -> f64 {
+pub fn ddot(
+    n: usize,
+    dx: &[f64],
+    ox: usize,
+    incx: usize,
+    dy: &[f64],
+    oy: usize,
+    incy: usize,
+) -> f64 {
     if ACCEL_PAIR4 && n == 4 {
         let s0 = dx[ox] * dy[oy];
         let s1 = dx[ox + incx] * dy[oy + incy];
@@ -227,8 +235,11 @@ pub fn dtrsl_same(buf: &mut [f64], t0: usize, lda: usize, n: usize, ob: usize, j
                 let temp = -buf[ob + j - 2];
                 if temp != 0.0 {
                     for i in 0..(n - j + 1) {
-                        buf[ob + j - 1 + i] =
-                            rfma(temp, buf[t0 + (j - 1 + i) + (j - 2) * lda], buf[ob + j - 1 + i]);
+                        buf[ob + j - 1 + i] = rfma(
+                            temp,
+                            buf[t0 + (j - 1 + i) + (j - 2) * lda],
+                            buf[ob + j - 1 + i],
+                        );
                     }
                 }
                 buf[ob + j - 1] /= buf[t0 + (j - 1) + (j - 1) * lda];

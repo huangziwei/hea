@@ -52,8 +52,13 @@ def _add_key_bg(handlebox, fontsize, *, fc, ec, lw):
     height = handlebox.height
     trans = handlebox.get_transform()
     bg = _MplRect(
-        (-xdescent, -ydescent), width, height,
-        facecolor=fc, edgecolor=ec, linewidth=lw, transform=trans,
+        (-xdescent, -ydescent),
+        width,
+        height,
+        facecolor=fc,
+        edgecolor=ec,
+        linewidth=lw,
+        transform=trans,
     )
     handlebox.add_artist(bg)
     return xdescent, ydescent, width, height, trans
@@ -79,12 +84,21 @@ class _HandlerLine2DKeyBg(HandlerLine2D):
 
     def legend_artist(self, legend, orig_handle, fontsize, handlebox):
         xdescent, ydescent, width, height, trans = _add_key_bg(
-            handlebox, fontsize,
-            fc=self._key_fc, ec=self._key_ec, lw=self._key_lw,
+            handlebox,
+            fontsize,
+            fc=self._key_fc,
+            ec=self._key_ec,
+            lw=self._key_lw,
         )
         glyphs = self.create_artists(
-            legend, orig_handle, xdescent, ydescent, width, height,
-            fontsize, trans,
+            legend,
+            orig_handle,
+            xdescent,
+            ydescent,
+            width,
+            height,
+            fontsize,
+            trans,
         )
         for g in glyphs:
             handlebox.add_artist(g)
@@ -105,12 +119,21 @@ class _HandlerPatchKeyBg(HandlerPatch):
 
     def legend_artist(self, legend, orig_handle, fontsize, handlebox):
         xdescent, ydescent, width, height, trans = _add_key_bg(
-            handlebox, fontsize,
-            fc=self._key_fc, ec=self._key_ec, lw=self._key_lw,
+            handlebox,
+            fontsize,
+            fc=self._key_fc,
+            ec=self._key_ec,
+            lw=self._key_lw,
         )
         glyphs = self.create_artists(
-            legend, orig_handle, xdescent, ydescent, width, height,
-            fontsize, trans,
+            legend,
+            orig_handle,
+            xdescent,
+            ydescent,
+            width,
+            height,
+            fontsize,
+            trans,
         )
         for g in glyphs:
             handlebox.add_artist(g)
@@ -234,13 +257,16 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
         # ``name=None`` (suppress) yields ``""`` here, which is falsy and
         # falls through to the source name — for legend titles that's fine
         # since no axis-style suppression UI exists yet.
-        title = (plot_labels.get(aes_name)
-                 or _scale_name_or_none(scale)
-                 or aes_source.get(aes_name)
-                 or aes_name)
+        title = (
+            plot_labels.get(aes_name)
+            or _scale_name_or_none(scale)
+            or aes_source.get(aes_name)
+            or aes_name
+        )
 
         contributor_idx, contributor = _find_layer_for_aes(
-            plot, aes_name,
+            plot,
+            aes_name,
             layer_mappings=build_output.layer_mappings,
             visible_only=True,
         )
@@ -256,9 +282,11 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
             # constants for the key glyph. Falls back to the raw layer
             # field for legacy callers without a build_output.
             eff_params_list = getattr(build_output, "layer_aes_params", None)
-            if (eff_params_list is not None
-                    and contributor_idx is not None
-                    and contributor_idx < len(eff_params_list)):
+            if (
+                eff_params_list is not None
+                and contributor_idx is not None
+                and contributor_idx < len(eff_params_list)
+            ):
                 layer_params = dict(eff_params_list[contributor_idx] or {})
             else:
                 layer_params = dict(getattr(contributor, "aes_params", {}))
@@ -269,8 +297,9 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
                 aes_values={},
                 key_glyph=getattr(geom, "key_glyph", "point") if geom else "point",
                 layer_aes_params=layer_params,
-                layer_default_aes=(dict(getattr(geom, "default_aes", {}))
-                                    if geom is not None else {}),
+                layer_default_aes=(
+                    dict(getattr(geom, "default_aes", {})) if geom is not None else {}
+                ),
             )
 
         groups[key].aes_values[aes_name] = _scale_mapped_values(scale, levels)
@@ -344,11 +373,12 @@ def _resolve_discrete_labels(scale, levels):
     out = [str(x) for x in labels]
     if len(out) < len(levels):
         out += [str(levels[i]) for i in range(len(out), len(levels))]
-    return out[:len(levels)]
+    return out[: len(levels)]
 
 
-def _find_layer_for_aes(plot, aes_name, *, layer_mappings=None,
-                         visible_only: bool = False):
+def _find_layer_for_aes(
+    plot, aes_name, *, layer_mappings=None, visible_only: bool = False
+):
     """Return ``(idx, layer)`` for the first layer whose mapping uses
     ``aes_name`` — or ``(None, None)`` if none does.
 
@@ -432,16 +462,23 @@ def build_colorbar_specs(plot, build_output) -> list[ColorbarSpec]:
         if scale.range_ is None or scale.palette is None:
             continue
         seen.add(id(scale))
-        title = (plot_labels.get(aes_name)
-                 or _scale_name_or_none(scale)
-                 or aes_source.get(aes_name)
-                 or _stat_default_label_for(plot, aes_name)
-                 or aes_name)
+        title = (
+            plot_labels.get(aes_name)
+            or _scale_name_or_none(scale)
+            or aes_source.get(aes_name)
+            or _stat_default_label_for(plot, aes_name)
+            or aes_name
+        )
         lo, hi = scale.range_
-        specs.append(ColorbarSpec(
-            title=title, aesthetic=aes_name,
-            vmin=float(lo), vmax=float(hi), palette=scale.palette,
-        ))
+        specs.append(
+            ColorbarSpec(
+                title=title,
+                aesthetic=aes_name,
+                vmin=float(lo),
+                vmax=float(hi),
+                palette=scale.palette,
+            )
+        )
     return specs
 
 
@@ -454,9 +491,15 @@ def _palette_to_cmap(palette, n: int = 256, name: str = "hea_pal"):
     return LinearSegmentedColormap.from_list(name, list(samples), N=n)
 
 
-def apply_legends(fig, axes_list, plot, build_output, *,
-                   colorbar_caxes: list | None = None,
-                   legend_host_axes: list | None = None) -> None:
+def apply_legends(
+    fig,
+    axes_list,
+    plot,
+    build_output,
+    *,
+    colorbar_caxes: list | None = None,
+    legend_host_axes: list | None = None,
+) -> None:
     """Render legend groups + colorbars onto the first axes using
     ``theme(legend.position=...)`` / ``theme(legend.direction=...)``.
 
@@ -522,13 +565,16 @@ def apply_legends(fig, axes_list, plot, build_output, *,
             ncols = max(1, int(gl.ncol))
         elif gl is not None and gl.nrow is not None:
             from math import ceil
+
             ncols = max(1, ceil(len(handles) / max(1, int(gl.nrow))))
         else:
             ncols = len(handles) if direction == "horizontal" else 1
 
-        host = (legend_host_axes[i]
-                if legend_host_axes and i < len(legend_host_axes)
-                else None)
+        host = (
+            legend_host_axes[i]
+            if legend_host_axes and i < len(legend_host_axes)
+            else None
+        )
         # Per-glyph spacing: polygon keys are filled rectangles that
         # *cover* the panel-colour bg, so they need visible vertical gaps
         # between rows or adjacent colour blocks would butt together.
@@ -553,9 +599,12 @@ def apply_legends(fig, axes_list, plot, build_output, *,
         # vertical incl. line spacing), so the same numeric value yields
         # a non-square box — empirically ``(1.2, 1.5)`` gives a square
         # ~12×12 px bbox at the default 10 pt fontsize.
-        sizing = {"handlelength": 1.2, "handleheight": 1.5,
-                  "labelspacing": labelspacing,
-                  "columnspacing": columnspacing}
+        sizing = {
+            "handlelength": 1.2,
+            "handleheight": 1.5,
+            "labelspacing": labelspacing,
+            "columnspacing": columnspacing,
+        }
         if host is not None:
             host.set_axis_off()
             # Anchor the legend against the panel-facing edge of the
@@ -572,17 +621,29 @@ def apply_legends(fig, axes_list, plot, build_output, *,
             else:  # right (or None)
                 host_loc, host_anchor = "center left", (0.0, 0.5)
             leg = host.legend(
-                handles, labels, title=title, ncols=ncols,
-                loc=host_loc, bbox_to_anchor=host_anchor,
-                frameon=False, alignment=alignment,
-                handler_map=handler_map, **sizing,
+                handles,
+                labels,
+                title=title,
+                ncols=ncols,
+                loc=host_loc,
+                bbox_to_anchor=host_anchor,
+                frameon=False,
+                alignment=alignment,
+                handler_map=handler_map,
+                **sizing,
             )
         else:
             kw = _legend_position_kwargs(pos, i, len(groups))
             leg = target.legend(
-                handles, labels, title=title, ncols=ncols,
-                frameon=False, alignment=alignment,
-                handler_map=handler_map, **sizing, **kw,
+                handles,
+                labels,
+                title=title,
+                ncols=ncols,
+                frameon=False,
+                alignment=alignment,
+                handler_map=handler_map,
+                **sizing,
+                **kw,
             )
         legends.append(leg)
         if host is None and i < len(groups) - 1:
@@ -593,9 +654,9 @@ def apply_legends(fig, axes_list, plot, build_output, *,
             target.add_artist(leg)
 
 
-def _render_colorbar(fig, axes_list, target, spec: ColorbarSpec,
-                     pos: str, direction: str, *,
-                     cax=None) -> None:
+def _render_colorbar(
+    fig, axes_list, target, spec: ColorbarSpec, pos: str, direction: str, *, cax=None
+) -> None:
     """Render one colorbar with theme-aware location.
 
     ``cax``: a pre-allocated dedicated axes. When given, the colorbar
@@ -617,8 +678,12 @@ def _render_colorbar(fig, axes_list, target, spec: ColorbarSpec,
         cb = fig.colorbar(mappable, cax=cax, orientation=orientation)
     else:
         cb = fig.colorbar(
-            mappable, ax=axes_list, location=location,
-            orientation=orientation, shrink=0.6, pad=0.05,
+            mappable,
+            ax=axes_list,
+            location=location,
+            orientation=orientation,
+            shrink=0.6,
+            pad=0.05,
         )
     # ggplot2 places the colorbar title ABOVE the bar (not to its side
     # rotated 90° — matplotlib's default ``cb.set_label``). We use
@@ -707,6 +772,7 @@ def _apply_handle_override(handle, key, value, key_glyph):
         return
     if key == "linestyle":
         from ..plot._util import r_lty
+
         if isinstance(handle, Line2D):
             handle.set_linestyle(r_lty(value) or "-")
         return
@@ -786,6 +852,7 @@ def _make_point_handle(group: LegendGroup, idx: int) -> Line2D:
 
     if "linetype" in aes_values:
         from ..plot._util import r_lty
+
         kwargs["linestyle"] = r_lty(aes_values["linetype"][idx]) or "-"
         kwargs["marker"] = ""
 
@@ -864,7 +931,8 @@ def _make_path_handle(group: LegendGroup, idx: int) -> Line2D:
     linetype = _resolve_aes(group, idx, "linetype", "solid")
 
     return Line2D(
-        [0], [0],
+        [0],
+        [0],
         marker="",
         color=r_color("black" if (colour is None or _is_na(colour)) else colour),
         alpha=float(alpha) if alpha is not None else None,
@@ -901,6 +969,7 @@ def _legend_position_kwargs(pos: str, idx: int, total: int) -> dict:
 # guide_legend / guides factories
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class GuideLegend:
     """ggplot2's ``guide_legend()``. Currently a metadata holder — auto-build
@@ -915,10 +984,12 @@ class GuideLegend:
     override_aes: dict = field(default_factory=dict)
 
 
-def guide_legend(*, title=None, ncol=None, nrow=None, reverse=False,
-                 override_aes=None):
+def guide_legend(*, title=None, ncol=None, nrow=None, reverse=False, override_aes=None):
     return GuideLegend(
-        title=title, ncol=ncol, nrow=nrow, reverse=reverse,
+        title=title,
+        ncol=ncol,
+        nrow=nrow,
+        reverse=reverse,
         override_aes=override_aes or {},
     )
 
@@ -948,8 +1019,10 @@ class GuideAxis:
 
 def guide_axis(*, angle=None, n_dodge=1, check_overlap=False, position=None):
     return GuideAxis(
-        angle=angle, n_dodge=n_dodge,
-        check_overlap=check_overlap, position=position,
+        angle=angle,
+        n_dodge=n_dodge,
+        check_overlap=check_overlap,
+        position=position,
     )
 
 
@@ -1052,8 +1125,11 @@ def _apply_check_overlap(ax, axis_name: str) -> None:
     renderer = fig.canvas.get_renderer()
 
     target_axis = ax.xaxis if axis_name == "x" else ax.yaxis
-    labels = [lbl for lbl in target_axis.get_majorticklabels()
-              if lbl.get_text() and lbl.get_visible()]
+    labels = [
+        lbl
+        for lbl in target_axis.get_majorticklabels()
+        if lbl.get_text() and lbl.get_visible()
+    ]
     if len(labels) <= 1:
         return
 

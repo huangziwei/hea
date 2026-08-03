@@ -16,17 +16,22 @@ import pytest
 
 import hea
 from hea.ggplot import (
-    aes, guide_area, plot_layout, theme,
+    aes,
+    guide_area,
+    plot_layout,
+    theme,
 )
 
 
 @pytest.fixture
 def mpg():
-    return hea.tidy.DataFrame({
-        "drv": ["f"]*5 + ["r"]*5 + ["4"]*5,
-        "cty": [20.0, 22, 19, 21, 23, 14, 13, 15, 12, 16, 17, 18, 16, 19, 18],
-        "hwy": [28.0, 30, 27, 29, 31, 22, 21, 23, 20, 24, 25, 26, 24, 27, 26],
-    })
+    return hea.tidy.DataFrame(
+        {
+            "drv": ["f"] * 5 + ["r"] * 5 + ["4"] * 5,
+            "cty": [20.0, 22, 19, 21, 23, 14, 13, 15, 12, 16, 17, 18, 16, 19, 18],
+            "hwy": [28.0, 30, 27, 29, 31, 22, 21, 23, 20, 24, 25, 26, 24, 27, 26],
+        }
+    )
 
 
 def _legend_axes(fig) -> list:
@@ -63,14 +68,13 @@ def test_plot_layout_guides_collect_dedups_legends(mpg):
     when ``guides="collect"`` is in effect — not one per plot."""
     p1 = mpg.ggplot(aes(x="cty", color="drv", fill="drv")).geom_density(alpha=0.5)
     p2 = mpg.ggplot(aes(x="hwy", color="drv", fill="drv")).geom_density(alpha=0.5)
-    composition = ((p1 + p2)
-                   + plot_layout(guides="collect")) & theme(legend_position="top")
+    composition = ((p1 + p2) + plot_layout(guides="collect")) & theme(
+        legend_position="top"
+    )
     fig = composition.draw()
     try:
         legends = _legend_axes(fig)
-        assert len(legends) == 1, (
-            f"expected 1 merged legend, got {len(legends)}"
-        )
+        assert len(legends) == 1, f"expected 1 merged legend, got {len(legends)}"
     finally:
         plt.close(fig)
 
@@ -80,8 +84,9 @@ def test_guide_area_receives_collected_legend(mpg):
     the merged legend (not auto-placed at the figure edge)."""
     p1 = mpg.ggplot(aes(x="cty", color="drv", fill="drv")).geom_density(alpha=0.5)
     p2 = mpg.ggplot(aes(x="hwy", color="drv", fill="drv")).geom_density(alpha=0.5)
-    composition = ((guide_area() / (p1 + p2))
-                   + plot_layout(guides="collect", heights=[1, 4]))
+    composition = (guide_area() / (p1 + p2)) + plot_layout(
+        guides="collect", heights=[1, 4]
+    )
     fig = composition.draw()
     try:
         legends = _legend_axes(fig)
@@ -89,8 +94,11 @@ def test_guide_area_receives_collected_legend(mpg):
         # The guide_area is in row 0; the legend host axes y-position should
         # be ABOVE the panel axes (which are in row 1).
         legend_y = legends[0].get_position().y0
-        panel_axes = [ax for ax in fig.axes
-                      if ax.get_label() == "" and ax.get_position().width > 0.05]
+        panel_axes = [
+            ax
+            for ax in fig.axes
+            if ax.get_label() == "" and ax.get_position().width > 0.05
+        ]
         panel_top = max(ax.get_position().y1 for ax in panel_axes)
         assert legend_y >= panel_top - 0.01, (
             f"legend (y0={legend_y:.3f}) should sit above panels "
@@ -111,8 +119,9 @@ def test_show_legend_false_excludes_layer_from_merge(mpg):
     p1 = mpg.ggplot(aes(x="drv", y="cty", color="drv")).geom_boxplot(show_legend=False)
     p2 = mpg.ggplot(aes(x="cty", y="hwy", color="drv")).geom_point(show_legend=False)
     p3 = mpg.ggplot(aes(x="cty", color="drv", fill="drv")).geom_density(alpha=0.5)
-    composition = ((guide_area() / (p1 + p2) / p3)
-                   + plot_layout(guides="collect", heights=[1, 3, 4]))
+    composition = (guide_area() / (p1 + p2) / p3) + plot_layout(
+        guides="collect", heights=[1, 3, 4]
+    )
     fig = composition.draw()
     try:
         legends = _legend_axes(fig)
@@ -130,16 +139,20 @@ def test_auto_placement_when_no_guide_area(mpg):
     ``theme(legend.position)`` — not silently drop it."""
     p1 = mpg.ggplot(aes(x="cty", color="drv", fill="drv")).geom_density(alpha=0.5)
     p2 = mpg.ggplot(aes(x="hwy", color="drv", fill="drv")).geom_density(alpha=0.5)
-    composition = ((p1 + p2)
-                   + plot_layout(guides="collect")) & theme(legend_position="top")
+    composition = ((p1 + p2) + plot_layout(guides="collect")) & theme(
+        legend_position="top"
+    )
     fig = composition.draw()
     try:
         legends = _legend_axes(fig)
         assert len(legends) == 1
         # Top auto-placement: legend should be ABOVE the panels.
         legend_y = legends[0].get_position().y0
-        panel_axes = [ax for ax in fig.axes
-                      if ax.get_label() == "" and ax.get_position().width > 0.05]
+        panel_axes = [
+            ax
+            for ax in fig.axes
+            if ax.get_label() == "" and ax.get_position().width > 0.05
+        ]
         panel_top = max(ax.get_position().y1 for ax in panel_axes)
         assert legend_y >= panel_top - 0.01
     finally:

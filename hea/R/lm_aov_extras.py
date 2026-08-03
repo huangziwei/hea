@@ -18,6 +18,7 @@ of ``stats`` that sits just outside the core ``lm`` / ``glm`` fit:
 
 Faithful to base R 4.6.0; verified against live ``Rscript``.
 """
+
 from __future__ import annotations
 
 import warnings
@@ -68,9 +69,9 @@ def cov2cor(V):
             "the non-finite result may be dubious",
             stacklevel=2,
         )
-    r = Is[:, None] * V * Is[None, :]           # D %*% V %*% D, D = diag(Is)
+    r = Is[:, None] * V * Is[None, :]  # D %*% V %*% D, D = diag(Is)
     if p:
-        np.fill_diagonal(r, 1.0)                # exact in diagonal
+        np.fill_diagonal(r, 1.0)  # exact in diagonal
     return r
 
 
@@ -89,11 +90,11 @@ def sigma(object, use_fallback=True):
     * ``sigma.mlm`` — per-response ``sqrt(colSums(resid²) / df.residual)``.
     """
     cls = object.__class__.__name__
-    if _is_mlm(object):                                   # sigma.mlm
+    if _is_mlm(object):  # sigma.mlm
         R = np.asarray(object.residuals.to_numpy(), dtype=float)
         dfres = float(object.df_residual)
         return np.sqrt(np.sum(R * R, axis=0) / dfres)
-    if cls in ("glm",):                                   # sigma.glm
+    if cls in ("glm",):  # sigma.glm
         return float(np.sqrt(object.dispersion))
     cf = np.asarray(coef(object), dtype=float).reshape(-1)  # sigma.default
     k = int(np.sum(~np.isnan(cf)))
@@ -112,12 +113,12 @@ def weighted_residuals(obj, drop0=True):
     unweighted). With ``drop0=True`` the zero-(prior-)weight rows are dropped.
     """
     if _is_glm_like(obj):
-        w = getattr(obj, "w", None)                       # IRLS working weights
+        w = getattr(obj, "w", None)  # IRLS working weights
         r = np.asarray(residuals(obj, type="working"), dtype=float)
         if w is not None:
             r = r * np.sqrt(np.asarray(w, dtype=float))
-        w = getattr(obj, "_prior_w", None)                # prior weights
-    else:                                                 # lm
+        w = getattr(obj, "_prior_w", None)  # prior weights
+    else:  # lm
         w = weights(obj)
         r = np.asarray(residuals(obj), dtype=float)
         if w is not None:
@@ -150,7 +151,7 @@ def covratio(model, infl=None, res=None):
     with np.errstate(divide="ignore", invalid="ignore"):
         e_star = res / (sigma_i * np.sqrt(omh))
     e_star = np.where(np.isinf(e_star), np.nan, e_star)
-    return 1.0 / (omh * (((n - p - 1) + e_star ** 2) / (n - p)) ** p)
+    return 1.0 / (omh * (((n - p - 1) + e_star**2) / (n - p)) ** p)
 
 
 def _abbreviate(names, minlength=4):
@@ -162,6 +163,7 @@ def _abbreviate(names, minlength=4):
     used for ``influence.measures`` column labels; only names longer than
     ``minlength`` are touched (short design-column names are returned verbatim).
     """
+
     def strip_one(s):
         if len(s) <= minlength:
             return s
@@ -191,9 +193,9 @@ def _abbreviate(names, minlength=4):
                     if chars[i - 1] == " ":
                         protected.add(i)
 
-        do_pass(lambda c: c in "aeiou")            # lower-case vowels
-        do_pass(lambda c: c.islower())             # lower-case consonants
-        do_pass(lambda c: not c.isspace())         # anything else but spaces
+        do_pass(lambda c: c in "aeiou")  # lower-case vowels
+        do_pass(lambda c: c.islower())  # lower-case consonants
+        do_pass(lambda c: not c.isspace())  # anything else but spaces
         return "".join(chars)
 
     return [strip_one(s) for s in names]
@@ -241,12 +243,13 @@ def influence_measures(model, infl=None):
     p = int(model.rank if hasattr(model, "rank") else model.p)
     e = np.asarray(weighted_residuals(model), dtype=float)
     from .model_generics import df_residual
-    s = float(np.sqrt(np.sum(e ** 2) / df_residual(model)))
+
+    s = float(np.sqrt(np.sum(e**2) / df_residual(model)))
     # (X'X)^-1 — hea's lm caches this as XtXinv (chol2inv of the fit's R factor)
     xxi = np.asarray(model.XtXinv, dtype=float)
     si = np.asarray(infl["sigma"], dtype=float)
     h = np.asarray(infl["hat"], dtype=float)
-    cf = infl["coefficients"]                             # unstandardized dfbeta
+    cf = infl["coefficients"]  # unstandardized dfbeta
     cf = cf.to_numpy() if isinstance(cf, pl.DataFrame) else np.asarray(cf)
 
     sd = np.sqrt(np.diag(xxi))
@@ -279,12 +282,13 @@ def influence_measures(model, infl=None):
         raise ValueError("too few cases i with h_ii > 0), n < k")
     absM = np.abs(M)
     flags = np.empty_like(M, dtype=bool)
-    flags[:, :k] = absM[:, :k] > 1                        # |dfbetas| > 1
-    flags[:, k] = absM[:, k] > 3 * np.sqrt(k / (n_pos - k))         # |dffit|
+    flags[:, :k] = absM[:, :k] > 1  # |dfbetas| > 1
+    flags[:, k] = absM[:, k] > 3 * np.sqrt(k / (n_pos - k))  # |dffit|
     flags[:, k + 1] = np.abs(1 - M[:, k + 1]) > (3 * k) / (n_pos - k)  # |1-cov.r|
     from .distributions import pf
+
     flags[:, k + 2] = np.asarray(pf(M[:, k + 2], k, n_pos - k)) > 0.5  # cook.d
-    flags[:, k + 3] = M[:, k + 3] > (3 * k) / n_pos                 # hat
+    flags[:, k + 3] = M[:, k + 3] > (3 * k) / n_pos  # hat
     is_inf = pl.DataFrame({c: flags[:, i] for i, c in enumerate(infmat.columns)})
     call = getattr(model, "formula", model.__class__.__name__)
     return Infl(infmat, is_inf, call)
@@ -330,8 +334,9 @@ def lsfit(x, y, wt=None, intercept=True, tolerance=1e-7, yname=None):
     dimy = y.shape
     if not good.all():
         ndel = int(np.sum(~good))
-        warnings.warn(f"{ndel} missing value{'s' if ndel != 1 else ''} deleted",
-                      stacklevel=2)
+        warnings.warn(
+            f"{ndel} missing value{'s' if ndel != 1 else ''} deleted", stacklevel=2
+        )
         x = x[good]
         y = y[good]
         if wt is not None:
@@ -340,8 +345,9 @@ def lsfit(x, y, wt=None, intercept=True, tolerance=1e-7, yname=None):
     nrx, ncx = x.shape
     nry, ncy = y.shape
     if nry != nrx:
-        raise ValueError(f"'X' matrix has {nrx} cases (rows), "
-                         f"'Y' has {nry} cases (rows)")
+        raise ValueError(
+            f"'X' matrix has {nrx} cases (rows), 'Y' has {nry} cases (rows)"
+        )
     if nry < ncx:
         raise ValueError(f"only {nry} cases, but {ncx} variables")
 
@@ -469,8 +475,9 @@ def ls_diag(ls_out):
         wt = np.asarray(wt, dtype=float)
         if np.any(wt[good] == 0):
             warnings.warn(
-                "observations with 0 weight not used in calculating "
-                "standard deviation", stacklevel=2)
+                "observations with 0 weight not used in calculating standard deviation",
+                stacklevel=2,
+            )
         resids = resids * np.sqrt(wt[good])[:, None]
 
     p = int(qr_obj["rank"])
@@ -482,9 +489,9 @@ def ls_diag(ls_out):
     e_basis = np.zeros((qr_obj["qr"].shape[0], p))
     e_basis[:p, :] = np.eye(p)
     q = _qr_qy_matrix(qr_obj, e_basis)
-    hatdiag[good] = np.sum(q ** 2, axis=1)
+    hatdiag[good] = np.sum(q**2, axis=1)
 
-    stddev = np.sqrt(np.sum(resids ** 2, axis=0) / (n - p))
+    stddev = np.sqrt(np.sum(resids**2, axis=0) / (n - p))
     stddevmat = np.broadcast_to(stddev, (int(np.sum(good)), ncy))
     hg = hatdiag[good]
     stdres = np.full(d0, np.nan)
@@ -494,17 +501,17 @@ def ls_diag(ls_out):
     sr = resids / (np.sqrt(1 - hg)[:, None] * stddevmat)
     stdres[good] = sr
     studres[good] = (sr * stddevmat) / np.sqrt(
-        ((n - p) * stddevmat ** 2 - resids ** 2 / (1 - hg)[:, None]) / (n - p - 1)
+        ((n - p) * stddevmat**2 - resids**2 / (1 - hg)[:, None]) / (n - p - 1)
     )
     dfits[good] = np.sqrt(hg / (1 - hg))[:, None] * studres[good]
-    cooks[good] = ((sr ** 2 * hg[:, None]) / p) / (1 - hg)[:, None]
+    cooks[good] = ((sr**2 * hg[:, None]) / p) / (1 - hg)[:, None]
 
     # unscaled coefficient covariance: tcrossprod(solve(R))
     R = np.asarray(qr_obj["qr"], dtype=float)[:p, :p].copy()
     R[np.tril_indices(p, -1)] = 0.0
     Rinv = np.linalg.solve(R, np.eye(p))
     covmat_unscaled = Rinv @ Rinv.T
-    covmat_scaled = float(np.sum(stddev ** 2)) * covmat_unscaled
+    covmat_scaled = float(np.sum(stddev**2)) * covmat_unscaled
     dg = np.diag(covmat_scaled)
     cormat = covmat_scaled / np.sqrt(np.outer(dg, dg))
     stderr = np.outer(np.sqrt(np.diag(covmat_unscaled)), stddev)
@@ -555,10 +562,10 @@ def ls_print(ls_out, digits=4, print_it=True):
         totss = np.sum(qt[1:] ** 2, axis=0)
         degfree = p - 1
     else:
-        totss = np.sum(qt ** 2, axis=0)
+        totss = np.sum(qt**2, axis=0)
         degfree = p
 
-    resss = np.nansum(resids ** 2, axis=0)
+    resss = np.nansum(resids**2, axis=0)
     resse = np.sqrt(resss / (n - p))
     regss = totss - resss
     rsquared = regss / totss
@@ -571,8 +578,11 @@ def ls_print(ls_out, digits=4, print_it=True):
     uVar = np.diag(Rinv @ Rinv.T)
 
     coef_in = ls_out["coefficients"]
-    coef_arr = (coef_in.to_numpy().reshape(-1, 1)
-                if isinstance(coef_in, _NamedVec) else np.asarray(coef_in))
+    coef_arr = (
+        coef_in.to_numpy().reshape(-1, 1)
+        if isinstance(coef_in, _NamedVec)
+        else np.asarray(coef_in)
+    )
     m_y = resids.shape[1]
     xnames = qr_obj["qr_colnames"]
     ynames = ls_out.get("_ynames")
@@ -584,17 +594,23 @@ def ls_print(ls_out, digits=4, print_it=True):
         pv = 2 * np.asarray(pt(np.abs(tval), n[i] - p, lower_tail=False))
         tbl = np.column_stack([est, se, tval, pv])
         key = ynames[i] if ynames is not None else i + 1
-        coef_table[key] = {"rows": xnames,
-                           "cols": ["Estimate", "Std.Err", "t-value", "Pr(>|t|)"],
-                           "values": tbl}
+        coef_table[key] = {
+            "rows": xnames,
+            "cols": ["Estimate", "Std.Err", "t-value", "Pr(>|t|)"],
+            "values": tbl,
+        }
         if print_it:
             if m_y > 1:
                 print(f"Response: {key}\n")
-            print(f"Residual Standard Error={round(float(resse[i]), digits)}, "
-                  f"R-Square={round(float(rsquared[i]), digits)}")
-            print(f"F-statistic (df={degfree}, {n[i] - p})="
-                  f"{round(float(fstat[i]), digits)}, "
-                  f"p-value={round(float(pvalue[i]), digits)}\n")
+            print(
+                f"Residual Standard Error={round(float(resse[i]), digits)}, "
+                f"R-Square={round(float(rsquared[i]), digits)}"
+            )
+            print(
+                f"F-statistic (df={degfree}, {n[i] - p})="
+                f"{round(float(fstat[i]), digits)}, "
+                f"p-value={round(float(pvalue[i]), digits)}\n"
+            )
             hdr = " ".join(f"{c:>10s}" for c in coef_table[key]["cols"])
             print(f"{'':>12s}{hdr}")
             for rname, rowv in zip(xnames, tbl):
@@ -604,8 +620,12 @@ def ls_print(ls_out, digits=4, print_it=True):
     return {
         "summary": {
             "rows": ynames if ynames is not None else ["Y"],
-            "resse": resse, "rsquared": rsquared, "fstat": fstat,
-            "df1": degfree, "df2": n - p, "pvalue": pvalue,
+            "resse": resse,
+            "rsquared": rsquared,
+            "fstat": fstat,
+            "df1": degfree,
+            "df2": n - p,
+            "pvalue": pvalue,
         },
         "coef.table": coef_table,
     }
@@ -627,7 +647,7 @@ def replications(formula, data):
 
     f = parse(formula) if isinstance(formula, str) else formula
     ef = expand(f, data_columns=list(data.columns))
-    terms = [t for t in ef.terms if t.atoms]              # drop intercept
+    terms = [t for t in ef.terms if t.atoms]  # drop intercept
     labels = [t.label for t in terms]
 
     # which columns are factors (Enum/categorical/string ⇒ factor)
@@ -659,12 +679,10 @@ def replications(formula, data):
             continue
         notfac = [v for v in select if not is_factor(v)]
         if notfac:
-            warnings.warn("non-factors ignored: " + ", ".join(notfac),
-                          stacklevel=2)
+            warnings.warn("non-factors ignored: " + ", ".join(notfac), stacklevel=2)
             continue
         if select:
-            tble = (data.group_by(select)
-                    .agg(pl.len().alias("__n__")))
+            tble = data.group_by(select).agg(pl.len().alias("__n__"))
             counts = tble["__n__"].to_numpy()
             # R turns character columns into factors (levels sorted); enumerate
             # the full grid of level combinations so missing cells read as 0.

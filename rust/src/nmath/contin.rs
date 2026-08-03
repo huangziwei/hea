@@ -197,7 +197,13 @@ pub(crate) fn dlogis_scalar(x: f64, location: f64, scale: f64, give_log: bool) -
     }
 }
 
-pub(crate) fn plogis_scalar(x: f64, location: f64, scale: f64, lower_tail: bool, log_p: bool) -> f64 {
+pub(crate) fn plogis_scalar(
+    x: f64,
+    location: f64,
+    scale: f64,
+    lower_tail: bool,
+    log_p: bool,
+) -> f64 {
     if x.is_nan() || location.is_nan() || scale.is_nan() {
         return x + location + scale;
     }
@@ -270,7 +276,11 @@ pub(crate) fn dlnorm_scalar(x: f64, meanlog: f64, sdlog: f64, give_log: bool) ->
     }
     let rd0 = if give_log { f64::NEG_INFINITY } else { 0.0 };
     if sdlog == 0.0 {
-        return if x.ln() == meanlog { f64::INFINITY } else { rd0 };
+        return if x.ln() == meanlog {
+            f64::INFINITY
+        } else {
+            rd0
+        };
     }
     if x <= 0.0 {
         return rd0;
@@ -286,7 +296,13 @@ pub(crate) fn dlnorm_scalar(x: f64, meanlog: f64, sdlog: f64, give_log: bool) ->
     }
 }
 
-pub(crate) fn plnorm_scalar(x: f64, meanlog: f64, sdlog: f64, lower_tail: bool, log_p: bool) -> f64 {
+pub(crate) fn plnorm_scalar(
+    x: f64,
+    meanlog: f64,
+    sdlog: f64,
+    lower_tail: bool,
+    log_p: bool,
+) -> f64 {
     if x.is_nan() || meanlog.is_nan() || sdlog.is_nan() {
         return x + meanlog + sdlog;
     }
@@ -300,7 +316,13 @@ pub(crate) fn plnorm_scalar(x: f64, meanlog: f64, sdlog: f64, lower_tail: bool, 
     }
 }
 
-pub(crate) fn qlnorm_scalar(p: f64, meanlog: f64, sdlog: f64, lower_tail: bool, log_p: bool) -> f64 {
+pub(crate) fn qlnorm_scalar(
+    p: f64,
+    meanlog: f64,
+    sdlog: f64,
+    lower_tail: bool,
+    log_p: bool,
+) -> f64 {
     if p.is_nan() || meanlog.is_nan() || sdlog.is_nan() {
         return p + meanlog + sdlog;
     }
@@ -337,7 +359,13 @@ pub(crate) fn dweibull_scalar(x: f64, shape: f64, scale: f64, give_log: bool) ->
     }
 }
 
-pub(crate) fn pweibull_scalar(x: f64, shape: f64, scale: f64, lower_tail: bool, log_p: bool) -> f64 {
+pub(crate) fn pweibull_scalar(
+    x: f64,
+    shape: f64,
+    scale: f64,
+    lower_tail: bool,
+    log_p: bool,
+) -> f64 {
     if x.is_nan() || shape.is_nan() || scale.is_nan() {
         return x + shape + scale;
     }
@@ -361,7 +389,13 @@ pub(crate) fn pweibull_scalar(x: f64, shape: f64, scale: f64, lower_tail: bool, 
     }
 }
 
-pub(crate) fn qweibull_scalar(p: f64, shape: f64, scale: f64, lower_tail: bool, log_p: bool) -> f64 {
+pub(crate) fn qweibull_scalar(
+    p: f64,
+    shape: f64,
+    scale: f64,
+    lower_tail: bool,
+    log_p: bool,
+) -> f64 {
     if p.is_nan() || shape.is_nan() || scale.is_nan() {
         return p + shape + scale;
     }

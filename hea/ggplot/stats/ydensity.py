@@ -73,13 +73,15 @@ class StatYdensity(Stat):
 
         n = len(grid)
         cols: dict = {col: [keys[i]] * n for i, col in enumerate(groupby_cols)}
-        cols.update({
-            "y": grid,
-            "density": density,
-            "ndensity": ndensity,
-            "count": density * len(y),
-            "violinwidth": violinwidth,
-        })
+        cols.update(
+            {
+                "y": grid,
+                "density": density,
+                "ndensity": ndensity,
+                "count": density * len(y),
+                "violinwidth": violinwidth,
+            }
+        )
         return pl.DataFrame(cols)
 
 

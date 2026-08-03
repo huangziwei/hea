@@ -145,7 +145,7 @@ fn dqrdc2(x: &mut [f64], n: usize, p: usize, tol: f64) -> (Vec<f64>, Vec<usize>,
                 // is the lever that beats R's single-threaded dqrdc2 at scale.
                 let (left, right) = x.split_at_mut((l0 + 1) * n);
                 let cl = &left[col_l + l0..col_l + n]; // pivot col, rows l0..n
-                // per-column Householder update (col rows l0..n, its qraux, work1)
+                                                       // per-column Householder update (col rows l0..n, its qraux, work1)
                 let update = |cj: &mut [f64], qx: &mut f64, w1: &mut f64| {
                     let cj = &mut cj[l0..n]; // rows l0..n of this column
                     let dot: f64 = cl.iter().zip(cj.iter()).map(|(a, b)| a * b).sum();

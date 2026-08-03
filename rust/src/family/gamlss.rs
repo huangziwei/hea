@@ -98,7 +98,9 @@ fn gamlss_xwx<'py>(
     let xi_f: Vec<f64> = xi.as_array().iter().copied().collect();
     let wxj_f: Vec<f64> = wxj.as_array().iter().copied().collect();
     let a = py.allow_threads(|| xwx(&xi_f, &wxj_f, n, pi, pj));
-    Array2::from_shape_vec((pi, pj), a).unwrap().into_pyarray(py)
+    Array2::from_shape_vec((pi, pj), a)
+        .unwrap()
+        .into_pyarray(py)
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

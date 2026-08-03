@@ -72,13 +72,25 @@ def test_polars_sub_namespaces_are_re_exported():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", [
-    "col", "lit", "when", "coalesce",
-    "concat_str", "concat_list",
-    "all_horizontal", "any_horizontal",
-    "min_horizontal", "max_horizontal", "mean_horizontal", "sum_horizontal",
-    "Expr", "Schema",
-])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "col",
+        "lit",
+        "when",
+        "coalesce",
+        "concat_str",
+        "concat_list",
+        "all_horizontal",
+        "any_horizontal",
+        "min_horizontal",
+        "max_horizontal",
+        "mean_horizontal",
+        "sum_horizontal",
+        "Expr",
+        "Schema",
+    ],
+)
 def test_tidy_re_exports_polars_expr(name):
     """``hea.tidy.col`` etc. are the polars originals — no wrapping."""
     assert getattr(hea.tidy, name) is getattr(pl, name)
@@ -103,7 +115,9 @@ def test_tidy_exclude_extends_polars_exclude():
     """``hea.tidy.exclude`` accepts everything ``pl.exclude`` does plus
     DataFrame/Series/list."""
     df = hea.tidy.DataFrame({"a": [1], "b": [2], "c": [3]})
-    assert df.select(hea.tidy.exclude("a")).columns == df.select(pl.exclude("a")).columns
+    assert (
+        df.select(hea.tidy.exclude("a")).columns == df.select(pl.exclude("a")).columns
+    )
     # Slice-of-DataFrame form (the new affordance).
     assert df.select(hea.tidy.exclude(df["a":"b"])).columns == ["c"]
 
@@ -112,10 +126,12 @@ def test_tidy_n_and_n_distinct_alias_polars():
     """``hea.tidy.n`` / ``hea.tidy.n_distinct`` are dplyr-named aliases."""
     assert hea.tidy.n is pl.len
     assert hea.tidy.n_distinct is pl.n_unique
-    df = hea.tidy.DataFrame({
-        "dest": ["A", "A", "B", "B", "B"],
-        "carrier": ["UA", "DL", "UA", "UA", "AA"],
-    })
+    df = hea.tidy.DataFrame(
+        {
+            "dest": ["A", "A", "B", "B", "B"],
+            "carrier": ["UA", "DL", "UA", "UA", "AA"],
+        }
+    )
     out = (
         df.group_by("dest")
         .summarize(rows=hea.tidy.n(), carriers=hea.tidy.n_distinct("carrier"))
@@ -130,12 +146,37 @@ def test_tidy_n_and_n_distinct_alias_polars():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", [
-    "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64",
-    "Float32", "Float64", "Boolean", "String", "Utf8", "Date", "Datetime",
-    "Duration", "Time", "Categorical", "Enum", "List", "Array", "Struct",
-    "Object", "Null", "Decimal", "DataType",
-])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Int8",
+        "Int16",
+        "Int32",
+        "Int64",
+        "UInt8",
+        "UInt16",
+        "UInt32",
+        "UInt64",
+        "Float32",
+        "Float64",
+        "Boolean",
+        "String",
+        "Utf8",
+        "Date",
+        "Datetime",
+        "Duration",
+        "Time",
+        "Categorical",
+        "Enum",
+        "List",
+        "Array",
+        "Struct",
+        "Object",
+        "Null",
+        "Decimal",
+        "DataType",
+    ],
+)
 def test_dtype_is_polars_dtype(name):
     assert getattr(hea.dtypes, name) is getattr(pl, name)
 
@@ -147,13 +188,21 @@ def test_dtype_is_polars_dtype(name):
 
 def test_constructors_return_hea_dataframe():
     cases = [
-        ("from_dict",    lambda: hea.tidy.from_dict({"x": [1, 2, 3]})),
-        ("from_dicts",   lambda: hea.tidy.from_dicts([{"x": 1}, {"x": 2}])),
-        ("from_records", lambda: hea.tidy.from_records([(1, 2), (3, 4)], schema=["a", "b"])),
-        ("concat",       lambda: hea.tidy.concat([
-                             hea.tidy.from_dict({"x": [1]}),
-                             hea.tidy.from_dict({"x": [2]}),
-                         ])),
+        ("from_dict", lambda: hea.tidy.from_dict({"x": [1, 2, 3]})),
+        ("from_dicts", lambda: hea.tidy.from_dicts([{"x": 1}, {"x": 2}])),
+        (
+            "from_records",
+            lambda: hea.tidy.from_records([(1, 2), (3, 4)], schema=["a", "b"]),
+        ),
+        (
+            "concat",
+            lambda: hea.tidy.concat(
+                [
+                    hea.tidy.from_dict({"x": [1]}),
+                    hea.tidy.from_dict({"x": [2]}),
+                ]
+            ),
+        ),
     ]
     for name, fn in cases:
         result = fn()

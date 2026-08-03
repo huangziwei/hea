@@ -8,6 +8,7 @@ terminal-width-aware print object.
 * ``_summary_block`` dispatches per dtype (numeric / boolean / factor
   / string / temporal) to produce the right entries.
 """
+
 from __future__ import annotations
 
 import datetime as _dt
@@ -98,10 +99,7 @@ def _render_summary(blocks: list[_SummaryBlock], width: int) -> str:
             out.append("")
         height = max(len(r) for r in row)
         for i in range(height):
-            cells = [
-                r[i] if i < len(r) else " " * len(r[0])
-                for r in row
-            ]
+            cells = [r[i] if i < len(r) else " " * len(r[0]) for r in row]
             out.append(sep.join(cells).rstrip())
     return "\n".join(out)
 
@@ -282,11 +280,6 @@ def _temporal_entries(s: pl.Series) -> list[tuple[str, str]]:
         s_clean.max(),
     ]
     if s.dtype == pl.Date:
-        stats = [
-            v.date() if isinstance(v, _dt.datetime) else v
-            for v in stats
-        ]
+        stats = [v.date() if isinstance(v, _dt.datetime) else v for v in stats]
     formatted = ["NA" if v is None else str(v) for v in stats]
     return list(zip(_NUMERIC_LABELS, formatted))
-
-

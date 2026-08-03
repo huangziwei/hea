@@ -45,7 +45,8 @@ _R_PREAMBLE = re.compile(r"^library\(")
 
 def _strip_py(src: str) -> str:
     out = [
-        line for line in src.strip().splitlines()
+        line
+        for line in src.strip().splitlines()
         if line.strip() and not _PY_PREAMBLE.match(line)
     ]
     return "\n".join(out).strip()
@@ -53,7 +54,8 @@ def _strip_py(src: str) -> str:
 
 def _strip_r(src: str) -> str:
     out = [
-        line for line in src.strip().splitlines()
+        line
+        for line in src.strip().splitlines()
         if line.strip() and not _R_PREAMBLE.match(line)
     ]
     return "\n".join(out).strip()
@@ -198,8 +200,12 @@ class TestDataLoadRoundtrip:
         out = _py_r_py(py_src)
         # gala must be bound before m0 references it
         lines = out.splitlines()
-        gala_line = next((i for i, ln in enumerate(lines) if "gala" in ln and "data" in ln), -1)
-        m0_line = next((i for i, ln in enumerate(lines) if ln.lstrip().startswith("m0")), -1)
+        gala_line = next(
+            (i for i, ln in enumerate(lines) if "gala" in ln and "data" in ln), -1
+        )
+        m0_line = next(
+            (i for i, ln in enumerate(lines) if ln.lstrip().startswith("m0")), -1
+        )
         assert gala_line >= 0, f"gala autoload missing in: {out!r}"
         assert m0_line >= 0, f"m0 binding missing in: {out!r}"
         assert gala_line < m0_line, f"gala must load before m0: {out!r}"
@@ -229,9 +235,11 @@ class TestToRExecuteNonFrameResult:
         # Need R available; skip if not installed.
         pytest.importorskip("polars")
         import shutil
+
         if shutil.which("R") is None:
             pytest.skip("R binary not available")
         from hea.translate.inline import RConsoleOutput
+
         result = to_R(
             "from hea.models import lm\n"
             "gala = data('gala', package='faraway')\n"
@@ -247,6 +255,7 @@ class TestToRExecuteNonFrameResult:
 
     def test_console_output_str_behavior(self):
         from hea.translate.inline import RConsoleOutput
+
         s = RConsoleOutput("hello\nworld")
         # Acts like str
         assert len(s) == 11
@@ -259,6 +268,7 @@ class TestToRExecuteNonFrameResult:
     def test_missing_R_raises_clear_error(self, monkeypatch):
         # Simulate R not installed by hiding it from PATH.
         from hea.translate.runner import RNotFoundError
+
         monkeypatch.setenv("PATH", "/nonexistent")
         with pytest.raises(RNotFoundError) as excinfo:
             to_R("x = 1\n", execute=True)
@@ -278,7 +288,7 @@ class TestResultWrapping:
         r_src = (
             'data("gala", package = "faraway")\n'
             'm0 <- lm("Species ~ Area", gala)\n'
-            'summary(m0)\n'
+            "summary(m0)\n"
         )
         # Nested wrap — fixed point: r_src → py → r_src.
         out = to_R(from_R(r_src))
@@ -300,6 +310,7 @@ class TestResultWrapping:
         # ignored. Sanity check: a Result with a manually-stashed
         # value still translates the source.
         from hea.translate.inline import Result
+
         r_src = "x <- 1"
         synthetic = Result(value="ignored", source=r_src, gaps=[])
         out = from_R(synthetic)

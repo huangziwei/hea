@@ -39,14 +39,16 @@ class GeomDensityRidges(Geom):
     # Mirrors ggridges' ``GeomDensityRidges$default_aes``
     # (R/geoms.R): colour=black, fill=grey70, scale=1.8,
     # rel_min_height=0, alpha=NA.
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
-        "fill": "grey70",
-        "size": 0.5,
-        "linewidth": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "black",
+            "fill": "grey70",
+            "size": 0.5,
+            "linewidth": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+        }
+    )
     required_aes: tuple = ("x", "y", "height")
     key_glyph: str = "polygon"
 
@@ -58,11 +60,7 @@ class GeomDensityRidges(Geom):
     closed: bool = False
 
     def setup_data(self, data: pl.DataFrame) -> pl.DataFrame:
-        if (
-            len(data) == 0
-            or "y" not in data.columns
-            or "height" not in data.columns
-        ):
+        if len(data) == 0 or "y" not in data.columns or "height" not in data.columns:
             return data
 
         # Discrete y → 0-based integer positions so iscale arithmetic
@@ -157,15 +155,23 @@ class GeomDensityRidges(Geom):
             poly_x = np.concatenate([x[valid], x[valid][::-1]])
             poly_y = np.concatenate([ymax[valid], ymin[valid][::-1]])
             polys = ax.fill(
-                poly_x, poly_y,
-                facecolor=fill, edgecolor=edge,
-                linewidth=lw * 2.83, alpha=alpha,
+                poly_x,
+                poly_y,
+                facecolor=fill,
+                edgecolor=edge,
+                linewidth=lw * 2.83,
+                alpha=alpha,
             )
             polar_arc_interp(ax, *polys)
         else:
             poly = ax.fill_between(
-                x, ymin, ymax, where=~np.isnan(ymax),
-                facecolor=fill, edgecolor="none", alpha=alpha,
+                x,
+                ymin,
+                ymax,
+                where=~np.isnan(ymax),
+                facecolor=fill,
+                edgecolor="none",
+                alpha=alpha,
                 linewidth=0,
             )
             polar_arc_interp(ax, poly)
@@ -201,16 +207,27 @@ def _resolve_stat(stat, *, bandwidth, n):
     return stat
 
 
-def geom_density_ridges(mapping=None, data=None, *, stat="density_ridges",
-                        position="identity", scale=1.8, rel_min_height=0.0,
-                        panel_scaling=True, bandwidth=None, n=512, **kwargs):
+def geom_density_ridges(
+    mapping=None,
+    data=None,
+    *,
+    stat="density_ridges",
+    position="identity",
+    scale=1.8,
+    rel_min_height=0.0,
+    panel_scaling=True,
+    bandwidth=None,
+    n=512,
+    **kwargs,
+):
     from ..layer import Layer
     from ..positions import resolve_position
 
     aes_params, geom_params = split_layer_kwargs(kwargs)
     return Layer(
-        geom=GeomDensityRidges(scale=scale, rel_min_height=rel_min_height,
-                               panel_scaling=panel_scaling),
+        geom=GeomDensityRidges(
+            scale=scale, rel_min_height=rel_min_height, panel_scaling=panel_scaling
+        ),
         stat=_resolve_stat(stat, bandwidth=bandwidth, n=n),
         position=resolve_position(position),
         mapping=mapping,
@@ -220,16 +237,27 @@ def geom_density_ridges(mapping=None, data=None, *, stat="density_ridges",
     )
 
 
-def geom_density_ridges2(mapping=None, data=None, *, stat="density_ridges",
-                         position="identity", scale=1.8, rel_min_height=0.0,
-                         panel_scaling=True, bandwidth=None, n=512, **kwargs):
+def geom_density_ridges2(
+    mapping=None,
+    data=None,
+    *,
+    stat="density_ridges",
+    position="identity",
+    scale=1.8,
+    rel_min_height=0.0,
+    panel_scaling=True,
+    bandwidth=None,
+    n=512,
+    **kwargs,
+):
     from ..layer import Layer
     from ..positions import resolve_position
 
     aes_params, geom_params = split_layer_kwargs(kwargs)
     return Layer(
-        geom=GeomDensityRidges2(scale=scale, rel_min_height=rel_min_height,
-                                panel_scaling=panel_scaling),
+        geom=GeomDensityRidges2(
+            scale=scale, rel_min_height=rel_min_height, panel_scaling=panel_scaling
+        ),
         stat=_resolve_stat(stat, bandwidth=bandwidth, n=n),
         position=resolve_position(position),
         mapping=mapping,

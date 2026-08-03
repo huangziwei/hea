@@ -99,9 +99,21 @@ pub(crate) fn pf_scalar(x: f64, df1: f64, df2: f64, lower_tail: bool, log_p: boo
         return pgamma_scalar(df2 / x, df2 / 2.0, 2.0, !lower_tail, log_p);
     }
     let x2 = if df1 * x > df2 {
-        pbeta_scalar(df2 / rfma(df1, x, df2), df2 / 2.0, df1 / 2.0, !lower_tail, log_p)
+        pbeta_scalar(
+            df2 / rfma(df1, x, df2),
+            df2 / 2.0,
+            df1 / 2.0,
+            !lower_tail,
+            log_p,
+        )
     } else {
-        pbeta_scalar(df1 * x / rfma(df1, x, df2), df1 / 2.0, df2 / 2.0, lower_tail, log_p)
+        pbeta_scalar(
+            df1 * x / rfma(df1, x, df2),
+            df1 / 2.0,
+            df2 / 2.0,
+            lower_tail,
+            log_p,
+        )
     };
     if !x2.is_nan() {
         x2
@@ -144,7 +156,11 @@ pub(crate) fn dt_scalar(x: f64, n: f64, give_log: bool) -> f64 {
     if give_log {
         return t - u - (M_LN_SQRT_2PI + l_x2n);
     }
-    let i_sqrt = if lrg_x2n { n.sqrt() / ax } else { (-l_x2n).exp() };
+    let i_sqrt = if lrg_x2n {
+        n.sqrt() / ax
+    } else {
+        (-l_x2n).exp()
+    };
     (t - u).exp() * M_1_SQRT_2PI * i_sqrt
 }
 
@@ -195,20 +211,36 @@ pub(crate) fn qt_scalar(p: f64, ndf: f64, lower_tail: bool, log_p: bool) -> f64 
             return f64::NAN;
         }
         if p == 0.0 {
-            return if lower_tail { f64::INFINITY } else { f64::NEG_INFINITY };
+            return if lower_tail {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            };
         }
         if p == f64::NEG_INFINITY {
-            return if lower_tail { f64::NEG_INFINITY } else { f64::INFINITY };
+            return if lower_tail {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
         }
     } else {
         if p < 0.0 || p > 1.0 {
             return f64::NAN;
         }
         if p == 0.0 {
-            return if lower_tail { f64::NEG_INFINITY } else { f64::INFINITY };
+            return if lower_tail {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
         }
         if p == 1.0 {
-            return if lower_tail { f64::INFINITY } else { f64::NEG_INFINITY };
+            return if lower_tail {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            };
         }
     }
     if ndf <= 0.0 {
@@ -256,7 +288,11 @@ pub(crate) fn qt_scalar(p: f64, ndf: f64, lower_tail: bool, log_p: bool) -> f64 
     if neg {
         pp = 2.0
             * (if log_p {
-                if lower_tail { pp } else { -p.exp_m1() }
+                if lower_tail {
+                    pp
+                } else {
+                    -p.exp_m1()
+                }
             } else if lower_tail {
                 pp
             } else {
@@ -265,7 +301,11 @@ pub(crate) fn qt_scalar(p: f64, ndf: f64, lower_tail: bool, log_p: bool) -> f64 
     } else {
         pp = 2.0
             * (if log_p {
-                if lower_tail { -p.exp_m1() } else { pp }
+                if lower_tail {
+                    -p.exp_m1()
+                } else {
+                    pp
+                }
             } else if lower_tail {
                 0.5 - p + 0.5
             } else {
@@ -463,9 +503,12 @@ pub fn qt<'py>(
     lower_tail: bool,
     log_p: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let v = crate::par::map2(py, p.as_slice().unwrap(), ndf.as_slice().unwrap(), |p, n| {
-        qt_scalar(p, n, lower_tail, log_p)
-    });
+    let v = crate::par::map2(
+        py,
+        p.as_slice().unwrap(),
+        ndf.as_slice().unwrap(),
+        |p, n| qt_scalar(p, n, lower_tail, log_p),
+    );
     v.into_pyarray(py)
 }
 

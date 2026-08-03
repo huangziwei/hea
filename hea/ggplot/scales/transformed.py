@@ -128,7 +128,7 @@ class SqrtTrans(Trans):
         # uses matplotlib's FuncScale; data is unmodified at the stat
         # layer (display-only transform).
         forward = lambda x: np.sqrt(np.maximum(x, 0))  # noqa: E731
-        inverse = lambda x: x ** 2  # noqa: E731
+        inverse = lambda x: x**2  # noqa: E731
         return ("function", {"functions": (forward, inverse)})
 
     def tick_positions_and_labels(self, lo: float, hi: float):
@@ -156,12 +156,13 @@ class SqrtTrans(Trans):
             return None
         locator = _mt.MaxNLocator(nbins=6, steps=[1, 2, 2.5, 5, 10])
         raw_breaks = [
-            float(b) for b in locator.tick_values(raw_lo, raw_hi)
+            float(b)
+            for b in locator.tick_values(raw_lo, raw_hi)
             if raw_lo <= b <= raw_hi and b >= 0
         ]
         if not raw_breaks:
             return None
-        positions = [b ** 0.5 for b in raw_breaks]
+        positions = [b**0.5 for b in raw_breaks]
         labels = format_breaks(raw_breaks)
         return positions, labels
 
@@ -187,8 +188,8 @@ def _log_breaks(lo: float, hi: float, *, base: float) -> tuple:
     per decade so the axis has more than one tick. For wide ranges, fall
     back to integer powers only.
     """
-    raw_lo = base ** lo
-    raw_hi = base ** hi
+    raw_lo = base**lo
+    raw_hi = base**hi
     log_b = np.log(base)
     k_lo = int(np.floor(np.log(raw_lo) / log_b))
     k_hi = int(np.ceil(np.log(raw_hi) / log_b))
@@ -199,12 +200,15 @@ def _log_breaks(lo: float, hi: float, *, base: float) -> tuple:
         candidates = []
         for k in range(k_lo, k_hi + 1):
             for m in (1, 2, 5):
-                v = m * (base ** k)
+                v = m * (base**k)
                 if raw_lo - 1e-12 <= v <= raw_hi * (1 + 1e-12):
                     candidates.append(v)
     else:
-        candidates = [base ** k for k in range(k_lo, k_hi + 1)
-                      if raw_lo - 1e-12 <= base ** k <= raw_hi * (1 + 1e-12)]
+        candidates = [
+            base**k
+            for k in range(k_lo, k_hi + 1)
+            if raw_lo - 1e-12 <= base**k <= raw_hi * (1 + 1e-12)
+        ]
     positions = [np.log(v) / log_b for v in candidates]
     labels = [_format_log_tick(v) for v in candidates]
     return positions, labels
@@ -232,49 +236,104 @@ def _format_log_tick(value: float) -> str:
 # Factories
 # ---------------------------------------------------------------------------
 
+
 def _scale_factory(aes_name: str, trans: Trans, name, breaks, labels, limits, expand):
     from .continuous import ScaleContinuous
+
     return ScaleContinuous(
-        aesthetics=(aes_name,), name=name, breaks=breaks, labels=labels,
-        limits=limits, expand=expand, transform=trans,
+        aesthetics=(aes_name,),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        expand=expand,
+        transform=trans,
     )
 
 
-def scale_x_log10(*, name=_NAME_MISSING, breaks="default", labels="default",
-                  limits=None, expand=(0.05, 0.0)):
+def scale_x_log10(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    expand=(0.05, 0.0),
+):
     return _scale_factory("x", Log10Trans(), name, breaks, labels, limits, expand)
 
 
-def scale_y_log10(*, name=_NAME_MISSING, breaks="default", labels="default",
-                  limits=None, expand=(0.05, 0.0)):
+def scale_y_log10(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    expand=(0.05, 0.0),
+):
     return _scale_factory("y", Log10Trans(), name, breaks, labels, limits, expand)
 
 
-def scale_x_log2(*, name=_NAME_MISSING, breaks="default", labels="default",
-                 limits=None, expand=(0.05, 0.0)):
+def scale_x_log2(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    expand=(0.05, 0.0),
+):
     return _scale_factory("x", Log2Trans(), name, breaks, labels, limits, expand)
 
 
-def scale_y_log2(*, name=_NAME_MISSING, breaks="default", labels="default",
-                 limits=None, expand=(0.05, 0.0)):
+def scale_y_log2(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    expand=(0.05, 0.0),
+):
     return _scale_factory("y", Log2Trans(), name, breaks, labels, limits, expand)
 
 
-def scale_x_sqrt(*, name=_NAME_MISSING, breaks="default", labels="default",
-                 limits=None, expand=(0.05, 0.0)):
+def scale_x_sqrt(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    expand=(0.05, 0.0),
+):
     return _scale_factory("x", SqrtTrans(), name, breaks, labels, limits, expand)
 
 
-def scale_y_sqrt(*, name=_NAME_MISSING, breaks="default", labels="default",
-                 limits=None, expand=(0.05, 0.0)):
+def scale_y_sqrt(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    expand=(0.05, 0.0),
+):
     return _scale_factory("y", SqrtTrans(), name, breaks, labels, limits, expand)
 
 
-def scale_x_reverse(*, name=_NAME_MISSING, breaks="default", labels="default",
-                    limits=None, expand=(0.05, 0.0)):
+def scale_x_reverse(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    expand=(0.05, 0.0),
+):
     return _scale_factory("x", ReverseTrans(), name, breaks, labels, limits, expand)
 
 
-def scale_y_reverse(*, name=_NAME_MISSING, breaks="default", labels="default",
-                    limits=None, expand=(0.05, 0.0)):
+def scale_y_reverse(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    expand=(0.05, 0.0),
+):
     return _scale_factory("y", ReverseTrans(), name, breaks, labels, limits, expand)

@@ -21,13 +21,22 @@ from __future__ import annotations
 
 # Chain-extension function names with explicit listing. Open-set names are
 # matched by prefix (see :func:`is_chain_extension`).
-_NON_PREFIXED_EXTENSIONS: frozenset[str] = frozenset({
-    "labs", "xlab", "ylab", "ggtitle",
-    "xlim", "ylim", "lims",
-    "guides",
-    "annotate", "annotation_custom",
-    "plot_annotation", "plot_layout",
-})
+_NON_PREFIXED_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        "labs",
+        "xlab",
+        "ylab",
+        "ggtitle",
+        "xlim",
+        "ylim",
+        "lims",
+        "guides",
+        "annotate",
+        "annotation_custom",
+        "plot_annotation",
+        "plot_layout",
+    }
+)
 
 _EXTENSION_PREFIXES: tuple[str, ...] = (
     "geom_",

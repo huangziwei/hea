@@ -8,6 +8,7 @@
 All parsers accept scalars, polars Series, lists / ndarrays, and integer
 shorthand (``ymd(20130102)``); return shape mirrors input shape.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -26,6 +27,7 @@ def today(tzone: str = ""):
         return _dt.date.today()
     try:
         from zoneinfo import ZoneInfo
+
         return _dt.datetime.now(ZoneInfo(tzone)).date()
     except Exception:
         return _dt.date.today()
@@ -148,6 +150,7 @@ def now(tzone: str = ""):
         return _dt.datetime.now()
     try:
         from zoneinfo import ZoneInfo
+
         return _dt.datetime.now(ZoneInfo(tzone))
     except Exception:
         return _dt.datetime.now()

@@ -102,7 +102,9 @@ pub fn cutree<'py>(
             }
         }
     }
-    Array2::from_shape_vec((n, nw), ans).unwrap().into_pyarray(py)
+    Array2::from_shape_vec((n, nw), ans)
+        .unwrap()
+        .into_pyarray(py)
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

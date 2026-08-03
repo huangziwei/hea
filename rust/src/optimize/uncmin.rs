@@ -868,7 +868,11 @@ fn chlhsn(n: usize, a: &mut [f64], epsm: f64, sx: &[f64], udiag: &mut [f64]) {
                     }
                 }
             }
-            amu = if offmax == 0.0 { 1.0 } else { offmax * (tol + 1.0) };
+            amu = if offmax == 0.0 {
+                1.0
+            } else {
+                offmax * (tol + 1.0)
+            };
         }
         for i in 0..n {
             a[i + i * n] += amu;
@@ -1209,16 +1213,24 @@ fn optchk(
         iexp = 1;
     }
     if (msg / 2) % 2 == 1 && iagflg == 0 {
-        return (fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -6);
+        return (
+            fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -6,
+        );
     }
     if (msg / 4) % 2 == 1 && iahflg == 0 {
-        return (fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -7);
+        return (
+            fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -7,
+        );
     }
     if n == 0 {
-        return (fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -1);
+        return (
+            fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -1,
+        );
     }
     if n == 1 && msg % 2 == 0 {
-        return (fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -2);
+        return (
+            fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -2,
+        );
     }
     for i in 0..n {
         if typsiz[i] == 0.0 {
@@ -1241,13 +1253,19 @@ fn optchk(
         fscale = -fscale;
     }
     if gradtl < 0.0 {
-        return (fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -3);
+        return (
+            fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -3,
+        );
     }
     if itnlim <= 0 {
-        return (fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -4);
+        return (
+            fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -4,
+        );
     }
     if ndigit == 0 {
-        return (fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -5);
+        return (
+            fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -5,
+        );
     }
     if ndigit < 0 {
         ndigit = (-epsm.log10()) as i32;
@@ -1257,7 +1275,9 @@ fn optchk(
     } else if dlt > stepmx {
         dlt = stepmx;
     }
-    (fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, msg)
+    (
+        fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, msg,
+    )
 }
 
 /// uncmin.c `optdrv` (:2166). Returns (fpls, itrmcd, itncnt, msg).
@@ -1292,8 +1312,8 @@ pub fn optdrv(
     let epsm = DBL_EPSILON;
     let (fscale, itnlim, ndigit, mut dlt, method, iexp, mut iagflg, iahflg, stepmx, mut msg) =
         optchk(
-            n, x, typsiz, &mut sx, fscale, gradtl, itnlim, ndigit, epsm, dlt, method, iexp,
-            iagflg, iahflg, stepmx, msg,
+            n, x, typsiz, &mut sx, fscale, gradtl, itnlim, ndigit, epsm, dlt, method, iexp, iagflg,
+            iahflg, stepmx, msg,
         );
     if msg < 0 {
         return Ok((0.0, 0, itncnt, msg));
@@ -1336,7 +1356,9 @@ pub fn optdrv(
     } else if (msg / 4) % 2 == 1 {
         obj.d2fcn(x, &mut a, n)?;
     } else {
-        msg = heschk(n, x, obj, f, &mut g, &mut a, typsiz, &sx, rnf, analtl, iagflg, msg)?;
+        msg = heschk(
+            n, x, obj, f, &mut g, &mut a, typsiz, &sx, rnf, analtl, iagflg, msg,
+        )?;
         if msg < 0 {
             return Ok((f, 0, itncnt, msg));
         }
@@ -1382,8 +1404,8 @@ pub fn optdrv(
                 }
                 _ => {
                     let r = hookdrv(
-                        n, x, f, &g, &mut a, &udiag, &p, xpls, obj, &sx, stepmx, steptl, dlt,
-                        amu, dltp, phi, phip0, epsm, itncnt,
+                        n, x, f, &g, &mut a, &udiag, &p, xpls, obj, &sx, stepmx, steptl, dlt, amu,
+                        dltp, phi, phip0, epsm, itncnt,
                     )?;
                     (fpls, dlt, iretcd, mxtake, amu, dltp, phi, phip0) = r;
                 }
@@ -1429,10 +1451,13 @@ pub fn optdrv(
         }
         if iexp != 0 {
             if method == 3 {
-                noupdt = secunf(n, x, &g, &mut a, &udiag, xpls, gpls, epsm, itncnt, rnf, iagflg,
-                                noupdt);
+                noupdt = secunf(
+                    n, x, &g, &mut a, &udiag, xpls, gpls, epsm, itncnt, rnf, iagflg, noupdt,
+                );
             } else {
-                noupdt = secfac(n, x, &g, &mut a, xpls, gpls, epsm, itncnt, rnf, iagflg, noupdt);
+                noupdt = secfac(
+                    n, x, &g, &mut a, xpls, gpls, epsm, itncnt, rnf, iagflg, noupdt,
+                );
             }
         } else if iahflg == 0 {
             if iagflg != 0 {

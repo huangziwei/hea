@@ -68,6 +68,7 @@ def _to_numeric_axis(arr):
     kind = getattr(arr.dtype, "kind", None)
     if kind == "M":  # datetime64
         from matplotlib.dates import date2num
+
         return date2num(arr)
     if kind == "m":  # timedelta64
         return arr.astype("float64")
@@ -76,8 +77,7 @@ def _to_numeric_axis(arr):
 
 def _update_lims(ax, xs, ys):
     ax.update_datalim(
-        [(float(np.min(xs)), float(np.min(ys))),
-         (float(np.max(xs)), float(np.max(ys)))]
+        [(float(np.min(xs)), float(np.min(ys))), (float(np.max(xs)), float(np.max(ys)))]
     )
     ax.autoscale_view()
 
@@ -91,10 +91,11 @@ def _update_lims(ax, xs, ys):
 class Arrow:
     """Specification for an arrowhead on a line geom — port of R's
     ``grid::arrow()``. Construct via :func:`arrow`."""
-    angle: float = 30.0      # half-angle at the tip, degrees
-    length: float = 0.25     # head length, inches (matches grid default)
-    ends: str = "last"       # "first" | "last" | "both"
-    type: str = "open"       # "open" (outline) | "closed" (filled triangle)
+
+    angle: float = 30.0  # half-angle at the tip, degrees
+    length: float = 0.25  # head length, inches (matches grid default)
+    ends: str = "last"  # "first" | "last" | "both"
+    type: str = "open"  # "open" (outline) | "closed" (filled triangle)
 
 
 def arrow(angle=30.0, length=0.25, ends="last", type="open"):
@@ -116,8 +117,9 @@ def arrow(angle=30.0, length=0.25, ends="last", type="open"):
         ``"open"`` = outline-only ``>`` head, ``"closed"`` = filled
         triangle ``|>`` head.
     """
-    return Arrow(angle=float(angle), length=float(length),
-                 ends=str(ends), type=str(type))
+    return Arrow(
+        angle=float(angle), length=float(length), ends=str(ends), type=str(type)
+    )
 
 
 def _arrow_to_style(arrow_spec):
@@ -144,12 +146,14 @@ def _arrow_to_style(arrow_spec):
 
 @dataclass
 class GeomSegment(Geom):
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "black",
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+        }
+    )
     required_aes: tuple = ("x", "y", "xend", "yend")
     key_glyph: str = "path"
     # ``arrow=arrow(...)`` (or matplotlib arrowstyle string). When set,
@@ -186,10 +190,20 @@ class GeomSegment(Geom):
             # Arrow needed → per-row FancyArrowPatch (each can carry its
             # own colour / size / linestyle, like ggplot2's behaviour).
             n = len(data)
-            colours = data["colour"].to_list() if "colour" in data.columns else ["black"] * n
-            sizes = data["size"].to_numpy() if "size" in data.columns else np.full(n, 0.5)
-            linetypes = data["linetype"].to_list() if "linetype" in data.columns else ["solid"] * n
-            alphas = data["alpha"].to_numpy() if "alpha" in data.columns else np.full(n, 1.0)
+            colours = (
+                data["colour"].to_list() if "colour" in data.columns else ["black"] * n
+            )
+            sizes = (
+                data["size"].to_numpy() if "size" in data.columns else np.full(n, 0.5)
+            )
+            linetypes = (
+                data["linetype"].to_list()
+                if "linetype" in data.columns
+                else ["solid"] * n
+            )
+            alphas = (
+                data["alpha"].to_numpy() if "alpha" in data.columns else np.full(n, 1.0)
+            )
             arrowstyle, mutation_scale = _arrow_to_style(self.arrow)
 
             for i in range(n):
@@ -198,11 +212,14 @@ class GeomSegment(Geom):
                     (float(xend[i]), float(yend[i])),
                     color=r_color(colours[i] if colours[i] is not None else "black"),
                     linewidth=float(sizes[i]) * _PT_PER_MM,
-                    linestyle=r_lty(linetypes[i] if linetypes[i] is not None else "solid"),
+                    linestyle=r_lty(
+                        linetypes[i] if linetypes[i] is not None else "solid"
+                    ),
                     alpha=float(alphas[i]) if alphas[i] is not None else 1.0,
                     arrowstyle=arrowstyle,
                     mutation_scale=mutation_scale,
-                    shrinkA=0, shrinkB=0,
+                    shrinkA=0,
+                    shrinkB=0,
                 )
                 ax.add_patch(patch)
 
@@ -219,13 +236,15 @@ class GeomCurve(Geom):
     ``connectionstyle='arc3,rad=<curvature>'``.
     """
 
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-        "curvature": 0.5,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "black",
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+            "curvature": 0.5,
+        }
+    )
     required_aes: tuple = ("x", "y", "xend", "yend")
     arrow: object = None
 
@@ -241,16 +260,21 @@ class GeomCurve(Geom):
         y = _to_numeric_axis(data["y"].to_numpy())
         xend = _to_numeric_axis(data["xend"].to_numpy())
         yend = _to_numeric_axis(data["yend"].to_numpy())
-        colours = (data["colour"].to_list()
-                   if "colour" in data.columns else ["black"] * n)
-        sizes = (data["size"].to_numpy()
-                 if "size" in data.columns else np.full(n, 0.5))
-        linetypes = (data["linetype"].to_list()
-                     if "linetype" in data.columns else ["solid"] * n)
-        alphas = (data["alpha"].to_numpy()
-                  if "alpha" in data.columns else np.full(n, 1.0))
-        curv = (data["curvature"].to_numpy()
-                if "curvature" in data.columns else np.full(n, 0.5))
+        colours = (
+            data["colour"].to_list() if "colour" in data.columns else ["black"] * n
+        )
+        sizes = data["size"].to_numpy() if "size" in data.columns else np.full(n, 0.5)
+        linetypes = (
+            data["linetype"].to_list() if "linetype" in data.columns else ["solid"] * n
+        )
+        alphas = (
+            data["alpha"].to_numpy() if "alpha" in data.columns else np.full(n, 1.0)
+        )
+        curv = (
+            data["curvature"].to_numpy()
+            if "curvature" in data.columns
+            else np.full(n, 0.5)
+        )
         arrowstyle, mutation_scale = _arrow_to_style(self.arrow)
 
         for i in range(n):
@@ -264,7 +288,8 @@ class GeomCurve(Geom):
                 alpha=float(alphas[i]) if alphas[i] is not None else 1.0,
                 arrowstyle=arrowstyle,
                 mutation_scale=mutation_scale,
-                shrinkA=0, shrinkB=0,
+                shrinkA=0,
+                shrinkB=0,
             )
             ax.add_patch(patch)
 
@@ -274,6 +299,7 @@ class GeomCurve(Geom):
 # ---------------------------------------------------------------------------
 # Factories
 # ---------------------------------------------------------------------------
+
 
 def _make_layer(geom, mapping, data, stat, position, kwargs):
     from ..layer import Layer
@@ -292,8 +318,15 @@ def _make_layer(geom, mapping, data, stat, position, kwargs):
     )
 
 
-def geom_segment(mapping=None, data=None, *, stat="identity", position="identity",
-                 arrow=None, **kwargs):
+def geom_segment(
+    mapping=None,
+    data=None,
+    *,
+    stat="identity",
+    position="identity",
+    arrow=None,
+    **kwargs,
+):
     """Straight line segment from ``(x, y)`` to ``(xend, yend)``.
 
     Pass ``arrow=arrow(...)`` to add an arrowhead. Without ``arrow``
@@ -303,8 +336,15 @@ def geom_segment(mapping=None, data=None, *, stat="identity", position="identity
     return _make_layer(GeomSegment(arrow=arrow), mapping, data, stat, position, kwargs)
 
 
-def geom_curve(mapping=None, data=None, *, stat="identity", position="identity",
-               arrow=None, **kwargs):
+def geom_curve(
+    mapping=None,
+    data=None,
+    *,
+    stat="identity",
+    position="identity",
+    arrow=None,
+    **kwargs,
+):
     """Curved segment. ``curvature`` (default 0.5) controls arc magnitude;
     sign flips the bending side. ``arrow=arrow(...)`` adds an arrowhead."""
     return _make_layer(GeomCurve(arrow=arrow), mapping, data, stat, position, kwargs)

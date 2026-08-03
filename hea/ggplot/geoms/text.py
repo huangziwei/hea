@@ -32,17 +32,19 @@ class GeomText(Geom):
     # Mirrors ggplot2's ``GeomText$default_aes`` (R/geom-text.R). ``size``
     # is in MM (ggplot2's text-size convention) — 11 pt × 25.4 / 72.27 ≈
     # 3.88 mm. ``lineheight`` is the ratio of line spacing to font size.
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
-        "size": 3.88,
-        "angle": 0.0,
-        "hjust": 0.5,
-        "vjust": 0.5,
-        "alpha": 1.0,
-        "family": "",
-        "fontface": "plain",
-        "lineheight": 1.2,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "black",
+            "size": 3.88,
+            "angle": 0.0,
+            "hjust": 0.5,
+            "vjust": 0.5,
+            "alpha": 1.0,
+            "family": "",
+            "fontface": "plain",
+            "lineheight": 1.2,
+        }
+    )
     required_aes: tuple = ("x", "y", "label")
 
     def draw_panel(self, data, ax) -> None:
@@ -70,10 +72,12 @@ class GeomText(Geom):
             v_raw = vjust[i] if vjust is not None else self.default_aes["vjust"]
             kwargs = {
                 "color": r_color(colour[i]) if colour else self.default_aes["colour"],
-                "fontsize": float(size[i]) * _PT_PER_MM if size is not None
-                            else self.default_aes["size"] * _PT_PER_MM,
-                "rotation": float(angle[i]) if angle is not None
-                            else self.default_aes["angle"],
+                "fontsize": float(size[i]) * _PT_PER_MM
+                if size is not None
+                else self.default_aes["size"] * _PT_PER_MM,
+                "rotation": float(angle[i])
+                if angle is not None
+                else self.default_aes["angle"],
                 "ha": _hjust_to_ha(_resolve_just(h_raw, x[i], x_range, axis="h")),
                 "va": _vjust_to_va(_resolve_just(v_raw, y[i], y_range, axis="v")),
             }
@@ -82,12 +86,18 @@ class GeomText(Geom):
 
 # ggplot2's compute_just (R/utilities.R) maps these names to numerics.
 _HJUST_ALIASES = {
-    "left": 0.0, "right": 1.0,
-    "center": 0.5, "centre": 0.5, "middle": 0.5,
+    "left": 0.0,
+    "right": 1.0,
+    "center": 0.5,
+    "centre": 0.5,
+    "middle": 0.5,
 }
 _VJUST_ALIASES = {
-    "bottom": 0.0, "top": 1.0,
-    "center": 0.5, "centre": 0.5, "middle": 0.5,
+    "bottom": 0.0,
+    "top": 1.0,
+    "center": 0.5,
+    "centre": 0.5,
+    "middle": 0.5,
 }
 
 
@@ -174,8 +184,15 @@ def _vjust_to_va(v: float) -> str:
     return "center"
 
 
-def geom_text(mapping=None, data=None, *, stat="identity", position="identity",
-              na_rm=False, **kwargs):
+def geom_text(
+    mapping=None,
+    data=None,
+    *,
+    stat="identity",
+    position="identity",
+    na_rm=False,
+    **kwargs,
+):
     from ..layer import Layer
     from ..positions import resolve_position
     from ..stats import resolve_stat
@@ -202,23 +219,26 @@ class GeomLabel(GeomText):
     ``fill = "white"``, ``linewidth = 0.5 * borderwidth = 0.25``,
     ``linetype = "solid"`` to ``GeomText``'s defaults.
     """
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
-        "fill": "white",
-        "size": 3.88,
-        "angle": 0.0,
-        "hjust": 0.5,
-        "vjust": 0.5,
-        "alpha": 1.0,
-        "family": "",
-        "fontface": "plain",
-        "lineheight": 1.2,
-        "linewidth": 0.25,
-        "linetype": "solid",
-    })
+
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "black",
+            "fill": "white",
+            "size": 3.88,
+            "angle": 0.0,
+            "hjust": 0.5,
+            "vjust": 0.5,
+            "alpha": 1.0,
+            "family": "",
+            "fontface": "plain",
+            "lineheight": 1.2,
+            "linewidth": 0.25,
+            "linetype": "solid",
+        }
+    )
     label_padding: float = 0.25  # ggplot2 default in lines; we treat as box pad
-    label_r: float = 0.15        # corner radius
-    label_size: float = 0.25     # border line width (mm)
+    label_r: float = 0.15  # corner radius
+    label_size: float = 0.25  # border line width (mm)
 
     def draw_panel(self, data, ax) -> None:
         from .._util import r_color
@@ -230,12 +250,36 @@ class GeomLabel(GeomText):
         labels = data["label"].to_list()
         n = len(labels)
 
-        colour = data["colour"].to_list() if "colour" in data.columns else [self.default_aes["colour"]] * n
-        fill = data["fill"].to_list() if "fill" in data.columns else [self.default_aes["fill"]] * n
-        size = data["size"].to_numpy() if "size" in data.columns else [self.default_aes["size"]] * n
-        angle = data["angle"].to_numpy() if "angle" in data.columns else [self.default_aes["angle"]] * n
-        hjust = data["hjust"].to_numpy() if "hjust" in data.columns else [self.default_aes["hjust"]] * n
-        vjust = data["vjust"].to_numpy() if "vjust" in data.columns else [self.default_aes["vjust"]] * n
+        colour = (
+            data["colour"].to_list()
+            if "colour" in data.columns
+            else [self.default_aes["colour"]] * n
+        )
+        fill = (
+            data["fill"].to_list()
+            if "fill" in data.columns
+            else [self.default_aes["fill"]] * n
+        )
+        size = (
+            data["size"].to_numpy()
+            if "size" in data.columns
+            else [self.default_aes["size"]] * n
+        )
+        angle = (
+            data["angle"].to_numpy()
+            if "angle" in data.columns
+            else [self.default_aes["angle"]] * n
+        )
+        hjust = (
+            data["hjust"].to_numpy()
+            if "hjust" in data.columns
+            else [self.default_aes["hjust"]] * n
+        )
+        vjust = (
+            data["vjust"].to_numpy()
+            if "vjust" in data.columns
+            else [self.default_aes["vjust"]] * n
+        )
 
         # Border width in pt — ggplot2 ``label_size`` is mm.
         border_pt = float(self.label_size) * _PT_PER_MM
@@ -246,7 +290,9 @@ class GeomLabel(GeomText):
             if label is None:
                 continue
             ax.text(
-                x[i], y[i], str(label),
+                x[i],
+                y[i],
+                str(label),
                 color=r_color(colour[i]),
                 fontsize=float(size[i]) * _PT_PER_MM,
                 rotation=float(angle[i]),
@@ -254,7 +300,7 @@ class GeomLabel(GeomText):
                 va=_vjust_to_va(_resolve_just(vjust[i], y[i], y_range, axis="v")),
                 bbox=dict(
                     boxstyle=f"round,pad={float(self.label_padding)},"
-                             f"rounding_size={float(self.label_r)}",
+                    f"rounding_size={float(self.label_r)}",
                     facecolor=r_color(fill[i]),
                     edgecolor=r_color(colour[i]),
                     linewidth=border_pt,
@@ -262,9 +308,18 @@ class GeomLabel(GeomText):
             )
 
 
-def geom_label(mapping=None, data=None, *, stat="identity", position="identity",
-               na_rm=False, label_padding=0.25, label_r=0.15, label_size=0.25,
-               **kwargs):
+def geom_label(
+    mapping=None,
+    data=None,
+    *,
+    stat="identity",
+    position="identity",
+    na_rm=False,
+    label_padding=0.25,
+    label_r=0.15,
+    label_size=0.25,
+    **kwargs,
+):
     from ..layer import Layer
     from ..positions import resolve_position
     from ..stats import resolve_stat
@@ -272,8 +327,9 @@ def geom_label(mapping=None, data=None, *, stat="identity", position="identity",
     aes_params, geom_params = split_layer_kwargs(kwargs)
 
     return Layer(
-        geom=GeomLabel(label_padding=label_padding, label_r=label_r,
-                       label_size=label_size),
+        geom=GeomLabel(
+            label_padding=label_padding, label_r=label_r, label_size=label_size
+        ),
         stat=resolve_stat(stat),
         position=resolve_position(position),
         mapping=mapping,
@@ -308,43 +364,47 @@ class GeomLabelRepel(GeomLabel):
     point — pure rad, no n-point control. ``parse`` (R plotmath) isn't
     portable; matplotlib supports its own mathtext with ``$...$``.
     """
+
     nudge_x: float = 0.0
     nudge_y: float = 0.0
     force: float = 1.0
     force_pull: float = 1.0
-    box_padding: float = 0.25         # in lines
-    point_padding: float = 0.0        # in lines
-    min_segment_length: float = 0.5   # in lines
+    box_padding: float = 0.25  # in lines
+    point_padding: float = 0.0  # in lines
+    min_segment_length: float = 0.5  # in lines
     max_iter: int = 2000
-    max_time: float = 0.5             # seconds; 0 = no time cap
+    max_time: float = 0.5  # seconds; 0 = no time cap
     max_overlaps: int = 10
     seed: int | None = None
     segment_color: str | None = None  # default: same as label colour
-    segment_size: float = 0.5         # mm
+    segment_size: float = 0.5  # mm
     segment_alpha: float = 1.0
-    segment_linetype: object = 1      # R lty (1=solid) or matplotlib string
-    segment_curvature: float = 0.0    # arc3 rad; positive curves one way
-    segment_ncp: int = 1              # accepted for parity; ignored
-    arrow: bool = False               # arrowhead at the anchor end
-    direction: str = "both"           # "both" | "x" | "y"
-    xlim: tuple | None = None         # (min, max) in data coords; None = panel
+    segment_linetype: object = 1  # R lty (1=solid) or matplotlib string
+    segment_curvature: float = 0.0  # arc3 rad; positive curves one way
+    segment_ncp: int = 1  # accepted for parity; ignored
+    arrow: bool = False  # arrowhead at the anchor end
+    direction: str = "both"  # "both" | "x" | "y"
+    xlim: tuple | None = None  # (min, max) in data coords; None = panel
     ylim: tuple | None = None
     verbose: bool = False
 
-    def _make_text_artist(self, ax, x, y, label, *,
-                          colour, fill, size, angle, ha, va):
+    def _make_text_artist(self, ax, x, y, label, *, colour, fill, size, angle, ha, va):
         """Render this label as text inside a rounded box (geom_label style)."""
         from .._util import r_color
+
         border_pt = float(self.label_size) * _PT_PER_MM
         return ax.text(
-            x, y, str(label),
+            x,
+            y,
+            str(label),
             color=r_color(colour),
             fontsize=float(size) * _PT_PER_MM,
             rotation=float(angle),
-            ha=ha, va=va,
+            ha=ha,
+            va=va,
             bbox=dict(
                 boxstyle=f"round,pad={float(self.label_padding)},"
-                         f"rounding_size={float(self.label_r)}",
+                f"rounding_size={float(self.label_r)}",
                 facecolor=r_color(fill),
                 edgecolor=r_color(colour),
                 linewidth=border_pt,
@@ -360,7 +420,11 @@ class GeomLabelRepel(GeomLabel):
         labels = data["label"].to_list()
         n = len(labels)
 
-        colour = data["colour"].to_list() if "colour" in data.columns else [self.default_aes["colour"]] * n
+        colour = (
+            data["colour"].to_list()
+            if "colour" in data.columns
+            else [self.default_aes["colour"]] * n
+        )
         # ``fill`` only exists on GeomLabel subclasses; fall back to ``colour``
         # so GeomTextRepel can share this code path.
         if "fill" in data.columns:
@@ -369,14 +433,21 @@ class GeomLabelRepel(GeomLabel):
             fill = [self.default_aes["fill"]] * n
         else:
             fill = list(colour)
-        size = data["size"].to_numpy() if "size" in data.columns else np.full(n, self.default_aes["size"])
-        angle = data["angle"].to_numpy() if "angle" in data.columns else np.full(n, self.default_aes["angle"])
+        size = (
+            data["size"].to_numpy()
+            if "size" in data.columns
+            else np.full(n, self.default_aes["size"])
+        )
+        angle = (
+            data["angle"].to_numpy()
+            if "angle" in data.columns
+            else np.full(n, self.default_aes["angle"])
+        )
         hjust_arr = data["hjust"].to_numpy() if "hjust" in data.columns else None
         vjust_arr = data["vjust"].to_numpy() if "vjust" in data.columns else None
 
         # Drop None / empty labels — ggrepel's na_rm equivalent.
-        keep = [i for i, lbl in enumerate(labels)
-                if lbl is not None and str(lbl) != ""]
+        keep = [i for i, lbl in enumerate(labels) if lbl is not None and str(lbl) != ""]
         if not keep:
             return
 
@@ -386,7 +457,11 @@ class GeomLabelRepel(GeomLabel):
 
         # Resolve per-label ha/va (string aliases + inward/outward handled).
         x_range, y_range = _axis_ranges_for_inward(
-            ax, x[keep], y[keep], hjust_arr, vjust_arr,
+            ax,
+            x[keep],
+            y[keep],
+            hjust_arr,
+            vjust_arr,
         )
         ha_list, va_list = [], []
         for k, i in enumerate(keep):
@@ -398,10 +473,16 @@ class GeomLabelRepel(GeomLabel):
         text_artists = []
         for k, i in enumerate(keep):
             ta = self._make_text_artist(
-                ax, x_init[k], y_init[k], labels[i],
-                colour=colour[i], fill=fill[i],
-                size=size[i], angle=angle[i],
-                ha=ha_list[k], va=va_list[k],
+                ax,
+                x_init[k],
+                y_init[k],
+                labels[i],
+                colour=colour[i],
+                fill=fill[i],
+                size=size[i],
+                angle=angle[i],
+                ha=ha_list[k],
+                va=va_list[k],
             )
             # Don't let tight_layout shrink the axes for moved labels.
             ta.set_in_layout(False)
@@ -410,9 +491,12 @@ class GeomLabelRepel(GeomLabel):
         _schedule_repel(
             ax=ax,
             text_artists=text_artists,
-            ha_list=ha_list, va_list=va_list,
-            x_anchor=x[keep], y_anchor=y[keep],
-            x_init=x_init, y_init=y_init,
+            ha_list=ha_list,
+            va_list=va_list,
+            x_anchor=x[keep],
+            y_anchor=y[keep],
+            x_init=x_init,
+            y_init=y_init,
             colours=[colour[i] for i in keep],
             sizes=[float(size[i]) for i in keep],
             force=float(self.force),
@@ -437,22 +521,40 @@ class GeomLabelRepel(GeomLabel):
         )
 
 
-def geom_label_repel(mapping=None, data=None, *, stat="identity",
-                     position="identity", na_rm=False,
-                     label_padding=0.25, label_r=0.15, label_size=0.25,
-                     nudge_x=0.0, nudge_y=0.0,
-                     force=1.0, force_pull=1.0,
-                     box_padding=0.25, point_padding=0.0,
-                     min_segment_length=0.5,
-                     max_iter=2000, max_time=0.5, max_overlaps=10,
-                     seed=None,
-                     segment_color=None, segment_size=0.5,
-                     segment_alpha=1.0, segment_linetype=1,
-                     segment_curvature=0.0, segment_ncp=1,
-                     arrow=False,
-                     direction="both", xlim=None, ylim=None,
-                     verbose=False,
-                     **kwargs):
+def geom_label_repel(
+    mapping=None,
+    data=None,
+    *,
+    stat="identity",
+    position="identity",
+    na_rm=False,
+    label_padding=0.25,
+    label_r=0.15,
+    label_size=0.25,
+    nudge_x=0.0,
+    nudge_y=0.0,
+    force=1.0,
+    force_pull=1.0,
+    box_padding=0.25,
+    point_padding=0.0,
+    min_segment_length=0.5,
+    max_iter=2000,
+    max_time=0.5,
+    max_overlaps=10,
+    seed=None,
+    segment_color=None,
+    segment_size=0.5,
+    segment_alpha=1.0,
+    segment_linetype=1,
+    segment_curvature=0.0,
+    segment_ncp=1,
+    arrow=False,
+    direction="both",
+    xlim=None,
+    ylim=None,
+    verbose=False,
+    **kwargs,
+):
     from ..layer import Layer
     from ..positions import resolve_position
     from ..stats import resolve_stat
@@ -461,22 +563,30 @@ def geom_label_repel(mapping=None, data=None, *, stat="identity",
 
     return Layer(
         geom=GeomLabelRepel(
-            label_padding=label_padding, label_r=label_r,
+            label_padding=label_padding,
+            label_r=label_r,
             label_size=label_size,
-            nudge_x=nudge_x, nudge_y=nudge_y,
-            force=force, force_pull=force_pull,
-            box_padding=box_padding, point_padding=point_padding,
+            nudge_x=nudge_x,
+            nudge_y=nudge_y,
+            force=force,
+            force_pull=force_pull,
+            box_padding=box_padding,
+            point_padding=point_padding,
             min_segment_length=min_segment_length,
-            max_iter=max_iter, max_time=max_time,
+            max_iter=max_iter,
+            max_time=max_time,
             max_overlaps=max_overlaps,
             seed=seed,
-            segment_color=segment_color, segment_size=segment_size,
+            segment_color=segment_color,
+            segment_size=segment_size,
             segment_alpha=segment_alpha,
             segment_linetype=segment_linetype,
             segment_curvature=segment_curvature,
             segment_ncp=segment_ncp,
             arrow=arrow,
-            direction=direction, xlim=xlim, ylim=ylim,
+            direction=direction,
+            xlim=xlim,
+            ylim=ylim,
             verbose=verbose,
         ),
         stat=resolve_stat(stat),
@@ -495,6 +605,7 @@ class GeomTextRepel(GeomText):
     connector machinery as :class:`GeomLabelRepel`, but the labels render
     as bare text (no rounded background box). Useful when you want repel
     behaviour without the visual weight of a fill/border."""
+
     nudge_x: float = 0.0
     nudge_y: float = 0.0
     force: float = 1.0
@@ -518,16 +629,19 @@ class GeomTextRepel(GeomText):
     ylim: tuple | None = None
     verbose: bool = False
 
-    def _make_text_artist(self, ax, x, y, label, *,
-                          colour, fill, size, angle, ha, va):
+    def _make_text_artist(self, ax, x, y, label, *, colour, fill, size, angle, ha, va):
         """Render this label as bare text — no bounding box."""
         from .._util import r_color
+
         return ax.text(
-            x, y, str(label),
+            x,
+            y,
+            str(label),
             color=r_color(colour),
             fontsize=float(size) * _PT_PER_MM,
             rotation=float(angle),
-            ha=ha, va=va,
+            ha=ha,
+            va=va,
             zorder=10,
         )
 
@@ -536,21 +650,37 @@ class GeomTextRepel(GeomText):
     draw_panel = GeomLabelRepel.draw_panel
 
 
-def geom_text_repel(mapping=None, data=None, *, stat="identity",
-                    position="identity", na_rm=False,
-                    nudge_x=0.0, nudge_y=0.0,
-                    force=1.0, force_pull=1.0,
-                    box_padding=0.25, point_padding=0.0,
-                    min_segment_length=0.5,
-                    max_iter=2000, max_time=0.5, max_overlaps=10,
-                    seed=None,
-                    segment_color=None, segment_size=0.5,
-                    segment_alpha=1.0, segment_linetype=1,
-                    segment_curvature=0.0, segment_ncp=1,
-                    arrow=False,
-                    direction="both", xlim=None, ylim=None,
-                    verbose=False,
-                    **kwargs):
+def geom_text_repel(
+    mapping=None,
+    data=None,
+    *,
+    stat="identity",
+    position="identity",
+    na_rm=False,
+    nudge_x=0.0,
+    nudge_y=0.0,
+    force=1.0,
+    force_pull=1.0,
+    box_padding=0.25,
+    point_padding=0.0,
+    min_segment_length=0.5,
+    max_iter=2000,
+    max_time=0.5,
+    max_overlaps=10,
+    seed=None,
+    segment_color=None,
+    segment_size=0.5,
+    segment_alpha=1.0,
+    segment_linetype=1,
+    segment_curvature=0.0,
+    segment_ncp=1,
+    arrow=False,
+    direction="both",
+    xlim=None,
+    ylim=None,
+    verbose=False,
+    **kwargs,
+):
     from ..layer import Layer
     from ..positions import resolve_position
     from ..stats import resolve_stat
@@ -559,20 +689,27 @@ def geom_text_repel(mapping=None, data=None, *, stat="identity",
 
     return Layer(
         geom=GeomTextRepel(
-            nudge_x=nudge_x, nudge_y=nudge_y,
-            force=force, force_pull=force_pull,
-            box_padding=box_padding, point_padding=point_padding,
+            nudge_x=nudge_x,
+            nudge_y=nudge_y,
+            force=force,
+            force_pull=force_pull,
+            box_padding=box_padding,
+            point_padding=point_padding,
             min_segment_length=min_segment_length,
-            max_iter=max_iter, max_time=max_time,
+            max_iter=max_iter,
+            max_time=max_time,
             max_overlaps=max_overlaps,
             seed=seed,
-            segment_color=segment_color, segment_size=segment_size,
+            segment_color=segment_color,
+            segment_size=segment_size,
             segment_alpha=segment_alpha,
             segment_linetype=segment_linetype,
             segment_curvature=segment_curvature,
             segment_ncp=segment_ncp,
             arrow=arrow,
-            direction=direction, xlim=xlim, ylim=ylim,
+            direction=direction,
+            xlim=xlim,
+            ylim=ylim,
             verbose=verbose,
         ),
         stat=resolve_stat(stat),
@@ -603,13 +740,39 @@ def _schedule_repel(**params):
     state["cid"] = fig.canvas.mpl_connect("draw_event", _on_draw)
 
 
-def _do_repel(*, renderer, ax, text_artists, ha_list, va_list,
-              x_anchor, y_anchor, x_init, y_init, colours, sizes,
-              force, force_pull, max_iter, max_time, max_overlaps,
-              box_padding_lines, point_padding_lines, min_segment_length_lines,
-              seed, segment_color, segment_size_mm, segment_alpha,
-              segment_linetype, segment_curvature, arrow,
-              direction, xlim, ylim, verbose):
+def _do_repel(
+    *,
+    renderer,
+    ax,
+    text_artists,
+    ha_list,
+    va_list,
+    x_anchor,
+    y_anchor,
+    x_init,
+    y_init,
+    colours,
+    sizes,
+    force,
+    force_pull,
+    max_iter,
+    max_time,
+    max_overlaps,
+    box_padding_lines,
+    point_padding_lines,
+    min_segment_length_lines,
+    seed,
+    segment_color,
+    segment_size_mm,
+    segment_alpha,
+    segment_linetype,
+    segment_curvature,
+    arrow,
+    direction,
+    xlim,
+    ylim,
+    verbose,
+):
     import time
 
     from matplotlib.patches import FancyArrowPatch
@@ -651,10 +814,12 @@ def _do_repel(*, renderer, ax, text_artists, ha_list, va_list,
     half_w = np.array([bb.width / 2 + box_pad_px for bb in bboxes0])
     half_h = np.array([bb.height / 2 + box_pad_px for bb in bboxes0])
 
-    dir_mask = np.array([
-        1.0 if direction in ("both", "x") else 0.0,
-        1.0 if direction in ("both", "y") else 0.0,
-    ])
+    dir_mask = np.array(
+        [
+            1.0 if direction in ("both", "x") else 0.0,
+            1.0 if direction in ("both", "y") else 0.0,
+        ]
+    )
 
     rng = np.random.default_rng(seed)
 
@@ -681,7 +846,7 @@ def _do_repel(*, renderer, ax, text_artists, ha_list, va_list,
         moved = False
 
         # Pairwise label-label repulsion (rectangle overlap).
-        dx = pos[:, 0:1] - pos[:, 0:1].T              # (n, n)
+        dx = pos[:, 0:1] - pos[:, 0:1].T  # (n, n)
         dy = pos[:, 1:2] - pos[:, 1:2].T
         ox = (half_w[:, None] + half_w[None, :]) - np.abs(dx)
         oy = (half_h[:, None] + half_h[None, :]) - np.abs(dy)
@@ -703,14 +868,15 @@ def _do_repel(*, renderer, ax, text_artists, ha_list, va_list,
         # Label-vs-anchor repulsion (push label off any anchor it covers).
         adx = pos[:, 0:1] - anchors[:, 0:1].T
         ady = pos[:, 1:2] - anchors[:, 1:2].T
-        ax_inside = (np.abs(adx) < half_w[:, None] + point_pad_px) & \
-                    (np.abs(ady) < half_h[:, None] + point_pad_px)
+        ax_inside = (np.abs(adx) < half_w[:, None] + point_pad_px) & (
+            np.abs(ady) < half_h[:, None] + point_pad_px
+        )
         if ax_inside.any():
             moved = True
             # Push direction = away from each covered anchor; pick the
             # axis with smaller intrusion (cheaper exit).
-            ix = (half_w[:, None] + point_pad_px - np.abs(adx))
-            iy = (half_h[:, None] + point_pad_px - np.abs(ady))
+            ix = half_w[:, None] + point_pad_px - np.abs(adx)
+            iy = half_h[:, None] + point_pad_px - np.abs(ady)
             sx = np.where(adx != 0, np.sign(adx), 1.0)
             sy = np.where(ady != 0, np.sign(ady), 1.0)
             use_x = ax_inside & (ix <= iy)
@@ -723,8 +889,7 @@ def _do_repel(*, renderer, ax, text_artists, ha_list, va_list,
         push_right = np.maximum((pos[:, 0] + half_w) - wall_xmax, 0.0)
         push_bottom = np.maximum(wall_ymin - (pos[:, 1] - half_h), 0.0)
         push_top = np.maximum((pos[:, 1] + half_h) - wall_ymax, 0.0)
-        if (push_left.any() or push_right.any()
-                or push_bottom.any() or push_top.any()):
+        if push_left.any() or push_right.any() or push_bottom.any() or push_top.any():
             moved = True
             forces[:, 0] += (push_left - push_right) * force
             forces[:, 1] += (push_bottom - push_top) * force
@@ -742,7 +907,9 @@ def _do_repel(*, renderer, ax, text_artists, ha_list, va_list,
 
         if max_time > 0 and (time.perf_counter() - t_start) > max_time:
             if verbose:
-                print(f"geom_*_repel: stopped at iter {iters_run} (max_time {max_time}s exceeded)")
+                print(
+                    f"geom_*_repel: stopped at iter {iters_run} (max_time {max_time}s exceeded)"
+                )
             break
 
     # Final overlap count (for max_overlaps decision).
@@ -755,7 +922,9 @@ def _do_repel(*, renderer, ax, text_artists, ha_list, va_list,
     n_overlapping = int((overlap_f.any(axis=1)).sum())
 
     if verbose:
-        print(f"geom_*_repel: {iters_run} iters, {n_overlapping} labels still overlapping")
+        print(
+            f"geom_*_repel: {iters_run} iters, {n_overlapping} labels still overlapping"
+        )
 
     # If too many labels still overlap, hide the excess (matches ggrepel's
     # max.overlaps behaviour: extra labels are silently dropped).
@@ -827,9 +996,8 @@ def _do_repel(*, renderer, ax, text_artists, ha_list, va_list,
             linestyle=linestyle,
             alpha=segment_alpha,
             mutation_scale=10,  # arrow head size in pt
-            shrinkA=0, shrinkB=0,
+            shrinkA=0,
+            shrinkB=0,
             zorder=9,
         )
         ax.add_patch(patch)
-
-

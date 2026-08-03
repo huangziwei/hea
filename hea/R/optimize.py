@@ -21,6 +21,7 @@ Objective conventions (R returns attributes; Python returns tuples):
 ``(value, gradient, hessian)`` to supply analytic derivatives, the
 equivalent of R's ``attr(ret, "gradient")``/``attr(ret, "hessian")``.
 """
+
 from __future__ import annotations
 
 import math
@@ -70,26 +71,28 @@ def _opterror(nerr):
         -21: "probable coding error in analytic gradient",
         -22: "probable coding error in analytic Hessian",
     }
-    raise RuntimeError(msgs.get(
-        nerr, f"*** unknown error message (msg = {nerr}) in nlm()"
-              "\n*** should not happen!"))
+    raise RuntimeError(
+        msgs.get(
+            nerr,
+            f"*** unknown error message (msg = {nerr}) in nlm()"
+            "\n*** should not happen!",
+        )
+    )
 
 
 _OPTCODE_MSG = {
-    1: "Relative gradient close to zero.\n"
-       "Current iterate is probably solution.\n",
-    2: "Successive iterates within tolerance.\n"
-       "Current iterate is probably solution.\n",
+    1: "Relative gradient close to zero.\nCurrent iterate is probably solution.\n",
+    2: "Successive iterates within tolerance.\nCurrent iterate is probably solution.\n",
     3: "Last global step failed to locate a point lower than x.\n"
-       "Either x is an approximate local minimum of the function,\n"
-       "the function is too non-linear for this algorithm,\n"
-       "or steptol is too large.\n",
+    "Either x is an approximate local minimum of the function,\n"
+    "the function is too non-linear for this algorithm,\n"
+    "or steptol is too large.\n",
     4: "Iteration limit exceeded.  Algorithm failed.\n",
     5: "Maximum step size exceeded 5 consecutive times.\n"
-       "Either the function is unbounded below,\n"
-       "becomes asymptotic to a finite value\n"
-       "from above in some direction,\n"
-       "or stepmx is too small.\n",
+    "Either the function is unbounded below,\n"
+    "becomes asymptotic to a finite value\n"
+    "from above in some direction,\n"
+    "or stepmx is too small.\n",
 }
 
 
@@ -103,7 +106,7 @@ class _FunctionInfo:
         self.n = n
         self.have_gradient = have_gradient
         self.have_hessian = have_hessian
-        self.table = []          # list of (x, fval, grad, hess)
+        self.table = []  # list of (x, fval, grad, hess)
         self.last = -1
 
     def lookup(self, x):
@@ -111,18 +114,18 @@ class _FunctionInfo:
             ind = (self.last - i) % _FT_SIZE
             if ind < len(self.table):
                 ftx = self.table[ind][0]
-                if all(float(x[j]) == float(ftx[j])
-                       for j in range(self.n)):
+                if all(float(x[j]) == float(ftx[j]) for j in range(self.n)):
                     return ind
         return -1
 
     def store(self, fval, x, grad, hess):
         ind = (self.last + 1) % _FT_SIZE
-        entry = (np.array(x, dtype=float, copy=True), float(fval),
-                 None if grad is None else np.array(grad, dtype=float,
-                                                    copy=True),
-                 None if hess is None else np.array(hess, dtype=float,
-                                                    copy=True))
+        entry = (
+            np.array(x, dtype=float, copy=True),
+            float(fval),
+            None if grad is None else np.array(grad, dtype=float, copy=True),
+            None if hess is None else np.array(hess, dtype=float, copy=True),
+        )
         if ind < len(self.table):
             self.table[ind] = entry
         else:
@@ -156,17 +159,18 @@ class _FunctionInfo:
         val, grad, hess = self._parse(self.f(x))
         if not np.isfinite(val):
             if val == float("-inf"):
-                warnings.warn("-Inf replaced by maximally negative "
-                              "value")
+                warnings.warn("-Inf replaced by maximally negative value")
                 val = -_DBL_MAX
             else:
                 what = "NA/NaN" if math.isnan(val) else "Inf"
-                warnings.warn(f"{what} replaced by maximum positive "
-                              "value")
+                warnings.warn(f"{what} replaced by maximum positive value")
                 val = _DBL_MAX
-        self.store(val, x,
-                   grad if self.have_gradient else None,
-                   hess if self.have_hessian else None)
+        self.store(
+            val,
+            x,
+            grad if self.have_gradient else None,
+            hess if self.have_hessian else None,
+        )
         return val
 
     def d1fcn(self, x):
@@ -176,8 +180,9 @@ class _FunctionInfo:
             self.fcn(x)
             ind = self.lookup(x)
             if ind < 0:
-                raise RuntimeError("function value caching for "
-                                   "optimization is seriously confused")
+                raise RuntimeError(
+                    "function value caching for optimization is seriously confused"
+                )
         return np.array(self.table[ind][2], dtype=float, copy=True)
 
     def d2fcn(self, x, a):
@@ -188,17 +193,28 @@ class _FunctionInfo:
             self.fcn(x)
             ind = self.lookup(x)
             if ind < 0:
-                raise RuntimeError("function value caching for "
-                                   "optimization is seriously confused")
-        hess = np.asarray(self.table[ind][3], dtype=float).reshape(
-            self.n, self.n)
+                raise RuntimeError(
+                    "function value caching for optimization is seriously confused"
+                )
+        hess = np.asarray(self.table[ind][3], dtype=float).reshape(self.n, self.n)
         for j in range(self.n):
             a[j:, j] = hess[j:, j]
 
 
-def nlm(f, p, hessian=False, typsize=None, fscale=1.0, print_level=0,
-        ndigit=12, gradtol=1e-6, stepmax=None, steptol=1e-6,
-        iterlim=100, check_analyticals=True):
+def nlm(
+    f,
+    p,
+    hessian=False,
+    typsize=None,
+    fscale=1.0,
+    print_level=0,
+    ndigit=12,
+    gradtol=1e-6,
+    stepmax=None,
+    steptol=1e-6,
+    iterlim=100,
+    check_analyticals=True,
+):
     """R's ``nlm()`` (nlm.R:19 + optimize.c ``nlm``, :699): Dennis-
     Schnabel UNCMIN minimization with the exact R semantics.
 
@@ -212,7 +228,7 @@ def nlm(f, p, hessian=False, typsize=None, fscale=1.0, print_level=0,
         raise ValueError("'print.level' must be in {0,1,2}")
     # msg is a bit pattern: 1 + (8, 0, 16)[print.level], +6 to skip the
     # analytic-derivative checks (nlm.R:29-30)
-    msg = (1 + (8, 0, 16)[print_level])
+    msg = 1 + (8, 0, 16)[print_level]
     if not check_analyticals:
         msg += 2 + 4
     x = _fixparam(p)
@@ -225,8 +241,7 @@ def nlm(f, p, hessian=False, typsize=None, fscale=1.0, print_level=0,
         raise ValueError("invalid NA value in parameter")
     if stepmax is None:
         # nlm.R default: max(1000*sqrt(sum((p/typsize)^2)), 1000)
-        stepmax = max(1000.0 * math.sqrt(float(np.sum(
-            (x / typsiz) ** 2))), 1000.0)
+        stepmax = max(1000.0 * math.sqrt(float(np.sum((x / typsiz) ** 2))), 1000.0)
     omsg = msg
     want_hessian = bool(hessian)
 
@@ -254,19 +269,21 @@ def nlm(f, p, hessian=False, typsize=None, fscale=1.0, print_level=0,
                     iahflg = 1
                     have_hessian = 1
                 else:
-                    warnings.warn("hessian supplied is of the wrong "
-                                  "length or mode, so ignored")
+                    warnings.warn(
+                        "hessian supplied is of the wrong length or mode, so ignored"
+                    )
         else:
-            warnings.warn("gradient supplied is of the wrong length or "
-                          "mode, so ignored")
-    if ((msg // 4) % 2) and not iahflg:   # skip check of analytic Hess.
+            warnings.warn(
+                "gradient supplied is of the wrong length or mode, so ignored"
+            )
+    if ((msg // 4) % 2) and not iahflg:  # skip check of analytic Hess.
         msg -= 4
-    if ((msg // 2) % 2) and not iagflg:   # skip check of analytic grad.
+    if ((msg // 2) % 2) and not iagflg:  # skip check of analytic grad.
         msg -= 2
     state = _FunctionInfo(f, n, have_gradient, have_hessian)
 
-    method = 1        # line search
-    iexp = 0 if iahflg else 1   # function calls are expensive
+    method = 1  # line search
+    iexp = 0 if iahflg else 1  # function calls are expensive
     dlt = 1.0
     if _rs_optif9 is not None:
         # rust d2fcn contract: return the n×n Hessian flat column-major
@@ -277,16 +294,45 @@ def nlm(f, p, hessian=False, typsize=None, fscale=1.0, print_level=0,
             return a.ravel(order="F")
 
         xpls, fpls, gpls, code, itncnt, msg = _rs_optif9(
-            x, state.fcn, state.d1fcn,
-            _d2_flat if have_hessian else None, typsiz, fscale,
-            method, iexp, msg, int(ndigit), int(iterlim), iagflg,
-            iahflg, dlt, float(gradtol), float(stepmax),
-            float(steptol))
+            x,
+            state.fcn,
+            state.d1fcn,
+            _d2_flat if have_hessian else None,
+            typsiz,
+            fscale,
+            method,
+            iexp,
+            msg,
+            int(ndigit),
+            int(iterlim),
+            iagflg,
+            iahflg,
+            dlt,
+            float(gradtol),
+            float(stepmax),
+            float(steptol),
+        )
     else:
         xpls, fpls, gpls, code, itncnt, msg = _optif9(
-            n, x, state.fcn, state.d1fcn, state.d2fcn, typsiz, fscale,
-            method, iexp, msg, int(ndigit), int(iterlim), iagflg,
-            iahflg, dlt, float(gradtol), float(stepmax), float(steptol))
+            n,
+            x,
+            state.fcn,
+            state.d1fcn,
+            state.d2fcn,
+            typsiz,
+            fscale,
+            method,
+            iexp,
+            msg,
+            int(ndigit),
+            int(iterlim),
+            iagflg,
+            iahflg,
+            dlt,
+            float(gradtol),
+            float(stepmax),
+            float(steptol),
+        )
     if msg < 0:
         _opterror(msg)
     if code != 0 and (omsg & 8) == 0:
@@ -300,13 +346,22 @@ def nlm(f, p, hessian=False, typsize=None, fscale=1.0, print_level=0,
     }
     if want_hessian:
         if _rs_fdhess is not None:
-            a = np.asarray(_rs_fdhess(
-                np.asarray(xpls, dtype=float), float(fpls), state.fcn,
-                int(ndigit), typsiz)).reshape(n, n, order="F").copy()
+            a = (
+                np.asarray(
+                    _rs_fdhess(
+                        np.asarray(xpls, dtype=float),
+                        float(fpls),
+                        state.fcn,
+                        int(ndigit),
+                        typsiz,
+                    )
+                )
+                .reshape(n, n, order="F")
+                .copy()
+            )
         else:
             a = np.zeros((n, n))
-            _fdhess(n, xpls, float(fpls), state.fcn, a, n, int(ndigit),
-                    typsiz)
+            _fdhess(n, xpls, float(fpls), state.fcn, a, n, int(ndigit), typsiz)
         for i in range(n):
             for j in range(i):
                 a[i, j] = a[j, i]
@@ -324,21 +379,17 @@ def _optim_fminfn(p, fn, fnscale, parscale, n):
     return val / fnscale
 
 
-def _optim_fmingr(p, df, fn, gr, fnscale, parscale, ndeps, n,
-                  usebounds, lower, upper):
+def _optim_fmingr(p, df, fn, gr, fnscale, parscale, ndeps, n, usebounds, lower, upper):
     """stats optim.c ``fmingr`` (:90): scaled analytic gradient, or the
     (possibly bound-clipped) central finite difference."""
     if gr is not None:
         for i in range(n):
             if not np.isfinite(float(p[i])):
                 raise ValueError("non-finite value supplied by optim")
-        x = np.array([float(p[i]) * float(parscale[i])
-                      for i in range(n)])
+        x = np.array([float(p[i]) * float(parscale[i]) for i in range(n)])
         s = np.asarray(gr(x), dtype=float).ravel()
         if s.size != n:
-            raise ValueError(
-                f"gradient in optim evaluated to length {s.size} not "
-                f"{n}")
+            raise ValueError(f"gradient in optim evaluated to length {s.size} not {n}")
         for i in range(n):
             df[i] = float(s[i]) * float(parscale[i]) / fnscale
         return
@@ -353,8 +404,7 @@ def _optim_fmingr(p, df, fn, gr, fnscale, parscale, ndeps, n,
             val2 = float(fn(x.copy())) / fnscale
             df[i] = (val1 - val2) / (2 * eps)
             if not np.isfinite(float(df[i])):
-                raise ValueError(
-                    f"non-finite finite-difference value [{i + 1}]")
+                raise ValueError(f"non-finite finite-difference value [{i + 1}]")
             x[i] = float(p[i]) * float(parscale[i])
     else:
         for i in range(n):
@@ -373,13 +423,20 @@ def _optim_fmingr(p, df, fn, gr, fnscale, parscale, ndeps, n,
             val2 = float(fn(x.copy())) / fnscale
             df[i] = (val1 - val2) / (epsused + eps)
             if not np.isfinite(float(df[i])):
-                raise ValueError(
-                    f"non-finite finite-difference value [{i + 1}]")
+                raise ValueError(f"non-finite finite-difference value [{i + 1}]")
             x[i] = float(p[i]) * float(parscale[i])
 
 
-def optim(par, fn, gr=None, method="L-BFGS-B", lower=-math.inf,
-          upper=math.inf, control=None, hessian=False):
+def optim(
+    par,
+    fn,
+    gr=None,
+    method="L-BFGS-B",
+    lower=-math.inf,
+    upper=math.inf,
+    control=None,
+    hessian=False,
+):
     """R's ``optim()`` (optim.R:19 + stats optim.c:199), ported for
     ``method="L-BFGS-B"`` only — the method mgcv's ``gam.outer`` uses.
 
@@ -389,34 +446,45 @@ def optim(par, fn, gr=None, method="L-BFGS-B", lower=-math.inf,
     if method != "L-BFGS-B":
         raise NotImplementedError(
             f"optim method {method!r} is not ported (only 'L-BFGS-B', "
-            "the method used by mgcv's gam.outer)")
+            "the method used by mgcv's gam.outer)"
+        )
     par = np.asarray(par, dtype=float).ravel().copy()
     npar = par.size
     # defaults (optim.R:35-42)
     con = {
-        "trace": 0, "fnscale": 1.0, "parscale": np.ones(npar),
-        "ndeps": np.full(npar, 1e-3), "maxit": 100, "abstol": -math.inf,
+        "trace": 0,
+        "fnscale": 1.0,
+        "parscale": np.ones(npar),
+        "ndeps": np.full(npar, 1e-3),
+        "maxit": 100,
+        "abstol": -math.inf,
         "reltol": math.sqrt(float(np.finfo(np.float64).eps)),
-        "alpha": 1.0, "beta": 0.5, "gamma": 2.0, "REPORT": 10,
-        "warn.1d.NelderMead": True, "type": 1, "lmm": 5, "factr": 1e7,
-        "pgtol": 0.0, "tmax": 10, "temp": 10.0,
+        "alpha": 1.0,
+        "beta": 0.5,
+        "gamma": 2.0,
+        "REPORT": 10,
+        "warn.1d.NelderMead": True,
+        "type": 1,
+        "lmm": 5,
+        "factr": 1e7,
+        "pgtol": 0.0,
+        "tmax": 10,
+        "temp": 10.0,
     }
     control = dict(control or {})
     unknown = [k for k in control if k not in con]
     if unknown:
-        warnings.warn("unknown names in control: "
-                      + ", ".join(unknown))
+        warnings.warn("unknown names in control: " + ", ".join(unknown))
     con.update((k, v) for k, v in control.items() if k in con)
     if con["trace"] < 0:
-        warnings.warn("read the documentation for 'trace' more "
-                      "carefully")
+        warnings.warn("read the documentation for 'trace' more carefully")
     if any(k in control for k in ("reltol", "abstol")):
-        warnings.warn("method L-BFGS-B uses 'factr' (and 'pgtol') "
-                      "instead of 'reltol' and 'abstol'")
-    lower = np.broadcast_to(np.asarray(lower, dtype=float),
-                            (npar,)).astype(float)
-    upper = np.broadcast_to(np.asarray(upper, dtype=float),
-                            (npar,)).astype(float)
+        warnings.warn(
+            "method L-BFGS-B uses 'factr' (and 'pgtol') "
+            "instead of 'reltol' and 'abstol'"
+        )
+    lower = np.broadcast_to(np.asarray(lower, dtype=float), (npar,)).astype(float)
+    upper = np.broadcast_to(np.asarray(upper, dtype=float), (npar,)).astype(float)
     # --- stats optim.c L-BFGS-B branch (:346) ---
     trace = int(con["trace"])
     fnscale = float(con["fnscale"])
@@ -431,8 +499,7 @@ def optim(par, fn, gr=None, method="L-BFGS-B", lower=-math.inf,
     factr = float(con["factr"])
     pgtol = float(con["pgtol"])
     lmm = int(con["lmm"])
-    dpar = np.array([float(par[i]) / float(parscale[i])
-                     for i in range(npar)])
+    dpar = np.array([float(par[i]) / float(parscale[i]) for i in range(npar)])
     lo = np.zeros(npar)
     up = np.zeros(npar)
     nbd = np.zeros(npar, dtype=np.int64)
@@ -448,8 +515,7 @@ def optim(par, fn, gr=None, method="L-BFGS-B", lower=-math.inf,
         return _optim_fminfn(p, fn, fnscale, parscale, npar)
 
     def fmingr(p, df):
-        _optim_fmingr(p, df, fn, gr, fnscale, parscale, ndeps, npar,
-                      True, lo, up)
+        _optim_fmingr(p, df, fn, gr, fnscale, parscale, ndeps, npar, True, lo, up)
 
     if _rs_lbfgsb is not None and trace == 0:
         # rust fmingr contract: RETURN the scaled gradient
@@ -459,14 +525,25 @@ def optim(par, fn, gr=None, method="L-BFGS-B", lower=-math.inf,
             return df
 
         dpar, val, fail, fncount, grcount, msg = _rs_lbfgsb(
-            npar, lmm, dpar, lo, up, nbd, fminfn, _gr_ret, factr,
-            pgtol, maxit)
+            npar, lmm, dpar, lo, up, nbd, fminfn, _gr_ret, factr, pgtol, maxit
+        )
     else:
         val, fail, fncount, grcount, msg = _lbfgsb_driver(
-            npar, lmm, dpar, lo, up, nbd, fminfn, fmingr, factr, pgtol,
-            maxit, trace, nREPORT)
-    out_par = np.array([float(dpar[i]) * float(parscale[i])
-                        for i in range(npar)])
+            npar,
+            lmm,
+            dpar,
+            lo,
+            up,
+            nbd,
+            fminfn,
+            fmingr,
+            factr,
+            pgtol,
+            maxit,
+            trace,
+            nREPORT,
+        )
+    out_par = np.array([float(dpar[i]) * float(parscale[i]) for i in range(npar)])
     res = {
         "par": out_par,
         "value": val * fnscale,
@@ -486,10 +563,8 @@ def optimHess(par, fn, gr=None, control=None):
     symmetrization."""
     par = np.asarray(par, dtype=float).ravel()
     npar = par.size
-    con = {"fnscale": 1.0, "parscale": np.ones(npar),
-           "ndeps": np.full(npar, 1e-3)}
-    con.update({k: v for k, v in dict(control or {}).items()
-                if k in con})
+    con = {"fnscale": 1.0, "parscale": np.ones(npar), "ndeps": np.full(npar, 1e-3)}
+    con.update({k: v for k, v in dict(control or {}).items() if k in con})
     fnscale = float(con["fnscale"])
     parscale = np.asarray(con["parscale"], dtype=float).ravel()
     if parscale.size != npar:
@@ -498,14 +573,12 @@ def optimHess(par, fn, gr=None, control=None):
     if ndeps.size != npar:
         raise ValueError("'ndeps' is of the wrong length")
     ans = np.zeros((npar, npar))
-    dpar = np.array([float(par[i]) / float(parscale[i])
-                     for i in range(npar)])
+    dpar = np.array([float(par[i]) / float(parscale[i]) for i in range(npar)])
     df1 = np.zeros(npar)
     df2 = np.zeros(npar)
 
     def fmingr(p, df):
-        _optim_fmingr(p, df, fn, gr, fnscale, parscale, ndeps, npar,
-                      False, None, None)
+        _optim_fmingr(p, df, fn, gr, fnscale, parscale, ndeps, npar, False, None, None)
 
     for i in range(npar):
         eps = float(ndeps[i]) / float(parscale[i])
@@ -515,9 +588,11 @@ def optimHess(par, fn, gr=None, control=None):
         fmingr(dpar, df2)
         for j in range(npar):
             # column-major a[i*npar + j] == ans[j, i]
-            ans[j, i] = (fnscale * (float(df1[j]) - float(df2[j]))
-                         / (2 * eps * float(parscale[i])
-                            * float(parscale[j])))
+            ans[j, i] = (
+                fnscale
+                * (float(df1[j]) - float(df2[j]))
+                / (2 * eps * float(parscale[i]) * float(parscale[j]))
+            )
         dpar[i] = float(dpar[i]) + eps
     # symmetrize
     for i in range(npar):

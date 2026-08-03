@@ -137,9 +137,14 @@ def _module_exports(module_name: str) -> frozenset[str]:
 def _hea_submodules() -> frozenset[str]:
     return _module_exports("hea")
 
+
 # Python builtins — names we never need to import.
-_PY_BUILTINS: frozenset[str] = frozenset(__builtins__.keys() if isinstance(__builtins__, dict) else dir(__builtins__)) | {  # type: ignore[union-attr]
-    "True", "False", "None",
+_PY_BUILTINS: frozenset[str] = frozenset(
+    __builtins__.keys() if isinstance(__builtins__, dict) else dir(__builtins__)
+) | {  # type: ignore[union-attr]
+    "True",
+    "False",
+    "None",
 }
 
 
@@ -169,7 +174,9 @@ class RTranslateError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def translate(src: str, *, log_gaps: bool = False, source_label: str = "<inline>") -> str:
+def translate(
+    src: str, *, log_gaps: bool = False, source_label: str = "<inline>"
+) -> str:
     """Translate an R source string to a Python source string.
 
     Raises :class:`RTranslateError` on out-of-grammar inputs; the parser
@@ -182,7 +189,9 @@ def translate(src: str, *, log_gaps: bool = False, source_label: str = "<inline>
     runner sets it.
     """
     prog = parse_r(src)
-    return Translator(src=src, log_gaps=log_gaps, source_label=source_label).translate(prog)
+    return Translator(src=src, log_gaps=log_gaps, source_label=source_label).translate(
+        prog
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -192,12 +201,12 @@ def translate(src: str, *, log_gaps: bool = False, source_label: str = "<inline>
 
 # R BinOp → Python ast operator class (for arithmetic / shift / bitwise).
 _BINOP_PY = {
-    "+":   P.Add,
-    "-":   P.Sub,
-    "*":   P.Mult,
-    "/":   P.Div,
-    "^":   P.Pow,
-    "%%":  P.Mod,
+    "+": P.Add,
+    "-": P.Sub,
+    "*": P.Mult,
+    "/": P.Div,
+    "^": P.Pow,
+    "%%": P.Mod,
     "%/%": P.FloorDiv,
 }
 
@@ -205,9 +214,9 @@ _BINOP_PY = {
 _CMP_PY = {
     "==": P.Eq,
     "!=": P.NotEq,
-    "<":  P.Lt,
+    "<": P.Lt,
     "<=": P.LtE,
-    ">":  P.Gt,
+    ">": P.Gt,
     ">=": P.GtE,
 }
 
@@ -218,24 +227,38 @@ _CMP_PY = {
 # convention of exposing per-object inspectors as methods rather
 # than free functions. Multi-arg calls (``anova(m1, m2)``) stay as
 # function calls so they round-trip cleanly with hea's Python API.
-_R_GENERIC_METHOD_FORM: frozenset[str] = frozenset({
-    "summary", "anova",
-    "coef", "coefficients",
-    "residuals", "resid",
-    "fitted", "fitted_values",
-    "predict",
-    "confint", "vcov",
-    "logLik", "deviance",
-    "formula", "nobs",
-    "AIC", "BIC",
-    "update", "print", "plot",
-})
+_R_GENERIC_METHOD_FORM: frozenset[str] = frozenset(
+    {
+        "summary",
+        "anova",
+        "coef",
+        "coefficients",
+        "residuals",
+        "resid",
+        "fitted",
+        "fitted_values",
+        "predict",
+        "confint",
+        "vcov",
+        "logLik",
+        "deviance",
+        "formula",
+        "nobs",
+        "AIC",
+        "BIC",
+        "update",
+        "print",
+        "plot",
+    }
+)
 
 
 class Translator:
     """Stateful walker. One instance per translation."""
 
-    def __init__(self, src: str = "", *, log_gaps: bool = False, source_label: str = "<inline>"):
+    def __init__(
+        self, src: str = "", *, log_gaps: bool = False, source_label: str = "<inline>"
+    ):
         self.nse = NSEContext()
         # Packages the source declared via ``library(pkg)`` /
         # ``require(pkg)``. Used to disambiguate autoload candidates
@@ -336,7 +359,9 @@ class Translator:
             indent = line[: len(line) - len(line.lstrip())]
             idx = int(m.group(2))
             kind, subject, r_text, _notes = self._unported[idx]
-            out_lines.append(f"{indent}# UNPORTED [{kind}: {subject}] — translator declined; original R was:")
+            out_lines.append(
+                f"{indent}# UNPORTED [{kind}: {subject}] — translator declined; original R was:"
+            )
             for r_line in r_text.splitlines() or [""]:
                 out_lines.append(f"{indent}#   {r_line}")
         return "\n".join(out_lines)
@@ -467,9 +492,13 @@ class Translator:
         used = set(r_names)
         tidy_names = sorted(n for n in (candidates - used) if n in _hea_tidy_exports())
         used |= set(tidy_names)
-        models_names = sorted(n for n in (candidates - used) if n in _hea_models_exports())
+        models_names = sorted(
+            n for n in (candidates - used) if n in _hea_models_exports()
+        )
         used |= set(models_names)
-        family_names = sorted(n for n in (candidates - used) if n in _hea_family_exports())
+        family_names = sorted(
+            n for n in (candidates - used) if n in _hea_family_exports()
+        )
         used |= set(family_names)
         hea_names = sorted(n for n in (candidates - used) if n in _hea_exports())
         used |= set(hea_names)
@@ -477,7 +506,9 @@ class Translator:
         used |= set(io_names)
         plot_names = sorted(n for n in (candidates - used) if n in _hea_plot_exports())
         used |= set(plot_names)
-        ggplot_names = sorted(n for n in (candidates - used) if n in _hea_ggplot_exports())
+        ggplot_names = sorted(
+            n for n in (candidates - used) if n in _hea_ggplot_exports()
+        )
         used |= set(ggplot_names)
         # Submodules used as Attribute roots: ``selectors.starts_with``,
         # ``pl.col``, etc. ``from hea import selectors`` resolves the root.
@@ -490,53 +521,71 @@ class Translator:
             # Translator emits ``np.array([...])`` for all-numeric ``c(...)``.
             out.append(P.Import(names=[P.alias(name="numpy", asname="np")]))
         if hea_names or submod_names:
-            out.append(P.ImportFrom(
-                module="hea",
-                names=[P.alias(name=n, asname=None) for n in (hea_names + submod_names)],
-                level=0,
-            ))
+            out.append(
+                P.ImportFrom(
+                    module="hea",
+                    names=[
+                        P.alias(name=n, asname=None) for n in (hea_names + submod_names)
+                    ],
+                    level=0,
+                )
+            )
         if r_names:
-            out.append(P.ImportFrom(
-                module="hea.R",
-                names=[P.alias(name=n, asname=None) for n in r_names],
-                level=0,
-            ))
+            out.append(
+                P.ImportFrom(
+                    module="hea.R",
+                    names=[P.alias(name=n, asname=None) for n in r_names],
+                    level=0,
+                )
+            )
         if tidy_names:
-            out.append(P.ImportFrom(
-                module="hea.tidy",
-                names=[P.alias(name=n, asname=None) for n in tidy_names],
-                level=0,
-            ))
+            out.append(
+                P.ImportFrom(
+                    module="hea.tidy",
+                    names=[P.alias(name=n, asname=None) for n in tidy_names],
+                    level=0,
+                )
+            )
         if models_names:
-            out.append(P.ImportFrom(
-                module="hea.models",
-                names=[P.alias(name=n, asname=None) for n in models_names],
-                level=0,
-            ))
+            out.append(
+                P.ImportFrom(
+                    module="hea.models",
+                    names=[P.alias(name=n, asname=None) for n in models_names],
+                    level=0,
+                )
+            )
         if family_names:
-            out.append(P.ImportFrom(
-                module="hea.family",
-                names=[P.alias(name=n, asname=None) for n in family_names],
-                level=0,
-            ))
+            out.append(
+                P.ImportFrom(
+                    module="hea.family",
+                    names=[P.alias(name=n, asname=None) for n in family_names],
+                    level=0,
+                )
+            )
         if io_names:
-            out.append(P.ImportFrom(
-                module="hea.io",
-                names=[P.alias(name=n, asname=None) for n in io_names],
-                level=0,
-            ))
+            out.append(
+                P.ImportFrom(
+                    module="hea.io",
+                    names=[P.alias(name=n, asname=None) for n in io_names],
+                    level=0,
+                )
+            )
         if plot_names:
-            out.append(P.ImportFrom(
-                module="hea.plot",
-                names=[P.alias(name=n, asname=None) for n in plot_names],
-                level=0,
-            ))
+            out.append(
+                P.ImportFrom(
+                    module="hea.plot",
+                    names=[P.alias(name=n, asname=None) for n in plot_names],
+                    level=0,
+                )
+            )
         if ggplot_names:
-            out.append(P.ImportFrom(
-                module="hea.ggplot",
-                names=[P.alias(name=n, asname=None) for n in ggplot_names],
-                level=0,
-            ))
+            out.append(
+                P.ImportFrom(
+                    module="hea.ggplot",
+                    names=[P.alias(name=n, asname=None) for n in ggplot_names],
+                    level=0,
+                )
+            )
         return out
 
     def _maybe_smart_data_call(self, stmt: R.Node) -> Optional[P.AST]:
@@ -654,9 +703,7 @@ class Translator:
         """Dispatch on R AST node type."""
         method = getattr(self, "_visit_" + type(node).__name__, None)
         if method is None:
-            raise RTranslateError(
-                f"no translator for {type(node).__name__}", node
-            )
+            raise RTranslateError(f"no translator for {type(node).__name__}", node)
         return method(node)
 
     # -- literals ----------------------------------------------------------
@@ -667,7 +714,7 @@ class Translator:
         # polars coerces literals on comparison either way. Users wanting
         # explicit double semantics can write ``1L`` (which becomes IntLit
         # — also emitted as int) or just any non-integer literal.
-        if n.value.is_integer() and -2**53 < n.value < 2**53:
+        if n.value.is_integer() and -(2**53) < n.value < 2**53:
             return P.Constant(value=int(n.value))
         return P.Constant(value=n.value)
 
@@ -761,10 +808,13 @@ class Translator:
                     and operand.func.id == "cols_between"
                 ):
                     return P.UnaryOp(P.Invert(), operand)
-                return P.UnaryOp(P.Invert(), _call(
-                    _attr(_name("selectors"), "by_name"),
-                    [operand],
-                ))
+                return P.UnaryOp(
+                    P.Invert(),
+                    _call(
+                        _attr(_name("selectors"), "by_name"),
+                        [operand],
+                    ),
+                )
             return P.UnaryOp(P.Not(), operand)
         if n.op == "?":
             # Help operator — rare. Translate to a comment placeholder.
@@ -924,7 +974,11 @@ class Translator:
             if isinstance(arg, R.Identifier) and arg.name == ".":
                 new_args.append(lhs)
                 placeholder_found = True
-            elif isinstance(arg, R.NamedArg) and isinstance(arg.value, R.Identifier) and arg.value.name == ".":
+            elif (
+                isinstance(arg, R.NamedArg)
+                and isinstance(arg.value, R.Identifier)
+                and arg.value.name == "."
+            ):
                 new_args.append(R.NamedArg(arg.name, lhs, arg.span))
                 placeholder_found = True
             else:
@@ -1315,7 +1369,9 @@ class Translator:
             fn_arg,
         )
 
-    def _emit_helper_call(self, helper: Func, r_name: str, args: tuple[R.Node, ...]) -> P.AST:
+    def _emit_helper_call(
+        self, helper: Func, r_name: str, args: tuple[R.Node, ...]
+    ) -> P.AST:
         """Translate one of the registered helpers (mean, desc, n, …).
 
         ``form="method"``  — only used in EXPR slot; emits
@@ -1356,7 +1412,11 @@ class Translator:
             return self._emit_quote_call(args)
 
         # Override arg slot if registry specifies one.
-        arg_slot_ctx = self.nse.enter(helper.arg_slot) if helper.arg_slot is not None else _null_ctx()
+        arg_slot_ctx = (
+            self.nse.enter(helper.arg_slot)
+            if helper.arg_slot is not None
+            else _null_ctx()
+        )
 
         if helper.form == "method" and self.nse.is_expr() and args:
             # ``mean(x, na.rm = TRUE)`` → ``col("x").mean()``.
@@ -1388,7 +1448,8 @@ class Translator:
         # walked at all (the value may itself reference R-only names).
         if helper.drop_kwargs:
             args = tuple(
-                a for a in args
+                a
+                for a in args
                 if not (isinstance(a, R.NamedArg) and a.name in helper.drop_kwargs)
             )
 
@@ -1425,7 +1486,9 @@ class Translator:
         finally:
             self._with_stack.pop()
 
-    _LM_LIKE: frozenset[str] = frozenset({"lm", "glm", "gam", "bam", "gmm", "lmer", "glmer"})
+    _LM_LIKE: frozenset[str] = frozenset(
+        {"lm", "glm", "gam", "bam", "gmm", "lmer", "glmer"}
+    )
     # lme4 exposes two entry points (lmer / glmer); hea folds both into one
     # ``gmm`` class that dispatches lmer-vs-glmer on ``family`` internally.
     # Reverse direction in ``py_to_r._emit_gmm_call``.
@@ -1449,8 +1512,7 @@ class Translator:
 
         positional = [a for a in args if not isinstance(a, R.NamedArg)]
         has_data_kwarg = any(
-            isinstance(a, R.NamedArg) and a.name in ("data", ".data")
-            for a in args
+            isinstance(a, R.NamedArg) and a.name in ("data", ".data") for a in args
         )
         # Second positional arg fills the ``data`` slot in R.
         if has_data_kwarg or len(positional) >= 2:
@@ -1539,16 +1601,20 @@ class Translator:
                 if isinstance(arg, R.Tilde):
                     if arg.lhs is None:
                         # ``~ value`` form — degenerate; treat as the default branch.
-                        kwargs.append(P.keyword(
-                            arg="default", value=self._visit(arg.rhs)
-                        ))
+                        kwargs.append(
+                            P.keyword(arg="default", value=self._visit(arg.rhs))
+                        )
                         continue
                     cond = self._visit(arg.lhs)
                     value = self._visit(arg.rhs)
                     tuples.append(P.Tuple(elts=[cond, value], ctx=P.Load()))
                 elif isinstance(arg, R.NamedArg):
                     alias = resolve_kwarg(arg.name)
-                    slot_ctx = self.nse.enter(alias.value_slot) if alias.value_slot is not None else _null_ctx()
+                    slot_ctx = (
+                        self.nse.enter(alias.value_slot)
+                        if alias.value_slot is not None
+                        else _null_ctx()
+                    )
                     with slot_ctx:
                         value = self._visit(arg.value)
                     kwargs.append(P.keyword(arg=alias.py_name, value=value))
@@ -1563,16 +1629,16 @@ class Translator:
     # ``selectors.<name>()``.
     _WHERE_PREDICATE_MAP: dict[str, str] = {
         "is.character": "string",
-        "is.string":    "string",
-        "is.numeric":   "numeric",
-        "is.double":    "float",
-        "is.integer":   "integer",
-        "is.logical":   "boolean",
-        "is.boolean":   "boolean",
-        "is.factor":    "categorical",
-        "is.Date":      "date",
-        "is.POSIXct":   "datetime",
-        "is.POSIXlt":   "datetime",
+        "is.string": "string",
+        "is.numeric": "numeric",
+        "is.double": "float",
+        "is.integer": "integer",
+        "is.logical": "boolean",
+        "is.boolean": "boolean",
+        "is.factor": "categorical",
+        "is.Date": "date",
+        "is.POSIXct": "datetime",
+        "is.POSIXlt": "datetime",
     }
 
     def _emit_quote_call(self, args: tuple[R.Node, ...]) -> P.AST:
@@ -1760,7 +1826,9 @@ class Translator:
 
     # -- args --------------------------------------------------------------
 
-    def _translate_args(self, args: tuple[R.Node, ...]) -> tuple[list[P.AST], list[P.keyword]]:
+    def _translate_args(
+        self, args: tuple[R.Node, ...]
+    ) -> tuple[list[P.AST], list[P.keyword]]:
         """Walk an R argument list, splitting positional from named.
 
         Named-arg name is resolved via :func:`resolve_kwarg` — known
@@ -1782,7 +1850,7 @@ class Translator:
                 py_name = resolve_kwarg(arg.name).py_name
                 name_counts[py_name] = name_counts.get(py_name, 0) + 1
         # Dict of merged kwargs we'll emit as a single ``**{}`` at the end.
-        merged_keys: list[str] = []      # insertion order
+        merged_keys: list[str] = []  # insertion order
         merged_values: dict[str, list[P.AST]] = {}
         for arg in args:
             if isinstance(arg, R.NamedArg):
@@ -1819,10 +1887,12 @@ class Translator:
                     # shape (and is generally less lossy than picking the
                     # last value as Python would do for plain dup kwargs).
                     dict_values.append(P.List(elts=vals, ctx=P.Load()))
-            py_kwargs.append(P.keyword(
-                arg=None,
-                value=P.Dict(keys=dict_keys, values=dict_values),
-            ))
+            py_kwargs.append(
+                P.keyword(
+                    arg=None,
+                    value=P.Dict(keys=dict_keys, values=dict_values),
+                )
+            )
         return py_args, py_kwargs
 
     # -- assignment & top-level control flow -------------------------------
@@ -1869,6 +1939,7 @@ class Translator:
         ``vec[a-1:b]`` so 0-based positional indexing on the hea side
         selects the same elements R's 1-based ``a:b`` would.
         """
+
         def _arg(a):
             if isinstance(a, R.MissingArg):
                 return P.Slice(lower=None, upper=None, step=None)
@@ -1887,14 +1958,15 @@ class Translator:
                 and a.args
                 and all(
                     (isinstance(x, R.IntLit) and x.value > 0)
-                    or (isinstance(x, R.NumLit) and x.value == int(x.value) and x.value > 0)
+                    or (
+                        isinstance(x, R.NumLit)
+                        and x.value == int(x.value)
+                        and x.value > 0
+                    )
                     for x in a.args
                 )
             ):
-                elts = [
-                    P.Constant(value=int(x.value) - 1)
-                    for x in a.args
-                ]
+                elts = [P.Constant(value=int(x.value) - 1) for x in a.args]
                 return P.List(elts=elts, ctx=P.Load())
             # ``vec[expr + 1]`` — R's idiom for "shift 0-based-arithmetic
             # result to 1-based index" (e.g. ``letters[dm + 1]`` where
@@ -1948,6 +2020,7 @@ class Translator:
     def _visit_DoubleSubscript(self, n: R.DoubleSubscript) -> P.AST:
         """``x[[i]]`` — translate to ``x[i]`` (polars has no double-bracket
         distinction; both flatten to single-element selection)."""
+
         def _arg(a):
             if isinstance(a, R.MissingArg):
                 return P.Slice(lower=None, upper=None, step=None)
@@ -1955,8 +2028,11 @@ class Translator:
 
         with self.nse.enter(Slot.NONE):
             target = self._visit(n.target)
-            slice_ = _arg(n.args[0]) if len(n.args) == 1 else \
-                P.Tuple(elts=[_arg(a) for a in n.args], ctx=P.Load())
+            slice_ = (
+                _arg(n.args[0])
+                if len(n.args) == 1
+                else P.Tuple(elts=[_arg(a) for a in n.args], ctx=P.Load())
+            )
         return P.Subscript(value=target, slice=slice_, ctx=P.Load())
 
     def _visit_Dollar(self, n: R.Dollar) -> P.AST:
@@ -2002,7 +2078,11 @@ class Translator:
         with self.nse.enter(self.nse.current):
             cond = self._visit(n.cond)
             then = self._visit(n.then)
-            otherwise = self._visit(n.otherwise) if n.otherwise is not None else P.Constant(None)
+            otherwise = (
+                self._visit(n.otherwise)
+                if n.otherwise is not None
+                else P.Constant(None)
+            )
         return P.IfExp(test=cond, body=then, orelse=otherwise)
 
     def _visit_For(self, n: R.For) -> P.stmt:
@@ -2091,7 +2171,9 @@ class Translator:
             args=[P.arg(arg=p.name) for p in n.params],
             kwonlyargs=[],
             kw_defaults=[],
-            defaults=[self._visit(p.default) for p in n.params if p.default is not None],
+            defaults=[
+                self._visit(p.default) for p in n.params if p.default is not None
+            ],
             vararg=None,
             kwarg=None,
         )
@@ -2112,7 +2194,11 @@ def _contains_col_call(node: P.AST) -> bool:
     that need ``with_columns`` rather than a literal dict-value slot.
     """
     for sub in P.walk(node):
-        if isinstance(sub, P.Call) and isinstance(sub.func, P.Name) and sub.func.id == "col":
+        if (
+            isinstance(sub, P.Call)
+            and isinstance(sub.func, P.Name)
+            and sub.func.id == "col"
+        ):
             return True
     return False
 
@@ -2150,9 +2236,8 @@ def _to_py_identifier(name: str) -> str:
 def _is_pos_int_lit(x: R.Node) -> bool:
     """True for an R positive integer literal — ``3L`` (IntLit) or a whole
     double ``3`` (NumLit). Used to statically shift ``slice`` positions."""
-    return (
-        (isinstance(x, R.IntLit) and x.value > 0)
-        or (isinstance(x, R.NumLit) and x.value == int(x.value) and x.value > 0)
+    return (isinstance(x, R.IntLit) and x.value > 0) or (
+        isinstance(x, R.NumLit) and x.value == int(x.value) and x.value > 0
     )
 
 
@@ -2164,7 +2249,9 @@ def _attr(value: P.AST, attr: str) -> P.Attribute:
     return P.Attribute(value=value, attr=attr, ctx=P.Load())
 
 
-def _call(func: P.AST, args: list[P.AST] | None = None, kwargs: list[P.keyword] | None = None) -> P.Call:
+def _call(
+    func: P.AST, args: list[P.AST] | None = None, kwargs: list[P.keyword] | None = None
+) -> P.Call:
     return P.Call(func=func, args=args or [], keywords=kwargs or [])
 
 
@@ -2179,9 +2266,13 @@ def _dotted_name(qualified: str) -> P.AST:
 
 _LIBRARY_CALL_NAMES: frozenset[str] = frozenset({"library", "require"})
 
-_NOOP_CALL_NAMES: frozenset[str] = frozenset({
-    "suppressMessages", "suppressWarnings", "suppressPackageStartupMessages",
-})
+_NOOP_CALL_NAMES: frozenset[str] = frozenset(
+    {
+        "suppressMessages",
+        "suppressWarnings",
+        "suppressPackageStartupMessages",
+    }
+)
 
 
 def _is_library_call(node) -> bool:
@@ -2272,6 +2363,7 @@ def _first_python_keyword_call(node: R.Node) -> Optional[str]:
     excluded here so it isn't flagged as a gap.
     """
     import keyword
+
     return _first_matching_call(
         node,
         lambda name: keyword.iskeyword(name) and name != "with",
@@ -2364,7 +2456,9 @@ def _extract_col_names(cols_arg) -> list[str]:
     )
 
 
-def _substitute_identifier(node: R.Node, param_name: str, replacement: R.Identifier) -> R.Node:
+def _substitute_identifier(
+    node: R.Node, param_name: str, replacement: R.Identifier
+) -> R.Node:
     """Recursively replace ``Identifier(name=param_name)`` with ``replacement``.
 
     Walks every field of every dataclass node, transforming tuples and
@@ -2381,7 +2475,9 @@ def _substitute_identifier(node: R.Node, param_name: str, replacement: R.Identif
     for f in fields(node):
         v = getattr(node, f.name)
         if isinstance(v, tuple) and v and is_dataclass(v[0]):
-            new_kwargs[f.name] = tuple(_substitute_identifier(x, param_name, replacement) for x in v)
+            new_kwargs[f.name] = tuple(
+                _substitute_identifier(x, param_name, replacement) for x in v
+            )
         elif is_dataclass(v):
             new_kwargs[f.name] = _substitute_identifier(v, param_name, replacement)
         else:
@@ -2413,7 +2509,11 @@ def _unparse_for_plotmath(node: R.Node) -> str:
     if isinstance(node, R.Subscript):
         # ``x[i]`` → ``x[i]`` (R plotmath subscript syntax).
         base = _unparse_for_plotmath(node.target)
-        idx = ", ".join(_unparse_for_plotmath(a) for a in node.args if not isinstance(a, R.MissingArg))
+        idx = ", ".join(
+            _unparse_for_plotmath(a)
+            for a in node.args
+            if not isinstance(a, R.MissingArg)
+        )
         return f"{base}[{idx}]"
     if isinstance(node, R.Call):
         func_text = _unparse_for_plotmath(node.func)

@@ -144,7 +144,14 @@ fn wprob(w: f64, rr: f64, cc: f64) -> f64 {
     pr_w
 }
 
-pub(crate) fn ptukey_scalar(q: f64, rr: f64, cc: f64, df: f64, lower_tail: bool, log_p: bool) -> f64 {
+pub(crate) fn ptukey_scalar(
+    q: f64,
+    rr: f64,
+    cc: f64,
+    df: f64,
+    lower_tail: bool,
+    log_p: bool,
+) -> f64 {
     let nlegq = 16;
     let ihalfq = 8;
     let eps1 = -30.0;
@@ -269,7 +276,14 @@ fn qtukey_qinv(p: f64, c: f64, v: f64) -> f64 {
     t * rfma(q, (c - 1.0).ln(), c5)
 }
 
-pub(crate) fn qtukey_scalar(p: f64, rr: f64, cc: f64, df: f64, lower_tail: bool, log_p: bool) -> f64 {
+pub(crate) fn qtukey_scalar(
+    p: f64,
+    rr: f64,
+    cc: f64,
+    df: f64,
+    lower_tail: bool,
+    log_p: bool,
+) -> f64 {
     let eps = 0.0001;
     let maxiter = 50;
 
@@ -314,7 +328,11 @@ pub(crate) fn qtukey_scalar(p: f64, rr: f64, cc: f64, df: f64, lower_tail: bool,
 
     let x0 = qtukey_qinv(p, cc, df);
     let mut valx0 = ptukey_scalar(x0, rr, cc, df, true, false) - p;
-    let mut x1 = if valx0 > 0.0 { (x0 - 1.0).max(0.0) } else { x0 + 1.0 };
+    let mut x1 = if valx0 > 0.0 {
+        (x0 - 1.0).max(0.0)
+    } else {
+        x0 + 1.0
+    };
     let mut valx1 = ptukey_scalar(x1, rr, cc, df, true, false) - p;
     let mut x0 = x0;
 

@@ -97,10 +97,13 @@ class ScaleContinuous(Scale):
         # as 10, 100, 1000) — wrong.
         if isinstance(self.breaks, str) and self.breaks == "default":
             tick_spec = self.transform.tick_positions_and_labels(
-                *(view_limits if view_limits is not None
-                  else self._expanded_break_range()
-                  if self.range_ is not None
-                  else (ax.get_xlim() if axis == "x" else ax.get_ylim()))
+                *(
+                    view_limits
+                    if view_limits is not None
+                    else self._expanded_break_range()
+                    if self.range_ is not None
+                    else (ax.get_xlim() if axis == "x" else ax.get_ylim())
+                )
             )
             if tick_spec is not None:
                 positions, labels = tick_spec
@@ -153,11 +156,15 @@ class ScaleContinuous(Scale):
                 tick_positions = np.asarray(self.transform.transform(breaks))
             except Exception:
                 tick_positions = np.asarray(breaks)
-            mask = (tick_positions >= break_range[0]) & (tick_positions <= break_range[1])
+            mask = (tick_positions >= break_range[0]) & (
+                tick_positions <= break_range[1]
+            )
             tick_positions = tick_positions[mask]
             labels = [labels[i] for i in range(len(labels)) if mask[i]]
         else:
-            mask = (np.asarray(breaks) >= break_range[0]) & (np.asarray(breaks) <= break_range[1])
+            mask = (np.asarray(breaks) >= break_range[0]) & (
+                np.asarray(breaks) <= break_range[1]
+            )
             tick_positions = np.asarray(breaks)[mask]
             labels = [labels[i] for i in range(len(labels)) if mask[i]]
         if axis == "x":
@@ -236,19 +243,39 @@ class ScaleContinuous(Scale):
         return [str(x) for x in self.labels]
 
 
-def scale_x_continuous(*, name=_NAME_MISSING, breaks="default", labels="default",
-                       limits=None, expand=(0.05, 0.0)):
+def scale_x_continuous(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    expand=(0.05, 0.0),
+):
     return ScaleContinuous(
-        aesthetics=("x",), name=name, breaks=breaks, labels=labels,
-        limits=limits, expand=expand,
+        aesthetics=("x",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        expand=expand,
     )
 
 
-def scale_y_continuous(*, name=_NAME_MISSING, breaks="default", labels="default",
-                       limits=None, expand=(0.05, 0.0)):
+def scale_y_continuous(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    expand=(0.05, 0.0),
+):
     return ScaleContinuous(
-        aesthetics=("y",), name=name, breaks=breaks, labels=labels,
-        limits=limits, expand=expand,
+        aesthetics=("y",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        expand=expand,
     )
 
 

@@ -55,7 +55,10 @@ from ..formula import (
 )
 from .lm import _apply_subset, _label_top_n, _lowess, _qq_plot
 from ..utils import (
-    format_df, format_pval, format_signif, format_signif_jointly,
+    format_df,
+    format_pval,
+    format_signif,
+    format_signif_jointly,
     significance_code,
 )
 
@@ -360,11 +363,11 @@ def _sparse_Lt_spec(
         theta_pos_parts.append((col[nz_rows] - 1).astype(np.int64))
         indptr[j + 1] = indptr[j] + nz_rows.size
     indices = (
-        np.concatenate(indices_parts) if indices_parts
-        else np.zeros(0, dtype=np.int32)
+        np.concatenate(indices_parts) if indices_parts else np.zeros(0, dtype=np.int32)
     )
     theta_pos = (
-        np.concatenate(theta_pos_parts) if theta_pos_parts
+        np.concatenate(theta_pos_parts)
+        if theta_pos_parts
         else np.zeros(0, dtype=np.int64)
     )
     return theta_pos, indices, indptr
@@ -372,10 +375,7 @@ def _sparse_Lt_spec(
 
 def _bar_sizes(cnms: dict) -> list[int]:
     """Component count ``c`` per bar (1 for scalar bars, ≥ 2 for vector)."""
-    return [
-        len(names) if isinstance(names, list) else 1
-        for names in cnms.values()
-    ]
+    return [len(names) if isinstance(names, list) else 1 for names in cnms.values()]
 
 
 def _theta_diag_idx(bar_sizes: list[int]) -> list[int]:
@@ -506,7 +506,7 @@ def _per_bar_relative_cov(theta: np.ndarray, bar_sizes: list[int]) -> list[np.nd
     for c in bar_sizes:
         Lt = np.zeros((c, c))
         iu, ju = np.triu_indices(c)
-        Lt[iu, ju] = theta[off:off + iu.size]
+        Lt[iu, ju] = theta[off : off + iu.size]
         L = Lt.T
         blocks.append(L @ L.T)
         off += c * (c + 1) // 2
@@ -561,8 +561,16 @@ class _GlmResponse:
     """
 
     __slots__ = (
-        "family", "y", "weights", "offset",
-        "eta", "mu", "sqrt_x_wt", "sqrt_r_wt", "wt_res", "wrss",
+        "family",
+        "y",
+        "weights",
+        "offset",
+        "eta",
+        "mu",
+        "sqrt_x_wt",
+        "sqrt_r_wt",
+        "wt_res",
+        "wrss",
         "log_det_weights",
     )
 
@@ -626,9 +634,7 @@ class _GlmResponse:
 
         # log Σ w[w>0] — Jacobian term for the lmer REML/ML criterion.
         good = weights > 0
-        log_det_weights = (
-            float(np.sum(np.log(weights[good]))) if np.any(good) else 0.0
-        )
+        log_det_weights = float(np.sum(np.log(weights[good]))) if np.any(good) else 0.0
 
         # Seed mutable state — start at all-zeros, then call update_mu /
         # update_weights to populate consistently.
@@ -743,13 +749,19 @@ class _GlmResponse:
         :class:`Binomial` and ignored by other families, so we pass an
         all-ones array for compatibility with the family signature.
         """
-        return float(self.family.aic(
-            self.y, self.mu, self.deviance(),
-            self.weights, np.ones(len(self.y)),
-        ))
+        return float(
+            self.family.aic(
+                self.y,
+                self.mu,
+                self.deviance(),
+                self.weights,
+                np.ones(len(self.y)),
+            )
+        )
 
-    def laplace(self, log_det_l_sq: float, log_det_rx_sq: float,
-                sqr_len_u: float) -> float:
+    def laplace(
+        self, log_det_l_sq: float, log_det_rx_sq: float, sqr_len_u: float
+    ) -> float:
         """GLMM Laplace approximation to ``-2 log L_marginal``.
 
         Port of ``glmResp::Laplace`` (respModule.cpp:161-163):
@@ -793,25 +805,34 @@ class _PredState:
 
     __slots__ = (
         # Read-only design pieces ----------------------------------------
-        "X",                 # (n, p) fixed-effect design
-        "Z_sp",              # (n, q) sparse Z (CSC)
-        "n", "p", "q",
+        "X",  # (n, p) fixed-effect design
+        "Z_sp",  # (n, q) sparse Z (CSC)
+        "n",
+        "p",
+        "q",
         # Λᵀ template (built once from ReTerms, structure is fixed) ------
-        "_lt_theta_pos", "_lt_indices", "_lt_indptr", "_lt_shape",
+        "_lt_theta_pos",
+        "_lt_indices",
+        "_lt_indptr",
+        "_lt_shape",
         # Persistent state ----------------------------------------------
-        "theta", "beta0", "u0", "delb", "delu",
+        "theta",
+        "beta0",
+        "u0",
+        "delb",
+        "delu",
         # Current weighted state (set by update_xwts_and_decomp) --------
         "sqrt_x_wt",
-        "lambdat_sp",        # current Λᵀ as CSC (built by set_theta)
-        "V",                 # (n, p) = diag(sqrt_x_wt) · X
-        "VtV",               # (p, p) = V'·V
-        "lamt_ut",           # (q, n) sparse = Λᵀ · √W · Z' (i.e. LamtUt)
-        "RZX_unfactored",    # (q, p) = lamt_ut · V
-        "M_inv_RZX",         # (q, p) = M⁻¹ · RZX_unfactored
-        "RX",                # (p, p) lower Cholesky of (V'V − RZX'·M⁻¹·RZX)
-        "log_det_l_sq",      # 2 log|L| from CHOLMOD
-        "log_det_rx_sq",     # 2 log|RX|
-        "chol_factor",       # CHOLMOD factor of M = LamtUt · LamtUt' + I
+        "lambdat_sp",  # current Λᵀ as CSC (built by set_theta)
+        "V",  # (n, p) = diag(sqrt_x_wt) · X
+        "VtV",  # (p, p) = V'·V
+        "lamt_ut",  # (q, n) sparse = Λᵀ · √W · Z' (i.e. LamtUt)
+        "RZX_unfactored",  # (q, p) = lamt_ut · V
+        "M_inv_RZX",  # (q, p) = M⁻¹ · RZX_unfactored
+        "RX",  # (p, p) lower Cholesky of (V'V − RZX'·M⁻¹·RZX)
+        "log_det_l_sq",  # 2 log|L| from CHOLMOD
+        "log_det_rx_sq",  # 2 log|RX|
+        "chol_factor",  # CHOLMOD factor of M = LamtUt · LamtUt' + I
         # Cached identity for M assembly (built once) -------------------
         "_eye_q_sp",
     )
@@ -820,9 +841,7 @@ class _PredState:
         n, p = X.shape
         q = Z_sp.shape[1]
         if Z_sp.shape[0] != n:
-            raise ValueError(
-                f"Z rows ({Z_sp.shape[0]}) don't match X rows ({n})"
-            )
+            raise ValueError(f"Z rows ({Z_sp.shape[0]}) don't match X rows ({n})")
 
         self.X = X
         self.Z_sp = Z_sp
@@ -846,7 +865,7 @@ class _PredState:
         self.sqrt_x_wt = np.zeros(n)
         self.V = np.zeros((n, p))
         self.VtV = np.zeros((p, p))
-        self.lamt_ut = None       # filled by set_theta + xwts
+        self.lamt_ut = None  # filled by set_theta + xwts
         self.RZX_unfactored = np.zeros((q, p))
         self.M_inv_RZX = np.zeros((q, p))
         self.RX = np.zeros((p, p))
@@ -871,7 +890,8 @@ class _PredState:
         data = np.asarray(theta, dtype=float)[self._lt_theta_pos]
         return csc_array(
             (data, self._lt_indices, self._lt_indptr),
-            shape=self._lt_shape, copy=False,
+            shape=self._lt_shape,
+            copy=False,
         )
 
     # ------- mutators --------------------------------------------------
@@ -937,7 +957,9 @@ class _PredState:
         if self.p > 0:
             self.M_inv_RZX = self.chol_factor.solve(self.RZX_unfactored)
             VtV_schur = self.VtV - np.einsum(
-                "ij,ik->jk", self.RZX_unfactored, self.M_inv_RZX,
+                "ij,ik->jk",
+                self.RZX_unfactored,
+                self.M_inv_RZX,
             )
             # chol returns lower-triangular L with VtV_schur = L · L'
             try:
@@ -1065,7 +1087,10 @@ class _PredState:
 
 
 def _internal_glmer_wrk_iter(
-    pred: _PredState, resp: _GlmResponse, *, u_only: bool,
+    pred: _PredState,
+    resp: _GlmResponse,
+    *,
+    u_only: bool,
 ) -> float:
     """One PIRLS iteration — port of ``internal_glmerWrkIter`` (external.cpp:268-295).
 
@@ -1214,8 +1239,9 @@ def _gh_rule(ord: int) -> np.ndarray:
     return np.column_stack([z, w, ldnorm])
 
 
-def _devc_col(fac: np.ndarray, u: np.ndarray, dev_res: np.ndarray,
-              n_levels: int) -> np.ndarray:
+def _devc_col(
+    fac: np.ndarray, u: np.ndarray, dev_res: np.ndarray, n_levels: int
+) -> np.ndarray:
     """Per-level ``u² + Σ devResid`` — port of ``devcCol`` (external.cpp:398-406).
 
     ``fac`` is the 0-based grouping-factor code per observation (length n);
@@ -1229,9 +1255,13 @@ def _devc_col(fac: np.ndarray, u: np.ndarray, dev_res: np.ndarray,
     return ans
 
 
-def _glmm_agq_deviance(pred: "_PredState", resp: "_GlmResponse",
-                       gqmat: np.ndarray, fac: np.ndarray,
-                       n_levels: int) -> float:
+def _glmm_agq_deviance(
+    pred: "_PredState",
+    resp: "_GlmResponse",
+    gqmat: np.ndarray,
+    fac: np.ndarray,
+    n_levels: int,
+) -> float:
     """Adaptive Gauss-Hermite ``-2 log L`` for a single scalar RE.
 
     Port of ``glmerAGQ`` (external.cpp:414-460). Assumes ``pred``/``resp`` are
@@ -1250,9 +1280,7 @@ def _glmm_agq_deviance(pred: "_PredState", resp: "_GlmResponse",
     """
     sqrt2pi = np.sqrt(2.0 * np.pi)
     devc0 = _devc_col(fac, pred.u(1.0), resp.deviance_residuals(), n_levels)
-    m_diag = np.asarray(
-        pred.lamt_ut.multiply(pred.lamt_ut).sum(axis=1)
-    ).ravel() + 1.0
+    m_diag = np.asarray(pred.lamt_ut.multiply(pred.lamt_ut).sum(axis=1)).ravel() + 1.0
     sd = 1.0 / np.sqrt(m_diag)
 
     u0_saved = pred.u0.copy()
@@ -1265,8 +1293,7 @@ def _glmm_agq_deviance(pred: "_PredState", resp: "_GlmResponse",
         else:
             pred.u0 = zknot * sd
             resp.update_mu(pred.lin_pred(1.0))
-            devc = _devc_col(fac, pred.u(1.0), resp.deviance_residuals(),
-                             n_levels)
+            devc = _devc_col(fac, pred.u(1.0), resp.deviance_residuals(), n_levels)
             mult += np.exp(-0.5 * (devc - devc0) - ldnorm) * w / sqrt2pi
     # Restore the conditional-mode state (u0 == 0 ⇒ u(1) == mode).
     pred.u0 = u0_saved
@@ -1352,20 +1379,27 @@ def _glmm_devfun_factory(
     u_only = nagq > 0
 
     if nagq == 0:
+
         def devfun_theta(theta: np.ndarray) -> float:
             resp.update_mu(lp0)
             pred.set_theta(np.asarray(theta, dtype=float))
             _pwrss_update(
-                pred, resp,
-                u_only=u_only, tol=tol_pwrss,
-                maxit=maxit_pwrss, verbose=verbose,
+                pred,
+                resp,
+                u_only=u_only,
+                tol=tol_pwrss,
+                maxit=maxit_pwrss,
+                verbose=verbose,
             )
             # Refresh weights once more so post-fit reads see a state
             # consistent with the final μ (mkdevfun lmer.R:337).
             resp.update_weights()
             return resp.laplace(
-                pred.log_det_l_sq, pred.log_det_rx_sq, pred.sqr_l_u(1.0),
+                pred.log_det_l_sq,
+                pred.log_det_rx_sq,
+                pred.sqr_l_u(1.0),
             )
+
         return devfun_theta
 
     # nagq > 0 — Stage 1 closure. Take the current resp.offset as
@@ -1402,16 +1436,22 @@ def _glmm_devfun_factory(
             resp.offset = base_offset + pred.X @ spars
         pred.set_theta(theta)
         _pwrss_update(
-            pred, resp,
-            u_only=u_only, tol=tol_pwrss,
-            maxit=maxit_pwrss, verbose=verbose,
+            pred,
+            resp,
+            u_only=u_only,
+            tol=tol_pwrss,
+            maxit=maxit_pwrss,
+            verbose=verbose,
         )
         resp.update_weights()
         if is_agq:
             return _glmm_agq_deviance(pred, resp, gqmat, fac, n_levels)
         return resp.laplace(
-            pred.log_det_l_sq, pred.log_det_rx_sq, pred.sqr_l_u(1.0),
+            pred.log_det_l_sq,
+            pred.log_det_rx_sq,
+            pred.sqr_l_u(1.0),
         )
+
     return devfun_theta_beta
 
 
@@ -1467,6 +1507,7 @@ def _glmm_devfun_factory(
 # - ``/tmp/minqa_src/minqa/src/*.f`` — F77 source (minqa 1.2.8).
 # - Powell, M. J. D. (2009), "The BOBYQA algorithm for bound constrained
 #   optimization without derivatives", DAMTP technical report 2009/NA06.
+
 
 def _bobyqa_update(n, npt, bmat, zmat, ndim, vlag, beta, denom, knew, w):
     """Update BMAT and ZMAT for the new KNEW-th interpolation point.
@@ -1530,8 +1571,27 @@ def _bobyqa_update(n, npt, bmat, zmat, ndim, vlag, beta, denom, knew, w):
                 bmat[jp, i - npt] = bmat[i, j]
 
 
-def _bobyqa_prelim(calfun, n, npt, x, xl, xu, rhobeg, maxfun,
-                   xbase, xpt, fval, gopt, hq, pq, bmat, zmat, ndim, sl, su):
+def _bobyqa_prelim(
+    calfun,
+    n,
+    npt,
+    x,
+    xl,
+    xu,
+    rhobeg,
+    maxfun,
+    xbase,
+    xpt,
+    fval,
+    gopt,
+    hq,
+    pq,
+    bmat,
+    zmat,
+    ndim,
+    sl,
+    su,
+):
     """Initialize XBASE, XPT, FVAL, GOPT, HQ, PQ, BMAT, ZMAT.
 
     Line-by-line port of ``prelim.f``. Maintains NF (number of CALFUN
@@ -1607,7 +1667,7 @@ def _bobyqa_prelim(calfun, n, npt, x, xl, xu, rhobeg, maxfun,
                 x[j] = xl[j]
             if xpt[nf, j] == su[j]:
                 x[j] = xu[j]
-        f = calfun(x[1:n + 1])
+        f = calfun(x[1 : n + 1])
         fval[nf] = f
         if nf == 1:
             fbeg = f
@@ -1660,8 +1720,25 @@ def _bobyqa_prelim(calfun, n, npt, x, xl, xu, rhobeg, maxfun,
     return nf, kopt
 
 
-def _bobyqa_altmov(n, npt, xpt, xopt, bmat, zmat, ndim, sl, su, kopt,
-                   knew, adelt, xnew, xalt, glag, hcol, w):
+def _bobyqa_altmov(
+    n,
+    npt,
+    xpt,
+    xopt,
+    bmat,
+    zmat,
+    ndim,
+    sl,
+    su,
+    kopt,
+    knew,
+    adelt,
+    xnew,
+    xalt,
+    glag,
+    hcol,
+    w,
+):
     """Compute alternative geometry step. Port of ``altmov.f``.
 
     Returns ``(alpha, cauchy)``. Mutates ``xnew``, ``xalt``, ``glag``,
@@ -1893,8 +1970,9 @@ def _bobyqa_altmov(n, npt, xpt, xopt, bmat, zmat, ndim, sl, su, kopt,
         return alpha, cauchy
 
 
-def _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta,
-                   xnew, d, gnew, xbdi, s, hs, hred):
+def _bobyqa_trsbox(
+    n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta, xnew, d, gnew, xbdi, s, hs, hred
+):
     """Trust-region step within bounds. Port of ``trsbox.f``.
 
     Returns ``(dsq, crvmin)``. Mutates ``xnew, d, gnew, xbdi, s, hs, hred``.
@@ -1947,12 +2025,12 @@ def _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta,
     xsav = 0.0
     itermax = 0
 
-    state = 'L20'
+    state = "L20"
     while True:
-        if state == 'L20':
+        if state == "L20":
             beta = ZERO
-            state = 'L30'
-        elif state == 'L30':
+            state = "L30"
+        elif state == "L30":
             stepsq = ZERO
             for i in range(1, n + 1):
                 if xbdi[i] != ZERO:
@@ -1963,16 +2041,16 @@ def _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta,
                     s[i] = beta * s[i] - gnew[i]
                 stepsq = stepsq + s[i] ** 2
             if stepsq == ZERO:
-                state = 'L190'
+                state = "L190"
                 continue
             if beta == ZERO:
                 gredsq = stepsq
                 itermax = iterc + n - nact
             if gredsq * delsq <= 1.0e-4 * qred * qred:
-                state = 'L190'
+                state = "L190"
                 continue
-            state = 'L210'
-        elif state == 'L50':
+            state = "L210"
+        elif state == "L50":
             resid = delsq
             ds = ZERO
             shs = ZERO
@@ -1982,7 +2060,7 @@ def _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta,
                     ds = ds + s[i] * d[i]
                     shs = shs + s[i] * hs[i]
             if resid <= ZERO:
-                state = 'L90'
+                state = "L90"
                 continue
             temp = np.sqrt(stepsq * resid + ds * ds)
             if ds < ZERO:
@@ -2036,30 +2114,30 @@ def _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta,
                     xbdi[iact] = ONEMIN
                 delsq = delsq - d[iact] ** 2
                 if delsq <= ZERO:
-                    state = 'L90'
+                    state = "L90"
                     continue
-                state = 'L20'
+                state = "L20"
                 continue
             #
             # STPLEN < BLEN: more CG steps or return.
             #
             if stplen < blen:
                 if iterc == itermax:
-                    state = 'L190'
+                    state = "L190"
                     continue
                 if sdec <= 0.01 * qred:
-                    state = 'L190'
+                    state = "L190"
                     continue
                 beta = gredsq / ggsav
-                state = 'L30'
+                state = "L30"
                 continue
-            state = 'L90'
-        elif state == 'L90':
+            state = "L90"
+        elif state == "L90":
             crvmin = ZERO
-            state = 'L100'
-        elif state == 'L100':
+            state = "L100"
+        elif state == "L100":
             if nact >= n - 1:
-                state = 'L190'
+                state = "L190"
                 continue
             dredsq = ZERO
             dredg = ZERO
@@ -2073,12 +2151,12 @@ def _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta,
                 else:
                     s[i] = ZERO
             itcsav = iterc
-            state = 'L210'
-        elif state == 'L120':
+            state = "L210"
+        elif state == "L120":
             iterc = iterc + 1
             temp = gredsq * dredsq - dredg * dredg
             if temp <= 1.0e-4 * qred * qred:
-                state = 'L190'
+                state = "L190"
                 continue
             temp = np.sqrt(temp)
             for i in range(1, n + 1):
@@ -2124,10 +2202,10 @@ def _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta,
                             iact = i
                             xsav = ONE
             if jumped_to_100:
-                state = 'L100'
+                state = "L100"
                 continue
-            state = 'L210'
-        elif state == 'L150':
+            state = "L210"
+        elif state == "L150":
             shs = ZERO
             dhs = ZERO
             dhd = ZERO
@@ -2158,7 +2236,7 @@ def _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta,
                     rdnext = rednew
                 redsav = rednew
             if isav == 0:
-                state = 'L190'
+                state = "L190"
                 continue
             if isav < iu:
                 temp = (rdnext - rdprev) / (redmax + redmax - rdprev - rdnext)
@@ -2168,7 +2246,7 @@ def _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta,
             temp = shs + angt * (angt * dhd - dhs - dhs)
             sdec = sth * (angt * dredg - sredg - HALF * sth * temp)
             if sdec <= ZERO:
-                state = 'L190'
+                state = "L190"
                 continue
             #
             # Update GNEW, D, HRED. Fix variable if angle was bound-restricted.
@@ -2186,13 +2264,13 @@ def _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta,
             if iact > 0 and isav == iu:
                 nact = nact + 1
                 xbdi[iact] = xsav
-                state = 'L100'
+                state = "L100"
                 continue
             if sdec > 0.01 * qred:
-                state = 'L120'
+                state = "L120"
                 continue
-            state = 'L190'
-        elif state == 'L190':
+            state = "L190"
+        elif state == "L190":
             dsq = ZERO
             for i in range(1, n + 1):
                 xnew[i] = max(min(xopt[i] + d[i], su[i]), sl[i])
@@ -2203,7 +2281,7 @@ def _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta,
                 d[i] = xnew[i] - xopt[i]
                 dsq = dsq + d[i] ** 2
             return dsq, crvmin
-        elif state == 'L210':
+        elif state == "L210":
             # Multiply S by HQ, store in HS.
             ih = 0
             for j in range(1, n + 1):
@@ -2222,21 +2300,45 @@ def _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su, delta,
                     for i in range(1, n + 1):
                         hs[i] = hs[i] + temp * xpt[k, i]
             if crvmin != ZERO:
-                state = 'L50'
+                state = "L50"
                 continue
             if iterc > itcsav:
-                state = 'L150'
+                state = "L150"
                 continue
             for i in range(1, n + 1):
                 hred[i] = hs[i]
-            state = 'L120'
+            state = "L120"
         else:
             raise RuntimeError(f"trsbox: unknown state {state!r}")
 
 
-def _bobyqa_rescue(calfun, n, npt, xl, xu, maxfun, xbase, xpt, fval,
-                   xopt, gopt, hq, pq, bmat, zmat, ndim, sl, su, nf, delta,
-                   kopt, vlag, ptsaux, ptsid, w):
+def _bobyqa_rescue(
+    calfun,
+    n,
+    npt,
+    xl,
+    xu,
+    maxfun,
+    xbase,
+    xpt,
+    fval,
+    xopt,
+    gopt,
+    hq,
+    pq,
+    bmat,
+    zmat,
+    ndim,
+    sl,
+    su,
+    nf,
+    delta,
+    kopt,
+    vlag,
+    ptsaux,
+    ptsid,
+    w,
+):
     """Rescue ill-conditioned interpolation set. Port of ``rescue.f``.
 
     Returns ``(nf, kopt)`` (nf set to -1 if MAXFUN exhausted).
@@ -2373,9 +2475,28 @@ def _bobyqa_rescue(calfun, n, npt, xl, xu, maxfun, xbase, xpt, fval,
             if dsqmin == ZERO:
                 # GOTO 260: finalize new interpolation points.
                 return _bobyqa_rescue_finalize(
-                    calfun, n, npt, xl, xu, maxfun, xbase, xpt, fval,
-                    gopt, hq, pq, bmat, zmat, ndim, sl, su, nf, kopt,
-                    ptsaux, ptsid, w,
+                    calfun,
+                    n,
+                    npt,
+                    xl,
+                    xu,
+                    maxfun,
+                    xbase,
+                    xpt,
+                    fval,
+                    gopt,
+                    hq,
+                    pq,
+                    bmat,
+                    zmat,
+                    ndim,
+                    sl,
+                    su,
+                    nf,
+                    kopt,
+                    ptsaux,
+                    ptsid,
+                    w,
                 )
             #
             # Form W-vector of the chosen original point.
@@ -2453,9 +2574,30 @@ def _bobyqa_rescue(calfun, n, npt, xl, xu, maxfun, xbase, xpt, fval,
         # falls back to GOTO 80
 
 
-def _bobyqa_rescue_finalize(calfun, n, npt, xl, xu, maxfun, xbase, xpt, fval,
-                            gopt, hq, pq, bmat, zmat, ndim, sl, su, nf, kopt,
-                            ptsaux, ptsid, w):
+def _bobyqa_rescue_finalize(
+    calfun,
+    n,
+    npt,
+    xl,
+    xu,
+    maxfun,
+    xbase,
+    xpt,
+    fval,
+    gopt,
+    hq,
+    pq,
+    bmat,
+    zmat,
+    ndim,
+    sl,
+    su,
+    nf,
+    kopt,
+    ptsaux,
+    ptsid,
+    w,
+):
     """Label-260 block of ``rescue.f``: evaluate F at remaining provisional
     points and absorb them into the quadratic model. Returns ``(nf, kopt)``.
     """
@@ -2526,7 +2668,7 @@ def _bobyqa_rescue_finalize(calfun, n, npt, xl, xu, maxfun, xbase, xpt, fval,
             if xpt[kpt, i] == su[i]:
                 w[i] = xu[i]
         nf = nf + 1
-        f = calfun(w[1:n + 1])
+        f = calfun(w[1 : n + 1])
         fval[kpt] = f
         if f < fval[kopt]:
             kopt = kpt
@@ -2560,8 +2702,9 @@ def _bobyqa_rescue_finalize(calfun, n, npt, xl, xu, maxfun, xbase, xpt, fval,
     return nf, kopt
 
 
-def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
-                   stop=None):
+def _bobyqa_bobyqb(
+    calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su, stop=None
+):
     """Main BOBYQA iteration loop. Port of ``bobyqb.f``.
 
     Returns ``(x, f, nf, ierr)`` where IERR is 0 on normal exit,
@@ -2605,9 +2748,27 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
     #
     # PRELIM: initial XBASE, XPT, FVAL, GOPT, HQ, PQ, BMAT, ZMAT.
     #
-    nf, kopt = _bobyqa_prelim(calfun, n, npt, x, xl, xu, rhobeg, maxfun,
-                              xbase, xpt, fval, gopt, hq, pq,
-                              bmat, zmat, ndim, sl, su)
+    nf, kopt = _bobyqa_prelim(
+        calfun,
+        n,
+        npt,
+        x,
+        xl,
+        xu,
+        rhobeg,
+        maxfun,
+        xbase,
+        xpt,
+        fval,
+        gopt,
+        hq,
+        pq,
+        bmat,
+        zmat,
+        ndim,
+        sl,
+        su,
+    )
     xoptsq = ZERO
     for i in range(1, n + 1):
         xopt[i] = xpt[kopt, i]
@@ -2616,8 +2777,9 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
     if nf < npt:
         ierr = 390
         # GOTO 720
-        return _bobyqa_finalize(x, xl, xu, sl, su, xbase, xopt, fval, kopt,
-                                fsave, n, nf, ierr)
+        return _bobyqa_finalize(
+            x, xl, xu, sl, su, xbase, xopt, fval, kopt, fsave, n, nf, ierr
+        )
     kbase = 1
     #
     # Settings for the iterative procedure.
@@ -2644,9 +2806,9 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
     denom = 0.0
     f = fval[kopt]
 
-    state = 'L20'
+    state = "L20"
     while True:
-        if state == 'L20':
+        if state == "L20":
             # Update GOPT if KOPT changed.
             if kopt != kbase:
                 ih = 0
@@ -2664,8 +2826,8 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
                         temp = pq[k] * temp
                         for i in range(1, n + 1):
                             gopt[i] = gopt[i] + temp * xpt[k, i]
-            state = 'L60'
-        elif state == 'L60':
+            state = "L60"
+        elif state == "L60":
             # Trust-region step.
             #
             # F77: TRSBOX(N,NPT,XPT,XOPT,GOPT,HQ,PQ,SL,SU,DELTA,XNEW,D,
@@ -2681,9 +2843,25 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
             # Cache W(1..N) for use in BDTEST below (XNEW snapshot vs SL/SU).
             for jj in range(1, n + 1):
                 w[jj] = gnew[jj]
-            dsq, crvmin = _bobyqa_trsbox(n, npt, xpt, xopt, gopt, hq, pq, sl, su,
-                                         delta, xnew, d, gnew, xbdi,
-                                         s_arr, hs_arr, hred)
+            dsq, crvmin = _bobyqa_trsbox(
+                n,
+                npt,
+                xpt,
+                xopt,
+                gopt,
+                hq,
+                pq,
+                sl,
+                su,
+                delta,
+                xnew,
+                d,
+                gnew,
+                xbdi,
+                s_arr,
+                hs_arr,
+                hred,
+            )
             # Snapshot GNEW into W(1..N) for the BDTEST branch below.
             for jj in range(1, n + 1):
                 w[jj] = gnew[jj]
@@ -2692,12 +2870,12 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
                 ntrits = -1
                 distsq = (TEN * rho) ** 2
                 if nf <= nfsav + 2:
-                    state = 'L650'
+                    state = "L650"
                     continue
                 errbig = max(diffa, diffb, diffc)
                 frhosq = 0.125 * rho * rho
                 if crvmin > ZERO and errbig > frhosq * crvmin:
-                    state = 'L650'
+                    state = "L650"
                     continue
                 bdtol = errbig / rho
                 hit_650 = False
@@ -2716,13 +2894,13 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
                             hit_650 = True
                             break
                 if hit_650:
-                    state = 'L650'
+                    state = "L650"
                     continue
-                state = 'L680'
+                state = "L680"
                 continue
             ntrits = ntrits + 1
-            state = 'L90'
-        elif state == 'L90':
+            state = "L90"
+        elif state == "L90":
             # Severe cancellation guard: shift XBASE if XOPT far from XBASE.
             if dsq <= 1.0e-3 * xoptsq:
                 fracsq = 0.25 * xoptsq
@@ -2779,19 +2957,41 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
                     xopt[i] = ZERO
                 xoptsq = ZERO
             if ntrits == 0:
-                state = 'L210'
+                state = "L210"
                 continue
-            state = 'L230'
-        elif state == 'L190':
+            state = "L230"
+        elif state == "L190":
             # RESCUE.
             nfsav = nf
             kbase = kopt
             ptsaux = np.zeros((3, n + 1))  # 1..2, 1..n
             ptsid = np.zeros(npt + 1)
             nf, kopt = _bobyqa_rescue(
-                calfun, n, npt, xl, xu, maxfun, xbase, xpt, fval,
-                xopt, gopt, hq, pq, bmat, zmat, ndim, sl, su, nf, delta,
-                kopt, vlag, ptsaux, ptsid, w,
+                calfun,
+                n,
+                npt,
+                xl,
+                xu,
+                maxfun,
+                xbase,
+                xpt,
+                fval,
+                xopt,
+                gopt,
+                hq,
+                pq,
+                bmat,
+                zmat,
+                ndim,
+                sl,
+                su,
+                nf,
+                delta,
+                kopt,
+                vlag,
+                ptsaux,
+                ptsid,
+                w,
             )
             xoptsq = ZERO
             if kopt != kbase:
@@ -2801,31 +3001,46 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
             if nf < 0:
                 nf = maxfun
                 ierr = 390
-                state = 'L720'
+                state = "L720"
                 continue
             nresc = nf
             if nfsav < nf:
                 nfsav = nf
-                state = 'L20'
+                state = "L20"
                 continue
             if ntrits > 0:
-                state = 'L60'
+                state = "L60"
                 continue
-            state = 'L210'
-        elif state == 'L210':
+            state = "L210"
+        elif state == "L210":
             # ALTMOV.
             glag = np.zeros(n + 1)
             hcol = np.zeros(npt + 1)
             # W(1..2*N) is the altmov workspace.
             adelt_local = adelt
             alpha, cauchy = _bobyqa_altmov(
-                n, npt, xpt, xopt, bmat, zmat, ndim, sl, su, kopt,
-                knew, adelt_local, xnew, xalt, glag, hcol, w,
+                n,
+                npt,
+                xpt,
+                xopt,
+                bmat,
+                zmat,
+                ndim,
+                sl,
+                su,
+                kopt,
+                knew,
+                adelt_local,
+                xnew,
+                xalt,
+                glag,
+                hcol,
+                w,
             )
             for i in range(1, n + 1):
                 d[i] = xnew[i] - xopt[i]
-            state = 'L230'
-        elif state == 'L230':
+            state = "L230"
+        elif state == "L230":
             # Compute VLAG and BETA for current D.
             for k in range(1, npt + 1):
                 suma = ZERO
@@ -2873,14 +3088,14 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
                         xnew[i] = xalt[i]
                         d[i] = xnew[i] - xopt[i]
                     cauchy = ZERO
-                    state = 'L230'
+                    state = "L230"
                     continue
                 if denom <= HALF * vlag[knew] ** 2:
                     if nf > nresc:
-                        state = 'L190'
+                        state = "L190"
                         continue
                     ierr = 320
-                    state = 'L720'
+                    state = "L720"
                     continue
             else:
                 # Pick KNEW for trust-region replacement.
@@ -2906,13 +3121,13 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
                     biglsq = max(biglsq, temp * vlag[k] ** 2)
                 if scaden <= HALF * biglsq:
                     if nf > nresc:
-                        state = 'L190'
+                        state = "L190"
                         continue
                     ierr = 320
-                    state = 'L720'
+                    state = "L720"
                     continue
-            state = 'L360'
-        elif state == 'L360':
+            state = "L360"
+        elif state == "L360":
             # Evaluate CALFUN at XBASE+XNEW.
             for i in range(1, n + 1):
                 x[i] = min(max(xl[i], xbase[i] + xnew[i]), xu[i])
@@ -2922,13 +3137,13 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
                     x[i] = xu[i]
             if nf >= maxfun:
                 ierr = 390
-                state = 'L720'
+                state = "L720"
                 continue
             nf = nf + 1
-            f = calfun(x[1:n + 1])
+            f = calfun(x[1 : n + 1])
             if ntrits == -1:
                 fsave = f
-                state = 'L720'
+                state = "L720"
                 continue
             #
             # VQUAD = quadratic-model prediction of F at XOPT+D.
@@ -2958,7 +3173,7 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
             if ntrits > 0:
                 if vquad >= ZERO:
                     ierr = 430
-                    state = 'L720'
+                    state = "L720"
                     continue
                 ratio = (f - fopt) / vquad
                 if ratio <= TENTH:
@@ -3061,7 +3276,7 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
                 if stop is not None and stop.ftol(f, fopt):
                     fsave = f
                     ierr = 0
-                    state = 'L720'
+                    state = "L720"
                     continue
             #
             # Frobenius-norm interpolant gradient check (NTRITS>0 only).
@@ -3111,17 +3326,17 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
                             hq[i] = ZERO
                         itest = 0
             if ntrits == 0:
-                state = 'L60'
+                state = "L60"
                 continue
             if f <= fopt + TENTH * vquad:
-                state = 'L60'
+                state = "L60"
                 continue
             distsq = max((TWO * delta) ** 2, (TEN * rho) ** 2)
-            state = 'L650'
-        elif state == 'L650':
+            state = "L650"
+        elif state == "L650":
             knew = 0
             # distsq comes from L60 (NTRITS=-1 branch) or L360.
-            if 'distsq' not in dir() or state == 'L650':  # ensure defined
+            if "distsq" not in dir() or state == "L650":  # ensure defined
                 pass
             for k in range(1, npt + 1):
                 sum_ = ZERO
@@ -3139,19 +3354,19 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
                 ntrits = 0
                 adelt = max(min(TENTH * dist, delta), rho)
                 dsq = adelt * adelt
-                state = 'L90'
+                state = "L90"
                 continue
             if ntrits == -1:
-                state = 'L680'
+                state = "L680"
                 continue
             if ratio > ZERO:
-                state = 'L60'
+                state = "L60"
                 continue
             if max(delta, dnorm) > rho:
-                state = 'L60'
+                state = "L60"
                 continue
-            state = 'L680'
-        elif state == 'L680':
+            state = "L680"
+        elif state == "L680":
             # Pick the next RHO.
             if rho > rhoend:
                 delta = HALF * rho
@@ -3165,20 +3380,23 @@ def _bobyqa_bobyqb(calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su,
                 delta = max(delta, rho)
                 ntrits = 0
                 nfsav = nf
-                state = 'L60'
+                state = "L60"
                 continue
             if ntrits == -1:
-                state = 'L360'
+                state = "L360"
                 continue
-            state = 'L720'
-        elif state == 'L720':
-            return _bobyqa_finalize(x, xl, xu, sl, su, xbase, xopt, fval, kopt,
-                                    fsave, n, nf, ierr, f)
+            state = "L720"
+        elif state == "L720":
+            return _bobyqa_finalize(
+                x, xl, xu, sl, su, xbase, xopt, fval, kopt, fsave, n, nf, ierr, f
+            )
         else:
             raise RuntimeError(f"bobyqb: unknown state {state!r}")
 
 
-def _bobyqa_finalize(x, xl, xu, sl, su, xbase, xopt, fval, kopt, fsave, n, nf, ierr, f=None):
+def _bobyqa_finalize(
+    x, xl, xu, sl, su, xbase, xopt, fval, kopt, fsave, n, nf, ierr, f=None
+):
     """Label 720 of ``bobyqb.f``: write final X and return ``(x, f, nf, ierr)``."""
     if fval[kopt] <= fsave:
         for i in range(1, n + 1):
@@ -3193,8 +3411,18 @@ def _bobyqa_finalize(x, xl, xu, sl, su, xbase, xopt, fval, kopt, fsave, n, nf, i
     return x, f_out, nf, ierr
 
 
-def _bobyqa_driver(calfun, x0, lower, upper, *,
-                   npt=None, rhobeg=None, rhoend=None, maxfun=10000, stop=None):
+def _bobyqa_driver(
+    calfun,
+    x0,
+    lower,
+    upper,
+    *,
+    npt=None,
+    rhobeg=None,
+    rhoend=None,
+    maxfun=10000,
+    stop=None,
+):
     """Public BOBYQA entry. Port of ``bobyqa.f`` (workspace partition,
     bound-aware initial X) plus the ``minqa`` R-wrapper defaults
     (``rhobeg``, ``rhoend``, ``npt`` when ``None``).
@@ -3230,17 +3458,22 @@ def _bobyqa_driver(calfun, x0, lower, upper, *,
     # NPT validity (matches bobyqa.f IERR=10).
     #
     if not (n + 2 <= npt <= ((n + 2) * (n + 1)) // 2):
-        return (x0, float('inf'), 0, 10,
-                "bobyqa -- NPT is not in the required interval")
+        return (
+            x0,
+            float("inf"),
+            0,
+            10,
+            "bobyqa -- NPT is not in the required interval",
+        )
     #
     # 1-indexed work arrays.
     #
     x = np.zeros(n + 1)
-    x[1:n + 1] = x0
+    x[1 : n + 1] = x0
     xl = np.zeros(n + 1)
-    xl[1:n + 1] = lower
+    xl[1 : n + 1] = lower
     xu = np.zeros(n + 1)
-    xu[1:n + 1] = upper
+    xu[1 : n + 1] = upper
     sl = np.zeros(n + 1)
     su = np.zeros(n + 1)
     #
@@ -3249,8 +3482,13 @@ def _bobyqa_driver(calfun, x0, lower, upper, *,
     for j in range(1, n + 1):
         temp = xu[j] - xl[j]
         if temp < rhobeg + rhobeg:
-            return (x[1:n + 1], float('inf'), 0, 20,
-                    "bobyqa -- one of the box constraint ranges is too small (< 2*RHOBEG)")
+            return (
+                x[1 : n + 1],
+                float("inf"),
+                0,
+                20,
+                "bobyqa -- one of the box constraint ranges is too small (< 2*RHOBEG)",
+            )
         sl[j] = xl[j] - x[j]
         su[j] = xu[j] - x[j]
         if sl[j] >= -rhobeg:
@@ -3275,17 +3513,28 @@ def _bobyqa_driver(calfun, x0, lower, upper, *,
     # Run the main loop.
     #
     x_out, f_out, nf, ierr = _bobyqa_bobyqb(
-        calfun, n, npt, x, xl, xu, rhobeg, rhoend, maxfun, sl, su, stop=stop,
+        calfun,
+        n,
+        npt,
+        x,
+        xl,
+        xu,
+        rhobeg,
+        rhoend,
+        maxfun,
+        sl,
+        su,
+        stop=stop,
     )
     msgmap = {
-        0:   "Normal exit from bobyqa",
-        10:  "bobyqa -- NPT is not in the required interval",
-        20:  "bobyqa -- one of the box constraint ranges is too small (< 2*RHOBEG)",
+        0: "Normal exit from bobyqa",
+        10: "bobyqa -- NPT is not in the required interval",
+        20: "bobyqa -- one of the box constraint ranges is too small (< 2*RHOBEG)",
         320: "bobyqa detected too much cancellation in denominator",
         390: "bobyqa -- maximum number of function evaluations exceeded",
         430: "bobyqa -- a trust region step failed to reduce q",
     }
-    return x_out[1:n + 1].copy(), f_out, nf, ierr, msgmap.get(ierr, "")
+    return x_out[1 : n + 1].copy(), f_out, nf, ierr, msgmap.get(ierr, "")
 
 
 # ----------------------------------------------------------------------
@@ -3319,8 +3568,12 @@ def _nlopt_default_step(x, lb, ub):
     dx = np.empty(n)
     for i in range(n):
         step = np.inf
-        if (np.isfinite(ub[i]) and np.isfinite(lb[i])
-                and (ub[i] - lb[i]) * 0.25 < step and ub[i] > lb[i]):
+        if (
+            np.isfinite(ub[i])
+            and np.isfinite(lb[i])
+            and (ub[i] - lb[i]) * 0.25 < step
+            and ub[i] > lb[i]
+        ):
             step = (ub[i] - lb[i]) * 0.25
         if np.isfinite(ub[i]) and ub[i] - x[i] < step and ub[i] > x[i]:
             step = (ub[i] - x[i]) * 0.75
@@ -3371,9 +3624,11 @@ class _NloptStopInfo:
         if not np.isfinite(oldf):
             return False
         d = abs(f - oldf)
-        return (d < self.ftol_abs
-                or d < self.ftol_rel * (abs(f) + abs(oldf)) * 0.5
-                or (self.ftol_rel > 0 and f == oldf))
+        return (
+            d < self.ftol_abs
+            or d < self.ftol_rel * (abs(f) + abs(oldf)) * 0.5
+            or (self.ftol_rel > 0 and f == oldf)
+        )
 
 
 class _NloptResult:
@@ -3389,8 +3644,18 @@ class _NloptResult:
         self.message = message
 
 
-def _nlopt_ln_bobyqa(fn, x0, lb, ub, *, ftol_abs=1e-8, ftol_rel=0.0,
-                     xtol_abs=1e-8, xtol_rel=0.0, maxeval=100000):
+def _nlopt_ln_bobyqa(
+    fn,
+    x0,
+    lb,
+    ub,
+    *,
+    ftol_abs=1e-8,
+    ftol_rel=0.0,
+    xtol_abs=1e-8,
+    xtol_rel=0.0,
+    maxeval=100000,
+):
     """NLopt ``NLOPT_LN_BOBYQA`` over box bounds — lme4's default ``lmer``
     optimizer (``nloptwrap``). Wraps the minqa BOBYQA core (:func:`_bobyqa_driver`)
     with NLopt's variable rescaling, default initial step, and ``ftol`` stop.
@@ -3426,8 +3691,16 @@ def _nlopt_ln_bobyqa(fn, x0, lb, ub, *, ftol_abs=1e-8, ftol_rel=0.0,
         return fn(xs * s)
 
     par_s, fval, nf, ierr, msg = _bobyqa_driver(
-        calfun, x0s, lbs, ubs, npt=npt, rhobeg=rhobeg, rhoend=rhoend,
-        maxfun=int(maxeval), stop=stop)
+        calfun,
+        x0s,
+        lbs,
+        ubs,
+        npt=npt,
+        rhobeg=rhobeg,
+        rhoend=rhoend,
+        maxfun=int(maxeval),
+        stop=stop,
+    )
     return _NloptResult(par_s * s, fval, nf, ierr == 0, msg)
 
 
@@ -3458,10 +3731,10 @@ def _nlopt_ln_bobyqa(fn, x0, lb, ub, *, ftol_abs=1e-8, ftol_rel=0.0,
 # - ``/tmp/lme4/R/optimizer.R`` — R wrapper exposing ``Nelder_Mead()``.
 # - NLopt's ``nldrmd.c`` — original algorithm by S. G. Johnson.
 
-_NM_ALPHA = 1.0    # reflection      — optimizer.h:95
-_NM_BETA  = 0.5    # contraction
-_NM_GAMM  = 2.0    # expansion
-_NM_DELTA = 0.5    # shrink
+_NM_ALPHA = 1.0  # reflection      — optimizer.h:95
+_NM_BETA = 0.5  # contraction
+_NM_GAMM = 2.0  # expansion
+_NM_DELTA = 0.5  # shrink
 
 
 class NMStatus(IntEnum):
@@ -3470,18 +3743,20 @@ class NMStatus(IntEnum):
     Mirrors lme4's ``nm_status`` enum (optimizer.h:89). ``active`` means
     "continue iterating"; any other value means the optimizer has stopped.
     """
+
     active = 0
-    x0_not_feasible = 1   # nm_x0notfeasible — raised by ctor, never returned.
-    no_feasible = 2       # nm_nofeasible    — raised by ctor, never returned.
-    forced = 3            # nm_forced (set_force_stop=True)
-    minf_max = 4          # objective dipped below ``minf_max``
-    evals = 5             # hit ``maxeval``
-    fcvg = 6              # ftol convergence (unused; preserved for parity)
-    xcvg = 7              # xtol convergence
+    x0_not_feasible = 1  # nm_x0notfeasible — raised by ctor, never returned.
+    no_feasible = 2  # nm_nofeasible    — raised by ctor, never returned.
+    forced = 3  # nm_forced (set_force_stop=True)
+    minf_max = 4  # objective dipped below ``minf_max``
+    evals = 5  # hit ``maxeval``
+    fcvg = 6  # ftol convergence (unused; preserved for parity)
+    xcvg = 7  # xtol convergence
 
 
 class _NMStage(IntEnum):
     """Internal stage of the state machine — optimizer.h:92."""
+
     restart = 0
     postreflect = 1
     postexpand = 2
@@ -3557,8 +3832,7 @@ class NelderMead:
         n = x0.size
         if lb.size != n or ub.size != n or xstep.size != n:
             raise ValueError(
-                f"lb/ub/xstep/x0 size mismatch: {lb.size}/{ub.size}/"
-                f"{xstep.size}/{n}"
+                f"lb/ub/xstep/x0 size mismatch: {lb.size}/{ub.size}/{xstep.size}/{n}"
             )
         if np.any(x0 - lb < 0) or np.any(ub - x0 < 0):
             raise ValueError("initial x0 is not a feasible point")
@@ -3709,7 +3983,9 @@ class NelderMead:
         """Decide what to do with the reflected point — port of
         ``Nelder_Mead::postreflect`` (optimizer.cpp:194-219)."""
         if f < self._fl:
-            if not self._reflectpt(self.xeval_, self.c, _NM_GAMM, self.pts[:, self._ih]):
+            if not self._reflectpt(
+                self.xeval_, self.c, _NM_GAMM, self.pts[:, self._ih]
+            ):
                 return NMStatus.xcvg
             self.stage = _NMStage.postexpand
             self._f_old = f
@@ -3759,8 +4035,9 @@ class NelderMead:
 
     # ---- helpers --------------------------------------------------------
 
-    def _reflectpt(self, xnew: np.ndarray, c: np.ndarray, scale: float,
-                   xold: np.ndarray) -> bool:
+    def _reflectpt(
+        self, xnew: np.ndarray, c: np.ndarray, scale: float, xold: np.ndarray
+    ) -> bool:
         """``xnew = clip(c + scale·(c − xold), lb, ub)`` (optimizer.cpp:269-289).
 
         Returns ``False`` if ``xnew`` coincides with ``c`` *or* ``xold``
@@ -3858,17 +4135,17 @@ _GLMER_CONTROL_DEFAULTS = {
     # runs optimizer[0], Stage 1 runs optimizer[1] (see _normalize_optimizer
     # _chain and _run_outer_stage).
     "optimizer": ["bobyqa", "Nelder_Mead"],
-    "restart_edge": False,          # lmer-only, deferred
-    "boundary.tol": 1e-5,           # deferred
-    "calc.derivs": None,            # lme4 NULL → smart rule (resolved in __init__)
+    "restart_edge": False,  # lmer-only, deferred
+    "boundary.tol": 1e-5,  # deferred
+    "calc.derivs": None,  # lme4 NULL → smart rule (resolved in __init__)
     "use.last.params": False,
-    "sparseX": False,               # lme4 no-op (warns); accepted for parity
-    "standardize.X": False,         # autoscale sibling, deferred
-    "autoscale": None,              # deferred
+    "sparseX": False,  # lme4 no-op (warns); accepted for parity
+    "standardize.X": False,  # autoscale sibling, deferred
+    "autoscale": None,  # deferred
     "tolPwrss": 1e-7,
     "compDev": True,
     "nAGQ0initStep": True,
-    "optCtrl": {},                  # Nelder_Mead kwargs (maxfun, XtolRel, etc.)
+    "optCtrl": {},  # Nelder_Mead kwargs (maxfun, XtolRel, etc.)
     # check.* keys — pre-fit and post-fit validation. Accepted now;
     # enforcement lands incrementally.
     "check.nobs.vs.rankZ": "ignore",
@@ -3881,7 +4158,7 @@ _GLMER_CONTROL_DEFAULTS = {
     "check.formula.LHS": "stop",
     "check.response.not.const": "stop",
     "check.conv.nobsmax": 1e4,
-    "check.conv.nparmax": 20,       # glmer default (lmer is 10)
+    "check.conv.nparmax": 20,  # glmer default (lmer is 10)
     "check.conv.grad": {"action": "warning", "tol": 2e-3, "relTol": None},
     "check.conv.singular": {"action": "message", "tol": 1e-4},
     "check.conv.hess": {"action": "warning", "tol": 1e-6},
@@ -3907,8 +4184,7 @@ def _normalize_optimizer_chain(optimizer) -> list:
             chain = [chain[0], chain[0]]
     if len(chain) != 2:
         raise ValueError(
-            f"optimizer= must be a string or a length-1/2 sequence; "
-            f"got {optimizer!r}"
+            f"optimizer= must be a string or a length-1/2 sequence; got {optimizer!r}"
         )
     bad = [o for o in chain if o not in _PORTED_OPTIMIZERS]
     if bad:
@@ -3941,7 +4217,8 @@ _LMER_CONTROL_DEFAULTS = {
 # the shared __init__ plumbing; a user passing one to a Gaussian (lmer) fit is
 # an error, matching lme4.
 _GLMER_ONLY_CONTROL_KEYS = frozenset(
-    {"tolPwrss", "compDev", "nAGQ0initStep", "check.response.not.const"})
+    {"tolPwrss", "compDev", "nAGQ0initStep", "check.response.not.const"}
+)
 
 
 def _normalize_lmer_optimizer(optimizer) -> str:
@@ -3958,9 +4235,7 @@ def _normalize_lmer_optimizer(optimizer) -> str:
     else:
         chain = list(optimizer)
         if len(chain) != 1:
-            raise ValueError(
-                f"lmer uses a single optimizer; got {optimizer!r}"
-            )
+            raise ValueError(f"lmer uses a single optimizer; got {optimizer!r}")
         name = chain[0]
     if name not in _LMER_PORTED_OPTIMIZERS:
         raise NotImplementedError(
@@ -3971,8 +4246,9 @@ def _normalize_lmer_optimizer(optimizer) -> str:
     return name
 
 
-def _run_outer_stage(optimizer_name, devfun, x0, lb, ub, *,
-                     xst, xtol_abs, nm_kwargs, bobyqa_kwargs=None):
+def _run_outer_stage(
+    optimizer_name, devfun, x0, lb, ub, *, xst, xtol_abs, nm_kwargs, bobyqa_kwargs=None
+):
     """Run one outer-optimizer stage, dispatching on ``optimizer_name``.
 
     ``"bobyqa"`` → the ported minqa BOBYQA (finite bounds; one-sided ±inf
@@ -3988,15 +4264,15 @@ def _run_outer_stage(optimizer_name, devfun, x0, lb, ub, *,
         lb_b = np.where(np.isfinite(lb), lb, -1.0e20)
         ub_b = np.where(np.isfinite(ub), ub, 1.0e20)
         par, fval, nf, ierr, _msg = _bobyqa_driver(
-            devfun, x0, lb_b, ub_b, **(bobyqa_kwargs or {}))
+            devfun, x0, lb_b, ub_b, **(bobyqa_kwargs or {})
+        )
         return np.asarray(par, dtype=float), float(fval), int(nf), int(ierr)
     nm = NelderMead(lb, ub, xst, x0, xtol_abs=xtol_abs, **nm_kwargs)
     status = nm.minimize(devfun)
     return nm.xpos().copy(), float(nm.value()), int(nm.nevals), int(status)
 
 
-_NM_OPT_CTRL_KEYS = {"maxfun", "FtolAbs", "FtolRel", "XtolRel",
-                     "MinfMax", "verbose"}
+_NM_OPT_CTRL_KEYS = {"maxfun", "FtolAbs", "FtolRel", "XtolRel", "MinfMax", "verbose"}
 
 # BOBYQA-stage optCtrl keys (minqa::bobyqa args). ``maxfun`` is shared with
 # Nelder_Mead; the rest are bobyqa-only. lme4 passes a single optCtrl list to
@@ -4042,8 +4318,13 @@ def _check_hess(H_sub, tol, hesstype=""):
     neg = int(np.sum(evd < -tol))
     if neg:
         t = f" {hesstype}" if hesstype else ""
-        return ([f"Model failed to converge: degenerate{t} Hessian with "
-                 f"{neg} negative eigenvalues"], -3)
+        return (
+            [
+                f"Model failed to converge: degenerate{t} Hessian with "
+                f"{neg} negative eigenvalues"
+            ],
+            -3,
+        )
     chol_fail = False
     try:
         np.linalg.cholesky(H_sub)
@@ -4051,18 +4332,27 @@ def _check_hess(H_sub, tol, hesstype=""):
         chol_fail = True
     if int(np.sum(np.abs(evd) < tol)) or chol_fail:
         t = f"{hesstype} " if hesstype else ""
-        return ([f"{t}Hessian is numerically singular: parameters are not "
-                 f"uniquely determined"], -4)
+        return (
+            [
+                f"{t}Hessian is numerically singular: parameters are not "
+                f"uniquely determined"
+            ],
+            -4,
+        )
     msgs: list[str] = []
     code = 0
     if evd.max() * tol > 1:
         code = 2
-        msgs.append("Model is nearly unidentifiable: very large eigenvalue\n"
-                    " - Rescale variables?")
+        msgs.append(
+            "Model is nearly unidentifiable: very large eigenvalue\n"
+            " - Rescale variables?"
+        )
     if (evd.min() / evd.max()) < tol:
         code = 3
-        msgs.append("Model is nearly unidentifiable: large eigenvalue ratio\n"
-                    " - Rescale variables?")
+        msgs.append(
+            "Model is nearly unidentifiable: large eigenvalue ratio\n"
+            " - Rescale variables?"
+        )
     return (msgs, code)
 
 
@@ -4102,7 +4392,7 @@ def _checkconv_grad_hess(grad, hess, *, n_theta, grad_cfg, hess_cfg):
             mingrad = np.minimum(np.abs(scgrad), np.abs(grad))
             maxmingrad = float(mingrad.max())
             if maxmingrad > grad_tol:
-                comp = int(np.argmax(mingrad)) + 1     # 1-based component
+                comp = int(np.argmax(mingrad)) + 1  # 1-based component
                 code = -1
                 messages.append(
                     f"Model failed to converge with max|grad| = "
@@ -4112,9 +4402,8 @@ def _checkconv_grad_hess(grad, hess, *, n_theta, grad_cfg, hess_cfg):
     hess_action = (hess_cfg or {}).get("action", "warning")
     if hess_action != "ignore":
         hess_tol = float((hess_cfg or {}).get("tol", 1e-6))
-        if H.shape[0] > n_theta:                       # GLMM: β-block first
-            mb, cb = _check_hess(H[n_theta:, n_theta:], hess_tol,
-                                 "fixed-effect")
+        if H.shape[0] > n_theta:  # GLMM: β-block first
+            mb, cb = _check_hess(H[n_theta:, n_theta:], hess_tol, "fixed-effect")
             if cb != 0:
                 messages.extend(mb)
                 code = cb
@@ -4166,14 +4455,18 @@ def _build_optinfo(
     derivs = None
     code = 0
     if grad is not None and hess is not None:
-        derivs = {"gradient": np.asarray(grad, dtype=float),
-                  "Hessian": np.asarray(hess, dtype=float)}
+        derivs = {
+            "gradient": np.asarray(grad, dtype=float),
+            "Hessian": np.asarray(hess, dtype=float),
+        }
         # lme4 runs the gradient/Hessian checks only for a NON-singular fit.
         if not is_singular:
             conv_msgs, code = _checkconv_grad_hess(
-                grad, hess,
+                grad,
+                hess,
                 n_theta=n_theta if n_theta is not None else len(theta_arr),
-                grad_cfg=grad_cfg, hess_cfg=hess_cfg,
+                grad_cfg=grad_cfg,
+                hess_cfg=hess_cfg,
             )
             messages.extend(conv_msgs)
 
@@ -4182,7 +4475,7 @@ def _build_optinfo(
         "control": dict(ctrl) if ctrl else {},
         "val": theta_arr.copy(),
         "feval": int(optim.get("feval", 0))
-                 + (int(optim_stage0.get("feval", 0)) if optim_stage0 else 0),
+        + (int(optim_stage0.get("feval", 0)) if optim_stage0 else 0),
         "is_singular": is_singular,
         "conv": {
             "opt": int(optim.get("status", 0)),
@@ -4229,8 +4522,14 @@ def _nm_kwargs_from_opt_ctrl(opt_ctrl) -> dict:
     return out
 
 
-_NLOPT_OPT_CTRL_KEYS = {"maxeval", "ftol_abs", "ftol_rel", "xtol_abs",
-                        "xtol_rel", "algorithm"}
+_NLOPT_OPT_CTRL_KEYS = {
+    "maxeval",
+    "ftol_abs",
+    "ftol_rel",
+    "xtol_abs",
+    "xtol_rel",
+    "algorithm",
+}
 
 
 def _nlopt_kwargs_from_opt_ctrl(opt_ctrl) -> dict:
@@ -4281,8 +4580,7 @@ def _emit_check(action: str, msg: str) -> None:
         print(msg)
 
 
-def _run_prefit_glmm_checks(re: ReTerms, y: np.ndarray, n: int,
-                            ctrl: dict) -> None:
+def _run_prefit_glmm_checks(re: ReTerms, y: np.ndarray, n: int, ctrl: dict) -> None:
     """Port of lme4's pre-fit identifiability / response validation, run from
     ``lFormula``/``glFormula`` (modular.R): ``checkNlevels`` (167-212),
     ``checkZdims`` (63-85), ``checkZrank`` (88-117), ``checkResponse``
@@ -4302,12 +4600,15 @@ def _run_prefit_glmm_checks(re: ReTerms, y: np.ndarray, n: int,
         bad = [g for g, v in nlev.items() if v >= n]
         if bad:
             _emit_check(
-                a, "number of levels of each grouping factor must be < number "
-                f"of observations (problems: {', '.join(bad)})")
+                a,
+                "number of levels of each grouping factor must be < number "
+                f"of observations (problems: {', '.join(bad)})",
+            )
     a = ctrl["check.nlev.gtreq.5"]
     if _do_check(a) and any(v < 5 for v in nlev.values()):
-        _emit_check(a, "grouping factors with < 5 sampled levels may give "
-                    "unreliable estimates")
+        _emit_check(
+            a, "grouping factors with < 5 sampled levels may give unreliable estimates"
+        )
 
     # checkZdims — per-term #random-effects vs #obs (modular.R:63-85).
     a = ctrl["check.nobs.vs.nRE"]
@@ -4317,10 +4618,12 @@ def _run_prefit_glmm_checks(re: ReTerms, y: np.ndarray, n: int,
             n_re = Gp[k + 1] - Gp[k]
             if n_re >= n:
                 _emit_check(
-                    a, f"number of observations (={n}) <= number of random "
+                    a,
+                    f"number of observations (={n}) <= number of random "
                     f"effects (={n_re}) for term ({key}); the random-effects "
                     "parameters and the residual variance (or scale parameter) "
-                    "are probably unidentifiable")
+                    "are probably unidentifiable",
+                )
 
     # checkZrank — rank(Z) vs #obs; opt-in (default "ignore") (modular.R:88-117).
     a = ctrl["check.nobs.vs.rankZ"]
@@ -4331,8 +4634,10 @@ def _run_prefit_glmm_checks(re: ReTerms, y: np.ndarray, n: int,
             if n <= rank_z:
                 act = "warning" if a.startswith("warning") else "stop"
                 _emit_check(
-                    act, f"number of observations (={n}) <= rank(Z) (={rank_z});"
-                    " the random-effects parameters are probably unidentifiable")
+                    act,
+                    f"number of observations (={n}) <= rank(Z) (={rank_z});"
+                    " the random-effects parameters are probably unidentifiable",
+                )
 
     # checkResponse — constant response (modular.R:296-307).
     a = ctrl["check.response.not.const"]
@@ -4350,8 +4655,9 @@ def _check_scale_x(X: np.ndarray, col_names: list, kind: str) -> None:
     if not _do_check(kind) or X.shape[1] == 0:
         return
     tol = 1e3
-    cont = np.array([not np.all(np.isin(X[:, j], (0.0, 1.0)))
-                     for j in range(X.shape[1])])
+    cont = np.array(
+        [not np.all(np.isin(X[:, j], (0.0, 1.0))) for j in range(X.shape[1])]
+    )
     if not cont.any():
         return
     sd = X[:, cont].std(axis=0, ddof=1)
@@ -4360,13 +4666,16 @@ def _check_scale_x(X: np.ndarray, col_names: list, kind: str) -> None:
         return
     logsd = np.abs(np.log(sd))
     iu = np.triu_indices(sd.size, k=1)
-    logratio = (np.abs(np.log(np.divide.outer(sd, sd)))[iu]
-                if iu[0].size else np.array([0.0]))
+    logratio = (
+        np.abs(np.log(np.divide.outer(sd, sd)))[iu] if iu[0].size else np.array([0.0])
+    )
     if max(logsd.max(), logratio.max()) > np.log(tol):
-        act = {"warn+rescale": "warning",
-               "message+rescale": "message"}.get(kind, kind)
-        _emit_check(act, "Some predictor variables are on very different "
-                    "scales: consider rescaling (or use autoscale=True).")
+        act = {"warn+rescale": "warning", "message+rescale": "message"}.get(kind, kind)
+        _emit_check(
+            act,
+            "Some predictor variables are on very different "
+            "scales: consider rescaling (or use autoscale=True).",
+        )
 
 
 def _restart_edge(devfun, par, lower, upper, refit, *, btol=1e-5, verbose=0):
@@ -4394,8 +4703,10 @@ def _restart_edge(devfun, par, lower, upper, refit, *, btol=1e-5, verbose=0):
     devfun(par0)  # reset internal state after probing
     grads = np.asarray(grads)
     if np.any(np.isnan(grads)):
-        warnings.warn("some gradient components are NA near boundaries, "
-                      "skipping boundary check", stacklevel=2)
+        warnings.warn(
+            "some gradient components are NA near boundaries, skipping boundary check",
+            stacklevel=2,
+        )
         return par0
     if np.any(grads < 0):
         if verbose:
@@ -4437,13 +4748,33 @@ def _theta_ml(y, mu, weights=None, limit=20, eps=1e-8):
     w = np.ones(n) if weights is None else np.asarray(weights, dtype=float)
 
     def score(th):
-        return float(np.sum(w * (digamma(th + y) - digamma(th) + np.log(th)
-                                 + 1 - np.log(th + mu) - (y + th) / (mu + th))))
+        return float(
+            np.sum(
+                w
+                * (
+                    digamma(th + y)
+                    - digamma(th)
+                    + np.log(th)
+                    + 1
+                    - np.log(th + mu)
+                    - (y + th) / (mu + th)
+                )
+            )
+        )
 
     def info(th):
-        return float(np.sum(w * (-polygamma(1, th + y) + polygamma(1, th)
-                                 - 1 / th + 2 / (mu + th)
-                                 - (y + th) / (mu + th) ** 2)))
+        return float(
+            np.sum(
+                w
+                * (
+                    -polygamma(1, th + y)
+                    + polygamma(1, th)
+                    - 1 / th
+                    + 2 / (mu + th)
+                    - (y + th) / (mu + th) ** 2
+                )
+            )
+        )
 
     t0 = n / np.sum(w * (y / mu - 1) ** 2)
     it, delta = 0, 1.0
@@ -4455,8 +4786,9 @@ def _theta_ml(y, mu, weights=None, limit=20, eps=1e-8):
     return max(float(t0), 0.0)
 
 
-def glmer_nb(formula, data, *, interval_width=3.0, tol=5e-5,
-             _gmm_kwargs=None, **kwargs):
+def glmer_nb(
+    formula, data, *, interval_width=3.0, tol=5e-5, _gmm_kwargs=None, **kwargs
+):
     """Negative-binomial GLMM with θ estimation — port of ``lme4::glmer.nb``
     (nbinom.R:96-159).
 
@@ -4472,19 +4804,22 @@ def glmer_nb(formula, data, *, interval_width=3.0, tol=5e-5,
 
     # 1. Poisson initialization → θ start from the residuals.
     m0 = gmm(formula, data, family=_family_mod.Poisson(), **kw)
-    th0 = _theta_ml(np.asarray(m0._resp.y, dtype=float),
-                    np.asarray(m0.fitted_values, dtype=float),
-                    m0.prior_weights)
+    th0 = _theta_ml(
+        np.asarray(m0._resp.y, dtype=float),
+        np.asarray(m0.fitted_values, dtype=float),
+        m0.prior_weights,
+    )
     lo, hi = np.log(th0) - interval_width, np.log(th0) + interval_width
 
     # 2. profile -2logL over log θ (lme4 optTheta).
     def nbdev(t):
-        return gmm(formula, data,
-                   family=_family_mod.nb(theta=float(np.exp(t))),
-                   **kw).deviance_laplace
+        return gmm(
+            formula, data, family=_family_mod.nb(theta=float(np.exp(t))), **kw
+        ).deviance_laplace
 
-    res = minimize_scalar(nbdev, bounds=(lo, hi), method="bounded",
-                          options={"xatol": tol})
+    res = minimize_scalar(
+        nbdev, bounds=(lo, hi), method="bounded", options={"xatol": tol}
+    )
     th_hat = float(np.exp(res.x))
 
     # 3. final fit at θ̂; account for the estimated dispersion parameter.
@@ -4511,16 +4846,15 @@ def _simulate_family_draw(rng, family, mu, weights, sigma):
     if name == "poisson":
         out = rng.rpois_n(mu)
     elif name == "binomial":
-        out = rng.rbinom_n(w, mu) / w        # size=wts (rounded), then /wts
+        out = rng.rbinom_n(w, mu) / w  # size=wts (rounded), then /wts
     elif name == "Gamma":
-        disp = sigma ** 2                     # Gamma_simfun: shape=1/disp
+        disp = sigma**2  # Gamma_simfun: shape=1/disp
         out = rng.rgamma_n(np.full(m, 1.0 / disp), mu * disp)
     elif name == "negative binomial":
         th = float(family.get_theta(trans=True)[0])
         out = rng.rnbinom_n(np.full(m, th), mu)
     else:
-        raise NotImplementedError(
-            f"simulate is not implemented for family {name!r}")
+        raise NotImplementedError(f"simulate is not implemented for family {name!r}")
     return out
 
 
@@ -4540,14 +4874,18 @@ def _simulate_rng(seed):
     one ``set.seed`` controls one stream, exactly as in R.
     """
     from ..R import distributions as _dist
+
     if seed is not None:
         _dist.set_seed(int(seed))
     return _dist._r_rng()
 
 
 def _check_rank_drop_cols(
-    X: np.ndarray, col_names: list[str], *,
-    tol: float = 1e-7, action: str = "message+drop.cols",
+    X: np.ndarray,
+    col_names: list[str],
+    *,
+    tol: float = 1e-7,
+    action: str = "message+drop.cols",
 ) -> tuple[np.ndarray, list[str], list[str]]:
     """Detect rank-deficient design matrix and drop redundant columns.
 
@@ -4604,13 +4942,14 @@ def _check_rank_drop_cols(
         f"{p - rank} column / coefficient"
         if p - rank == 1
         else f"fixed-effect model matrix is rank deficient so dropping "
-             f"{p - rank} columns / coefficients"
+        f"{p - rank} columns / coefficients"
     )
     if action == "warn+drop.cols":
         warnings.warn(msg, UserWarning, stacklevel=3)
     elif action == "message+drop.cols":
         # lme4's ``message()`` writes to stderr; mirror.
         import sys
+
         print(msg, file=sys.stderr)
     # ``silent.drop.cols`` falls through without printing.
     X_kept = X[:, keep]
@@ -4631,9 +4970,7 @@ def _normalize_glmer_control(control) -> dict:
         merged["optCtrl"] = dict(merged["optCtrl"])  # don't share the default mapping
         return merged
     if not isinstance(control, dict):
-        raise TypeError(
-            f"control= must be a dict; got {type(control).__name__}"
-        )
+        raise TypeError(f"control= must be a dict; got {type(control).__name__}")
     bad = set(control) - set(_GLMER_CONTROL_DEFAULTS)
     if bad:
         raise ValueError(
@@ -4659,9 +4996,7 @@ def _normalize_lmer_control(control) -> dict:
         merged["optCtrl"] = dict(merged["optCtrl"])  # don't share the default
         return merged
     if not isinstance(control, dict):
-        raise TypeError(
-            f"control= must be a dict; got {type(control).__name__}"
-        )
+        raise TypeError(f"control= must be a dict; got {type(control).__name__}")
     glmer_only = set(control) & _GLMER_ONLY_CONTROL_KEYS
     if glmer_only:
         raise ValueError(
@@ -4802,23 +5137,59 @@ class gmm:
     #              _pred, _devfun_stage1, _optim_stage0
     _FIT_CONTRACT = (
         # identity & dimensions
-        "family", "n", "p", "q", "npar", "column_names", "n_groups",
-        "data", "_re", "_expanded", "_offset", "_bar_sizes",
+        "family",
+        "n",
+        "p",
+        "q",
+        "npar",
+        "column_names",
+        "n_groups",
+        "data",
+        "_re",
+        "_expanded",
+        "_offset",
+        "_bar_sizes",
         # design (response scale) the accessors re-use
-        "X", "y", "Z",
+        "X",
+        "y",
+        "Z",
         # fixed-effect estimates + inference
-        "theta", "_beta", "_se_beta", "_vcov_beta_arr",
-        "bhat", "fixef", "se_bhat", "t_values", "vcov_beta",
+        "theta",
+        "_beta",
+        "_se_beta",
+        "_vcov_beta_arr",
+        "bhat",
+        "fixef",
+        "se_bhat",
+        "t_values",
+        "vcov_beta",
         # variance components & residual scale
-        "sigma", "sigma_squared", "sd_re", "corr_re",
+        "sigma",
+        "sigma_squared",
+        "sd_re",
+        "corr_re",
         # random-effect machinery the posterior / profile accessors reach into
-        "_u", "Lambda", "L", "_Z_sp", "_Z_sp_solve", "_chol_factor",
-        "_eye_q_sp", "_optim",
+        "_u",
+        "Lambda",
+        "L",
+        "_Z_sp",
+        "_Z_sp_solve",
+        "_chol_factor",
+        "_eye_q_sp",
+        "_optim",
         # sparse-Λ structure profile() / ranef() rebuild from
-        "_template", "_lt_theta_pos", "_lt_indices", "_lt_indptr",
-        "_lt_shape", "_theta_bounds", "_diag_set",
+        "_template",
+        "_lt_theta_pos",
+        "_lt_indices",
+        "_lt_indptr",
+        "_lt_shape",
+        "_theta_bounds",
+        "_diag_set",
         # fitted-model outputs
-        "fitted", "residuals", "AIC", "BIC",
+        "fitted",
+        "residuals",
+        "AIC",
+        "BIC",
     )
 
     def _assert_fit_contract(self) -> None:
@@ -4866,19 +5237,31 @@ class gmm:
         # estimation outer loop (lme4::glmer.nb). Fixed-θ nb(theta=Θ) flows
         # through the standard Laplace path below. Delegate + adopt the fit.
         if isinstance(family, _family_mod.nb) and family.n_theta > 0:
-            _m = glmer_nb(formula, data, _gmm_kwargs=dict(
-                weights=weights, offset=offset, mustart=mustart,
-                etastart=etastart, nAGQ=nAGQ, start=start, subset=subset,
-                na_action=na_action, contrasts=contrasts, verbose=verbose,
-                control=control, nAGQ0initStep=nAGQ0initStep))
+            _m = glmer_nb(
+                formula,
+                data,
+                _gmm_kwargs=dict(
+                    weights=weights,
+                    offset=offset,
+                    mustart=mustart,
+                    etastart=etastart,
+                    nAGQ=nAGQ,
+                    start=start,
+                    subset=subset,
+                    na_action=na_action,
+                    contrasts=contrasts,
+                    verbose=verbose,
+                    control=control,
+                    nAGQ0initStep=nAGQ0initStep,
+                ),
+            )
             self.__dict__.update(_m.__dict__)
             self.formula = formula
             return
 
         # lmer (Gaussian-identity LMM) vs glmer (any other family) split the
         # control defaults, the optimizer surface, and the REML toggle below.
-        _is_gaussian_id = (family.name == "gaussian"
-                           and family.link.name == "identity")
+        _is_gaussian_id = family.name == "gaussian" and family.link.name == "identity"
 
         # REML is only meaningful for the Gaussian-identity LMM; glmer is
         # ML by construction (the Laplace approximation evaluates the
@@ -4905,8 +5288,11 @@ class gmm:
         # different lme4 control defaults — lmerControl vs glmerControl: the
         # default optimizer ("nloptwrap" vs c("bobyqa","Nelder_Mead")) and
         # check.conv.nparmax (10 vs 20). Unknown keys raise either way.
-        ctrl = (_normalize_lmer_control(control) if _is_gaussian_id
-                else _normalize_glmer_control(control))
+        ctrl = (
+            _normalize_lmer_control(control)
+            if _is_gaussian_id
+            else _normalize_glmer_control(control)
+        )
 
         # subset= (R's row-filter) and na_action= (R's na.action).
         # subset accepts: bool mask, positive 1-based ints (keep), negative
@@ -4953,16 +5339,22 @@ class gmm:
             import re as _re
 
             from ..formula import referenced_columns
+
             # referenced_columns covers the RHS; add the response (LHS) columns
             # so an NA in the response is detected too.
             lhs = formula.split("~", 1)[0]
             lhs_cols = set(_re.findall(r"[A-Za-z_][A-Za-z0-9_.]*", lhs))
-            _ref = [c for c in (set(referenced_columns(d.expanded)) | lhs_cols)
-                    if c in data.columns]
+            _ref = [
+                c
+                for c in (set(referenced_columns(d.expanded)) | lhs_cols)
+                if c in data.columns
+            ]
             if _ref:
-                self._na_exclude_mask = data.select(
-                    pl.any_horizontal([pl.col(c).is_null() for c in _ref])
-                ).to_series().to_numpy()
+                self._na_exclude_mask = (
+                    data.select(pl.any_horizontal([pl.col(c).is_null() for c in _ref]))
+                    .to_series()
+                    .to_numpy()
+                )
         if not d.expanded.bars:
             raise ValueError(
                 f"gmm requires at least one random-effect bar; got formula={formula!r}"
@@ -5009,12 +5401,15 @@ class gmm:
         if X_arr.shape == (0, 0):
             X_arr = np.zeros((n, 0))
         X_arr_kept, kept_names, dropped_names = _check_rank_drop_cols(
-            X_arr, list(d.X.columns),
-            tol=1e-7, action=ctrl["check.rankX"],
+            X_arr,
+            list(d.X.columns),
+            tol=1e-7,
+            action=ctrl["check.rankX"],
         )
         if dropped_names:
-            X_for_fit = pl.DataFrame({c: X_arr_kept[:, i]
-                                       for i, c in enumerate(kept_names)})
+            X_for_fit = pl.DataFrame(
+                {c: X_arr_kept[:, i] for i, c in enumerate(kept_names)}
+            )
         else:
             X_for_fit = d.X
         self._dropped_cols = dropped_names
@@ -5037,15 +5432,17 @@ class gmm:
                 if _s > 0:
                     _Xa[:, _j] = (_Xa[:, _j] - _m) / _s
                     _center[_j], _scale[_j] = _m, _s
-            X_for_fit = pl.DataFrame({_c: _Xa[:, _j]
-                                      for _j, _c in enumerate(_cols)})
+            X_for_fit = pl.DataFrame({_c: _Xa[:, _j] for _j, _c in enumerate(_cols)})
             self._autoscale_center = _center
             self._autoscale_scale = _scale
 
         # checkScaleX (modular.R:128-158, run at 461): flag predictors
         # on very different scales (post-autoscale, so quiet once scaled).
-        _check_scale_x(X_for_fit.to_numpy().astype(float),
-                       list(X_for_fit.columns), ctrl["check.scaleX"])
+        _check_scale_x(
+            X_for_fit.to_numpy().astype(float),
+            list(X_for_fit.columns),
+            ctrl["check.scaleX"],
+        )
 
         # calc.derivs=None is lme4's actual default (NULL); resolve it to the
         # "smart" rule (lmer.R:51-53): compute the post-fit numerical Hessian
@@ -5056,14 +5453,14 @@ class gmm:
         if calc_derivs_resolved is None:
             npar_opt = len(re.theta) + X_for_fit.width
             calc_derivs_resolved = bool(
-                n < ctrl["check.conv.nobsmax"]
-                and npar_opt < ctrl["check.conv.nparmax"]
+                n < ctrl["check.conv.nobsmax"] and npar_opt < ctrl["check.conv.nparmax"]
             )
 
         # restart_edge defaults TRUE for lmer (Gaussian-identity),
         # FALSE/unsupported for glmer, unless the user set it explicitly.
         restart_edge_resolved = (
-            ctrl["restart_edge"] if "restart_edge" in (control or {})
+            ctrl["restart_edge"]
+            if "restart_edge" in (control or {})
             else _is_gaussian_id
         )
         if restart_edge_resolved and not _is_gaussian_id:
@@ -5085,15 +5482,17 @@ class gmm:
             etastart=etastart,
             start=start,
             nagq0_init_step=ctrl["nAGQ0initStep"]
-                if "nAGQ0initStep" in (control or {}) else nAGQ0initStep,
+            if "nAGQ0initStep" in (control or {})
+            else nAGQ0initStep,
             nAGQ=nAGQ,
             tol_pwrss=ctrl["tolPwrss"],
             calc_derivs=calc_derivs_resolved,
             use_last_params=ctrl["use.last.params"],
             verbose=verbose,
             opt_ctrl=ctrl["optCtrl"],
-            optimizer=(ctrl["optimizer"] if _is_gaussian_id
-                       else tuple(ctrl["optimizer"])),
+            optimizer=(
+                ctrl["optimizer"] if _is_gaussian_id else tuple(ctrl["optimizer"])
+            ),
             check_conv_grad=ctrl["check.conv.grad"],
             check_conv_hess=ctrl["check.conv.hess"],
             expanded=d.expanded,
@@ -5133,8 +5532,8 @@ class gmm:
             _b, _se = self._beta, self._se_beta
 
             def _df1(arr):
-                return pl.DataFrame({cc: [float(arr[i])]
-                                     for i, cc in enumerate(cols)})
+                return pl.DataFrame({cc: [float(arr[i])] for i, cc in enumerate(cols)})
+
             self.bhat = _df1(_b)
             self.fixef = self.bhat
             if hasattr(self, "se_bhat"):
@@ -5145,7 +5544,8 @@ class gmm:
                 self.z_values = _df1(_b / _se)
             if hasattr(self, "vcov_beta"):
                 self.vcov_beta = pl.DataFrame(
-                    {cc: self._vcov_beta_arr[:, i] for i, cc in enumerate(cols)})
+                    {cc: self._vcov_beta_arr[:, i] for i, cc in enumerate(cols)}
+                )
 
     def _fit_from_components(self, inputs: _FitInputs) -> None:
         """Fit the model given pre-assembled design pieces.
@@ -5160,8 +5560,7 @@ class gmm:
         take the GLMM Laplace path.
         """
         is_gaussian_identity = (
-            inputs.family.name == "gaussian"
-            and inputs.family.link.name == "identity"
+            inputs.family.name == "gaussian" and inputs.family.link.name == "identity"
         )
         if not is_gaussian_identity:
             self._fit_glmm_from_components(inputs)
@@ -5184,8 +5583,7 @@ class gmm:
             sqrt_w = np.sqrt(w_arr)
         self._sqrt_w = sqrt_w
         self._log_det_weights = (
-            0.0 if sqrt_w is None
-            else float(np.sum(np.log(w_arr[w_arr > 0])))
+            0.0 if sqrt_w is None else float(np.sum(np.log(w_arr[w_arr > 0])))
         )
 
         # Unpack inputs onto self — same attributes the original __init__ set.
@@ -5232,7 +5630,7 @@ class gmm:
         # dense Cholesky for O(q³) flops per deviance eval.
         template = re.Lambdat
         lt_theta_pos, lt_indices, lt_indptr = _sparse_Lt_spec(template)
-        Z_sp = csc_array(Z)                       # original-space (fitted/ranef)
+        Z_sp = csc_array(Z)  # original-space (fitted/ranef)
         eye_q_sp = eye_array(q, format="csc")
         # Row-scale X / Z / y by √w for the (tilde-space) weighted profiled
         # deviance; for unit weights these are the originals (byte-identical).
@@ -5252,9 +5650,9 @@ class gmm:
         self._lt_indices = lt_indices
         self._lt_indptr = lt_indptr
         self._lt_shape = template.shape
-        self._Z_sp = Z_sp                  # original-space Z (fitted, RE contrib)
-        self._Z_sp_solve = Z_sp_w          # √w-scaled Z for the profiled deviance
-        self._X_solve = Xw                 # √w-scaled X for the profiled deviance
+        self._Z_sp = Z_sp  # original-space Z (fitted, RE contrib)
+        self._Z_sp_solve = Z_sp_w  # √w-scaled Z for the profiled deviance
+        self._X_solve = Xw  # √w-scaled X for the profiled deviance
         self._eye_q_sp = eye_q_sp
         self._chol_factor = None
         self._XtX = XtX
@@ -5265,8 +5663,7 @@ class gmm:
         diag_set = set(_theta_diag_idx(bar_sizes))
         self._diag_set = diag_set
         bounds = [
-            (0.0, None) if i in diag_set else (None, None)
-            for i in range(len(re.theta))
+            (0.0, None) if i in diag_set else (None, None) for i in range(len(re.theta))
         ]
         self._theta_bounds = bounds
 
@@ -5313,11 +5710,19 @@ class gmm:
             def _run_opt(p0):
                 xst = np.full(p0.size, 0.02)
                 par, fval, nf, status = _run_outer_stage(
-                    optimizer, _devfun_g, p0, _lo, _hi,
-                    xst=xst, xtol_abs=xst * 5e-4,
-                    nm_kwargs=_nm_kw, bobyqa_kwargs=_bob_kw)
-                return _NloptResult(np.asarray(par, float), float(fval),
-                                    int(nf), status == 0, "")
+                    optimizer,
+                    _devfun_g,
+                    p0,
+                    _lo,
+                    _hi,
+                    xst=xst,
+                    xtol_abs=xst * 5e-4,
+                    nm_kwargs=_nm_kw,
+                    bobyqa_kwargs=_bob_kw,
+                )
+                return _NloptResult(
+                    np.asarray(par, float), float(fval), int(nf), status == 0, ""
+                )
 
         res = _run_opt(theta0)
         theta_hat = res.x
@@ -5327,13 +5732,23 @@ class gmm:
         # at a false edge) but ported for parity; check.boundary pins near-zero
         # variance params to 0. The restart refit reuses the chosen optimizer.
         if inputs.restart_edge:
-            theta_hat = _restart_edge(_devfun_g, theta_hat, _lo, _hi,
-                                      lambda p0: _run_opt(p0).x,
-                                      verbose=inputs.verbose)
+            theta_hat = _restart_edge(
+                _devfun_g,
+                theta_hat,
+                _lo,
+                _hi,
+                lambda p0: _run_opt(p0).x,
+                verbose=inputs.verbose,
+            )
         if inputs.boundary_tol > 0:
-            theta_hat = _check_boundary(_devfun_g, theta_hat,
-                                        _devfun_g(theta_hat), _lo, _hi,
-                                        inputs.boundary_tol)
+            theta_hat = _check_boundary(
+                _devfun_g,
+                theta_hat,
+                _devfun_g(theta_hat),
+                _lo,
+                _hi,
+                inputs.boundary_tol,
+            )
         if not np.array_equal(theta_hat, res.x):
             res.x = theta_hat
             res.fun = _devfun_g(theta_hat)
@@ -5411,7 +5826,7 @@ class gmm:
         self.bhat = pl.DataFrame(
             {c: [float(beta[i])] for i, c in enumerate(self.column_names)}
         )
-        self.fixef = self.bhat                            # R-canonical alias
+        self.fixef = self.bhat  # R-canonical alias
         self.se_bhat = pl.DataFrame(
             {c: [float(se_beta[i])] for i, c in enumerate(self.column_names)}
         )
@@ -5466,18 +5881,24 @@ class gmm:
                 # NaN at the clamped step; _build_optinfo skips the grad/Hess
                 # checks for a singular fit, so silence the benign warning.
                 with np.errstate(invalid="ignore", divide="ignore"):
-                    d_grad, d_hess = _deriv12(_devfun_g, theta_hat,
-                                              fx=float(res.fun), lower=_lo, upper=_hi)
-            except Exception:                       # noqa: BLE001 — checkConv bails
+                    d_grad, d_hess = _deriv12(
+                        _devfun_g, theta_hat, fx=float(res.fun), lower=_lo, upper=_hi
+                    )
+            except Exception:  # noqa: BLE001 — checkConv bails
                 d_grad = d_hess = None
-            _devfun_g(theta_hat)                    # restore the factor to θ̂
-        _opt_name = (inputs.optimizer,) if isinstance(inputs.optimizer, str) \
+            _devfun_g(theta_hat)  # restore the factor to θ̂
+        _opt_name = (
+            (inputs.optimizer,)
+            if isinstance(inputs.optimizer, str)
             else tuple(inputs.optimizer)
+        )
         self.optinfo = _build_optinfo(
             theta=self.theta,
             theta_bounds=self._theta_bounds,
-            optim={"feval": int(getattr(res, "nfev", 0)),
-                   "status": 0 if getattr(res, "success", True) else 1},
+            optim={
+                "feval": int(getattr(res, "nfev", 0)),
+                "status": 0 if getattr(res, "success", True) else 1,
+            },
             optim_stage0=None,
             ctrl=inputs.opt_ctrl,
             optimizer=_opt_name,
@@ -5547,8 +5968,7 @@ class gmm:
         diag_set = set(_theta_diag_idx(bar_sizes))
         self._diag_set = diag_set
         bounds_theta = [
-            (0.0, None) if i in diag_set else (None, None)
-            for i in range(len(re.theta))
+            (0.0, None) if i in diag_set else (None, None) for i in range(len(re.theta))
         ]
         self._theta_bounds = bounds_theta
         n_theta = len(re.theta)
@@ -5558,9 +5978,12 @@ class gmm:
         # state PIRLS mutates each iteration.
         pred = _PredState(X, Z_sp, re)
         resp = _GlmResponse(
-            family, y,
-            weights=inputs.weights, offset=off,
-            mustart=inputs.mustart, etastart=inputs.etastart,
+            family,
+            y,
+            weights=inputs.weights,
+            offset=off,
+            mustart=inputs.mustart,
+            etastart=inputs.etastart,
         )
 
         theta0 = re.theta.astype(float).copy()
@@ -5571,9 +5994,7 @@ class gmm:
         if inputs.start is not None:
             if isinstance(inputs.start, dict):
                 if "theta" in inputs.start and "par" in inputs.start:
-                    raise ValueError(
-                        "start= must not have both 'theta' and 'par' keys"
-                    )
+                    raise ValueError("start= must not have both 'theta' and 'par' keys")
                 if "beta" in inputs.start and "fixef" in inputs.start:
                     raise ValueError(
                         "start= must not have both 'beta' and 'fixef' keys"
@@ -5605,8 +6026,7 @@ class gmm:
                 theta0 = np.asarray(inputs.start, dtype=float).copy()
                 if theta0.shape != re.theta.shape:
                     raise ValueError(
-                        f"start has shape {theta0.shape}; expected "
-                        f"{re.theta.shape}"
+                        f"start has shape {theta0.shape}; expected {re.theta.shape}"
                     )
 
         nagq0_init_step = inputs.nagq0_init_step
@@ -5647,18 +6067,27 @@ class gmm:
             # Our ported BOBYQA matches R's at the algorithm level; converged
             # θ̂ lands within rhoend (~2e-7) of R's, with β̂ following at the
             # FD-Hessian-amplified scale (1e-7 to 1e-3 depending on contrast).
-            _pwrss_update(pred, resp, u_only=False, tol=tol_pwrss,
-                          maxit=maxit_pwrss, verbose=verbose_pirls)
+            _pwrss_update(
+                pred,
+                resp,
+                u_only=False,
+                tol=tol_pwrss,
+                maxit=maxit_pwrss,
+                verbose=verbose_pirls,
+            )
             devfun_stage0 = _glmm_devfun_factory(
-                pred, resp, nagq=0, tol_pwrss=tol_pwrss,
-                maxit_pwrss=maxit_pwrss, verbose=verbose_pirls,
+                pred,
+                resp,
+                nagq=0,
+                tol_pwrss=tol_pwrss,
+                maxit_pwrss=maxit_pwrss,
+                verbose=verbose_pirls,
             )
             # devFunOnly with nAGQ=0: return the θ-only Stage-0 closure
             # before optimizing (lme4 lmer.R:151).
             if inputs.dev_fun_only and not do_stage1:
                 tnames = [f"theta{i + 1}" for i in range(n_theta)]
-                self.devfun = _DevFunHandle(
-                    devfun_stage0, tnames, lb_theta, ub_theta)
+                self.devfun = _DevFunHandle(devfun_stage0, tnames, lb_theta, ub_theta)
                 self._dev_fun_only = True
                 return
             # Stage 0 outer optimizer = optimizer[0]. BOBYQA self-scales via
@@ -5668,8 +6097,14 @@ class gmm:
             # ±inf bounds for BOBYQA and passes them through for Nelder-Mead.
             xst0 = np.full(n_theta, 0.02)
             theta_stage0_x, fval0, feval0, ierr0 = _run_outer_stage(
-                optimizer[0], devfun_stage0, theta0, lb_theta, ub_theta,
-                xst=xst0, xtol_abs=xst0 * 5e-4, nm_kwargs=nm_kwargs,
+                optimizer[0],
+                devfun_stage0,
+                theta0,
+                lb_theta,
+                ub_theta,
+                xst=xst0,
+                xtol_abs=xst0 * 5e-4,
+                nm_kwargs=nm_kwargs,
                 bobyqa_kwargs=bobyqa_kwargs,
             )
             theta_stage0 = np.asarray(theta_stage0_x, dtype=float)
@@ -5678,16 +6113,28 @@ class gmm:
             # β at Stage 0 optimum (= pp.delb after the joint PIRLS).
             # modular.R:475: ``fixef0 <- rho$pp$delb``. A user-supplied
             # ``start["beta"]`` overrides for the Stage 1 starting β.
-            beta_start = beta_user_start if beta_user_start is not None else pred.beta(1.0).copy()
+            beta_start = (
+                beta_user_start
+                if beta_user_start is not None
+                else pred.beta(1.0).copy()
+            )
             self._optim_stage0 = {
-                "par": theta_stage0, "fval": float(fval0),
-                "feval": int(feval0), "status": int(ierr0),
+                "par": theta_stage0,
+                "fval": float(fval0),
+                "feval": int(feval0),
+                "status": int(ierr0),
             }
         else:
             # No Stage 0 — go straight to Stage 1 with θ₀ and β=0 (or
             # user-supplied β).
-            _pwrss_update(pred, resp, u_only=True, tol=tol_pwrss,
-                          maxit=maxit_pwrss, verbose=verbose_pirls)
+            _pwrss_update(
+                pred,
+                resp,
+                u_only=True,
+                tol=tol_pwrss,
+                maxit=maxit_pwrss,
+                verbose=verbose_pirls,
+            )
             theta_stage0 = theta0
             beta_start = beta_user_start if beta_user_start is not None else np.zeros(p)
             self._optim_stage0 = None
@@ -5707,8 +6154,11 @@ class gmm:
                 # component (modular.R:918-920). ``cnms`` values are a string
                 # for scalar bars / a list for vector bars, so count via
                 # ``_bar_sizes`` rather than ``len`` on the value.
-                if (len(re.flist_levels) != 1 or len(re.cnms) != 1
-                        or _bar_sizes(re.cnms)[0] != 1):
+                if (
+                    len(re.flist_levels) != 1
+                    or len(re.cnms) != 1
+                    or _bar_sizes(re.cnms)[0] != 1
+                ):
                     raise ValueError(
                         "nAGQ > 1 is only available for models with a single, "
                         "scalar random-effects term"
@@ -5729,8 +6179,13 @@ class gmm:
                     "n_levels": q,
                 }
             devfun_stage1 = _glmm_devfun_factory(
-                pred, resp, nagq=nagq_stage1, tol_pwrss=tol_pwrss,
-                maxit_pwrss=maxit_pwrss, verbose=verbose_pirls, **agq_kwargs,
+                pred,
+                resp,
+                nagq=nagq_stage1,
+                tol_pwrss=tol_pwrss,
+                maxit_pwrss=maxit_pwrss,
+                verbose=verbose_pirls,
+                **agq_kwargs,
             )
             # devFunOnly with nAGQ>0: return the [θ, β] Stage-1 closure
             # (built at the Stage-0 optimum) before optimizing (lme4 lmer.R:175).
@@ -5738,9 +6193,11 @@ class gmm:
                 tnames = [f"theta{i + 1}" for i in range(n_theta)]
                 bnames = list(inputs.X_df.columns)
                 self.devfun = _DevFunHandle(
-                    devfun_stage1, tnames + bnames,
+                    devfun_stage1,
+                    tnames + bnames,
                     np.concatenate([lb_theta, lb_beta]),
-                    np.concatenate([ub_theta, ub_beta]))
+                    np.concatenate([ub_theta, ub_beta]),
+                )
                 self._dev_fun_only = True
                 return
             start_par = np.concatenate([theta_stage0, beta_start])
@@ -5750,32 +6207,48 @@ class gmm:
             # lmer.R:2533-2540: θ block uses 0.1, β block uses
             # ``min(βSD, 10)``, all scaled by 0.2.
             beta_sd = _beta_sd_from_RX(pred.RX) if p > 0 else np.zeros(0)
-            xst1 = 0.2 * np.concatenate([
-                np.full(n_theta, 0.1),
-                np.minimum(beta_sd, 10.0),
-            ])
+            xst1 = 0.2 * np.concatenate(
+                [
+                    np.full(n_theta, 0.1),
+                    np.minimum(beta_sd, 10.0),
+                ]
+            )
             xt1 = xst1 * 5e-4
             # Stage 1 outer optimizer = optimizer[1] (lme4 default Nelder_Mead;
             # the βSD-scaled xst1 / xt1 step+tol apply to the NM branch, and
             # BOBYQA self-scales over the joint (θ, β) vector).
             theta_beta_x, fval1, feval1, status1 = _run_outer_stage(
-                optimizer[1], devfun_stage1, start_par, lb_par, ub_par,
-                xst=xst1, xtol_abs=xt1, nm_kwargs=nm_kwargs,
+                optimizer[1],
+                devfun_stage1,
+                start_par,
+                lb_par,
+                ub_par,
+                xst=xst1,
+                xtol_abs=xt1,
+                nm_kwargs=nm_kwargs,
                 bobyqa_kwargs=bobyqa_kwargs,
             )
             # check.boundary on the θ block (modular.R:871-872): pin a
             # near-zero variance param to 0 if it lowers the deviance.
             if inputs.boundary_tol > 0:
                 theta_beta_x = _check_boundary(
-                    devfun_stage1, theta_beta_x, fval1, lb_par, ub_par,
-                    inputs.boundary_tol, dpars=range(n_theta))
+                    devfun_stage1,
+                    theta_beta_x,
+                    fval1,
+                    lb_par,
+                    ub_par,
+                    inputs.boundary_tol,
+                    dpars=range(n_theta),
+                )
                 fval1 = devfun_stage1(theta_beta_x)
             theta_hat = theta_beta_x[:n_theta].copy()
             beta_hat = theta_beta_x[n_theta:].copy()
             devfun_stage1(theta_beta_x)
             self._optim = {
-                "par": theta_beta_x.copy(), "fval": fval1,
-                "feval": feval1, "status": status1,
+                "par": theta_beta_x.copy(),
+                "fval": fval1,
+                "feval": feval1,
+                "status": status1,
             }
             self._devfun_stage1 = devfun_stage1  # convergence diagnostics reuse this
         else:
@@ -5791,7 +6264,7 @@ class gmm:
         self._beta = beta_hat
         self._pred = pred
         self._resp = resp
-        self.method = "glmer.ML"   # lme4's @resp$family != gaussian path
+        self.method = "glmer.ML"  # lme4's @resp$family != gaussian path
 
         # ----- post-fit attributes ----------------------------------------
 
@@ -5838,7 +6311,7 @@ class gmm:
         self.residuals = self._deviance_residuals_signed()
         # ``working_weights`` = lme4's ``glmResp$weights`` = (μ_η²·w)/V(μ)
         # = sqrt_x_wt² (respModule.cpp:179-183).
-        self.working_weights = resp.sqrt_x_wt ** 2
+        self.working_weights = resp.sqrt_x_wt**2
         self.prior_weights = resp.weights.copy()
 
         # ----- scale (σ) / dispersion -------------------------------------
@@ -5873,12 +6346,17 @@ class gmm:
         # when calc_derivs is off (lme4's checkConv then bails — no checks).
         deriv_grad = None
         deriv_hess = None
-        if (inputs.calc_derivs and p > 0 and do_stage1
-                and self._devfun_stage1 is not None):
+        if (
+            inputs.calc_derivs
+            and p > 0
+            and do_stage1
+            and self._devfun_stage1 is not None
+        ):
             try:
                 opt_par = np.concatenate([theta_hat, beta_hat])
-                deriv_grad, H = _deriv12(self._devfun_stage1, opt_par,
-                                         fx=self._optim["fval"])
+                deriv_grad, H = _deriv12(
+                    self._devfun_stage1, opt_par, fx=self._optim["fval"]
+                )
                 deriv_hess = H
                 H_inv = np.linalg.solve(H, np.eye(H.shape[0]))
                 # β-block of inv(H); lme4 then adds its transpose for
@@ -5920,7 +6398,9 @@ class gmm:
             {c: [float(se_beta[i])] for i, c in enumerate(self.column_names)}
         )
         with np.errstate(divide="ignore", invalid="ignore"):
-            t_vals = np.where(se_beta > 0, beta_hat / np.where(se_beta > 0, se_beta, 1.0), 0.0)
+            t_vals = np.where(
+                se_beta > 0, beta_hat / np.where(se_beta > 0, se_beta, 1.0), 0.0
+            )
         self.t_values = pl.DataFrame(
             {c: [float(t_vals[i])] for i, c in enumerate(self.column_names)}
         )
@@ -5954,7 +6434,7 @@ class gmm:
         # for glmer fits (methods.R's deviance.merMod). The Laplace
         # criterion is on ``m.deviance_laplace`` for downstream callers.
         self.deviance_laplace = laplace
-        self.deviance = float(resp.deviance())   # = Σ dev_resids
+        self.deviance = float(resp.deviance())  # = Σ dev_resids
         self.loglike = -0.5 * laplace
         self.df_resid = n - self.npar
         # AIC/BIC use the Laplace deviance (lme4's logLik-based formula).
@@ -5995,7 +6475,9 @@ class gmm:
         rp = getattr(self, "_resp", None)
         if rp is None:
             # Gaussian-identity LMM path — devresids are just raw residuals.
-            return np.asarray(self.y, dtype=float) - np.asarray(self.fitted, dtype=float)
+            return np.asarray(self.y, dtype=float) - np.asarray(
+                self.fitted, dtype=float
+            )
         return np.sign(rp.y - rp.mu) * np.sqrt(rp.deviance_residuals())
 
     def residuals_of(self, type: str = "deviance", scaled: bool = False) -> np.ndarray:
@@ -6062,13 +6544,18 @@ class gmm:
         data = np.asarray(theta, dtype=float)[self._lt_theta_pos]
         return csc_array(
             (data, self._lt_indices, self._lt_indptr),
-            shape=self._lt_shape, copy=False,
+            shape=self._lt_shape,
+            copy=False,
         )
 
     def _chol_block(
-        self, theta: np.ndarray, *,
-        y: np.ndarray | None = None, X: np.ndarray | None = None,
-        XtX: np.ndarray | None = None, Xty: np.ndarray | None = None,
+        self,
+        theta: np.ndarray,
+        *,
+        y: np.ndarray | None = None,
+        X: np.ndarray | None = None,
+        XtX: np.ndarray | None = None,
+        Xty: np.ndarray | None = None,
         yty: float | None = None,
     ) -> tuple[float, float, float] | None:
         """Core Cholesky step. Returns ``(rss, log|Lz|, log|Rx|)`` at β̂_θ,
@@ -6127,24 +6614,33 @@ class gmm:
         return rss, log_det_Lz, log_det_Rx
 
     def _ml_deviance(
-        self, theta: np.ndarray, *,
+        self,
+        theta: np.ndarray,
+        *,
         sigma_fix: float | None = None,
-        y: np.ndarray | None = None, X: np.ndarray | None = None,
-        XtX: np.ndarray | None = None, Xty: np.ndarray | None = None,
+        y: np.ndarray | None = None,
+        X: np.ndarray | None = None,
+        XtX: np.ndarray | None = None,
+        Xty: np.ndarray | None = None,
         yty: float | None = None,
     ) -> float:
         """ML deviance at this θ. Defaults to σ profiled out (σ̂² = rss/n);
         pass ``sigma_fix`` to hold σ at a specific value instead."""
         n = len(self.y) if y is None else len(y)
         r = self._chol_block(
-            theta, y=y, X=X, XtX=XtX, Xty=Xty, yty=yty,
+            theta,
+            y=y,
+            X=X,
+            XtX=XtX,
+            Xty=Xty,
+            yty=yty,
         )
         if r is None:
             return 1e15
         rss, log_det_Lz, _ = r
         if sigma_fix is None:
             return 2.0 * log_det_Lz + n * (1.0 + self._log2pi + np.log(rss / n))
-        s2 = sigma_fix ** 2
+        s2 = sigma_fix**2
         return 2.0 * log_det_Lz + n * (self._log2pi + np.log(s2)) + rss / s2
 
     def _reml_deviance(self, theta: np.ndarray) -> float:
@@ -6156,7 +6652,8 @@ class gmm:
         rss, log_det_Lz, log_det_Rx = r
         df = n - p
         return (
-            2.0 * log_det_Lz + 2.0 * log_det_Rx
+            2.0 * log_det_Lz
+            + 2.0 * log_det_Rx
             + df * (1.0 + self._log2pi + np.log(rss / df))
         )
 
@@ -6165,16 +6662,23 @@ class gmm:
     def _refit_theta(self, obj_fn, theta_start: np.ndarray) -> tuple[float, np.ndarray]:
         """Re-optimize θ against ``obj_fn(theta) → deviance``."""
         res = minimize(
-            obj_fn, theta_start, method="L-BFGS-B", bounds=self._theta_bounds,
+            obj_fn,
+            theta_start,
+            method="L-BFGS-B",
+            bounds=self._theta_bounds,
             options={"ftol": 1e-12, "gtol": 1e-8, "maxiter": 1000},
         )
         return float(res.fun), res.x
 
     def _post_refit_state(
-        self, theta: np.ndarray, *,
+        self,
+        theta: np.ndarray,
+        *,
         sigma_fix: float | None = None,
-        y: np.ndarray | None = None, X: np.ndarray | None = None,
-        XtX: np.ndarray | None = None, Xty: np.ndarray | None = None,
+        y: np.ndarray | None = None,
+        X: np.ndarray | None = None,
+        XtX: np.ndarray | None = None,
+        Xty: np.ndarray | None = None,
         yty: float | None = None,
     ) -> tuple[float, np.ndarray]:
         """At a fixed θ, recover (σ̂, β̂) at the just-found optimum.
@@ -6211,17 +6715,22 @@ class gmm:
             cb = solve_triangular(Rx, rhs, lower=True)
             beta = solve_triangular(Rx.T, cb, lower=False)
             rss = yty_ - cu_sq - float(np.einsum("i,i->", cb, cb))
-        sigma = sigma_fix if sigma_fix is not None else float(np.sqrt(max(rss, 0.0) / n))
+        sigma = (
+            sigma_fix if sigma_fix is not None else float(np.sqrt(max(rss, 0.0) / n))
+        )
         return sigma, beta
 
     def _dev_with_beta_fixed(
-        self, j: int, beta_j_tgt: float, theta_start: np.ndarray,
+        self,
+        j: int,
+        beta_j_tgt: float,
+        theta_start: np.ndarray,
     ) -> tuple[float, np.ndarray, float, np.ndarray]:
         """Min ML deviance with β_j = ``beta_j_tgt``. Trick: subtract
         ``x_j · β_j_tgt`` from y and drop column j — the remaining fit has
         the same functional form. Returns ``(dev, θ̂, σ̂, β̂)`` where β̂ is
         in the full original column order with ``β_j = beta_j_tgt``."""
-        X_full = self._X_solve          # √w-scaled design (weighted profile)
+        X_full = self._X_solve  # √w-scaled design (weighted profile)
         x_j = X_full[:, j]
         X_rest = np.delete(X_full, j, axis=1)
         # ``self._y_solve`` already has the offset removed; subtracting
@@ -6233,14 +6742,22 @@ class gmm:
         yty_adj = float(y_adj @ y_adj)
         dev, theta_opt = self._refit_theta(
             lambda th: self._ml_deviance(
-                th, y=y_adj, X=X_rest,
-                XtX=XtX_rest, Xty=Xty_rest, yty=yty_adj,
+                th,
+                y=y_adj,
+                X=X_rest,
+                XtX=XtX_rest,
+                Xty=Xty_rest,
+                yty=yty_adj,
             ),
             theta_start,
         )
         sigma_opt, beta_rest = self._post_refit_state(
-            theta_opt, y=y_adj, X=X_rest,
-            XtX=XtX_rest, Xty=Xty_rest, yty=yty_adj,
+            theta_opt,
+            y=y_adj,
+            X=X_rest,
+            XtX=XtX_rest,
+            Xty=Xty_rest,
+            yty=yty_adj,
         )
         beta_opt = np.empty(self.p)
         beta_opt[j] = beta_j_tgt
@@ -6249,7 +6766,9 @@ class gmm:
         return dev, theta_opt, sigma_opt, beta_opt
 
     def _dev_with_sigma_fixed(
-        self, sigma_tgt: float, theta_start: np.ndarray,
+        self,
+        sigma_tgt: float,
+        theta_start: np.ndarray,
     ) -> tuple[float, np.ndarray, float, np.ndarray]:
         """Min ML deviance with σ = ``sigma_tgt`` (β profiles out).
         Returns ``(dev, θ̂, σ_tgt, β̂)``."""
@@ -6261,8 +6780,11 @@ class gmm:
         return dev, theta_opt, float(sigma_tgt), beta_opt
 
     def _dev_with_sd_fixed(
-        self, slot_i: int, sd_tgt: float,
-        sigma_start: float, theta_start: np.ndarray,
+        self,
+        slot_i: int,
+        sd_tgt: float,
+        sigma_start: float,
+        theta_start: np.ndarray,
     ) -> tuple[float, np.ndarray, float, np.ndarray]:
         """Min ML deviance with σ_i = σ · θ[slot_i] pinned at ``sd_tgt``.
 
@@ -6294,7 +6816,10 @@ class gmm:
         x0 = np.concatenate([[max(sigma_start, sigma_lb)], theta_rest0])
         bounds = [(sigma_lb, None)] + [self._theta_bounds[k] for k in other]
         res = minimize(
-            obj, x0, method="L-BFGS-B", bounds=bounds,
+            obj,
+            x0,
+            method="L-BFGS-B",
+            bounds=bounds,
             options={"ftol": 1e-12, "gtol": 1e-8, "maxiter": 1000},
         )
         # Reconstruct θ at the optimum for warm-start of neighboring points.
@@ -6324,8 +6849,9 @@ class gmm:
             off += npar
         raise IndexError(f"bar_idx {bar_idx} out of range")
 
-    def _variance_component_specs(self, prof_scale: str = "sdcor",
-                                  signames: bool = True) -> list[tuple]:
+    def _variance_component_specs(
+        self, prof_scale: str = "sdcor", signames: bool = True
+    ) -> list[tuple]:
         """Ordered profile specs for every variance component — per bar the
         diagonal terms (SDs, or variances on the ``"varcov"`` scale) then the
         off-diagonal terms (correlations / covariances), in lme4's ``.sig0i``
@@ -6334,7 +6860,7 @@ class gmm:
         ``sd_…``/``cor_…`` (``var_…``/``cov_…``) name. ``value_func(θ, σ)`` reads
         the component off the (θ, σ) state; ``fit_at_v(v, θ_warm, σ_warm)``
         minimises the deviance with it pinned."""
-        varcov = (prof_scale == "varcov")
+        varcov = prof_scale == "varcov"
         specs: list[tuple] = []
         sig_n = 0
         theta_off = 0
@@ -6348,65 +6874,105 @@ class gmm:
             cnames = list(cnames) if isinstance(cnames, list) else [cnames]
             sd = np.asarray(self.sd_re[key], dtype=float)
             corr = self.corr_re.get(key)
-            for i in range(c):                                   # diagonal terms
+            for i in range(c):  # diagonal terms
                 sig_n += 1
                 pre = "var" if varcov else "sd"
-                lbl = (f".sig{sig_n:02d}" if signames
-                       else f"{pre}_{cnames[i]}|{gname}")
+                lbl = f".sig{sig_n:02d}" if signames else f"{pre}_{cnames[i]}|{gname}"
                 if varcov:
+
                     def val(th, sg, _bi=bi, _i=i):
-                        return float((sg * np.linalg.norm(
-                            self._theta_bar_block(th, _bi)[_i, :])) ** 2)
+                        return float(
+                            (sg * np.linalg.norm(self._theta_bar_block(th, _bi)[_i, :]))
+                            ** 2
+                        )
 
                     def fit(v, th, sg, _bi=bi, _i=i):
                         return self._dev_with_vc_fixed(
-                            (lambda t, s, __bi=_bi, __i=_i:
-                             (s * np.linalg.norm(
-                                 self._theta_bar_block(t, __bi)[__i, :])) ** 2),
-                            v, th, sg)
+                            (
+                                lambda t, s, __bi=_bi, __i=_i: (
+                                    (
+                                        s
+                                        * np.linalg.norm(
+                                            self._theta_bar_block(t, __bi)[__i, :]
+                                        )
+                                    )
+                                    ** 2
+                                )
+                            ),
+                            v,
+                            th,
+                            sg,
+                        )
+
                     mle = float(sd[i]) ** 2
                 elif c == 1:
+
                     def val(th, sg, _s=theta_off):
                         return float(sg * np.asarray(th)[_s])
 
                     def fit(v, th, sg, _s=theta_off):
                         return self._dev_with_sd_fixed(_s, v, sg, th)
+
                     mle = float(sd[i])
                 else:
+
                     def val(th, sg, _bi=bi, _i=i):
-                        return float(sg * np.linalg.norm(
-                            self._theta_bar_block(th, _bi)[_i, :]))
+                        return float(
+                            sg * np.linalg.norm(self._theta_bar_block(th, _bi)[_i, :])
+                        )
 
                     def fit(v, th, sg, _bi=bi, _i=i):
                         return self._dev_with_vc_fixed(
-                            (lambda t, s, __bi=_bi, __i=_i:
-                             s * np.linalg.norm(
-                                 self._theta_bar_block(t, __bi)[__i, :])),
-                            v, th, sg)
+                            (
+                                lambda t, s, __bi=_bi, __i=_i: (
+                                    s
+                                    * np.linalg.norm(
+                                        self._theta_bar_block(t, __bi)[__i, :]
+                                    )
+                                )
+                            ),
+                            v,
+                            th,
+                            sg,
+                        )
+
                     mle = float(sd[i])
                 specs.append((lbl, mle, fit, val, 0.0, np.inf))
-            for j in range(c):                                   # off-diagonal terms
+            for j in range(c):  # off-diagonal terms
                 for i in range(j + 1, c):
                     sig_n += 1
                     pre = "cov" if varcov else "cor"
-                    lbl = (f".sig{sig_n:02d}" if signames
-                           else f"{pre}_{cnames[i]}.{cnames[j]}|{gname}")
+                    lbl = (
+                        f".sig{sig_n:02d}"
+                        if signames
+                        else f"{pre}_{cnames[i]}.{cnames[j]}|{gname}"
+                    )
                     if varcov:
+
                         def _val(th, sg, _bi=bi, _i=i, _j=j):
                             b = self._theta_bar_block(th, _bi)
                             return float(sg * sg * (b[_i, :] @ b[_j, :]))
-                        mle = float(corr[i, j] * sd[i] * sd[j]) if corr is not None else 0.0
+
+                        mle = (
+                            float(corr[i, j] * sd[i] * sd[j])
+                            if corr is not None
+                            else 0.0
+                        )
                         vmin, vmax = -np.inf, np.inf
                     else:
+
                         def _val(th, sg, _bi=bi, _i=i, _j=j):
                             b = self._theta_bar_block(th, _bi)
                             ri, rj = b[_i, :], b[_j, :]
                             nn = np.linalg.norm(ri) * np.linalg.norm(rj)
                             return float((ri @ rj) / nn) if nn > 0 else 0.0
+
                         mle = float(corr[i, j]) if corr is not None else 0.0
                         vmin, vmax = -1.0, 1.0
+
                     def _fit(v, th, sg, _vc=_val):
                         return self._dev_with_vc_fixed(_vc, v, th, sg)
+
                     specs.append((lbl, mle, _fit, _val, vmin, vmax))
             theta_off += c * (c + 1) // 2
         return specs
@@ -6423,25 +6989,43 @@ class gmm:
                 return 1e15
             return self._ml_deviance(x[1:], sigma_fix=sigma)
 
-        x0 = np.concatenate([[max(float(sigma_start), 1e-6)],
-                             np.asarray(theta_start, dtype=float)])
+        x0 = np.concatenate(
+            [[max(float(sigma_start), 1e-6)], np.asarray(theta_start, dtype=float)]
+        )
         bounds = [(1e-8, None)] + [tuple(b) for b in self._theta_bounds]
         con = {"type": "eq", "fun": lambda x: vc_func(x[1:], x[0]) - v_tgt}
-        res = minimize(obj, x0, method="SLSQP", bounds=bounds, constraints=[con],
-                       options={"ftol": 1e-12, "maxiter": 2000})
+        res = minimize(
+            obj,
+            x0,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=[con],
+            options={"ftol": 1e-12, "maxiter": 2000},
+        )
         theta_opt = np.asarray(res.x[1:], dtype=float)
         sigma_opt = float(res.x[0])
         _, beta_opt = self._post_refit_state(theta_opt, sigma_fix=sigma_opt)
         return float(res.fun), theta_opt, sigma_opt, beta_opt
 
     def _fillmat_walk(
-        self, *, direction: int,
-        prev_v: float, prev_zeta: float,
-        curr_v: float, curr_zeta: float,
-        fit_at_v, theta_warm: np.ndarray, sigma_warm: float,
-        d_hat: float, delta: float, cutoff: float,
-        v_min: float = -np.inf, v_max: float = np.inf,
-        max_steps: int = 100, maxmult: float = 10.0, minstep: float = 1e-6,
+        self,
+        *,
+        direction: int,
+        prev_v: float,
+        prev_zeta: float,
+        curr_v: float,
+        curr_zeta: float,
+        fit_at_v,
+        theta_warm: np.ndarray,
+        sigma_warm: float,
+        d_hat: float,
+        delta: float,
+        cutoff: float,
+        v_min: float = -np.inf,
+        v_max: float = np.inf,
+        max_steps: int = 100,
+        maxmult: float = 10.0,
+        minstep: float = 1e-6,
     ) -> list[tuple]:
         """One-direction profile walk — port of lme4's ``fillmat`` inner
         loop in ``profile.merMod``.
@@ -6487,14 +7071,14 @@ class gmm:
                 boundary_hit = True
 
             d_new, theta_new, sigma_new, beta_new = fit_at_v(
-                v_new, theta_warm, sigma_warm,
+                v_new,
+                theta_warm,
+                sigma_warm,
             )
             if not np.isfinite(d_new):
                 break
             zeta_new = direction * float(np.sqrt(max(0.0, d_new - d_hat)))
-            out.append(
-                (float(v_new), float(zeta_new), theta_new, sigma_new, beta_new)
-            )
+            out.append((float(v_new), float(zeta_new), theta_new, sigma_new, beta_new))
 
             if boundary_hit:
                 break
@@ -6505,12 +7089,20 @@ class gmm:
         return out
 
     def _profile_param_adaptive(
-        self, *, fit_at_v, v_start: float,
-        theta_start: np.ndarray, sigma_start: float, beta_start: np.ndarray,
-        d_hat: float, is_var_component: bool,
-        cutoff: float, delta: float,
+        self,
+        *,
+        fit_at_v,
+        v_start: float,
+        theta_start: np.ndarray,
+        sigma_start: float,
+        beta_start: np.ndarray,
+        d_hat: float,
+        is_var_component: bool,
+        cutoff: float,
+        delta: float,
         se_for_init: float = 0.0,
-        v_min: float = -np.inf, v_max: float = np.inf,
+        v_min: float = -np.inf,
+        v_max: float = np.inf,
         max_steps_per_dir: int = 100,
     ) -> list[tuple]:
         """Profile one parameter — port of lme4's per-parameter loop in
@@ -6528,7 +7120,9 @@ class gmm:
             shift_v = v_start + delta * se_for_init
 
         d_shift, theta_shift, sigma_shift, beta_shift = fit_at_v(
-            shift_v, theta_start.copy(), sigma_start,
+            shift_v,
+            theta_start.copy(),
+            sigma_start,
         )
         # shift_v > v_start by construction (multiplicative bump for
         # variance components, additive positive bump for fixed effects),
@@ -6537,30 +7131,51 @@ class gmm:
         zeta_shift = float(np.sqrt(max(0.0, d_shift - d_hat)))
 
         mle_tup = (
-            float(v_start), 0.0, theta_start.copy(),
-            float(sigma_start), beta_start.copy(),
+            float(v_start),
+            0.0,
+            theta_start.copy(),
+            float(sigma_start),
+            beta_start.copy(),
         )
         shift_tup = (
-            float(shift_v), zeta_shift, theta_shift, sigma_shift, beta_shift,
+            float(shift_v),
+            zeta_shift,
+            theta_shift,
+            sigma_shift,
+            beta_shift,
         )
 
         pos = self._fillmat_walk(
             direction=+1,
-            prev_v=float(v_start), prev_zeta=0.0,
-            curr_v=float(shift_v), curr_zeta=zeta_shift,
+            prev_v=float(v_start),
+            prev_zeta=0.0,
+            curr_v=float(shift_v),
+            curr_zeta=zeta_shift,
             fit_at_v=fit_at_v,
-            theta_warm=theta_shift, sigma_warm=sigma_shift,
-            d_hat=d_hat, delta=delta, cutoff=cutoff,
-            v_min=v_min, v_max=v_max, max_steps=max_steps_per_dir,
+            theta_warm=theta_shift,
+            sigma_warm=sigma_shift,
+            d_hat=d_hat,
+            delta=delta,
+            cutoff=cutoff,
+            v_min=v_min,
+            v_max=v_max,
+            max_steps=max_steps_per_dir,
         )
         neg = self._fillmat_walk(
             direction=-1,
-            prev_v=float(shift_v), prev_zeta=zeta_shift,
-            curr_v=float(v_start), curr_zeta=0.0,
+            prev_v=float(shift_v),
+            prev_zeta=zeta_shift,
+            curr_v=float(v_start),
+            curr_zeta=0.0,
             fit_at_v=fit_at_v,
-            theta_warm=theta_start.copy(), sigma_warm=sigma_start,
-            d_hat=d_hat, delta=delta, cutoff=cutoff,
-            v_min=v_min, v_max=v_max, max_steps=max_steps_per_dir,
+            theta_warm=theta_start.copy(),
+            sigma_warm=sigma_start,
+            d_hat=d_hat,
+            delta=delta,
+            cutoff=cutoff,
+            v_min=v_min,
+            v_max=v_max,
+            max_steps=max_steps_per_dir,
         )
         return list(reversed(neg)) + [mle_tup, shift_tup] + pos
 
@@ -6581,11 +7196,17 @@ class gmm:
                 theta[k] = x[a]
             return devfun(np.concatenate([theta, x[nf:]]))
 
-        x0 = np.concatenate([np.asarray(theta_warm, float)[free_t],
-                             np.asarray(beta_warm, float)])
+        x0 = np.concatenate(
+            [np.asarray(theta_warm, float)[free_t], np.asarray(beta_warm, float)]
+        )
         bounds = [self._theta_bounds[k] for k in free_t] + [(None, None)] * self.p
-        res = minimize(obj, x0, method="L-BFGS-B", bounds=bounds,
-                       options={"ftol": 1e-12, "gtol": 1e-7, "maxiter": 500})
+        res = minimize(
+            obj,
+            x0,
+            method="L-BFGS-B",
+            bounds=bounds,
+            options={"ftol": 1e-12, "gtol": 1e-7, "maxiter": 500},
+        )
         theta_opt = np.empty(n_theta)
         theta_opt[slot_i] = v_tgt
         for a, k in enumerate(free_t):
@@ -6607,11 +7228,17 @@ class gmm:
                 beta[k] = x[n_theta + a]
             return devfun(np.concatenate([x[:n_theta], beta]))
 
-        x0 = np.concatenate([np.asarray(theta_warm, float),
-                             np.asarray(beta_warm, float)[free_b]])
+        x0 = np.concatenate(
+            [np.asarray(theta_warm, float), np.asarray(beta_warm, float)[free_b]]
+        )
         bounds = list(self._theta_bounds) + [(None, None)] * len(free_b)
-        res = minimize(obj, x0, method="L-BFGS-B", bounds=bounds,
-                       options={"ftol": 1e-12, "gtol": 1e-7, "maxiter": 500})
+        res = minimize(
+            obj,
+            x0,
+            method="L-BFGS-B",
+            bounds=bounds,
+            options={"ftol": 1e-12, "gtol": 1e-7, "maxiter": 500},
+        )
         theta_opt = res.x[:n_theta].copy()
         beta_opt = np.empty(p)
         beta_opt[j] = v_tgt
@@ -6629,7 +7256,8 @@ class gmm:
         if self._devfun_stage1 is None:
             raise NotImplementedError(
                 "profile() needs the Stage-1 [θ,β] Laplace devfun, which "
-                "nAGQ=0 fits don't build; refit with nAGQ>=1")
+                "nAGQ=0 fits don't build; refit with nAGQ>=1"
+            )
         d_hat = float(self._optim["fval"])
         theta_hat = self.theta.copy()
         n_theta = len(theta_hat)
@@ -6668,25 +7296,38 @@ class gmm:
 
         for lbl, slot_i in zip(bar_labels, bar_slots):
             samples = self._profile_param_adaptive(
-                fit_at_v=lambda v, th_w, sg_w, _slot=slot_i:
-                    self._glmm_dev_with_theta_fixed(_slot, v, th_w, self._beta),
-                v_start=estimate[lbl], theta_start=theta_hat,
-                sigma_start=1.0, beta_start=self._beta,
-                d_hat=d_hat, is_var_component=True,
-                cutoff=cutoff, delta=delta, v_min=0.0, max_steps_per_dir=n_grid,
+                fit_at_v=lambda v, th_w, sg_w, _slot=slot_i: (
+                    self._glmm_dev_with_theta_fixed(_slot, v, th_w, self._beta)
+                ),
+                v_start=estimate[lbl],
+                theta_start=theta_hat,
+                sigma_start=1.0,
+                beta_start=self._beta,
+                d_hat=d_hat,
+                is_var_component=True,
+                cutoff=cutoff,
+                delta=delta,
+                v_min=0.0,
+                max_steps_per_dir=n_grid,
             )
             _store(samples, lbl)
 
         for j, name in enumerate(self.column_names):
             se_j = float(self._se_beta[j])
             samples = self._profile_param_adaptive(
-                fit_at_v=lambda v, th_w, sg_w, _j=j:
-                    self._glmm_dev_with_beta_fixed(_j, v, th_w, self._beta),
-                v_start=estimate[name], theta_start=theta_hat,
-                sigma_start=1.0, beta_start=self._beta,
-                d_hat=d_hat, is_var_component=False,
+                fit_at_v=lambda v, th_w, sg_w, _j=j: self._glmm_dev_with_beta_fixed(
+                    _j, v, th_w, self._beta
+                ),
+                v_start=estimate[name],
+                theta_start=theta_hat,
+                sigma_start=1.0,
+                beta_start=self._beta,
+                d_hat=d_hat,
+                is_var_component=False,
                 se_for_init=max(se_j, 1e-3),
-                cutoff=cutoff, delta=delta, max_steps_per_dir=n_grid,
+                cutoff=cutoff,
+                delta=delta,
+                max_steps_per_dir=n_grid,
             )
             _store(samples, name)
 
@@ -6701,9 +7342,16 @@ class gmm:
             data[p] = pl.DataFrame(cols)
         return Profile(data, estimate)
 
-    def profile(self, n_grid: int = 100, alphamax: float = 0.01, *,
-                maxpts: int | None = None, which=None,
-                signames: bool = True, prof_scale: str = "sdcor") -> "Profile":
+    def profile(
+        self,
+        n_grid: int = 100,
+        alphamax: float = 0.01,
+        *,
+        maxpts: int | None = None,
+        which=None,
+        signames: bool = True,
+        prof_scale: str = "sdcor",
+    ) -> "Profile":
         """Compute profile-likelihood curves for the variance components, σ,
         and each β_j — lme4's ``profile.merMod``.
 
@@ -6737,14 +7385,18 @@ class gmm:
             # confint(method="profile") raises identically.
             if not bool(getattr(self.family, "scale_known", False)):
                 raise NotImplementedError(
-                    "can't (yet) profile GLMMs with non-fixed scale parameters")
+                    "can't (yet) profile GLMMs with non-fixed scale parameters"
+                )
             # scale-known GLMM (Poisson/Binomial): profile the [θ, β]
             # Laplace devfun, re-optimising the free coords with one pinned.
             return self._profile_glmm(n_grid, alphamax)
         if self.REML:
             return gmm(self.formula, self.data, REML=False).profile(
-                n_grid=n_grid, alphamax=alphamax, which=which,
-                signames=signames, prof_scale=prof_scale,
+                n_grid=n_grid,
+                alphamax=alphamax,
+                which=which,
+                signames=signames,
+                prof_scale=prof_scale,
             )
 
         d_hat = self.deviance
@@ -6758,33 +7410,36 @@ class gmm:
         cutoff = float(np.sqrt(_dist.qchisq(1.0 - alphamax, nptot)))
         delta = cutoff / 8.0
 
-        varcov = (prof_scale == "varcov")
-        vc_specs = self._variance_component_specs(prof_scale=prof_scale,
-                                                  signames=signames)
+        varcov = prof_scale == "varcov"
+        vc_specs = self._variance_component_specs(
+            prof_scale=prof_scale, signames=signames
+        )
         # Column order, also the iteration order for profiled params.
-        param_names: list[str] = ([s[0] for s in vc_specs] + [".sigma"]
-                                  + list(self.column_names))
+        param_names: list[str] = (
+            [s[0] for s in vc_specs] + [".sigma"] + list(self.column_names)
+        )
         if which is None:
             want = set(param_names)
         else:
             wl = [which] if isinstance(which, (str, int)) else list(which)
-            want = {param_names[w] if isinstance(w, (int, np.integer)) else w
-                    for w in wl}
+            want = {
+                param_names[w] if isinstance(w, (int, np.integer)) else w for w in wl
+            }
 
         estimate: dict[str, float] = {}
-        for (lbl, mle, _fit, _val, _vmin, _vmax) in vc_specs:
+        for lbl, mle, _fit, _val, _vmin, _vmax in vc_specs:
             estimate[lbl] = mle
-        estimate[".sigma"] = sigma_hat ** 2 if varcov else sigma_hat
+        estimate[".sigma"] = sigma_hat**2 if varcov else sigma_hat
         for j, name in enumerate(self.column_names):
             estimate[name] = float(self._beta[j])
 
         def _state_to_row(theta_opt, sigma_opt, beta_opt) -> dict[str, float]:
             """Map (θ̂, σ̂, β̂) at a grid point into the per-parameter row."""
             row: dict[str, float] = {}
-            for (lbl, _mle, _fit, val, _vmin, _vmax) in vc_specs:
+            for lbl, _mle, _fit, val, _vmin, _vmax in vc_specs:
                 row[lbl] = float(val(theta_opt, sigma_opt))
             # On the varcov scale the residual term is the variance σ².
-            row[".sigma"] = float(sigma_opt ** 2 if varcov else sigma_opt)
+            row[".sigma"] = float(sigma_opt**2 if varcov else sigma_opt)
             for j, name in enumerate(self.column_names):
                 row[name] = float(beta_opt[j])
             return row
@@ -6800,29 +7455,39 @@ class gmm:
                 rows_by_param[lbl].append(_state_to_row(s[2], s[3], s[4]))
 
         # -- variance components (per bar: diagonal terms, then off-diagonal) --
-        for (lbl, mle, fit, _val, vmin, vmax) in vc_specs:
+        for lbl, mle, fit, _val, vmin, vmax in vc_specs:
             if lbl not in want:
                 continue
             samples = self._profile_param_adaptive(
                 fit_at_v=fit,
-                v_start=mle, theta_start=theta_hat,
-                sigma_start=sigma_hat, beta_start=self._beta,
-                d_hat=d_hat, is_var_component=True,
-                cutoff=cutoff, delta=delta,
-                v_min=vmin, v_max=vmax, max_steps_per_dir=n_grid,
+                v_start=mle,
+                theta_start=theta_hat,
+                sigma_start=sigma_hat,
+                beta_start=self._beta,
+                d_hat=d_hat,
+                is_var_component=True,
+                cutoff=cutoff,
+                delta=delta,
+                v_min=vmin,
+                v_max=vmax,
+                max_steps_per_dir=n_grid,
             )
             _samples_to_storage(samples, lbl)
 
         # -- σ ----------------------------------------------------------------
         if ".sigma" in want:
             samples = self._profile_param_adaptive(
-                fit_at_v=lambda v, th_w, sg_w:
-                    self._dev_with_sigma_fixed(v, th_w),
-                v_start=sigma_hat, theta_start=theta_hat,
-                sigma_start=sigma_hat, beta_start=self._beta,
-                d_hat=d_hat, is_var_component=True,
-                cutoff=cutoff, delta=delta,
-                v_min=0.0, max_steps_per_dir=n_grid,
+                fit_at_v=lambda v, th_w, sg_w: self._dev_with_sigma_fixed(v, th_w),
+                v_start=sigma_hat,
+                theta_start=theta_hat,
+                sigma_start=sigma_hat,
+                beta_start=self._beta,
+                d_hat=d_hat,
+                is_var_component=True,
+                cutoff=cutoff,
+                delta=delta,
+                v_min=0.0,
+                max_steps_per_dir=n_grid,
             )
             _samples_to_storage(samples, ".sigma")
 
@@ -6833,22 +7498,29 @@ class gmm:
             beta_j = estimate[name]
             se_j = float(self._se_beta[j])
             samples = self._profile_param_adaptive(
-                fit_at_v=lambda v, th_w, sg_w, _j=j:
-                    self._dev_with_beta_fixed(_j, v, th_w),
-                v_start=beta_j, theta_start=theta_hat,
-                sigma_start=sigma_hat, beta_start=self._beta,
-                d_hat=d_hat, is_var_component=False,
+                fit_at_v=lambda v, th_w, sg_w, _j=j: self._dev_with_beta_fixed(
+                    _j, v, th_w
+                ),
+                v_start=beta_j,
+                theta_start=theta_hat,
+                sigma_start=sigma_hat,
+                beta_start=self._beta,
+                d_hat=d_hat,
+                is_var_component=False,
                 se_for_init=max(se_j, 1e-3),
-                cutoff=cutoff, delta=delta,
+                cutoff=cutoff,
+                delta=delta,
                 max_steps_per_dir=n_grid,
             )
             _samples_to_storage(samples, name)
 
         data: dict[str, pl.DataFrame] = {}
         for p in param_names:
-            if p not in zetas_by_param:          # skipped via which=
+            if p not in zetas_by_param:  # skipped via which=
                 continue
-            cols: dict[str, list[float]] = {q: [r[q] for r in rows_by_param[p]] for q in param_names}
+            cols: dict[str, list[float]] = {
+                q: [r[q] for r in rows_by_param[p]] for q in param_names
+            }
             cols["zeta"] = list(zetas_by_param[p])
             data[p] = pl.DataFrame(cols)
 
@@ -6877,18 +7549,30 @@ class gmm:
             return df
         if isinstance(parm, (str, int)):
             parm = [parm]
-        keep = [all_names[p] if isinstance(p, (int, np.integer)) else p
-                for p in parm]
+        keep = [all_names[p] if isinstance(p, (int, np.integer)) else p for p in parm]
         # Preserve the requested order rather than the table's.
         order = {name: i for i, name in enumerate(keep)}
-        return (df.filter(pl.col("parameter").is_in(keep))
-                  .sort(pl.col("parameter").replace_strict(order, default=10**9)))
+        return df.filter(pl.col("parameter").is_in(keep)).sort(
+            pl.col("parameter").replace_strict(order, default=10**9)
+        )
 
-    def confint(self, parm=None, level: float = 0.95, method: str = "profile",
-                *, nsim: int = 500, boot_type: str = "perc", FUN=None,
-                seed=None, boot_scale: str = "sdcor",
-                use_u: bool = False, zeta=None, quiet: bool = False,
-                oldNames: bool = True, signames: bool = True) -> pl.DataFrame:
+    def confint(
+        self,
+        parm=None,
+        level: float = 0.95,
+        method: str = "profile",
+        *,
+        nsim: int = 500,
+        boot_type: str = "perc",
+        FUN=None,
+        seed=None,
+        boot_scale: str = "sdcor",
+        use_u: bool = False,
+        zeta=None,
+        quiet: bool = False,
+        oldNames: bool = True,
+        signames: bool = True,
+    ) -> pl.DataFrame:
         """R: ``confint.merMod`` — fixed-effect & variance-component CIs.
 
         ``method`` (lme4's three, profile.R:807):
@@ -6922,21 +7606,24 @@ class gmm:
             prof = self.profile(signames=use_signames)
             df = prof.confint(level=level, zeta=zeta)
             all_names = list(prof.data.keys())
-            if not use_signames:                       # lme4 prints "sigma" here
+            if not use_signames:  # lme4 prints "sigma" here
                 df = df.with_columns(pl.col("parameter").replace({".sigma": "sigma"}))
                 all_names = ["sigma" if n == ".sigma" else n for n in all_names]
             return self._filter_parm(df, parm, all_names)
         if method == "boot":
-            return self._confint_boot(parm, level, nsim, boot_type, FUN,
-                                      seed, boot_scale, use_u)
+            return self._confint_boot(
+                parm, level, nsim, boot_type, FUN, seed, boot_scale, use_u
+            )
         raise ValueError(
-            f"confint: method must be 'profile'/'Wald'/'boot'; got {method!r}")
+            f"confint: method must be 'profile'/'Wald'/'boot'; got {method!r}"
+        )
 
     def _confint_wald(self, parm, level: float, signames: bool = True) -> pl.DataFrame:
         """``method="Wald"`` — ``β̂ ± z·SE`` for fixed effects; ``NaN`` rows for
         the variance components / σ (confint.merMod:843-857)."""
         _, vc_names, use_sc, fixef_names, all_names = self._ci_param_layout(
-            signames=signames)
+            signames=signames
+        )
         z = float(_nmath.qnorm5((1 + level) / 2))
         a = (1 - level) / 2
         lo_lbl, hi_lbl = f"{100 * a:.1f}%", f"{100 * (1 - a):.1f}%"
@@ -6964,13 +7651,15 @@ class gmm:
         if boot_scale not in ("sdcor", "vcov"):
             raise NotImplementedError(
                 f"confint(boot_scale={boot_scale!r}) not implemented; "
-                "use 'sdcor' or 'vcov'")
+                "use 'sdcor' or 'vcov'"
+            )
         if any(c > 1 for c in self._bar_sizes):
             raise NotImplementedError(
                 "bootstrap confint requires scalar bars (1|g); pass a custom "
-                "FUN for vector bars")
+                "FUN for vector bars"
+            )
         bar_keys, vc_names, use_sc, fixef_names, _ = self._ci_param_layout()
-        sq = boot_scale == "vcov"               # variance = sd² on the vcov scale
+        sq = boot_scale == "vcov"  # variance = sd² on the vcov scale
         out: dict[str, float] = {}
         for nm, key in zip(vc_names, bar_keys):
             sd = float(self.sd_re[key][0])
@@ -6982,12 +7671,15 @@ class gmm:
             out[nm] = float(self._beta[j])
         return out
 
-    def _confint_boot(self, parm, level, nsim, boot_type, FUN, seed,
-                      boot_scale, use_u) -> pl.DataFrame:
+    def _confint_boot(
+        self, parm, level, nsim, boot_type, FUN, seed, boot_scale, use_u
+    ) -> pl.DataFrame:
         """``method="boot"`` — bootstrap CIs via :meth:`bootMer` (confint.merMod:859)."""
         if FUN is None:
+
             def FUN(x):
                 return x._boot_profile_stat(boot_scale)
+
         bb = self.bootMer(FUN, nsim=nsim, seed=seed, use_u=use_u)
         if np.all(np.isnan(bb.t)):
             raise RuntimeError("*all* bootstrap runs failed!")
@@ -7020,7 +7712,10 @@ class gmm:
         return off
 
     def _build_Z_for_newdata(
-        self, newdata: pl.DataFrame, *, allow_new_levels: bool = False,
+        self,
+        newdata: pl.DataFrame,
+        *,
+        allow_new_levels: bool = False,
     ) -> np.ndarray:
         """Build a dense Z matrix on ``newdata`` aligned to the fit's RE
         column layout. Group values in newdata are mapped to the fit's
@@ -7048,13 +7743,23 @@ class gmm:
             if is_double:
                 lhs_parts: list[ExpandedFormula] = []
                 if lhs_ef.intercept:
-                    lhs_parts.append(ExpandedFormula(
-                        intercept=True, terms=[], bars=[], offsets=[],
-                    ))
+                    lhs_parts.append(
+                        ExpandedFormula(
+                            intercept=True,
+                            terms=[],
+                            bars=[],
+                            offsets=[],
+                        )
+                    )
                 for t in lhs_ef.terms:
-                    lhs_parts.append(ExpandedFormula(
-                        intercept=False, terms=[t], bars=[], offsets=[],
-                    ))
+                    lhs_parts.append(
+                        ExpandedFormula(
+                            intercept=False,
+                            terms=[t],
+                            bars=[],
+                            offsets=[],
+                        )
+                    )
             else:
                 lhs_parts = [lhs_ef]
             for g_node in group_nodes:
@@ -7134,12 +7839,13 @@ class gmm:
         matched = False
         for k, key in enumerate(self._re.cnms):
             if _sig(self._re.cnms, key, self.n_groups) in wanted:
-                mask[Gp[k]:Gp[k + 1]] = 1.0
+                mask[Gp[k] : Gp[k + 1]] = 1.0
                 matched = True
         if not matched:
             raise ValueError(
                 f"predict: re_form={re_form!r} matched none of the model's "
-                f"random-effect terms {list(self._re.cnms)}")
+                f"random-effect terms {list(self._re.cnms)}"
+            )
         return mask
 
     def predict(
@@ -7204,42 +7910,50 @@ class gmm:
         if terms is not None:
             raise NotImplementedError("predict: terms= is not implemented")
         if type not in ("response", "link"):
-            raise ValueError(f"predict: type must be 'response' or 'link', got {type!r}")
+            raise ValueError(
+                f"predict: type must be 'response' or 'link', got {type!r}"
+            )
         if na_action not in ("na.pass", "na.omit", "na.exclude"):
             raise NotImplementedError(
                 "predict: na.action must be 'na.pass' / 'na.omit' / 'na.exclude'; "
-                f"got {na_action!r}")
+                f"got {na_action!r}"
+            )
         if se_fit and newparams is not None:
             raise NotImplementedError(
                 "predict: se_fit with newparams= is not supported (the SE is the "
-                "fitted model's posterior — supply one or the other)")
+                "fitted model's posterior — supply one or the other)"
+            )
         # newparams: substitute β (and Λ(θ)) into the predictor while keeping the
         # fitted conditional modes û — lme4's setParams → predict.
         beta_eff = np.asarray(self._beta, dtype=float).ravel()
         Lam_eff = self.Lambda
         if newparams is not None:
             if not isinstance(newparams, dict):
-                raise TypeError("predict: newparams= must be a dict with "
-                                "'beta'/'fixef' and/or 'theta'")
+                raise TypeError(
+                    "predict: newparams= must be a dict with "
+                    "'beta'/'fixef' and/or 'theta'"
+                )
             _b = newparams.get("beta", newparams.get("fixef"))
             if _b is not None:
                 beta_eff = np.asarray(_b, dtype=float).ravel()
                 if beta_eff.shape != (self.p,):
                     raise ValueError(
                         f"predict: newparams['beta'] must have length {self.p}; "
-                        f"got {beta_eff.size}")
+                        f"got {beta_eff.size}"
+                    )
             _t = newparams.get("theta")
             if _t is not None:
-                Lam_eff = self._build_Lt_sparse(
-                    np.asarray(_t, dtype=float)).T.toarray()
+                Lam_eff = self._build_Lt_sparse(np.asarray(_t, dtype=float)).T.toarray()
         # R's ``isRE``: re.form=None (all RE); the no-RE sentinels (NA / ~0,
         # spelled False / "NA" / NaN / "~0") = population; else a partial-bars
         # formula selecting a subset of random-effect terms.
         _no_re = (
             re_form is False
-            or (isinstance(re_form, float) and re_form != re_form)        # NaN
-            or (isinstance(re_form, str)
-                and re_form.strip().replace(" ", "") in ("NA", "~0", "0"))
+            or (isinstance(re_form, float) and re_form != re_form)  # NaN
+            or (
+                isinstance(re_form, str)
+                and re_form.strip().replace(" ", "") in ("NA", "~0", "0")
+            )
         )
         re_mask = None
         if re_form is None:
@@ -7258,9 +7972,13 @@ class gmm:
         if newdata is not None and na_action in ("na.omit", "na.exclude"):
             model_cols = [c for c in newdata.columns if c in self.data.columns]
             if model_cols:
-                null_mask = newdata.select(
-                    pl.any_horizontal([pl.col(c).is_null() for c in model_cols])
-                ).to_series().to_numpy()
+                null_mask = (
+                    newdata.select(
+                        pl.any_horizontal([pl.col(c).is_null() for c in model_cols])
+                    )
+                    .to_series()
+                    .to_numpy()
+                )
                 if null_mask.any():
                     na_idx = np.where(null_mask)[0]
                     newdata = newdata.filter(~pl.Series(null_mask))
@@ -7281,8 +7999,14 @@ class gmm:
         # No-arg fast path — matches R's ``na.omit(fitted(object))``.
         # For GLMM, ``self.fitted`` is on the response scale (= μ̂); for LMM
         # μ ≡ η so both ``type`` values are the same value.
-        if (newdata is None and include_re and not random_only and not se_fit
-                and newparams is None and re_mask is None):
+        if (
+            newdata is None
+            and include_re
+            and not random_only
+            and not se_fit
+            and newparams is None
+            and re_mask is None
+        ):
             if is_glmm and type == "link":
                 return pl.DataFrame({"fit": self.eta.copy()})
             return pl.DataFrame({"fit": self.fitted.copy()})
@@ -7315,7 +8039,8 @@ class gmm:
                 Z_pred = self.Z
             else:
                 Z_pred = self._build_Z_for_newdata(
-                    newdata, allow_new_levels=allow_new_levels,
+                    newdata,
+                    allow_new_levels=allow_new_levels,
                 )
             ZL_pred = Z_pred @ Lam_eff
             # partial re_form keeps only the selected bars' RE coordinates.
@@ -7360,7 +8085,7 @@ class gmm:
             lamt_ut_dense = np.asarray(pp.lamt_ut.todense())
             M_top = lamt_ut_dense @ lamt_ut_dense.T + np.eye(self.q)
             M_brc = pp.RZX_unfactored  # = lamt_ut · V = Λᵀ Z' W X
-            M_bot = pp.VtV             # = V' V = X' W X
+            M_bot = pp.VtV  # = V' V = X' W X
         else:
             X_fit = self.X.to_numpy().astype(float)
             if X_fit.shape == (0, 0):
@@ -7467,17 +8192,27 @@ class gmm:
             sds = self.sd_re[key]
             corr = self.corr_re.get(key)
             for i, (name, s) in enumerate(zip(names, sds)):
-                corrs = [corr[i, j] for j in range(i)] if (corr is not None and i > 0) else []
-                entries.append((key if i == 0 else "", name, float(s), float(s) ** 2, corrs))
+                corrs = (
+                    [corr[i, j] for j in range(i)]
+                    if (corr is not None and i > 0)
+                    else []
+                )
+                entries.append(
+                    (key if i == 0 else "", name, float(s), float(s) ** 2, corrs)
+                )
         # Residual SD: lme4 omits this row for scale-known GLMM families
         # (Poisson, Binomial — methods.R: print.merMod for glmerMod) since
         # σ ≡ 1 conveys no information; show it only when the scale is
         # estimated (LMM Gaussian, GLMM with Gamma / Inverse-Gaussian).
         if not (self._is_glmm() and getattr(self.family, "scale_known", False)):
-            entries.append(("Residual", "", float(self.sigma), float(self.sigma_squared), []))
+            entries.append(
+                ("Residual", "", float(self.sigma), float(self.sigma_squared), [])
+            )
 
         sd_col = self._format_col([e[2] for e in entries])
-        var_col = self._format_col([e[3] for e in entries]) if include_variance else None
+        var_col = (
+            self._format_col([e[3] for e in entries]) if include_variance else None
+        )
 
         rows: list[list[str]] = []
         for idx, (group, name, _s, _v, corrs) in enumerate(entries):
@@ -7543,8 +8278,8 @@ class gmm:
         names = ["(Intr)" if n == "(Intercept)" else n for n in self.column_names]
         row_w = max(len(n) for n in names[1:])
         cell_w = max(6, max(len(n) for n in names[: p - 1]))
-        header = " " * row_w + " " + " ".join(
-            names[j].rjust(cell_w) for j in range(p - 1)
+        header = (
+            " " * row_w + " " + " ".join(names[j].rjust(cell_w) for j in range(p - 1))
         )
         rows = []
         for i in range(1, p):
@@ -7580,8 +8315,16 @@ class gmm:
         row = " ".join(v.rjust(w) for v, w in zip(vals, widths))
         return ["Scaled residuals:", hdr, row]
 
-    def simulate(self, nsim: int = 1, seed=None, use_u: bool = False, *,
-                 re_form=None, newdata=None, newparams=None):
+    def simulate(
+        self,
+        nsim: int = 1,
+        seed=None,
+        use_u: bool = False,
+        *,
+        re_form=None,
+        newdata=None,
+        newparams=None,
+    ):
         """Simulate ``nsim`` response vectors from the fitted model — port of
         ``simulate.merMod`` (predict.R:673-938).
 
@@ -7634,16 +8377,20 @@ class gmm:
         # re_form: a no-RE sentinel (NA / ~0) ≡ fresh RE draws (the use_u=False
         # default); a partial-bars formula is not supported (use use_u=).
         _ok_re = (
-            re_form is None or re_form is False
-            or (isinstance(re_form, float) and re_form != re_form)         # NaN
-            or (isinstance(re_form, str)
-                and re_form.strip().replace(" ", "") in ("NA", "~0", "0"))
+            re_form is None
+            or re_form is False
+            or (isinstance(re_form, float) and re_form != re_form)  # NaN
+            or (
+                isinstance(re_form, str)
+                and re_form.strip().replace(" ", "") in ("NA", "~0", "0")
+            )
         )
         if not _ok_re:
             raise NotImplementedError(
                 "simulate: re_form= accepts None or a no-RE sentinel (False / "
                 "'NA' / NaN / '~0'); a partial-bars formula is not supported — "
-                "use use_u= to condition on the fitted RE modes")
+                "use use_u= to condition on the fitted RE modes"
+            )
 
         # Effective design — ``newdata`` builds a fresh X / Z (and its own RE
         # dimension q, which sets the RE-draw count).
@@ -7653,14 +8400,19 @@ class gmm:
                 X_eff = np.zeros((self.n, 0))
             offset_eff = self._offset
             Z_eff = self._Z_sp
-            Lam_eff = (self._build_Lt_sparse(theta_eff).T.toarray()
-                       if theta_overridden else self.Lambda)
+            Lam_eff = (
+                self._build_Lt_sparse(theta_eff).T.toarray()
+                if theta_overridden
+                else self.Lambda
+            )
             n_eff, q_eff = self.n, self.q
         else:
             if use_u:
                 raise NotImplementedError(
-                    "simulate: use_u=True with newdata= is not supported")
+                    "simulate: use_u=True with newdata= is not supported"
+                )
             from ..formula import materialize_bars, prepare_design
+
             dd = prepare_design(self.formula, newdata)
             re_nd = materialize_bars(dd.expanded, dd.data)
             X_eff = self._build_X_for_newdata(newdata)
@@ -7668,7 +8420,7 @@ class gmm:
                 X_eff = np.zeros((newdata.height, 0))
             offset_eff = self._build_offset_for_newdata(newdata)
             Z_eff = csc_array(re_nd.Z)
-            Lt_tmpl = np.asarray(re_nd.Lambdat)            # integer θ-position template
+            Lt_tmpl = np.asarray(re_nd.Lambdat)  # integer θ-position template
             Lt_nd = Lt_tmpl.astype(float).copy()
             nz = Lt_tmpl != 0
             Lt_nd[nz] = theta_eff[Lt_tmpl[nz].astype(int) - 1]
@@ -7678,7 +8430,7 @@ class gmm:
         rng = _simulate_rng(seed)
         nsim = int(nsim)
         fam = self.family
-        is_gaussian = (fam.name == "gaussian")
+        is_gaussian = fam.name == "gaussian"
         offset_eff = np.asarray(offset_eff, dtype=float).ravel()
         # Population linear predictor (link scale) at the effective β.
         eta_pop = np.asarray(X_eff @ beta_eff, dtype=float).ravel() + offset_eff
@@ -7725,20 +8477,26 @@ class gmm:
         resp = np.asarray(newresp, dtype=float).ravel()
         if resp.shape != (self.n,):
             raise ValueError(
-                f"_refit_response: newresp must have length {self.n}; "
-                f"got {resp.shape}")
+                f"_refit_response: newresp must have length {self.n}; got {resp.shape}"
+            )
         lhs = self.formula.split("~", 1)[0].strip()
         if lhs not in self.data.columns:
             raise NotImplementedError(
                 f"refit(newresp=): response {lhs!r} is not a bare data column "
-                f"(cbind() / transformed LHS not supported yet)")
+                f"(cbind() / transformed LHS not supported yet)"
+            )
         data = self.data.with_columns(pl.Series(lhs, resp))
         w = getattr(self, "prior_weights", None)
         if w is not None and np.allclose(np.asarray(w, float), 1.0):
             w = None  # unit weights ⇒ pass None (avoids a spurious weighted fit)
         return gmm(
-            self.formula, data, family=self.family, REML=self.REML,
-            weights=w, offset=self._offset_arg, nAGQ=self._nAGQ,
+            self.formula,
+            data,
+            family=self.family,
+            REML=self.REML,
+            weights=w,
+            offset=self._offset_arg,
+            nAGQ=self._nAGQ,
             control=self._control_arg,
         )
 
@@ -7750,17 +8508,29 @@ class gmm:
         matching how R names an unnamed ``FUN`` result."""
         raw = FUN(model)
         if isinstance(raw, dict):
-            return (np.asarray(list(raw.values()), dtype=float).ravel(),
-                    list(raw.keys()))
+            return (
+                np.asarray(list(raw.values()), dtype=float).ravel(),
+                list(raw.keys()),
+            )
         if isinstance(raw, pl.Series):
             return raw.to_numpy().astype(float).ravel(), [
-                f"t{i + 1}" for i in range(raw.len())]
+                f"t{i + 1}" for i in range(raw.len())
+            ]
         arr = np.asarray(raw, dtype=float).ravel()
         return arr, [f"t{i + 1}" for i in range(arr.size)]
 
-    def bootMer(self, FUN, nsim: int = 1, seed=None, use_u: bool = False,
-                type: str = "parametric", re_form=None, verbose: bool = False,
-                parallel: str = "no", ncpus: int = 1) -> "BootMer":
+    def bootMer(
+        self,
+        FUN,
+        nsim: int = 1,
+        seed=None,
+        use_u: bool = False,
+        type: str = "parametric",
+        re_form=None,
+        verbose: bool = False,
+        parallel: str = "no",
+        ncpus: int = 1,
+    ) -> "BootMer":
         """Model-based parametric bootstrap — port of ``bootMer`` (bootMer.R).
 
         Simulates ``nsim`` responses from the fitted model (via
@@ -7789,13 +8559,14 @@ class gmm:
             raise ValueError("bootMer: nsim must be a positive integer")
         if type not in ("parametric", "semiparametric"):
             raise ValueError(
-                f"bootMer: type must be 'parametric'/'semiparametric'; got {type!r}")
+                f"bootMer: type must be 'parametric'/'semiparametric'; got {type!r}"
+            )
 
         t0, t0_names = self._boot_apply_fun(FUN, self)
         if not np.issubdtype(t0.dtype, np.number):
             raise TypeError(
-                "bootMer currently only handles functions that return "
-                "numeric vectors")
+                "bootMer currently only handles functions that return numeric vectors"
+            )
 
         # (1) Generate all nsim responses up front (one sequential RNG pass).
         if type == "parametric":
@@ -7805,17 +8576,22 @@ class gmm:
             if not use_u:
                 raise NotImplementedError(
                     "semiparametric bootstrapping with use_u=False is not "
-                    "implemented (matches lme4)")
+                    "implemented (matches lme4)"
+                )
             if self._is_glmm():
-                warnings.warn(
-                    "semiparametric bootstrapping is questionable for GLMMs")
+                warnings.warn("semiparametric bootstrapping is questionable for GLMMs")
             rng = _simulate_rng(seed)
             ftd = np.asarray(self.fitted, dtype=float).ravel()
-            res_resp = np.asarray(self.residuals_of("response")
-                                  if hasattr(self, "residuals_of")
-                                  else (self.y - self.fitted), dtype=float).ravel()
-            sims = [ftd + res_resp[rng.sample_int(self.n, self.n, replace=True)]
-                    for _ in range(nsim)]
+            res_resp = np.asarray(
+                self.residuals_of("response")
+                if hasattr(self, "residuals_of")
+                else (self.y - self.fitted),
+                dtype=float,
+            ).ravel()
+            sims = [
+                ftd + res_resp[rng.sample_int(self.n, self.n, replace=True)]
+                for _ in range(nsim)
+            ]
 
         # (2) Refit each simulated response and apply FUN; failures → NaN row.
         def _one(y_k):
@@ -7851,17 +8627,28 @@ class gmm:
         w = getattr(self, "prior_weights", None)
         if w is not None and np.allclose(np.asarray(w, float), 1.0):
             w = None
-        spec_base = (self.formula, lhs, self.data, self.family, self.REML,
-                     w, self._offset_arg, self._nAGQ, self._control_arg,
-                     FUN, int(t0.size))
+        spec_base = (
+            self.formula,
+            lhs,
+            self.data,
+            self.family,
+            self.REML,
+            w,
+            self._offset_arg,
+            self._nAGQ,
+            self._control_arg,
+            FUN,
+            int(t0.size),
+        )
         try:
             with ProcessPoolExecutor(max_workers=int(ncpus)) as ex:
-                return list(ex.map(_bootmer_worker,
-                                   [(*spec_base, y_k) for y_k in sims]))
+                return list(
+                    ex.map(_bootmer_worker, [(*spec_base, y_k) for y_k in sims])
+                )
         except Exception as exc:  # noqa: BLE001 — pickling / spawn failure
             warnings.warn(
-                f"bootMer: parallel run failed ({exc!r}); falling back to "
-                f"sequential")
+                f"bootMer: parallel run failed ({exc!r}); falling back to sequential"
+            )
             out = []
             for y_k in sims:
                 try:
@@ -7887,29 +8674,33 @@ class gmm:
         out.append("Fixed effects:")
         raw = self._fixef_table().rename({"coef": ""})
         est_arr = raw["Estimate"].to_numpy()
-        se_arr  = raw["Std. Error"].to_numpy()
-        tval    = raw["t value"].to_numpy()
+        se_arr = raw["Std. Error"].to_numpy()
+        tval = raw["t value"].to_numpy()
         est_s, se_s = format_signif_jointly([est_arr, se_arr], digits=digits)
         # GLMM uses z + Pr(>|z|) (asymptotic normal — lme4's print.coefmat
         # for glmerMod); LMM keeps lme4's t-no-p convention.
         if self._is_glmm():
             p_arr = 2.0 * _nmath.pnorm5_vec(np.abs(tval), lower_tail=False)
-            tbl = pl.DataFrame({
-                "":           raw[""].to_list(),
-                "Estimate":   est_s,
-                "Std. Error": se_s,
-                "z value":    format_signif(tval, digits=digits),
-                "Pr(>|z|)":   format_pval(p_arr),
-                " ":          significance_code(p_arr),
-            })
+            tbl = pl.DataFrame(
+                {
+                    "": raw[""].to_list(),
+                    "Estimate": est_s,
+                    "Std. Error": se_s,
+                    "z value": format_signif(tval, digits=digits),
+                    "Pr(>|z|)": format_pval(p_arr),
+                    " ": significance_code(p_arr),
+                }
+            )
             align_cols = ("Estimate", "Std. Error", "z value", "Pr(>|z|)")
         else:
-            tbl = pl.DataFrame({
-                "":           raw[""].to_list(),
-                "Estimate":   est_s,
-                "Std. Error": se_s,
-                "t value":    format_signif(tval, digits=digits),
-            })
+            tbl = pl.DataFrame(
+                {
+                    "": raw[""].to_list(),
+                    "Estimate": est_s,
+                    "Std. Error": se_s,
+                    "t value": format_signif(tval, digits=digits),
+                }
+            )
             align_cols = ("Estimate", "Std. Error", "t value")
         out.append(format_df(tbl, align={c: "right" for c in align_cols}))
         # lme4 prints the signif-code legend only when at least one row has
@@ -7918,9 +8709,7 @@ class gmm:
         # docs: "Why are p-values not displayed").
         if self._is_glmm():
             out.append("---")
-            out.append(
-                "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
-            )
+            out.append("Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1")
         corr_lines = self._fixef_corr_lines()
         if corr_lines:
             out.append("")
@@ -7929,14 +8718,18 @@ class gmm:
         # correlation matrix when there's anything to report. Mirrors lme4's
         # ``print.summary.merMod`` (methods.R:158-176) which prints the
         # collected ``optinfo$conv$lme4$messages`` at the tail.
-        opt_messages = getattr(self, "optinfo", {}).get(
-            "conv", {}).get("lme4", {}).get("messages", [])
+        opt_messages = (
+            getattr(self, "optinfo", {})
+            .get("conv", {})
+            .get("lme4", {})
+            .get("messages", [])
+        )
         if opt_messages:
             out.append("")
             opt_name = getattr(self, "optinfo", {}).get(
-                "optimizer", "bobyqa+Nelder_Mead")
-            out.append(
-                f"optimizer ({opt_name}) convergence code: 0 (OK)")
+                "optimizer", "bobyqa+Nelder_Mead"
+            )
+            out.append(f"optimizer ({opt_name}) convergence code: 0 (OK)")
             for msg in opt_messages:
                 out.append(msg)
         print("\n".join(out))
@@ -8015,8 +8808,13 @@ class gmm:
             out[key] = pv
         return out
 
-    def ranef(self, condVar: bool = False, postVar: bool = False,
-              drop: bool = False, whichel=None) -> "RanefResult":
+    def ranef(
+        self,
+        condVar: bool = False,
+        postVar: bool = False,
+        drop: bool = False,
+        whichel=None,
+    ) -> "RanefResult":
         """BLUPs per random-effect bar — lme4's ``ranef(m, condVar=, postVar=,
         drop=, whichel=)``.
 
@@ -8065,8 +8863,9 @@ class gmm:
             out.postVar = pv_out
         return out
 
-    def vcov(self, correlation: bool = False, full: bool = False,
-             use_hessian=None) -> pl.DataFrame:
+    def vcov(
+        self, correlation: bool = False, full: bool = False, use_hessian=None
+    ) -> pl.DataFrame:
         """Variance–covariance matrix of the coefficients — lme4's
         ``vcov.merMod``.
 
@@ -8111,18 +8910,18 @@ class gmm:
         F = self._chol_factor
         q, p, s2 = self.q, self.p, self.sigma_squared
         Lam = self.Lambda
-        B = np.asarray(ZL.T @ self._X_solve)        # (ZΛ)ᵀX  (q×p)
-        Minv_B = F.solve(B)                          # M⁻¹B
-        S = self._XtX - B.T @ Minv_B                 # XᵀX_eff (p×p Schur)
+        B = np.asarray(ZL.T @ self._X_solve)  # (ZΛ)ᵀX  (q×p)
+        Minv_B = F.solve(B)  # M⁻¹B
+        S = self._XtX - B.T @ Minv_B  # XᵀX_eff (p×p Schur)
         Sinv = np.linalg.inv(S)
-        Minv = F.solve(np.eye(q))                    # dense M⁻¹ (q×q)
-        Cuu = Minv + Minv_B @ Sinv @ Minv_B.T        # Cov(u)/σ²
-        Cub = -Minv_B @ Sinv                          # Cov(u,β)/σ²
+        Minv = F.solve(np.eye(q))  # dense M⁻¹ (q×q)
+        Cuu = Minv + Minv_B @ Sinv @ Minv_B.T  # Cov(u)/σ²
+        Cub = -Minv_B @ Sinv  # Cov(u,β)/σ²
         V = np.zeros((q + p, q + p))
-        V[:q, :q] = s2 * (Lam @ Cuu @ Lam.T)         # Cov(b)
-        V[:q, q:] = s2 * (Lam @ Cub)                 # Cov(b,β)
+        V[:q, :q] = s2 * (Lam @ Cuu @ Lam.T)  # Cov(b)
+        V[:q, q:] = s2 * (Lam @ Cub)  # Cov(b,β)
         V[q:, :q] = V[:q, q:].T
-        V[q:, q:] = s2 * Sinv                         # Cov(β) = vcov_beta
+        V[q:, q:] = s2 * Sinv  # Cov(β) = vcov_beta
         return V
 
     def _joint_vcov_labels(self) -> list[str]:
@@ -8154,8 +8953,11 @@ class gmm:
             # -residual_deviance/2 — self.deviance holds Σ deviance-residuals.
             return -0.5 * self.deviance_laplace
         want_reml = self.REML if REML is None else bool(REML)
-        dev = (self._reml_deviance(self.theta) if want_reml
-               else self._ml_deviance(self.theta))
+        dev = (
+            self._reml_deviance(self.theta)
+            if want_reml
+            else self._ml_deviance(self.theta)
+        )
         return -0.5 * (dev - self._log_det_weights)
 
     # ------------------------------------------------------------------
@@ -8197,11 +8999,48 @@ class gmm:
         return False
 
     _GETME_NAMES = (
-        "X", "Z", "Zt", "y", "mu", "beta", "fixef", "theta", "u", "b",
-        "Lambda", "Lambdat", "L", "sigma", "lower", "flist", "cnms", "Gp",
-        "n", "N", "p", "q", "n_rtrms", "n_rfacs", "is_REML", "REML",
-        "A", "RX", "RZX", "Tlist", "ST", "mmList", "Ztlist", "Tp", "offset",
-        "devcomp", "p_i", "l_i", "q_i", "k", "m_i", "m",
+        "X",
+        "Z",
+        "Zt",
+        "y",
+        "mu",
+        "beta",
+        "fixef",
+        "theta",
+        "u",
+        "b",
+        "Lambda",
+        "Lambdat",
+        "L",
+        "sigma",
+        "lower",
+        "flist",
+        "cnms",
+        "Gp",
+        "n",
+        "N",
+        "p",
+        "q",
+        "n_rtrms",
+        "n_rfacs",
+        "is_REML",
+        "REML",
+        "A",
+        "RX",
+        "RZX",
+        "Tlist",
+        "ST",
+        "mmList",
+        "Ztlist",
+        "Tp",
+        "offset",
+        "devcomp",
+        "p_i",
+        "l_i",
+        "q_i",
+        "k",
+        "m_i",
+        "m",
     )
 
     def getME(self, name: str):
@@ -8222,7 +9061,9 @@ class gmm:
         re = self._re
         if name == "X":
             X = self.X
-            return np.asarray(X.to_numpy() if hasattr(X, "to_numpy") else X, dtype=float)
+            return np.asarray(
+                X.to_numpy() if hasattr(X, "to_numpy") else X, dtype=float
+            )
         if name == "Z":
             return np.asarray(self.Z, dtype=float)
         if name == "Zt":
@@ -8249,7 +9090,10 @@ class gmm:
             return float(self.sigma)
         if name == "lower":
             return np.array(
-                [(-np.inf if lo is None else float(lo)) for lo, _hi in self._theta_bounds],
+                [
+                    (-np.inf if lo is None else float(lo))
+                    for lo, _hi in self._theta_bounds
+                ],
                 dtype=float,
             )
         if name == "flist":
@@ -8285,9 +9129,9 @@ class gmm:
             out_st = {}
             for key, blk in self._bar_lambda_blocks():
                 d = np.diag(blk).copy()
-                T = blk @ np.diag(np.where(d != 0, 1.0 / d, 0.0))   # unit-diagonal
+                T = blk @ np.diag(np.where(d != 0, 1.0 / d, 0.0))  # unit-diagonal
                 st = T.copy()
-                np.fill_diagonal(st, d)                              # S on the diagonal
+                np.fill_diagonal(st, d)  # S on the diagonal
                 out_st[key] = st
             return out_st
         if name == "mmList":
@@ -8312,17 +9156,19 @@ class gmm:
             return np.asarray(self._offset, dtype=float)
         if name == "devcomp":
             return self._getme_devcomp()
-        if name == "p_i":              # fixed-effect columns per term (= bar size)
+        if name == "p_i":  # fixed-effect columns per term (= bar size)
             return np.asarray([c for _k, _s, c, _n in self._bar_layout()], dtype=int)
-        if name == "l_i":              # levels per term
+        if name == "l_i":  # levels per term
             return np.asarray([n for _k, _s, _c, n in self._bar_layout()], dtype=int)
-        if name == "q_i":              # RE coefficients per term (= c·n_levels)
+        if name == "q_i":  # RE coefficients per term (= c·n_levels)
             return np.asarray([c * n for _k, _s, c, n in self._bar_layout()], dtype=int)
-        if name == "k":                # number of RE terms
+        if name == "k":  # number of RE terms
             return int(len(self._re.cnms))
-        if name == "m_i":              # covariance params per term (= c(c+1)/2)
-            return np.asarray([c * (c + 1) // 2 for _k, _s, c, _n in self._bar_layout()], dtype=int)
-        if name == "m":                # total covariance parameters (= len θ)
+        if name == "m_i":  # covariance params per term (= c(c+1)/2)
+            return np.asarray(
+                [c * (c + 1) // 2 for _k, _s, c, _n in self._bar_layout()], dtype=int
+            )
+        if name == "m":  # total covariance parameters (= len θ)
             return int(np.asarray(self.theta).size)
         raise ValueError(
             f"getME(): name {name!r} not supported. Supported names: "
@@ -8348,7 +9194,7 @@ class gmm:
         out, off = [], 0
         for key, _start, c, _n in self._bar_layout():
             blk = np.zeros((c, c))
-            for j in range(c):                       # column-major lower triangle
+            for j in range(c):  # column-major lower triangle
                 for i in range(j, c):
                     blk[i, j] = theta[off]
                     off += 1
@@ -8376,12 +9222,13 @@ class gmm:
         if not hasattr(self, "_X_solve"):
             raise ValueError(
                 "getME('RX'/'RZX') is currently implemented for the LMM (lmer) "
-                "path only")
+                "path only"
+            )
         ZL = self._Z_sp_solve @ self.Lambda
         ZLtX = np.asarray(ZL.T @ self._X_solve)
         RZX = solve_triangular(self.L, ZLtX, lower=True)
         XtX_eff = self._XtX - RZX.T @ RZX
-        RX = np.linalg.cholesky(XtX_eff).T               # upper-tri (lme4 RX)
+        RX = np.linalg.cholesky(XtX_eff).T  # upper-tri (lme4 RX)
         return RX, RZX
 
     def _getme_devcomp(self) -> dict:
@@ -8389,26 +9236,41 @@ class gmm:
         n, p, q = int(self.n), int(self.p), int(self.q)
         ldL2 = 2.0 * float(np.log(np.abs(np.diag(self.L))).sum())
         RX, _ = self._getme_rx_rzx() if hasattr(self, "_X_solve") else (None, None)
-        ldRX2 = (2.0 * float(np.log(np.abs(np.diag(RX))).sum())
-                 if RX is not None else float("nan"))
+        ldRX2 = (
+            2.0 * float(np.log(np.abs(np.diag(RX))).sum())
+            if RX is not None
+            else float("nan")
+        )
         ussq = float(self._u @ self._u)
         sw = getattr(self, "_sqrt_w", None)
         rr = self.residuals if sw is None else sw * self.residuals
         wrss = float(rr @ rr)
         pwrss = wrss + ussq
         cmp = {
-            "ldL2": ldL2, "ldRX2": ldRX2, "wrss": wrss, "ussq": ussq,
-            "pwrss": pwrss, "drsum": float("nan"),
+            "ldL2": ldL2,
+            "ldRX2": ldRX2,
+            "wrss": wrss,
+            "ussq": ussq,
+            "pwrss": pwrss,
+            "drsum": float("nan"),
             "REML": float(self.REML_criterion) if self.REML else float("nan"),
             "dev": float("nan") if self.REML else float(self.deviance),
             "sigmaML": float(np.sqrt(pwrss / n)),
             "sigmaREML": float(np.sqrt(pwrss / (n - p))),
         }
         dims = {
-            "N": n, "n": n, "p": p, "nmp": n - p, "q": q,
-            "nth": int(np.asarray(self.theta).size), "useSc": 1,
-            "reTrms": int(len(self._re.cnms)), "spFe": 0,
-            "REML": p if self.REML else 0, "GLMM": 0, "NLMM": 0,
+            "N": n,
+            "n": n,
+            "p": p,
+            "nmp": n - p,
+            "q": q,
+            "nth": int(np.asarray(self.theta).size),
+            "useSc": 1,
+            "reTrms": int(len(self._re.cnms)),
+            "spFe": 0,
+            "REML": p if self.REML else 0,
+            "GLMM": 0,
+            "NLMM": 0,
         }
         return {"cmp": cmp, "dims": dims}
 
@@ -8478,6 +9340,7 @@ class gmm:
         """``refit()`` — refit this model, optionally to a new response vector
         (thin wrapper over :func:`hea.R.model_generics.refit`)."""
         from ..R.model_generics import refit as _refit
+
         return _refit(self, newresp)
 
     def refitML(self) -> "gmm":
@@ -8485,6 +9348,7 @@ class gmm:
         or any GLMM); thin wrapper over
         :func:`hea.R.model_generics.refitML`."""
         from ..R.model_generics import refitML as _refitML
+
         return _refitML(self)
 
     def extractAIC(self, scale: float = 0.0, k: float = 2.0) -> tuple[int, float]:
@@ -8506,7 +9370,9 @@ class gmm:
         for key in self.sd_re:
             sd_rel = np.asarray(self.sd_re[key], dtype=float) / self.sigma
             corr = self.corr_re.get(key)
-            corr = np.eye(len(sd_rel)) if corr is None else np.asarray(corr, dtype=float)
+            corr = (
+                np.eye(len(sd_rel)) if corr is None else np.asarray(corr, dtype=float)
+            )
             Sigma_rel = np.outer(sd_rel, sd_rel) * corr
             evals = np.linalg.eigvalsh(Sigma_rel)[::-1]
             out[key] = np.sqrt(np.clip(evals, 0.0, None))
@@ -8521,15 +9387,16 @@ class gmm:
         (lme4 warns the hat matrix may not make sense for a GLMM)."""
         if not hasattr(self, "_X_solve"):
             raise NotImplementedError(
-                "hatvalues() is implemented for the LMM (lmer) path only")
-        ZLt = np.asarray(self._Z_sp_solve @ self.Lambda).T       # Λᵀ Zᵀ√W (q×n)
-        Xs = np.asarray(self._X_solve, dtype=float)              # √W X (n×p)
-        CL = solve_triangular(self.L, ZLt, lower=True)           # q×n
+                "hatvalues() is implemented for the LMM (lmer) path only"
+            )
+        ZLt = np.asarray(self._Z_sp_solve @ self.Lambda).T  # Λᵀ Zᵀ√W (q×n)
+        Xs = np.asarray(self._X_solve, dtype=float)  # √W X (n×p)
+        CL = solve_triangular(self.L, ZLt, lower=True)  # q×n
         RX, RZX = self._getme_rx_rzx()
-        CR = solve_triangular(RX.T, Xs.T - RZX.T @ CL, lower=True)   # p×n
+        CR = solve_triangular(RX.T, Xs.T - RZX.T @ CL, lower=True)  # p×n
         if fullHatMatrix:
             return CL.T @ CL + CR.T @ CR
-        return (CL ** 2).sum(axis=0) + (CR ** 2).sum(axis=0)
+        return (CL**2).sum(axis=0) + (CR**2).sum(axis=0)
 
     def cooks_distance(self) -> np.ndarray:
         """``cooks.distance()`` — lme4's ``cooks.distance.merMod``:
@@ -8549,7 +9416,7 @@ class gmm:
         pr = self.residuals_of("pearson")
         h = self.hatvalues()
         with np.errstate(divide="ignore", invalid="ignore"):
-            rr = np.sign(r) * np.sqrt(r ** 2 + (h * pr ** 2) / (1.0 - h))
+            rr = np.sign(r) * np.sqrt(r**2 + (h * pr**2) / (1.0 - h))
         return np.where(np.isfinite(rr), rr, np.nan) / self.sigma
 
     def influence(self, groups=None, do_coef: bool = True) -> "Influence":
@@ -8577,9 +9444,14 @@ class gmm:
             sub_map = {c: float(mm.bhat[c][0]) for c in mm.bhat.columns}
             fixef_sub.append([sub_map.get(c, np.nan) for c in cols])
             vcov_sub.append(np.asarray(mm._vcov_beta_arr))
-        return Influence(cols, np.asarray(self._beta, dtype=float).ravel(),
-                         np.asarray(self._vcov_beta_arr), np.asarray(fixef_sub),
-                         vcov_sub, labels)
+        return Influence(
+            cols,
+            np.asarray(self._beta, dtype=float).ravel(),
+            np.asarray(self._vcov_beta_arr),
+            np.asarray(fixef_sub),
+            vcov_sub,
+            labels,
+        )
 
     def _pooled_std_blups(self) -> np.ndarray:
         """All BLUPs concatenated, each component scaled by its model SD.
@@ -8597,8 +9469,12 @@ class gmm:
         return np.concatenate(out)
 
     def plot_observed_fitted(
-        self, ax=None, figsize=None,
-        facecolor="none", edgecolor="black", label_n=3,
+        self,
+        ax=None,
+        figsize=None,
+        facecolor="none",
+        edgecolor="black",
+        label_n=3,
     ):
         if ax is None:
             _fig, ax = plt.subplots(figsize=figsize)
@@ -8615,9 +9491,13 @@ class gmm:
         return ax
 
     def plot_residuals(
-        self, ax=None, figsize=None,
-        facecolor="none", edgecolor="black",
-        smooth=True, label_n=3,
+        self,
+        ax=None,
+        figsize=None,
+        facecolor="none",
+        edgecolor="black",
+        smooth=True,
+        label_n=3,
     ):
         if ax is None:
             _fig, ax = plt.subplots(figsize=figsize)
@@ -8641,9 +9521,13 @@ class gmm:
         return ax
 
     def plot_scale_location(
-        self, ax=None, figsize=None,
-        facecolor="none", edgecolor="black",
-        smooth=True, label_n=3,
+        self,
+        ax=None,
+        figsize=None,
+        facecolor="none",
+        edgecolor="black",
+        smooth=True,
+        label_n=3,
     ):
         if ax is None:
             _fig, ax = plt.subplots(figsize=figsize)
@@ -8733,8 +9617,11 @@ class gmm:
         return fig
 
     def plot_qq_ranef(
-        self, figsize=None,
-        *, level: float = 0.95, strip: bool = True,
+        self,
+        figsize=None,
+        *,
+        level: float = 0.95,
+        strip: bool = True,
     ):
         """qqmath of BLUPs with conditional-variance bars (Bates Fig. 1.12).
 
@@ -8763,8 +9650,15 @@ class gmm:
             ax.grid(True, color="lightgray", linewidth=0.4)
             ax.axvline(0, color="black", linewidth=0.8)
             ax.errorbar(
-                b_s, q, xerr=z * se_s, fmt="o", color="black",
-                ecolor="black", markersize=3, linewidth=0.8, capsize=0,
+                b_s,
+                q,
+                xerr=z * se_s,
+                fmt="o",
+                color="black",
+                ecolor="black",
+                markersize=3,
+                linewidth=0.8,
+                capsize=0,
             )
             ax.set_ylabel("Standard normal quantiles")
             ax.set_title(title if strip else "")
@@ -8772,8 +9666,11 @@ class gmm:
         return fig
 
     def plot_ranef(
-        self, figsize=None,
-        *, level: float = 0.95, strip: bool = True,
+        self,
+        figsize=None,
+        *,
+        level: float = 0.95,
+        strip: bool = True,
         layout: str | tuple[int, int] = "horizontal",
         aspect: float | None = None,
         which: str | list[str] | None = None,
@@ -8833,8 +9730,9 @@ class gmm:
 
         # Resolve layout to (nrow, ncol).
         if isinstance(layout, tuple):
-            if len(layout) != 2 or not all(isinstance(x, int) and x > 0
-                                            for x in layout):
+            if len(layout) != 2 or not all(
+                isinstance(x, int) and x > 0 for x in layout
+            ):
                 raise TypeError(
                     f"layout: tuple must be (nrow, ncol) of positive ints; got {layout!r}."
                 )
@@ -8874,9 +9772,15 @@ class gmm:
             for y in y_pos:
                 ax.axhline(y, color="lightgray", linewidth=0.4, zorder=0)
             ax.errorbar(
-                b_sorted, y_pos, xerr=z * se_sorted,
-                fmt="o", color="black", ecolor="black",
-                markersize=3, capsize=0, linewidth=0.8,
+                b_sorted,
+                y_pos,
+                xerr=z * se_sorted,
+                fmt="o",
+                color="black",
+                ecolor="black",
+                markersize=3,
+                capsize=0,
+                linewidth=0.8,
             )
             ax.axvline(0, color="black", linestyle="--", linewidth=0.8)
             ax.set_yticks(y_pos)
@@ -8904,7 +9808,9 @@ class gmm:
         pooled = self._pooled_std_blups()
         if len(pooled) >= 4:
             _qq_plot(
-                axes[1, 1], pooled, label_n=label_n,
+                axes[1, 1],
+                pooled,
+                label_n=label_n,
                 ylabel="Standardized BLUPs (pooled)",
                 title="Random-Effects Q-Q",
             )
@@ -8928,8 +9834,11 @@ def _resolve_transform(t):
 
 
 def _invert_zeta(
-    vals: np.ndarray, zetas: np.ndarray, target: float,
-    *, fallback: float = float("nan"),
+    vals: np.ndarray,
+    zetas: np.ndarray,
+    target: float,
+    *,
+    fallback: float = float("nan"),
 ) -> float:
     """Cubic-spline-interpolate the ζ-curve to find where ζ(v) = target.
 
@@ -8957,6 +9866,7 @@ def _invert_zeta(
     # the same data triggers. R uses splines::interpSpline + backSpline.
     from scipy.interpolate import CubicSpline
     from scipy.optimize import brentq
+
     v_order = np.argsort(vals)
     v_sorted, z_sorted = vals[v_order], zetas[v_order]
     fwd = CubicSpline(v_sorted, z_sorted, bc_type="natural", extrapolate=False)
@@ -8990,11 +9900,11 @@ def _norm_inter(t: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     out = np.empty_like(alpha)
     for i in range(alpha.size):
         ki = int(k[i])
-        if ki == rk[i]:            # exact order statistic
+        if ki == rk[i]:  # exact order statistic
             out[i] = tstar[ki - 1]
-        elif ki == 0:              # below the first order statistic
+        elif ki == 0:  # below the first order statistic
             out[i] = tstar[0]
-        elif ki >= R:              # at/above the last
+        elif ki >= R:  # at/above the last
             out[i] = tstar[R - 1]
         else:
             t1 = _nmath.qnorm5(float(alpha[i]))
@@ -9005,7 +9915,9 @@ def _norm_inter(t: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     return out
 
 
-def _boot_ci_one(t0: float, t_col: np.ndarray, conf: float, kind: str) -> tuple[float, float]:
+def _boot_ci_one(
+    t0: float, t_col: np.ndarray, conf: float, kind: str
+) -> tuple[float, float]:
     """One parameter's bootstrap CI — port of ``boot::boot.ci`` for the three
     types ``confint.bootMer`` exposes (the last two columns of each method):
 
@@ -9035,13 +9947,32 @@ def _bootmer_worker(spec):
     """Top-level (picklable) bootstrap worker for ``ProcessPoolExecutor`` —
     refit on one simulated response and apply ``FUN``. Returns an all-``NaN``
     row on failure (mirrors lme4's ``factory(errval=NA)``)."""
-    (formula, lhs, data, family, reml, weights, offset, nagq, control,
-     FUN, t0_len, y_k) = spec
+    (
+        formula,
+        lhs,
+        data,
+        family,
+        reml,
+        weights,
+        offset,
+        nagq,
+        control,
+        FUN,
+        t0_len,
+        y_k,
+    ) = spec
     try:
-        data_k = data.with_columns(
-            pl.Series(lhs, np.asarray(y_k, dtype=float).ravel()))
-        m = gmm(formula, data_k, family=family, REML=reml, weights=weights,
-                offset=offset, nAGQ=nagq, control=control)
+        data_k = data.with_columns(pl.Series(lhs, np.asarray(y_k, dtype=float).ravel()))
+        m = gmm(
+            formula,
+            data_k,
+            family=family,
+            REML=reml,
+            weights=weights,
+            offset=offset,
+            nAGQ=nagq,
+            control=control,
+        )
         return gmm._boot_apply_fun(FUN, m)[0]
     except Exception:  # noqa: BLE001
         return np.full(t0_len, np.nan)
@@ -9132,7 +10063,7 @@ class Influence:
         self.names = list(names)
         self.fixef = np.asarray(fixef_full, dtype=float)
         self.vcov_full = np.asarray(vcov_full, dtype=float)
-        self.fixef_sub = np.asarray(fixef_sub, dtype=float)      # (n_del × p)
+        self.fixef_sub = np.asarray(fixef_sub, dtype=float)  # (n_del × p)
         self.vcov_sub = [np.asarray(v, dtype=float) for v in vcov_sub]
         self.labels = list(labels)
 
@@ -9171,16 +10102,22 @@ class Profile:
         MLE for each profiled parameter, keyed the same way.
     """
 
-    def __init__(self, data: dict[str, pl.DataFrame], estimate: dict[str, float],
-                 clip_zero: set | None = None):
+    def __init__(
+        self,
+        data: dict[str, pl.DataFrame],
+        estimate: dict[str, float],
+        clip_zero: set | None = None,
+    ):
         self.data = data
         self.estimate = estimate
         # Parameters whose profile lower bound clips to 0 when the curve
         # flattens (the non-negative variance components: SDs / variances / σ);
         # correlations, covariances and fixed effects are unbounded below.
         self._clip_zero = (
-            clip_zero if clip_zero is not None
-            else {k for k in data if k.startswith(".sig") or k == ".sigma"})
+            clip_zero
+            if clip_zero is not None
+            else {k for k in data if k.startswith(".sig") or k == ".sigma"}
+        )
 
     def confint(self, level: float = 0.95, zeta=None) -> pl.DataFrame:
         """Profile-based confidence intervals at ``level`` (default 95%).
@@ -9216,7 +10153,9 @@ class Profile:
         return pl.DataFrame({"parameter": names, lo_lbl: lo, hi_lbl: hi})
 
     def plot(
-        self, absolute: bool = False, figsize: tuple[float, float] | None = None,
+        self,
+        absolute: bool = False,
+        figsize: tuple[float, float] | None = None,
         levels: tuple[float, ...] = (0.50, 0.80, 0.90, 0.95, 0.99),
         *,
         which: str | list[str] | None = None,
@@ -9270,13 +10209,17 @@ class Profile:
             # grid (R's ``par(mfrow=...)`` ergonomics). Outside ``par``,
             # this still allocates a fresh figure.
             from ..plot._util import resolve_ax
+
             ax_single = resolve_ax(None, figsize=figsize)
             axes = [ax_single]
             fig = ax_single.figure
         else:
             n = len(names)
             fig, axes_obj = plt.subplots(
-                1, n, figsize=figsize or (3.2 * n, 3.0), sharey=False,
+                1,
+                n,
+                figsize=figsize or (3.2 * n, 3.0),
+                sharey=False,
             )
             axes = list(axes_obj)
 
@@ -9307,7 +10250,9 @@ class Profile:
         return fig
 
     def plot_density(
-        self, npts: int = 201, upper: float = 0.999,
+        self,
+        npts: int = 201,
+        upper: float = 0.999,
         figsize: tuple[float, float] | None = None,
     ):
         """Profile-implied density plot — Pythonic ``densityplot(profile(...))``.
@@ -9325,7 +10270,10 @@ class Profile:
         names = list(self.data.keys())
         n = len(names)
         fig, axes = plt.subplots(
-            1, n, figsize=figsize or (3.2 * n, 3.0), sharey=False,
+            1,
+            n,
+            figsize=figsize or (3.2 * n, 3.0),
+            sharey=False,
         )
         if n == 1:
             axes = [axes]
@@ -9357,7 +10305,8 @@ class Profile:
         return fig
 
     def plot_pairs(
-        self, *,
+        self,
+        *,
         which: list[str] | None = None,
         transform: str | None = None,
         levels: tuple[float, ...] = (0.50, 0.80, 0.90, 0.95, 0.99),
@@ -9424,9 +10373,7 @@ class Profile:
                 for name in names
             }
         else:
-            raise ValueError(
-                f"unknown transform {transform!r}; use 'log' or None"
-            )
+            raise ValueError(f"unknown transform {transform!r}; use 'log' or None")
 
         fwd: dict[str, PchipInterpolator] = {}
         bwd: dict[str, PchipInterpolator] = {}
@@ -9451,7 +10398,9 @@ class Profile:
             v_hi = v_t_max if not np.isfinite(v_hi) else float(min(v_hi, v_t_max))
             v_lim[name] = (v_lo, v_hi)
 
-        def _trace_zeta(prof_name: str, other_name: str) -> tuple[np.ndarray, np.ndarray]:
+        def _trace_zeta(
+            prof_name: str, other_name: str
+        ) -> tuple[np.ndarray, np.ndarray]:
             """Return (ζ_prof, ζ_other) along the trace of profile(prof_name).
 
             ζ_prof is read directly from the ``zeta`` column; ζ_other is
@@ -9521,8 +10470,8 @@ class Profile:
         for jj in range(1, n):
             for ii in range(jj):
                 ni, nj = names[ii], names[jj]
-                zi_i, zj_i = _trace_zeta(ni, nj)   # along trace of i
-                zj_j, zi_j = _trace_zeta(nj, ni)   # along trace of j
+                zi_i, zj_i = _trace_zeta(ni, nj)  # along trace of i
+                zj_j, zi_j = _trace_zeta(nj, ni)  # along trace of j
                 if len(zi_i) < 4 or len(zj_j) < 4:
                     contours[(ii, jj)] = {}
                     continue
@@ -9540,14 +10489,18 @@ class Profile:
                     pts = _contour_pts(sij, sji, float(lev))
                     pts_per_level.append(pts)
                 contours[(ii, jj)] = dict(
-                    sij=sij, sji=sji,
+                    sij=sij,
+                    sji=sji,
                     trace_i=(zi_i[o_i], zj_i[o_i]),
                     trace_j=(zi_j[o_j], zj_j[o_j]),
                     pts=pts_per_level,
                 )
 
         fig, axes = plt.subplots(
-            n, n, figsize=figsize or (2.4 * n, 2.4 * n), squeeze=False,
+            n,
+            n,
+            figsize=figsize or (2.4 * n, 2.4 * n),
+            squeeze=False,
         )
 
         def _draw_zeta_panel(ax, info, x_is_i: bool):
@@ -9613,8 +10566,13 @@ class Profile:
                 vid_col = c
                 if vid_row == vid_col:
                     ax.text(
-                        0.5, 0.5, tx_label[names[vid_row]], ha="center", va="center",
-                        transform=ax.transAxes, fontsize=12,
+                        0.5,
+                        0.5,
+                        tx_label[names[vid_row]],
+                        ha="center",
+                        va="center",
+                        transform=ax.transAxes,
+                        fontsize=12,
                     )
                     ax.set_xticks([])
                     ax.set_yticks([])
@@ -9628,7 +10586,7 @@ class Profile:
                 if not info:
                     continue
                 ni, nj = names[ii], names[jj]
-                x_is_i = (vid_col == ii)
+                x_is_i = vid_col == ii
                 # Lower triangle in display (closer to bottom-left,
                 # vid_row < vid_col): ζ-space, per lme4 splom.
                 # Upper triangle in display: v-space.
@@ -9679,11 +10637,11 @@ class BootMer:
         self.nfail = int(nfail)
 
     def __repr__(self) -> str:
-        return (f"BootMer(R={self.R}, statistics={self.t0_names!r}, "
-                f"nfail={self.nfail})")
+        return f"BootMer(R={self.R}, statistics={self.t0_names!r}, nfail={self.nfail})"
 
-    def confint(self, parm=None, level: float = 0.95,
-                type: str = "perc") -> pl.DataFrame:
+    def confint(
+        self, parm=None, level: float = 0.95, type: str = "perc"
+    ) -> pl.DataFrame:
         """Bootstrap CIs — port of ``confint.bootMer`` (bootMer.R:207-229).
 
         ``type`` ∈ ``{"perc","basic","norm"}`` selects the ``boot::boot.ci``

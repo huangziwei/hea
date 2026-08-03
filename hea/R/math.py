@@ -12,6 +12,7 @@ builtins; the translator routes R's ``abs()`` / ``round()`` to the
 builtin via its ``FUNCTION_TABLE`` for surface compatibility). Use the
 fully-qualified ``hea.R.abs`` / ``hea.R.round`` when you need them.
 """
+
 from __future__ import annotations
 
 import numpy as np

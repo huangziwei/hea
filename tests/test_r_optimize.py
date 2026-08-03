@@ -48,6 +48,7 @@ to the same doubles Python does)::
     nlm(fr, c(-1.2, 1), hessian=TRUE)
     optimHess(c(-1.2, 1), frv, grv)
 """
+
 from __future__ import annotations
 
 import math
@@ -68,27 +69,48 @@ _DARWIN_ARM64 = sys.platform == "darwin" and platform.machine() == "arm64"
 # the gradient); optim entries are [par..., value, fncount, grcount,
 # convergence]; hessians are column-major.
 _PINS = {
-    "nlm_default": [1.1820961652299623e-20,
-                    1.0000000000906322, 1.0000000001752587,
-                    2.5835205088543604e-09, -1.2011280858814644e-09,
-                    1, 24],
-    "nlm_mgcv": [5.7433811131008786e-16,
-                 1.0000000207487953, 1.000000040298318,
-                 5.2120685075120562e-07, -2.3985462505038413e-07,
-                 1, 42],
-    "nlm_fd": [3.9737658773242689e-12,
-               0.9999980066391061, 0.99999601495019041,
-               1, 23],
-    "nlm_hess": [802.24001414660472, -400.02000003629195,
-                 -400.02000003629195, 200.00000000000011],
-    "optim_unb": [1.0000001654856896, 1.0000003405957025,
-                  3.6648220862233968e-14, 51, 51, 0],
+    "nlm_default": [
+        1.1820961652299623e-20,
+        1.0000000000906322,
+        1.0000000001752587,
+        2.5835205088543604e-09,
+        -1.2011280858814644e-09,
+        1,
+        24,
+    ],
+    "nlm_mgcv": [
+        5.7433811131008786e-16,
+        1.0000000207487953,
+        1.000000040298318,
+        5.2120685075120562e-07,
+        -2.3985462505038413e-07,
+        1,
+        42,
+    ],
+    "nlm_fd": [3.9737658773242689e-12, 0.9999980066391061, 0.99999601495019041, 1, 23],
+    "nlm_hess": [
+        802.24001414660472,
+        -400.02000003629195,
+        -400.02000003629195,
+        200.00000000000011,
+    ],
+    "optim_unb": [
+        1.0000001654856896,
+        1.0000003405957025,
+        3.6648220862233968e-14,
+        51,
+        51,
+        0,
+    ],
     "optim_unb_msg": "CONVERGENCE: REL_REDUCTION_OF_F <= FACTR*EPSMCH",
-    "optim_bnd": [0.5, 0.29999999999999999, 0.49999999999999989,
-                  4, 4, 0],
+    "optim_bnd": [0.5, 0.29999999999999999, 0.49999999999999989, 4, 4, 0],
     "optim_bnd_msg": "CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
-    "opthess": [1330.0004000000313, 480.0000000000075,
-                480.0000000000075, 200.00000000000284],
+    "opthess": [
+        1330.0004000000313,
+        480.0000000000075,
+        480.0000000000075,
+        200.00000000000284,
+    ],
 }
 
 _R_ORACLE = r"""
@@ -138,13 +160,19 @@ def rv(tmp_path_factory):
     if _DARWIN_ARM64:
         return _PINS
     if shutil.which("Rscript") is None:
-        pytest.skip("pins are darwin/arm64 receipts; elsewhere the "
-                    "live-R oracle needs Rscript on PATH")
+        pytest.skip(
+            "pins are darwin/arm64 receipts; elsewhere the "
+            "live-R oracle needs Rscript on PATH"
+        )
     rf = tmp_path_factory.mktemp("r_optimize") / "oracle.R"
     rf.write_text(_R_ORACLE)
     out = subprocess.run(
-        ["Rscript", "--vanilla", str(rf)], check=True, text=True,
-        stdin=subprocess.DEVNULL, capture_output=True).stdout
+        ["Rscript", "--vanilla", str(rf)],
+        check=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+    ).stdout
     vals = {}
     for line in out.splitlines():
         key, _, rest = line.partition(" ")
@@ -159,8 +187,9 @@ def rv(tmp_path_factory):
 
 def _fr(x):
     v = 100 * (x[1] - x[0] ** 2) ** 2 + (1 - x[0]) ** 2
-    g = np.array([-400 * x[0] * (x[1] - x[0] ** 2) - 2 * (1 - x[0]),
-                  200 * (x[1] - x[0] ** 2)])
+    g = np.array(
+        [-400 * x[0] * (x[1] - x[0] ** 2) - 2 * (1 - x[0]), 200 * (x[1] - x[0] ** 2)]
+    )
     return float(v), g
 
 
@@ -169,8 +198,9 @@ def _frv(x):
 
 
 def _grv(x):
-    return np.array([-400 * x[0] * (x[1] - x[0] ** 2) - 2 * (1 - x[0]),
-                     200 * (x[1] - x[0] ** 2)])
+    return np.array(
+        [-400 * x[0] * (x[1] - x[0] ** 2) - 2 * (1 - x[0]), 200 * (x[1] - x[0] ** 2)]
+    )
 
 
 def test_nlm_rosenbrock_default_bitexact_vs_r(rv):
@@ -191,9 +221,18 @@ def test_nlm_rosenbrock_mgcv_config_bitexact_vs_r(rv):
     # checks (msg 15)
     e = rv["nlm_mgcv"]
     p0 = np.array([-1.2, 1.0])
-    r = nlm(_fr, p0, typsize=p0, fscale=3.5, stepmax=2, ndigit=7,
-            gradtol=1e-6, steptol=1e-4, iterlim=200,
-            check_analyticals=False)
+    r = nlm(
+        _fr,
+        p0,
+        typsize=p0,
+        fscale=3.5,
+        stepmax=2,
+        ndigit=7,
+        gradtol=1e-6,
+        steptol=1e-4,
+        iterlim=200,
+        check_analyticals=False,
+    )
     assert r["minimum"] == e[0]
     assert r["estimate"][0] == e[1]
     assert r["estimate"][1] == e[2]
@@ -225,8 +264,13 @@ def test_nlm_hessian_true_bitexact_vs_r(rv):
 
 def test_optim_lbfgsb_unbounded_bitexact_vs_r(rv):
     e = rv["optim_unb"]
-    r = optim([-1.2, 1], _frv, _grv, method="L-BFGS-B",
-              control={"fnscale": 3.7, "factr": 1e7, "lmm": 2})
+    r = optim(
+        [-1.2, 1],
+        _frv,
+        _grv,
+        method="L-BFGS-B",
+        control={"fnscale": 3.7, "factr": 1e7, "lmm": 2},
+    )
     assert r["par"][0] == e[0]
     assert r["par"][1] == e[1]
     assert r["value"] == e[2]
@@ -237,9 +281,15 @@ def test_optim_lbfgsb_unbounded_bitexact_vs_r(rv):
 
 def test_optim_lbfgsb_bounded_bitexact_vs_r(rv):
     e = rv["optim_bnd"]
-    r = optim([-1.2, 1], _frv, _grv, method="L-BFGS-B",
-              lower=[-2, 0.3], upper=[0.5, 0.6],
-              control={"factr": 1e7})
+    r = optim(
+        [-1.2, 1],
+        _frv,
+        _grv,
+        method="L-BFGS-B",
+        lower=[-2, 0.3],
+        upper=[0.5, 0.6],
+        control={"factr": 1e7},
+    )
     assert r["par"][0] == e[0]
     assert r["par"][1] == e[1]
     assert r["value"] == e[2]
@@ -250,8 +300,7 @@ def test_optim_lbfgsb_bounded_bitexact_vs_r(rv):
 
 def test_optim_maxit_and_method_validation():
     # convergence=1 when the iteration cap trips (R optim semantics)
-    r = optim([-1.2, 1], _frv, _grv, method="L-BFGS-B",
-              control={"maxit": 2})
+    r = optim([-1.2, 1], _frv, _grv, method="L-BFGS-B", control={"maxit": 2})
     assert r["convergence"] == 1
     with pytest.raises(NotImplementedError, match="L-BFGS-B"):
         optim([0.0], _frv, _grv, method="BFGS")
@@ -276,6 +325,7 @@ def test_nlm_nonfinite_value_mapping():
         if x[0] > 1.5:
             return math.inf, _grv(x)
         return v, _grv(x)
+
     with pytest.warns(UserWarning, match="replaced by maximum positive"):
         r = nlm(f, [1.6, 1.0])
     assert r["code"] in (1, 2, 3)

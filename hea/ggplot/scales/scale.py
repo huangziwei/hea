@@ -97,9 +97,11 @@ def format_breaks(breaks) -> list[str]:
     """
     import math
 
-    finite = [b for b in breaks
-              if b is not None and isinstance(b, (int, float))
-              and math.isfinite(float(b))]
+    finite = [
+        b
+        for b in breaks
+        if b is not None and isinstance(b, (int, float)) and math.isfinite(float(b))
+    ]
     if not finite:
         return [str(b) for b in breaks]
 

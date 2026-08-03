@@ -2,6 +2,7 @@
 (simplify-apply). Both produce :class:`~hea.R.NamedVector` to mirror R's
 "named numeric vector" return shape.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -52,7 +53,9 @@ def sapply(X, FUN, *args, **kwargs):
     if not results:
         return np.asarray([])
 
-    if all(np.isscalar(r) or (isinstance(r, np.ndarray) and r.ndim == 0) for r in results):
+    if all(
+        np.isscalar(r) or (isinstance(r, np.ndarray) and r.ndim == 0) for r in results
+    ):
         return np.asarray(results)
     arrs = [np.asarray(r).ravel() for r in results]
     sizes = {len(a) for a in arrs}

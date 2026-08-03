@@ -63,6 +63,7 @@ def test_df_ggplot_captures_caller_frame_env(df):
     ``DataFrame.ggplot`` wrapper, not the test function, and ``my_helper``
     would silently fail to resolve at build time.
     """
+
     def my_helper(s):
         return s * 2
 
@@ -80,6 +81,7 @@ def test_df_ggplot_renders_end_to_end(df):
 
 def test_function_form_still_works_after_env_kwarg(df):
     """The ``_env=None`` path must keep the original frame-walk semantics."""
+
     def helper(s):
         return s + 1
 
@@ -165,8 +167,7 @@ def test_fluent_theme_method_works_via_property_handle():
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     p_fluent = ggplot_class(df, aes("x", "y")) + geom_point()
     p_fluent = p_fluent.theme(aspect_ratio=1)
-    p_plus = (ggplot_class(df, aes("x", "y")) + geom_point()
-              + theme(aspect_ratio=1))
+    p_plus = ggplot_class(df, aes("x", "y")) + geom_point() + theme(aspect_ratio=1)
     assert p_fluent.theme.elements == p_plus.theme.elements
 
 
@@ -191,13 +192,16 @@ def test_plot_theme_attribute_access_still_works():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name,call_args,call_kwargs", [
-    ("geom_point", (), {}),
-    ("geom_smooth", (), {"method": "lm"}),
-    ("theme_minimal", (), {}),
-    ("scale_x_log10", (), {}),
-    ("facet_wrap", ("g",), {}),
-])
+@pytest.mark.parametrize(
+    "name,call_args,call_kwargs",
+    [
+        ("geom_point", (), {}),
+        ("geom_smooth", (), {"method": "lm"}),
+        ("theme_minimal", (), {}),
+        ("scale_x_log10", (), {}),
+        ("facet_wrap", ("g",), {}),
+    ],
+)
 def test_fluent_method_matches_plus_form(df, name, call_args, call_kwargs):
     """For each representative name, the fluent and ``+`` forms produce
     structurally equivalent plots."""
@@ -231,11 +235,7 @@ def test_fluent_chain_full(df):
 
 def test_fluent_chain_renders(df):
     """End-to-end: a fluent-only chain renders to a Figure."""
-    fig = (
-        df.ggplot(aes("x", "y"))
-        .geom_point()
-        .theme_minimal()
-    ).draw()
+    fig = (df.ggplot(aes("x", "y")).geom_point().theme_minimal()).draw()
     assert fig is not None
     plt.close(fig)
 
@@ -243,8 +243,7 @@ def test_fluent_chain_renders(df):
 def test_fluent_and_plus_interleaved(df):
     """Users can mix the two forms freely."""
     p = (
-        df.ggplot(aes("x", "y"))
-        .geom_point()
+        df.ggplot(aes("x", "y")).geom_point()
         + geom_smooth(method="lm")
         + theme_minimal()
     )
@@ -281,6 +280,7 @@ def test_kwargs_merge_with_aes_kwargs_win(df):
 def test_top_level_ggplot_accepts_kwargs(df):
     """``ggplot(df, x="x")`` (function form) also accepts kwarg sugar."""
     from hea.ggplot import ggplot
+
     p1 = ggplot(df, aes(x="x", y="y"))
     p2 = ggplot(df, x="x", y="y")
     assert p1.mapping == p2.mapping
@@ -319,6 +319,7 @@ def test_layer_level_color_column_means_map(df):
     # The promoted mapping should now contain colour: "g".
     # Inspect via build (no need to draw).
     from hea.ggplot.build import build
+
     bo = build(p)
     assert bo.aes_source.get("colour") == "g"
 
@@ -334,11 +335,14 @@ def test_layer_level_callable_kwarg_promotes_to_mapping():
     from hea.tidy import col
     from hea.tidy import cut_width
     from hea.ggplot.build import build
+
     rng = np.random.default_rng(0)
-    df = hea.tidy.DataFrame({
-        "carat": rng.uniform(0.2, 2.5, 200),
-        "price": rng.uniform(200, 2000, 200),
-    })
+    df = hea.tidy.DataFrame(
+        {
+            "carat": rng.uniform(0.2, 2.5, 200),
+            "price": rng.uniform(200, 2000, 200),
+        }
+    )
 
     p_kw = df.ggplot(x="carat", y="price").geom_boxplot(
         group=cut_width(col("carat"), 0.1),
@@ -362,11 +366,14 @@ def test_cut_width_accepts_bare_column_name():
     from hea.tidy import col
     from hea.tidy import cut_width
     from hea.ggplot.build import build
+
     rng = np.random.default_rng(0)
-    df = hea.tidy.DataFrame({
-        "carat": rng.uniform(0.2, 2.5, 200),
-        "price": rng.uniform(200, 2000, 200),
-    })
+    df = hea.tidy.DataFrame(
+        {
+            "carat": rng.uniform(0.2, 2.5, 200),
+            "price": rng.uniform(200, 2000, 200),
+        }
+    )
 
     p_str = df.ggplot(x="carat", y="price").geom_boxplot(
         aes(group=cut_width("carat", 0.1)),

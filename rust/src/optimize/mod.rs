@@ -90,10 +90,15 @@ pub fn optif9(
     let n = x.len();
     let mut xpls = vec![0.0; n];
     let mut gpls = vec![0.0; n];
-    let mut obj = PyObj { py, fcn, d1fcn, d2fcn };
+    let mut obj = PyObj {
+        py,
+        fcn,
+        d1fcn,
+        d2fcn,
+    };
     let (fpls, itrmcd, itncnt, msg_out) = uncmin::optdrv(
-        n, &mut x, &mut obj, &mut ts, fscale, method, iexp, msg, ndigit, itnlim, iagflg,
-        iahflg, dlt, gradtl, stepmx, steptl, &mut xpls, &mut gpls,
+        n, &mut x, &mut obj, &mut ts, fscale, method, iexp, msg, ndigit, itnlim, iagflg, iahflg,
+        dlt, gradtl, stepmx, steptl, &mut xpls, &mut gpls,
     )?;
     Ok((
         xpls.into_pyarray(py).unbind(),
@@ -121,7 +126,12 @@ pub fn uncmin_fdhess(
     let ts = typsiz.as_slice()?.to_vec();
     let n = xv.len();
     let mut h = vec![0.0; n * n];
-    let mut obj = PyObj { py, fcn, d1fcn: py.None(), d2fcn: None };
+    let mut obj = PyObj {
+        py,
+        fcn,
+        d1fcn: py.None(),
+        d2fcn: None,
+    };
     uncmin::fdhess(n, &mut xv, fval, &mut obj, &mut h, n, ndigit, &ts)?;
     Ok(h.into_pyarray(py).unbind())
 }
@@ -177,7 +187,14 @@ pub fn lbfgsb_drive(
     let (fmin, fail, fncount, grcount, msg) = lbfgsb::lbfgsb_drive(
         n, m, &mut x, &lov, &upv, &nbdv, &mut obj, factr, pgtol, maxit,
     )?;
-    Ok((x.into_pyarray(py).unbind(), fmin, fail, fncount, grcount, msg))
+    Ok((
+        x.into_pyarray(py).unbind(),
+        fmin,
+        fail,
+        fncount,
+        grcount,
+        msg,
+    ))
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

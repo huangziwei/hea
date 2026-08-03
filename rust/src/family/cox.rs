@@ -409,13 +409,17 @@ fn cox_d2h<'py>(
                     // A_p[l,l]*d1gamma[k] + 2*d1b[l,k]*b_l
                     let inner1 = rfma(adiag[l], d1gamma_p[k], (2.0 * d1b_p[l * mm + k]) * bl);
                     // 5-product group, left-assoc fused
-                    let mut big5 = rfma(d1adiag[l * mm + m], d1gamma_p[k], adiag[l] * d2gamma_p[off]);
+                    let mut big5 =
+                        rfma(d1adiag[l * mm + m], d1gamma_p[k], adiag[l] * d2gamma_p[off]);
                     big5 = rfma(d2b_p[l * nhh + off], bl, big5);
                     big5 = rfma(2.0 * d1b_p[l * mm + k], d1b_p[l * mm + m], big5);
                     big5 = rfma(bl, d2b_p[l * nhh + off], big5);
                     // 2*d1b[l,m]*b_l*d1gamma[k] + b_l*b_l*d2gamma[off]
-                    let inner6 =
-                        rfma((2.0 * d1b_p[l * mm + m]) * bl, d1gamma_p[k], (bl * bl) * d2gamma_p[off]);
+                    let inner6 = rfma(
+                        (2.0 * d1b_p[l * mm + m]) * bl,
+                        d1gamma_p[k],
+                        (bl * bl) * d2gamma_p[off],
+                    );
                     let mut v = rfma(xx3, inner1, xx0 * big5); // T1 fused, T2 rounded
                     v = rfma(xx0 * d1gamma_p[m], d1adiag[l * mm + k], v); // + xx0*d1gamma[m]*d1A[l,l,k]
                     v = rfma(-xx, d2lda_p[l * nhh + off], v); // - xx*d2ldA

@@ -64,13 +64,11 @@ def _resolve_geom(geom, **geom_kwargs):
         return geom
     if not isinstance(geom, str):
         raise TypeError(
-            f"annotate: geom must be a Geom or string name, got "
-            f"{type(geom).__name__}"
+            f"annotate: geom must be a Geom or string name, got {type(geom).__name__}"
         )
     if geom not in _NAME_TO_GEOM_CLS:
         raise ValueError(
-            f"annotate: unknown geom {geom!r}; valid names: "
-            f"{sorted(_NAME_TO_GEOM_CLS)}"
+            f"annotate: unknown geom {geom!r}; valid names: {sorted(_NAME_TO_GEOM_CLS)}"
         )
     import importlib
 
@@ -100,8 +98,19 @@ def _broadcast(v, n):
     return lst
 
 
-def annotate(geom, *, x=None, y=None, xmin=None, xmax=None, ymin=None, ymax=None,
-             xend=None, yend=None, **kwargs):
+def annotate(
+    geom,
+    *,
+    x=None,
+    y=None,
+    xmin=None,
+    xmax=None,
+    ymin=None,
+    ymax=None,
+    xend=None,
+    yend=None,
+    **kwargs,
+):
     """One-row (or N-row) annotation layer with constant aesthetics.
 
     Positional aesthetics (``x``, ``y``, ``xmin``…) and ``label`` go into
@@ -118,18 +127,21 @@ def annotate(geom, *, x=None, y=None, xmin=None, xmax=None, ymin=None, ymax=None
     # ``label`` varies per row when the user supplies a list, so it has
     # to live in the data alongside x/y. Everything else aesthetic-shaped
     # is treated as SET.
-    POSITIONAL = {"x", "y", "xmin", "xmax", "ymin", "ymax", "xend", "yend",
-                  "label"}
+    POSITIONAL = {"x", "y", "xmin", "xmax", "ymin", "ymax", "xend", "yend", "label"}
 
-    mapped_values: dict = {}    # → data + Aes mapping
-    set_aes_params: dict = {}   # → layer.aes_params (no scale, no legend)
-    geom_kwargs: dict = {}      # → geom constructor (e.g. arrow=)
+    mapped_values: dict = {}  # → data + Aes mapping
+    set_aes_params: dict = {}  # → layer.aes_params (no scale, no legend)
+    geom_kwargs: dict = {}  # → geom constructor (e.g. arrow=)
 
     for key, value in (
-        ("x", x), ("y", y),
-        ("xmin", xmin), ("xmax", xmax),
-        ("ymin", ymin), ("ymax", ymax),
-        ("xend", xend), ("yend", yend),
+        ("x", x),
+        ("y", y),
+        ("xmin", xmin),
+        ("xmax", xmax),
+        ("ymin", ymin),
+        ("ymax", ymax),
+        ("xend", xend),
+        ("yend", yend),
     ):
         if value is not None:
             mapped_values[key] = value
@@ -204,9 +216,9 @@ class _GeomCustomArtist(Geom):
         if hasattr(artist, "set_extent"):
             artist.set_extent((self.xmin, self.xmax, self.ymin, self.ymax))
         elif hasattr(artist, "set_bounds"):
-            artist.set_bounds(self.xmin, self.ymin,
-                              self.xmax - self.xmin,
-                              self.ymax - self.ymin)
+            artist.set_bounds(
+                self.xmin, self.ymin, self.xmax - self.xmin, self.ymax - self.ymin
+            )
         ax.add_artist(artist)
 
 

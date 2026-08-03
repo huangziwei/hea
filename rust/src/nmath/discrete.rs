@@ -55,13 +55,7 @@ pub(crate) fn pbinom_scalar(x: f64, n: f64, p: f64, lower_tail: bool, log_p: boo
     pbeta_scalar(p, x + 1.0, n - x, !lower_tail, log_p)
 }
 
-pub(crate) fn pnbinom_mu_scalar(
-    x: f64,
-    size: f64,
-    mu: f64,
-    lower_tail: bool,
-    log_p: bool,
-) -> f64 {
+pub(crate) fn pnbinom_mu_scalar(x: f64, size: f64, mu: f64, lower_tail: bool, log_p: bool) -> f64 {
     if x.is_nan() || size.is_nan() || mu.is_nan() {
         return x + size + mu;
     }
@@ -155,7 +149,11 @@ pub(crate) fn dbeta_scalar(x: f64, a: f64, b: f64, give_log: bool) -> f64 {
     }
     if a == 0.0 || b == 0.0 || !a.is_finite() || !b.is_finite() {
         if a == 0.0 && b == 0.0 {
-            return if x == 0.0 || x == 1.0 { f64::INFINITY } else { rd0 };
+            return if x == 0.0 || x == 1.0 {
+                f64::INFINITY
+            } else {
+                rd0
+            };
         }
         if a == 0.0 || a / b == 0.0 {
             return if x == 0.0 { f64::INFINITY } else { rd0 };
@@ -384,13 +382,7 @@ pub(crate) fn qbinom_scalar(p: f64, n: f64, pr: f64, lower_tail: bool, log_p: bo
     q_discrete(p, lower_tail, log_p, mu, sigma, gamma, &cdf, Some(n))
 }
 
-pub(crate) fn qnbinom_mu_scalar(
-    p: f64,
-    size: f64,
-    mu: f64,
-    lower_tail: bool,
-    log_p: bool,
-) -> f64 {
+pub(crate) fn qnbinom_mu_scalar(p: f64, size: f64, mu: f64, lower_tail: bool, log_p: bool) -> f64 {
     if size == f64::INFINITY {
         // limit case: Poisson
         return qpois_scalar(p, mu, lower_tail, log_p);
@@ -456,7 +448,11 @@ pub(crate) fn dnbinom_scalar(x: f64, size: f64, prob: f64, give_log: bool) -> f6
         if size == 0.0 {
             return if give_log { 0.0 } else { 1.0 };
         }
-        return if give_log { size * prob.ln() } else { prob.powf(size) };
+        return if give_log {
+            size * prob.ln()
+        } else {
+            prob.powf(size)
+        };
     }
     let size = if !size.is_finite() { f64::MAX } else { size };
     if x < 1e-10 * size {
@@ -466,8 +462,7 @@ pub(crate) fn dnbinom_scalar(x: f64, size: f64, prob: f64, give_log: bool) -> f6
         } else {
             x * ((x * 0.5) / size)
         };
-        let v = size * prob.ln() + x * (size.ln() + (-prob).ln_1p()) - lgamma1p(x)
-            + xx2s.ln_1p();
+        let v = size * prob.ln() + x * (size.ln() + (-prob).ln_1p()) - lgamma1p(x) + xx2s.ln_1p();
         return if give_log { v } else { v.exp() };
     }
     let p = if give_log {
@@ -540,7 +535,13 @@ pub(crate) fn dnbinom_mu_scalar(x: f64, size: f64, mu: f64, give_log: bool) -> f
     } else {
         size / (size + x)
     };
-    let ans = dbinom_raw(size, x + size, size / (size + mu), mu / (size + mu), give_log);
+    let ans = dbinom_raw(
+        size,
+        x + size,
+        size / (size + mu),
+        mu / (size + mu),
+        give_log,
+    );
     if give_log {
         p + ans
     } else {
@@ -729,10 +730,34 @@ macro_rules! wrap2 {
     };
 }
 
-wrap2!("ppois", ppois, ppois_scalar, (lower_tail = true), (log_p = false));
-wrap2!("qpois", qpois, qpois_scalar, (lower_tail = true), (log_p = false));
-wrap2!("pgeom", pgeom, pgeom_scalar, (lower_tail = true), (log_p = false));
-wrap2!("qgeom", qgeom, qgeom_scalar, (lower_tail = true), (log_p = false));
+wrap2!(
+    "ppois",
+    ppois,
+    ppois_scalar,
+    (lower_tail = true),
+    (log_p = false)
+);
+wrap2!(
+    "qpois",
+    qpois,
+    qpois_scalar,
+    (lower_tail = true),
+    (log_p = false)
+);
+wrap2!(
+    "pgeom",
+    pgeom,
+    pgeom_scalar,
+    (lower_tail = true),
+    (log_p = false)
+);
+wrap2!(
+    "qgeom",
+    qgeom,
+    qgeom_scalar,
+    (lower_tail = true),
+    (log_p = false)
+);
 
 #[pyfunction]
 #[pyo3(name = "dgeom", signature = (x, p, give_log=false))]
@@ -756,9 +781,12 @@ pub fn dpois<'py>(
     lam: PyReadonlyArray1<'py, f64>,
     give_log: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let v = crate::par::map2(py, x.as_slice().unwrap(), lam.as_slice().unwrap(), |x, l| {
-        dpois_scalar(x, l, give_log)
-    });
+    let v = crate::par::map2(
+        py,
+        x.as_slice().unwrap(),
+        lam.as_slice().unwrap(),
+        |x, l| dpois_scalar(x, l, give_log),
+    );
     v.into_pyarray(py)
 }
 

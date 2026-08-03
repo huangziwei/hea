@@ -5,6 +5,7 @@ columns; doesn't materialize per-group state. Each verb dispatches to
 the appropriate polars idiom (``agg`` for summarize, ``.over(...)`` for
 windowed mutate, ``group_by(...).head/tail`` for slice, etc.).
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -67,7 +68,10 @@ class GroupBy:
     # ---- collapsing verbs --------------------------------------------
 
     def summarize(
-        self, *args: pl.Expr, _groups: str = "drop", **kwargs: pl.Expr,
+        self,
+        *args: pl.Expr,
+        _groups: str = "drop",
+        **kwargs: pl.Expr,
     ):
         """One row per group.
 
@@ -107,9 +111,7 @@ class GroupBy:
         args, kwargs = _resolve_lazy_factors(self._df, args, kwargs)
         exprs = _kwargs_to_exprs(args, kwargs)
         windowed = [e.over(self._by) for e in exprs]
-        new_df = self._df._wrap(
-            pl.DataFrame.with_columns(self._df, windowed)
-        )
+        new_df = self._df._wrap(pl.DataFrame.with_columns(self._df, windowed))
         return GroupBy(new_df, self._by, self._kwargs)
 
     def filter(self, *predicates) -> "GroupBy":
@@ -167,7 +169,9 @@ class GroupBy:
         # Build the new frame: group cols + the new exprs.
         new_df = self._df._wrap(
             pl.DataFrame.select(
-                self._df, *[pl.col(g) for g in self._by], *windowed,
+                self._df,
+                *[pl.col(g) for g in self._by],
+                *windowed,
             )
         )
         return GroupBy(new_df, self._by, self._kwargs)
@@ -292,22 +296,17 @@ class GroupBy:
         # `int_range over` + filter for n=, and per-group sampling via agg
         # for prop=.
         if n is not None:
-            shuffled = (
-                pl.int_range(0, pl.len())
-                .shuffle(seed=seed)
-                .over(self._by)
-            )
+            shuffled = pl.int_range(0, pl.len()).shuffle(seed=seed).over(self._by)
             out = pl.DataFrame.filter(self._df, shuffled < n)
         else:
             gb = pl.DataFrame.group_by(self._df, self._by, **self._kwargs)
             cols = [c for c in self._df.columns if c not in self._by]
-            out = (
-                gb.agg(
-                    [pl.col(c).sample(fraction=prop, with_replacement=replace, seed=seed)
-                     for c in cols]
-                )
-                .explode(cols)
-            )
+            out = gb.agg(
+                [
+                    pl.col(c).sample(fraction=prop, with_replacement=replace, seed=seed)
+                    for c in cols
+                ]
+            ).explode(cols)
         return GroupBy(self._df._wrap(out), self._by, self._kwargs)
 
     def slice(self, positions) -> "GroupBy":
@@ -329,8 +328,8 @@ class GroupBy:
             pos = [int(p) for p in positions]
         else:
             pos = [int(positions)]
-        wpos = pl.int_range(0, pl.len()).over(self._by)   # 0-based pos in group
-        glen = pl.len().over(self._by)                    # rows per group
+        wpos = pl.int_range(0, pl.len()).over(self._by)  # 0-based pos in group
+        glen = pl.len().over(self._by)  # rows per group
         # A non-negative request ``p`` matches wpos == p; a from-end
         # request ``-k`` matches wpos == glen - k, i.e. wpos - glen == -k.
         # ``is_in`` over the raw request set captures both directions;
@@ -392,10 +391,7 @@ class GroupBy:
 
     def __repr__(self) -> str:
         by_str = ", ".join(self._by)
-        return (
-            f"# Groups: {by_str} [{self._n_groups()}]\n"
-            f"{self._df!r}"
-        )
+        return f"# Groups: {by_str} [{self._n_groups()}]\n{self._df!r}"
 
     def __str__(self) -> str:
         return self.__repr__()
@@ -403,13 +399,11 @@ class GroupBy:
     def _repr_html_(self) -> str:
         """Notebook / Jupyter display — frame's HTML plus a Groups: banner."""
         by_str = ", ".join(self._by)
-        banner = (
-            f'<small>Groups: {by_str} [{self._n_groups()}]</small>'
-        )
+        banner = f"<small>Groups: {by_str} [{self._n_groups()}]</small>"
         # polars DataFrame exposes _repr_html_; delegate.
-        inner = self._df._repr_html_() if hasattr(self._df, "_repr_html_") else (
-            f"<pre>{self._df!r}</pre>"
+        inner = (
+            self._df._repr_html_()
+            if hasattr(self._df, "_repr_html_")
+            else (f"<pre>{self._df!r}</pre>")
         )
         return banner + inner
-
-

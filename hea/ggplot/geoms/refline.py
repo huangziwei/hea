@@ -33,12 +33,14 @@ def _split_kwargs(kwargs):
 
 @dataclass
 class GeomHline(Geom):
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "black",
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+        }
+    )
     required_aes: tuple = ("yintercept",)
 
     def draw_panel(self, data, ax) -> None:
@@ -51,7 +53,9 @@ class GeomHline(Geom):
         n = len(data)
         colour = data["colour"].to_list() if "colour" in data.columns else ["black"] * n
         size = data["size"].to_numpy() if "size" in data.columns else [0.5] * n
-        linetype = data["linetype"].to_list() if "linetype" in data.columns else ["solid"] * n
+        linetype = (
+            data["linetype"].to_list() if "linetype" in data.columns else ["solid"] * n
+        )
         alpha = data["alpha"].to_numpy() if "alpha" in data.columns else [1.0] * n
         for i in range(n):
             ax.axhline(
@@ -65,12 +69,14 @@ class GeomHline(Geom):
 
 @dataclass
 class GeomVline(Geom):
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "black",
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+        }
+    )
     required_aes: tuple = ("xintercept",)
 
     def draw_panel(self, data, ax) -> None:
@@ -83,7 +89,9 @@ class GeomVline(Geom):
         n = len(data)
         colour = data["colour"].to_list() if "colour" in data.columns else ["black"] * n
         size = data["size"].to_numpy() if "size" in data.columns else [0.5] * n
-        linetype = data["linetype"].to_list() if "linetype" in data.columns else ["solid"] * n
+        linetype = (
+            data["linetype"].to_list() if "linetype" in data.columns else ["solid"] * n
+        )
         alpha = data["alpha"].to_numpy() if "alpha" in data.columns else [1.0] * n
         for i in range(n):
             ax.axvline(
@@ -97,12 +105,14 @@ class GeomVline(Geom):
 
 @dataclass
 class GeomAbline(Geom):
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "black",
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+        }
+    )
     required_aes: tuple = ("slope", "intercept")
 
     def draw_panel(self, data, ax) -> None:
@@ -116,7 +126,9 @@ class GeomAbline(Geom):
         n = len(data)
         colour = data["colour"].to_list() if "colour" in data.columns else ["black"] * n
         size = data["size"].to_numpy() if "size" in data.columns else [0.5] * n
-        linetype = data["linetype"].to_list() if "linetype" in data.columns else ["solid"] * n
+        linetype = (
+            data["linetype"].to_list() if "linetype" in data.columns else ["solid"] * n
+        )
         alpha = data["alpha"].to_numpy() if "alpha" in data.columns else [1.0] * n
         for i in range(n):
             # ``axline`` takes a point + slope; (0, intercept) is on the line.
@@ -158,6 +170,7 @@ def geom_hline(*, yintercept, **kwargs):
     layer = _build_layer(GeomHline(), data, kwargs)
     # The layer needs a mapping so ``yintercept`` makes it through compute_aesthetics.
     from ..aes import Aes
+
     layer.mapping = Aes(yintercept="yintercept")
     return layer
 
@@ -168,6 +181,7 @@ def geom_vline(*, xintercept, **kwargs):
     data = pl.DataFrame({"xintercept": xvals})
     layer = _build_layer(GeomVline(), data, kwargs)
     from ..aes import Aes
+
     layer.mapping = Aes(xintercept="xintercept")
     return layer
 
@@ -192,5 +206,6 @@ def geom_abline(*, slope=1.0, intercept=0.0, **kwargs):
     data = pl.DataFrame({"slope": s, "intercept": b})
     layer = _build_layer(GeomAbline(), data, kwargs)
     from ..aes import Aes
+
     layer.mapping = Aes(slope="slope", intercept="intercept")
     return layer

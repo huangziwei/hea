@@ -41,6 +41,7 @@ def _scalar(df, col, *, default):
 
 def _scalar_color(df, col, default):
     from .._util import r_color
+
     val = _scalar(df, col, default=default)
     return r_color(val)
 
@@ -48,6 +49,7 @@ def _scalar_color(df, col, default):
 def _line_kwargs(data):
     """Common kwargs for ``vlines``/``hlines`` from a frame's aes columns."""
     from ...plot._util import r_lty
+
     return {
         "colors": _scalar_color(data, "colour", "black"),
         "linewidths": float(_scalar(data, "size", default=0.5)) * _PT_PER_MM,
@@ -58,12 +60,14 @@ def _line_kwargs(data):
 
 @dataclass
 class GeomLinerange(Geom):
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "black",
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+        }
+    )
     required_aes: tuple = ("x", "ymin", "ymax")
 
     def draw_panel(self, data, ax) -> None:
@@ -82,13 +86,15 @@ class GeomLinerange(Geom):
 class GeomErrorbar(Geom):
     # Mirrors ggplot2's ``GeomErrorbar$default_aes`` (R/geom-errorbar.R):
     # ``width = 0.9`` (90% of bar slot), NOT 0.5.
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-        "width": 0.9,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "black",
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+            "width": 0.9,
+        }
+    )
     required_aes: tuple = ("x", "ymin", "ymax")
 
     def draw_panel(self, data, ax) -> None:
@@ -97,7 +103,11 @@ class GeomErrorbar(Geom):
         x = data["x"].to_numpy()
         ymin = data["ymin"].to_numpy()
         ymax = data["ymax"].to_numpy()
-        w = data["width"].to_numpy() if "width" in data.columns else np.full(len(data), 0.5)
+        w = (
+            data["width"].to_numpy()
+            if "width" in data.columns
+            else np.full(len(data), 0.5)
+        )
         kw = _line_kwargs(data)
         _vlines(ax, x, ymin, ymax, **kw)
         _hlines(ax, ymin, x - w / 2, x + w / 2, **kw)
@@ -109,13 +119,15 @@ class GeomErrorbarh(Geom):
     # ggplot2 dropped ``GeomErrorbarh`` in favour of ``geom_errorbar`` with
     # ``orientation = "y"``; we keep it as a separate class but match the
     # same ``height = 0.9`` (= width=0.9 flipped) default.
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-        "height": 0.9,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "black",
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+            "height": 0.9,
+        }
+    )
     required_aes: tuple = ("y", "xmin", "xmax")
 
     def draw_panel(self, data, ax) -> None:
@@ -124,7 +136,11 @@ class GeomErrorbarh(Geom):
         y = data["y"].to_numpy()
         xmin = data["xmin"].to_numpy()
         xmax = data["xmax"].to_numpy()
-        h = data["height"].to_numpy() if "height" in data.columns else np.full(len(data), 0.5)
+        h = (
+            data["height"].to_numpy()
+            if "height" in data.columns
+            else np.full(len(data), 0.5)
+        )
         kw = _line_kwargs(data)
         _hlines(ax, y, xmin, xmax, **kw)
         _vlines(ax, xmin, y - h / 2, y + h / 2, **kw)
@@ -139,15 +155,17 @@ class GeomPointrange(Geom):
     # the bar's line width into one ``size`` aes (the bar takes ``size``
     # mm, the point dia ≈ 4× that), so ``stroke`` only matters for
     # fillable shape variants.
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
-        "fill": None,
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-        "shape": "o",
-        "stroke": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "black",
+            "fill": None,
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+            "shape": "o",
+            "stroke": 1.0,
+        }
+    )
     required_aes: tuple = ("x", "y", "ymin", "ymax")
 
     def draw_panel(self, data, ax) -> None:
@@ -166,7 +184,8 @@ class GeomPointrange(Geom):
         line_pt = float(_scalar(data, "size", default=0.5)) * _PT_PER_MM
         point_size_pt2 = (line_pt * 4) ** 2
         ax.scatter(
-            x, y,
+            x,
+            y,
             s=point_size_pt2,
             c=_scalar_color(data, "colour", "black"),
             marker=_scalar(data, "shape", default="o"),
@@ -180,14 +199,16 @@ class GeomCrossbar(Geom):
     horizontal bar at ``y`` (the median line). ggplot2 default: no fill.
     """
 
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
-        "fill": None,
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-        "width": 0.5,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "black",
+            "fill": None,
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+            "width": 0.5,
+        }
+    )
     required_aes: tuple = ("x", "y", "ymin", "ymax")
 
     def draw_panel(self, data, ax) -> None:
@@ -197,7 +218,11 @@ class GeomCrossbar(Geom):
         y = data["y"].to_numpy()
         ymin = data["ymin"].to_numpy()
         ymax = data["ymax"].to_numpy()
-        w = data["width"].to_numpy() if "width" in data.columns else np.full(len(data), 0.5)
+        w = (
+            data["width"].to_numpy()
+            if "width" in data.columns
+            else np.full(len(data), 0.5)
+        )
 
         kw = _line_kwargs(data)
         # Box outline: top, bottom, left, right.
@@ -213,6 +238,7 @@ class GeomCrossbar(Geom):
 # ---------------------------------------------------------------------------
 # Factories
 # ---------------------------------------------------------------------------
+
 
 def _make_layer(geom, mapping, data, stat, position, kwargs):
     from ..layer import Layer
@@ -231,35 +257,40 @@ def _make_layer(geom, mapping, data, stat, position, kwargs):
     )
 
 
-def geom_errorbar(mapping=None, data=None, *, stat="identity", position="identity",
-                  **kwargs):
+def geom_errorbar(
+    mapping=None, data=None, *, stat="identity", position="identity", **kwargs
+):
     """Vertical error bars: line from ``ymin`` to ``ymax`` at each ``x``,
     with horizontal caps of ``width`` (default 0.5)."""
     return _make_layer(GeomErrorbar(), mapping, data, stat, position, kwargs)
 
 
-def geom_errorbarh(mapping=None, data=None, *, stat="identity", position="identity",
-                   **kwargs):
+def geom_errorbarh(
+    mapping=None, data=None, *, stat="identity", position="identity", **kwargs
+):
     """Horizontal error bars: line from ``xmin`` to ``xmax`` at each ``y``,
     with vertical caps of ``height`` (default 0.5)."""
     return _make_layer(GeomErrorbarh(), mapping, data, stat, position, kwargs)
 
 
-def geom_linerange(mapping=None, data=None, *, stat="identity", position="identity",
-                   **kwargs):
+def geom_linerange(
+    mapping=None, data=None, *, stat="identity", position="identity", **kwargs
+):
     """Vertical line from ``ymin`` to ``ymax`` at each ``x``, no caps."""
     return _make_layer(GeomLinerange(), mapping, data, stat, position, kwargs)
 
 
-def geom_pointrange(mapping=None, data=None, *, stat="identity", position="identity",
-                    **kwargs):
+def geom_pointrange(
+    mapping=None, data=None, *, stat="identity", position="identity", **kwargs
+):
     """Vertical range line plus a point at ``(x, y)``. The range uses
     ``size`` as the line width; the point's diameter is ~4× that."""
     return _make_layer(GeomPointrange(), mapping, data, stat, position, kwargs)
 
 
-def geom_crossbar(mapping=None, data=None, *, stat="identity", position="identity",
-                  **kwargs):
+def geom_crossbar(
+    mapping=None, data=None, *, stat="identity", position="identity", **kwargs
+):
     """Rectangular outline at ``[x ± width/2] × [ymin, ymax]`` with a
     thicker bar at ``y`` (the centre line)."""
     return _make_layer(GeomCrossbar(), mapping, data, stat, position, kwargs)

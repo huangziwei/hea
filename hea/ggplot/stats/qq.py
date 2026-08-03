@@ -52,6 +52,7 @@ def _ppf(distribution: str, dparams: dict):
 
     def ppf(p):
         return dist.ppf(p, **(dparams or {}))
+
     return ppf
 
 
@@ -74,12 +75,14 @@ class StatQq(Stat):
         ppf = _ppf(self.distribution, self.dparams)
         theoretical = ppf(probs)
 
-        return pl.DataFrame({
-            "x": theoretical,
-            "y": sample_sorted,
-            "theoretical": theoretical,
-            "sample": sample_sorted,
-        })
+        return pl.DataFrame(
+            {
+                "x": theoretical,
+                "y": sample_sorted,
+                "theoretical": theoretical,
+                "sample": sample_sorted,
+            }
+        )
 
 
 @dataclass
@@ -105,14 +108,24 @@ class StatQqLine(Stat):
         x_lo, x_hi = float(theoretical.min()), float(theoretical.max())
         slope = (y2 - y1) / (x2 - x1) if x2 != x1 else 0.0
         intercept = y1 - slope * x1
-        return pl.DataFrame({
-            "x": [x_lo, x_hi],
-            "y": [intercept + slope * x_lo, intercept + slope * x_hi],
-        })
+        return pl.DataFrame(
+            {
+                "x": [x_lo, x_hi],
+                "y": [intercept + slope * x_lo, intercept + slope * x_hi],
+            }
+        )
 
 
-def stat_qq(mapping=None, data=None, *, geom="point", distribution="norm",
-            dparams=None, position="identity", **kwargs):
+def stat_qq(
+    mapping=None,
+    data=None,
+    *,
+    geom="point",
+    distribution="norm",
+    dparams=None,
+    position="identity",
+    **kwargs,
+):
     """Q-Q plot points (theoretical vs sample quantiles).
 
     Map the data column via ``aes(sample=col)`` (preferred) or ``aes(y=col)``.
@@ -142,9 +155,17 @@ def stat_qq(mapping=None, data=None, *, geom="point", distribution="norm",
     )
 
 
-def stat_qq_line(mapping=None, data=None, *, geom="path", distribution="norm",
-                 dparams=None, quantiles=(0.25, 0.75),
-                 position="identity", **kwargs):
+def stat_qq_line(
+    mapping=None,
+    data=None,
+    *,
+    geom="path",
+    distribution="norm",
+    dparams=None,
+    quantiles=(0.25, 0.75),
+    position="identity",
+    **kwargs,
+):
     """Reference line for a Q-Q plot — a robust line through the 25th and
     75th sample/theoretical quantile pair (R-style)."""
     from ..geoms.path import GeomPath
@@ -153,8 +174,9 @@ def stat_qq_line(mapping=None, data=None, *, geom="path", distribution="norm",
 
     if isinstance(geom, str):
         if geom not in ("path", "line"):
-            raise ValueError(f"stat_qq_line: unknown geom {geom!r}; "
-                             "expected 'path' or 'line'")
+            raise ValueError(
+                f"stat_qq_line: unknown geom {geom!r}; expected 'path' or 'line'"
+            )
         geom_obj = GeomPath()
     else:
         geom_obj = geom
@@ -163,8 +185,9 @@ def stat_qq_line(mapping=None, data=None, *, geom="path", distribution="norm",
 
     return Layer(
         geom=geom_obj,
-        stat=StatQqLine(distribution=distribution, dparams=dparams or {},
-                        quantiles=tuple(quantiles)),
+        stat=StatQqLine(
+            distribution=distribution, dparams=dparams or {}, quantiles=tuple(quantiles)
+        ),
         position=resolve_position(position),
         mapping=mapping,
         data=data,

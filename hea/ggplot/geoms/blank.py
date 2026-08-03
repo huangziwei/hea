@@ -14,6 +14,7 @@ def geom_blank(mapping=None, data=None, *, position="identity"):
     from ..layer import Layer
     from ..positions import resolve_position
     from ..stats.identity import StatIdentity
+
     return Layer(
         geom=GeomBlank(),
         stat=StatIdentity(),

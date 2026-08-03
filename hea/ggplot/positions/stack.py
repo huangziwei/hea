@@ -14,7 +14,9 @@ import polars as pl
 from .position import Position
 
 
-def _sort_within_x(data: pl.DataFrame, reverse: bool) -> tuple[pl.DataFrame, list, list]:
+def _sort_within_x(
+    data: pl.DataFrame, reverse: bool
+) -> tuple[pl.DataFrame, list, list]:
     """Match R's ``position_stack`` ordering: ``order(x, group,
     decreasing = !reverse)``. With ``reverse=False`` (default), groups
     sort DESCENDING so that — under cumsum — the *first* legend level
@@ -53,14 +55,18 @@ class PositionFill(Position):
         if "x" not in data.columns or "y" not in data.columns:
             return data
         sorted_data, _, _ = _sort_within_x(data, self.reverse)
-        return sorted_data.with_columns(
-            _ymax_raw=pl.col("y").cum_sum().over("x"),
-            _total=pl.col("y").sum().over("x"),
-        ).with_columns(
-            ymax=pl.col("_ymax_raw") / pl.col("_total"),
-            ymin=(pl.col("_ymax_raw") - pl.col("y")) / pl.col("_total"),
-            y=pl.col("y") / pl.col("_total"),
-        ).drop("_ymax_raw", "_total")
+        return (
+            sorted_data.with_columns(
+                _ymax_raw=pl.col("y").cum_sum().over("x"),
+                _total=pl.col("y").sum().over("x"),
+            )
+            .with_columns(
+                ymax=pl.col("_ymax_raw") / pl.col("_total"),
+                ymin=(pl.col("_ymax_raw") - pl.col("y")) / pl.col("_total"),
+                y=pl.col("y") / pl.col("_total"),
+            )
+            .drop("_ymax_raw", "_total")
+        )
 
 
 def position_stack(*, vjust=1.0, reverse=False):

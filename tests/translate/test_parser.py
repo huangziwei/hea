@@ -320,20 +320,25 @@ flights |>
     assert isinstance(top, A.Pipe) and top.op == "|>"
     summarize = top.rhs
     assert isinstance(summarize, A.Call) and summarize.func.name == "summarize"
-    assert isinstance(summarize.args[0], A.NamedArg) and summarize.args[0].name == "arr_delay"
+    assert (
+        isinstance(summarize.args[0], A.NamedArg)
+        and summarize.args[0].name == "arr_delay"
+    )
 
     # The mean(arr_delay, na.rm = TRUE) call.
     mean_call = summarize.args[0].value
     assert isinstance(mean_call, A.Call) and mean_call.func.name == "mean"
-    assert isinstance(mean_call.args[1], A.NamedArg) and mean_call.args[1].name == "na.rm"
+    assert (
+        isinstance(mean_call.args[1], A.NamedArg) and mean_call.args[1].name == "na.rm"
+    )
     assert mean_call.args[1].value.value is True
 
     # Walk down the pipe chain.
-    p1 = top.lhs                            # ... |> group_by(...)
+    p1 = top.lhs  # ... |> group_by(...)
     assert isinstance(p1, A.Pipe)
-    p2 = p1.lhs                             # ... |> filter(...)
+    p2 = p1.lhs  # ... |> filter(...)
     assert isinstance(p2, A.Pipe)
-    p3 = p2.lhs                             # flights
+    p3 = p2.lhs  # flights
     assert isinstance(p3, A.Identifier) and p3.name == "flights"
 
 

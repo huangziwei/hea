@@ -87,8 +87,15 @@ def hcl_to_hex(h: float, c: float, lightness: float) -> str:
 # Discrete palettes
 # ---------------------------------------------------------------------------
 
-def hue_pal(*, h: tuple = (15, 375), c: float = 100, lightness: float = 65,
-            h_start: float = 0, direction: int = 1):
+
+def hue_pal(
+    *,
+    h: tuple = (15, 375),
+    c: float = 100,
+    lightness: float = 65,
+    h_start: float = 0,
+    direction: int = 1,
+):
     """ggplot2's default qualitative palette — equally-spaced hues in HCL.
 
     Defaults match ``scales::hue_pal``: chroma 100, lightness 65, hues
@@ -121,8 +128,14 @@ def hue_pal(*, h: tuple = (15, 375), c: float = 100, lightness: float = 65,
 
 
 _OKABE_ITO = (
-    "#000000", "#E69F00", "#56B4E9", "#009E73",
-    "#F0E442", "#0072B2", "#D55E00", "#CC79A7",
+    "#000000",
+    "#E69F00",
+    "#56B4E9",
+    "#009E73",
+    "#F0E442",
+    "#0072B2",
+    "#D55E00",
+    "#CC79A7",
 )
 
 
@@ -170,6 +183,7 @@ def manual_pal(values):
 # yields a list of hex codes.
 # ---------------------------------------------------------------------------
 
+
 def gradient_pal(low: str = "#132B43", high: str = "#56B1F7"):
     """Two-colour gradient. ggplot2 defaults: dark blue → light blue."""
     import numpy as np
@@ -186,8 +200,12 @@ def gradient_pal(low: str = "#132B43", high: str = "#56B1F7"):
     return palette
 
 
-def gradient2_pal(low: str = "#3B4CC0", mid: str = "#DDDDDD",
-                  high: str = "#B40426", midpoint: float = 0.5):
+def gradient2_pal(
+    low: str = "#3B4CC0",
+    mid: str = "#DDDDDD",
+    high: str = "#B40426",
+    midpoint: float = 0.5,
+):
     """Diverging three-colour gradient with a midpoint anchor (in [0, 1])."""
     import numpy as np
     from matplotlib.colors import to_hex, to_rgb
@@ -216,8 +234,7 @@ def gradientn_pal(colors, *, n_interp: int = 256):
     """N-stop gradient from an explicit colour list, equally spaced."""
     from matplotlib.colors import LinearSegmentedColormap, to_hex
 
-    cmap = LinearSegmentedColormap.from_list("hea_gradientn", list(colors),
-                                              N=n_interp)
+    cmap = LinearSegmentedColormap.from_list("hea_gradientn", list(colors), N=n_interp)
 
     def palette(values) -> list[str]:
         return [to_hex(c) for c in cmap(values)]
@@ -243,8 +260,9 @@ def viridis_pal(*, option: str = "viridis", direction: int = 1):
     return palette
 
 
-def viridis_pal_discrete(*, option: str = "viridis", direction: int = 1,
-                         begin: float = 0.0, end: float = 1.0):
+def viridis_pal_discrete(
+    *, option: str = "viridis", direction: int = 1, begin: float = 0.0, end: float = 1.0
+):
     """Discrete viridis palette: equally-spaced samples for n levels."""
     import matplotlib
     import numpy as np
@@ -328,6 +346,7 @@ def brewer_pal_continuous(*, palette: str = "Blues", direction: int = 1):
 # ---------------------------------------------------------------------------
 # Non-colour palettes — size, alpha, shape, linetype
 # ---------------------------------------------------------------------------
+
 
 def rescale_pal(range_: tuple = (1.0, 6.0)):
     """Linear rescale: ``[0, 1] -> [range_[0], range_[1]]``. Default matches
@@ -440,7 +459,7 @@ _DEFAULT_LINETYPES = [
     "dashed",
     "dotted",
     "dashdot",
-    (0, (10, 3)),     # longdash
+    (0, (10, 3)),  # longdash
     (0, (5, 1, 1, 1)),  # twodash
 ]
 

@@ -320,20 +320,36 @@ pub fn qnorm5_scalar(p: f64, mu: f64, sigma: f64, lower_tail: bool, log_p: bool)
             return f64::NAN;
         }
         if p == 0.0 {
-            return if lower_tail { f64::INFINITY } else { f64::NEG_INFINITY };
+            return if lower_tail {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            };
         }
         if p == f64::NEG_INFINITY {
-            return if lower_tail { f64::NEG_INFINITY } else { f64::INFINITY };
+            return if lower_tail {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
         }
     } else {
         if p < 0.0 || p > 1.0 {
             return f64::NAN;
         }
         if p == 0.0 {
-            return if lower_tail { f64::NEG_INFINITY } else { f64::INFINITY };
+            return if lower_tail {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
         }
         if p == 1.0 {
-            return if lower_tail { f64::INFINITY } else { f64::NEG_INFINITY };
+            return if lower_tail {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            };
         }
     }
     if sigma < 0.0 {
@@ -399,13 +415,12 @@ pub fn qnorm5_scalar(p: f64, mu: f64, sigma: f64, lower_tail: bool, log_p: bool)
         if r < 36000.0 {
             x2 = s2 - (M_2PI * x2).ln() - 2.0 / (2.0 + x2);
             if r < 840.0 {
-                x2 = s2 - (M_2PI * x2).ln()
-                    + 2.0 * (-(1.0 - 1.0 / (4.0 + x2)) / (2.0 + x2)).ln_1p();
+                x2 =
+                    s2 - (M_2PI * x2).ln() + 2.0 * (-(1.0 - 1.0 / (4.0 + x2)) / (2.0 + x2)).ln_1p();
                 if r < 109.0 {
                     x2 = s2 - (M_2PI * x2).ln()
                         + 2.0
-                            * (-(1.0 - (1.0 - 5.0 / (6.0 + x2)) / (4.0 + x2)) / (2.0 + x2))
-                                .ln_1p();
+                            * (-(1.0 - (1.0 - 5.0 / (6.0 + x2)) / (4.0 + x2)) / (2.0 + x2)).ln_1p();
                     if r < 55.0 {
                         x2 = s2 - (M_2PI * x2).ln()
                             + 2.0
