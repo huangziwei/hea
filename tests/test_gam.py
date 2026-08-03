@@ -11621,3 +11621,40 @@ def test_gfam_gaussian_tw_theta_walk_quirk_matches_mgcv():
     )
     assert m.REML_criterion / 2 == pytest.approx(160.741637692, rel=1e-11)
     assert m._family_display_name() == "gfam{gaussian,Tweedie(p=1.242)}"
+
+
+def test_gam_bam_predict_uses_fit_xlevels():
+    """``predict`` on a frame missing a factor level must code the parametric
+    contrast on the FIT's levels (R's ``xlevels``, lm.R:79/695) and reject an
+    unseen one — for every gam/bam rail.
+
+    Previously handled by ``_add_factor_stub_rows``, which appended a synthetic
+    row per missing level and sliced it back off; that covered the missing-level
+    case but turned an unseen level into an opaque shape error.
+    """
+    from hea.models.bam import bam
+
+    rng = np.random.default_rng(5)
+    n = 400
+    g = rng.choice(["a", "b", "c"], n)
+    x = rng.uniform(size=n)
+    y = rng.poisson(np.exp(0.5 + (g == "b") * 0.4 + (g == "c") * 0.9 + np.sin(x)))
+    d = pl.DataFrame({"y": y.astype(float), "g": g, "x": x}).with_columns(
+        pl.col("g").cast(pl.Enum(["a", "b", "c"]))
+    )
+    f = "y ~ g + s(x, k=6)"
+    models = {
+        "gam": gam(f, d, family=Poisson()),
+        "bam-dense": bam(f, d, family=Poisson(), discrete=False),
+        "bam-discrete": bam(f, d, family=Poisson(), discrete=True),
+    }
+    allrows = pl.DataFrame({"g": ["a", "b", "c"], "x": [0.3, 0.3, 0.3]})
+    for name, m in models.items():
+        both = m.predict(newdata=allrows, type="response")["fit"].to_numpy()
+        for i, lv in enumerate(["a", "b", "c"]):
+            solo = m.predict(
+                newdata=pl.DataFrame({"g": [lv], "x": [0.3]}), type="response"
+            )["fit"].to_numpy()
+            np.testing.assert_allclose(solo[0], both[i], rtol=1e-10, err_msg=name)
+        with pytest.raises(ValueError, match="factor g has new level zz"):
+            m.predict(newdata=pl.DataFrame({"g": ["zz"], "x": [0.3]}))

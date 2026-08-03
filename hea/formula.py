@@ -1159,6 +1159,75 @@ def set_ordered_cols(cols):
     _ORDERED_COLS_CV.set(frozenset(cols))
 
 
+# R's ``object$xlevels``: the factor levels the model was FIT with, keyed by
+# the variable's deparsed name. ``lm``/``glm`` store it (lm.R:79, glm.R:130)
+# and ``predict`` re-levels newdata against it (lm.R:695-696) so a prediction
+# frame that happens to omit a level — or carry an unseen one — cannot silently
+# re-code the contrast. Two context vars rather than threading a parameter
+# through every ``factor()``/``C()``/``ordered()`` call site, matching how
+# ``_ORDERED_COLS_CV``/``_CONTRASTS_CV`` already reach the same builder.
+_XLEV_CV: contextvars.ContextVar[dict] = contextvars.ContextVar(
+    "hea_xlevels", default={}
+)
+_XLEV_SINK_CV: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "hea_xlevels_sink", default=None
+)
+
+
+@contextlib.contextmanager
+def with_xlevels(xlev):
+    """Context manager: re-level factors to ``xlev`` (``{label: levels}``)
+    instead of to the levels present in the data — R's
+    ``model.frame(..., xlev=object$xlevels)``. Falsy ``xlev`` is a no-op."""
+    token = _XLEV_CV.set(dict(xlev) if xlev else {})
+    try:
+        yield
+    finally:
+        _XLEV_CV.reset(token)
+
+
+# Reserved ``basis_state`` key. xlevels rides alongside predvars because it is
+# the same kind of thing — fit-time state the predict pass must replay — and
+# ``basis_state`` is already threaded through every fit and predict design build
+# with exactly the right lifetime (empty dict at fit, same dict at predict).
+_XLEV_KEY = "__xlevels__"
+
+
+@contextlib.contextmanager
+def _xlevels_scope(basis_state):
+    """Bind the xlevels map carried in ``basis_state`` as BOTH the source and
+    the sink for this design build.
+
+    One dict serving both roles gives first-write-wins: the fit pass finds it
+    empty and each factor records its levels; every later pass finds them and
+    re-levels against them. ``basis_state=None`` (callers that opted out of
+    predvars replay) keeps the pre-xlevels behaviour.
+    """
+    if basis_state is None:
+        yield
+        return
+    xlev = basis_state.setdefault(_XLEV_KEY, {})
+    src = _XLEV_CV.set(xlev)
+    sink = _XLEV_SINK_CV.set(xlev)
+    try:
+        yield
+    finally:
+        _XLEV_CV.reset(src)
+        _XLEV_SINK_CV.reset(sink)
+
+
+@contextlib.contextmanager
+def capture_xlevels():
+    """Context manager yielding the dict that collects every factor block's
+    levels built inside it — hea's ``.getXlevels(mt, mf)`` (models.R:753)."""
+    sink: dict = {}
+    token = _XLEV_SINK_CV.set(sink)
+    try:
+        yield sink
+    finally:
+        _XLEV_SINK_CV.reset(token)
+
+
 # R's ``contrasts.arg`` (model.matrix): a named-list mapping factor-column
 # name → contrast name (one of ``contr.treatment``, ``contr.sum``,
 # ``contr.helmert``, ``contr.poly``, ``contr.SAS``). When a factor block is
@@ -1292,6 +1361,67 @@ def _is_categorical(series: pl.Series) -> bool:
 
 
 def _factor_from_series(
+    series: pl.Series, label: str, ordered_hint: bool = False
+) -> _FactorBlock:
+    """Build a factor block, honouring R's ``xlevels`` when one is in scope.
+
+    Wraps :func:`_factor_from_series_impl` with the two halves of R's
+    fit→predict factor contract:
+
+    * **apply** — inside :func:`with_xlevels`, a variable whose label is in
+      the stored map is re-levelled to the FIT's levels instead of the ones
+      present here (``model.frame(..., xlev=object$xlevels)``, models.R:568-593).
+    * **record** — inside :func:`capture_xlevels`, the levels this block was
+      built with are written to the sink, which is ``.getXlevels(mt, mf)``
+      (models.R:753-763): every factor/character variable in the model frame,
+      keyed by its deparsed name (hea's labels already match — ``g``,
+      ``factor(g)``, ``ordered(g)``).
+    """
+    xl = _XLEV_CV.get().get(label)
+    blk = (
+        _relevel_to_xlevels(series, xl, label, ordered_hint)
+        if xl is not None
+        else _factor_from_series_impl(series, label, ordered_hint)
+    )
+    sink = _XLEV_SINK_CV.get()
+    if sink is not None:
+        sink.setdefault(label, list(blk.levels))
+    return blk
+
+
+def _relevel_to_xlevels(
+    series: pl.Series, xl: list, label: str, ordered_hint: bool
+) -> _FactorBlock:
+    """R's ``model.frame`` xlev fix-up (models.R:568-593).
+
+    Checks the levels actually present against the fit's (``xi[, drop=TRUE]``
+    then ``match(nxl, xl)``) and rejects any that are new, then rebuilds as
+    ``factor(xi, levels=xl)`` — so the contrast is coded on the FIT's full
+    level set, unused levels included, and a dropped level no longer shifts
+    the baseline.
+    """
+    present = _factor_levels(series)
+    known = set(xl)
+    new = [v for v in present if v not in known]
+    if new:
+        # models.R:583-587, ngettext singular/plural.
+        plural = "s" if len(new) > 1 else ""
+        joined = ", ".join(str(v) for v in new)
+        raise ValueError(f"factor {label} has new level{plural} {joined}")
+    code_map = {lv: i for i, lv in enumerate(xl)}
+    codes = np.array(
+        [-1 if v is None else code_map[v] for v in series.to_list()], dtype=int
+    )
+    return _FactorBlock(
+        codes=codes,
+        levels=list(xl),
+        ordered=ordered_hint or (label in _ORDERED_COLS_CV.get()),
+        label=label,
+        forced_contrast=_CONTRASTS_CV.get().get(label),
+    )
+
+
+def _factor_from_series_impl(
     series: pl.Series, label: str, ordered_hint: bool = False
 ) -> _FactorBlock:
     dt = series.dtype
@@ -2693,6 +2823,21 @@ def materialize(
 
 
 def _build_design(
+    expanded: ExpandedFormula,
+    data: pl.DataFrame,
+    *,
+    drop_na: bool = True,
+    basis_state: dict | None = None,
+) -> tuple[Optional[np.ndarray], list[str], list[int]]:
+    """Core design assembly — :func:`_build_design_impl` under the xlevels
+    scope, so every factor in the design is coded on the FIT's level set."""
+    with _xlevels_scope(basis_state):
+        return _build_design_impl(
+            expanded, data, drop_na=drop_na, basis_state=basis_state
+        )
+
+
+def _build_design_impl(
     expanded: ExpandedFormula,
     data: pl.DataFrame,
     *,

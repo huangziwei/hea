@@ -69,6 +69,8 @@ from ..formula import (
     BasisSpec,
     SmoothBlock,
     _apply_smooth_arg_exprs,
+    capture_xlevels as _capture_xlevels,
+    with_xlevels as _with_xlevels,
     _collect_name_idents,
     _eval_atom,
     _factor_levels,
@@ -95,7 +97,6 @@ from .gam import (
     _PenaltySlot,
     _R_rank,
     _Sl,
-    _add_factor_stub_rows,
     _add_null_space_penalties,
     _apply_gam_side,
     _block_s_scale,
@@ -2949,7 +2950,10 @@ class bam(gam):
             # predict-on-newdata re-derives the family index from this
             # expression (mgcv.r:2819/3174) — same hook as gam.
             self._gfam_fi_expr = _gfam_expr
-        d = prepare_design(formula, data)
+        with _capture_xlevels() as _xlev:
+            d = prepare_design(formula, data)
+        # R's ``model$xlevels`` (lm.R:79) — see gam.__init__.
+        self._xlevels = _xlev
         self._expanded = d.expanded
         # R model.matrix's ``assign`` for the parametric block (0 = intercept,
         # i = expanded.terms[i-1]). The inherited predict()/summary() term
@@ -4387,22 +4391,21 @@ class bam(gam):
         grid (mgcv ``PredictMat``) and a numeric by-variable is binned
         (bam.r:1889), exactly as the fitter does.
 
-        Returns ``(design, n_user, n_stubs, off_new)`` where ``off_new`` is
-        the (stub-trimmed) formula offset evaluated on ``newdata``.
+        Returns ``(design, n_user, off_new)`` where ``off_new`` is the
+        formula offset evaluated on ``newdata``.
         """
         newdata = normalize_data(newdata)
         expr_map = _smooth_arg_expr_map(self._expanded)
         if expr_map:
             newdata = _apply_smooth_arg_exprs(newdata, expr_map)
-        # Carry fit-time factor levels through (predict.gam's xlevels); the
-        # stubs keep the parametric contrasts at the fit's column count.
-        n_user = newdata.height
-        newdata, n_stubs = _add_factor_stub_rows(newdata, self.data)
         # Parametric design on newdata — response-free, the same call
-        # gam.predict uses. ``build_discrete_design`` stores these columns
-        # directly (identity gather), so the parametric part is exact
-        # (matching the fitter's ``X_param_full`` handling), not re-binned.
-        X_param = materialize(self._expanded, newdata).to_numpy().astype(float)
+        # gam.predict uses, and coded on the fit's xlevels so a frame missing a
+        # factor level keeps the fit's column count. ``build_discrete_design``
+        # stores these columns directly (identity gather), so the parametric
+        # part is exact (matching the fitter's ``X_param_full`` handling), not
+        # re-binned.
+        with _with_xlevels(getattr(self, "_xlevels", None)):
+            X_param = materialize(self._expanded, newdata).to_numpy().astype(float)
         # Discretise the smooth covariates at the default resolution.
         specs = _smooth_specs_from_expanded(self._expanded, newdata)
         names_pmf = [
@@ -4416,9 +4419,7 @@ class bam(gam):
         for off_node in self._expanded.offsets:
             blk = _eval_atom(off_node, newdata)
             off_new = off_new + blk.values.flatten().astype(float)
-        if n_stubs > 0:
-            off_new = off_new[:n_user]
-        return design, n_user, n_stubs, off_new
+        return design, newdata.height, off_new
 
     def _predict_bamd(self, newdata, *, type, se_fit, offset, unconditional):
         """Predict from a discrete bam fit via the discrete kernels — port
@@ -4459,7 +4460,7 @@ class bam(gam):
             n_pred = self.n
         else:
             src = self.data if newdata is None else newdata
-            design, n_pred, n_stubs, off_new = self._build_predict_discrete_design(src)
+            design, n_pred, off_new = self._build_predict_discrete_design(src)
 
         if extra is not None and extra.shape != (n_pred,):
             raise ValueError(f"offset must have length {n_pred}, got {extra.shape}")
@@ -4532,14 +4533,12 @@ class bam(gam):
             expr_map.update(_smooth_arg_expr_map(lp.expanded))
         if expr_map:
             newdata = _apply_smooth_arg_exprs(newdata, expr_map)
-        n_user = newdata.height
-        newdata, n_stubs = _add_factor_stub_rows(newdata, self.data)
-
         specs: list[dict] = []
         names_pmf: list[str] = []
         lp_parts: list[tuple[np.ndarray, list]] = []
         for lp in md.lps:
-            Xp_df = materialize(lp.expanded, newdata)
+            with _with_xlevels(getattr(lp, "xlevels", None)):
+                Xp_df = materialize(lp.expanded, newdata)
             X_param = Xp_df.to_numpy().astype(float)
             if X_param.shape[1] == 0:
                 X_param = np.zeros((newdata.height, 0))
@@ -4566,10 +4565,10 @@ class bam(gam):
                 for off_node in lp.expanded.offsets:
                     blk = _eval_atom(off_node, newdata)
                     off_j = off_j + blk.values.flatten().astype(float)
-                offs.append(off_j[:n_user] if n_stubs > 0 else off_j)
+                offs.append(off_j)
             else:
                 offs.append(None)
-        return design, n_user, offs
+        return design, newdata.height, offs
 
     def _predict_bamd_general(self, newdata, *, type, se_fit, unconditional):
         """``predict.bamd`` for the discrete GENERAL fit — the per-LP

@@ -71,10 +71,12 @@ from ..formula import (
     SmoothBlock,
     _eval_atom,
     _eval_lhs_expr,
+    capture_xlevels as _capture_xlevels,
     materialize_smooths,
     normalize_data,
     parse,
     prepare_design,
+    with_xlevels as _with_xlevels,
 )
 from .lm import _label_top_n, _lowess, _qq_plot
 from ..utils import (
@@ -8481,7 +8483,12 @@ class gam:
             # to recover the family index (mgcv reads the response from
             # newdata, mgcv.r:2819/3174).
             self._gfam_fi_expr = _gfam_expr
-        d = prepare_design(formula, data)
+        with _capture_xlevels() as _xlev:
+            d = prepare_design(formula, data)
+        # R's ``model$xlevels`` (lm.R:79): the parametric factor levels this fit
+        # saw. predict re-levels newdata against them so a frame missing a level
+        # (or carrying an unseen one) can't silently re-code the contrast.
+        self._xlevels = _xlev
         self._expanded = d.expanded
         # Materialise smooth-arg expressions once into ``self.data`` so the
         # synth columns (``s(I(b.depth^.5))`` ⇒ ``"I(b.depth^0.5)"``) are
@@ -12951,19 +12958,15 @@ class gam:
         return newdata, (bad if act == "na.pass" else None)
 
     def _predict_design_rows(self, newdata):
-        """One block of predict.gam's design build: factor-level stub
-        rows (mgcv's xlevels mechanism — ``materialize``'s droplevels
-        would otherwise collapse contrasts), the parametric columns +
-        every smooth's ``predict_mat``, the identifiability-drop
-        column selection, and the formula ``offset(...)`` re-eval.
-        Returns ``(X_new, off_new)`` for exactly ``newdata.height``
-        rows."""
+        """One block of predict.gam's design build: the parametric
+        columns (coded on the fit's ``xlevels``) + every smooth's
+        ``predict_mat``, the identifiability-drop column selection, and
+        the formula ``offset(...)`` re-eval. Returns ``(X_new, off_new)``
+        for exactly ``newdata.height`` rows."""
         from ..formula import materialize  # local to avoid cycle
 
-        n_user = newdata.height
-        newdata, n_stubs = _add_factor_stub_rows(newdata, self.data)
-
-        X_param = materialize(self._expanded, newdata).to_numpy().astype(float)
+        with _with_xlevels(getattr(self, "_xlevels", None)):
+            X_param = materialize(self._expanded, newdata).to_numpy().astype(float)
         if getattr(self, "_drop_intercept_param", None) is not None:
             # drop.intercept fits: materialize rebuilds the intercept
             # column; delete it like the fit did (mgcv.r:1165-1171).
@@ -12982,19 +12985,13 @@ class gam:
             # predict-time bases rebuild the full columns; apply the
             # identifiability drop so X_new matches the reduced β.
             X_new = X_new[:, self._keep_cols]
-        if n_stubs > 0:
-            X_new = X_new[:n_user]
         n_new = X_new.shape[0]
         # Re-evaluate any formula offset(...) atoms against newdata
-        # — predict.gam does the same. Slice off the stubs so the
-        # offset matches the user's row count.
+        # — predict.gam does the same.
         off_new = np.zeros(n_new)
         for off_node in self._expanded.offsets:
             blk = _eval_atom(off_node, newdata)
-            off_full = blk.values.flatten().astype(float)
-            if n_stubs > 0:
-                off_full = off_full[:n_user]
-            off_new = off_new + off_full
+            off_new = off_new + blk.values.flatten().astype(float)
         return X_new, off_new
 
     def _gfam_predict_y(self, newdata) -> np.ndarray | None:
@@ -13605,21 +13602,11 @@ class gam:
         newd2 = _coerce_schema(newd2, self.data)
 
         # --- lpmatrices ------------------------------------------------------
-        # Predict on a single combined frame to dodge a known limitation:
-        # ``materialize`` drops absent factor levels from new data (R's
-        # ``droplevels`` semantics — fine at fit time, wrong at predict
-        # time, since mgcv stores ``model$xlevels`` and we don't yet). By
-        # stacking newd1 + newd2 the comp variables regain both levels in
-        # one frame; stub rows then top up any non-comp factor still
-        # missing source levels (e.g. sex='F' when 'M' is the mode).
-        n1 = newd1.height
-        combined = pl.concat([newd1, newd2], how="vertical_relaxed")
-        combined, n_stubs = _add_factor_stub_rows(combined, self.data)
-        P = np.asarray(self.predict(combined, type="lpmatrix"), dtype=float)
-        if n_stubs > 0:
-            P = P[:-n_stubs]
-        p1 = P[:n1]
-        p2 = P[n1:]
+        # Each condition holds one level per comp variable, so its frame alone
+        # carries only that level; ``predict`` codes the contrasts on the fit's
+        # ``xlevels``, so the two lpmatrices are directly comparable.
+        p1 = np.asarray(self.predict(newd1, type="lpmatrix"), dtype=float)
+        p2 = np.asarray(self.predict(newd2, type="lpmatrix"), dtype=float)
 
         # --- rm.ranef --------------------------------------------------------
         # itsadug treats rm_ranef==False the same as None (no removal).
@@ -17921,6 +17908,7 @@ class _LpDesign:
         "L",
         "n_work",
         "param_assign",
+        "xlevels",
     )
 
     def __init__(self, **kw):
@@ -17979,7 +17967,8 @@ def _build_lp_design(
         _smooth_id_value,
     )
 
-    d = prepare_design(formula, data)
+    with _capture_xlevels() as xlevels:
+        d = prepare_design(formula, data)
     expr_map = _smooth_arg_expr_map(d.expanded)
     data_m = _apply_smooth_arg_exprs(d.data, expr_map) if expr_map else d.data
     X_param_df = d.X
@@ -18082,6 +18071,7 @@ def _build_lp_design(
         L=L,
         n_work=n_work,
         param_assign=list(d.param_assign or []),
+        xlevels=xlevels,
     )
 
 
@@ -18324,9 +18314,8 @@ def _multi_lpmatrix(md: _MultiDesign, newdata) -> tuple[np.ndarray, list[np.ndar
         expr_map = _smooth_arg_expr_map(lp.expanded)
         if expr_map:
             nd = _apply_smooth_arg_exprs(nd, expr_map)
-        n_user = nd.height
-        nd, n_stubs = _add_factor_stub_rows(nd, lp.data)
-        X_param = materialize(lp.expanded, nd).to_numpy().astype(float)
+        with _with_xlevels(getattr(lp, "xlevels", None)):
+            X_param = materialize(lp.expanded, nd).to_numpy().astype(float)
         if X_param.shape[1] == 0:
             X_param = np.zeros((nd.height, 0))
         parts = [X_param]
@@ -18337,10 +18326,7 @@ def _multi_lpmatrix(md: _MultiDesign, newdata) -> tuple[np.ndarray, list[np.ndar
                     "lpmatrix on newdata requires one."
                 )
             parts.append(np.asarray(b.spec.predict_mat(nd), dtype=float))
-        X_lp = np.concatenate(parts, axis=1) if len(parts) > 1 else X_param
-        if n_stubs > 0:
-            X_lp = X_lp[:n_user]
-        cols.append(X_lp)
+        cols.append(np.concatenate(parts, axis=1) if len(parts) > 1 else X_param)
     return np.concatenate(cols, axis=1), md.lpi
 
 
@@ -19998,56 +19984,6 @@ def _coerce_schema(grid: pl.DataFrame, src: pl.DataFrame) -> pl.DataFrame:
         if name in src.columns and src[name].dtype != out[name].dtype:
             out = out.with_columns(out[name].cast(src[name].dtype))
     return out
-
-
-def _add_factor_stub_rows(grid: pl.DataFrame, src: pl.DataFrame):
-    """Append one stub row per missing source-factor level so that
-    :meth:`gam.predict` (under the hood, :func:`materialize`) sees every
-    factor level the model was fit with.
-
-    Rationale: without this, ``materialize``'s droplevels behavior
-    (formula.py: line 1031–1037) collapses the contrast to only the levels
-    present in the new data, returning a design matrix with fewer columns
-    than ``self._beta``. mgcv side-steps this with ``model$xlevels``;
-    we'll wire that into predict eventually, but this keeps
-    ``get_difference`` correct in the interim.
-
-    Returns ``(grid_with_stubs, n_stubs)``. Stubs are appended at the
-    *end* — drop them via ``X[:-n_stubs]`` after predicting.
-    """
-    if grid.height == 0:
-        return grid, 0
-    stubs: list[dict] = []
-    # Each stub copies the first row's other-column values so the
-    # smooth bases evaluate at sensible points.
-    template = {col: grid[col][0] for col in grid.columns}
-    for name in grid.columns:
-        if name not in src.columns:
-            continue
-        src_col = src[name]
-        if not _is_factor_like_col(src_col):
-            continue
-        from ..formula import _factor_levels  # local to avoid cycle
-
-        src_levels = list(_factor_levels(src_col))
-        if len(src_levels) <= 1:
-            continue
-        present = set(grid[name].drop_nulls().to_list())
-        for lv in src_levels:
-            if lv not in present:
-                row = dict(template)
-                row[name] = lv
-                stubs.append(row)
-                # Track that this stub also adds the level — so
-                # downstream factors don't double-stub for it.
-                present.add(lv)
-    if not stubs:
-        return grid, 0
-    stub_df = pl.DataFrame(stubs).select(grid.columns)
-    for col in stub_df.columns:
-        if stub_df[col].dtype != grid[col].dtype:
-            stub_df = stub_df.with_columns(stub_df[col].cast(grid[col].dtype))
-    return pl.concat([grid, stub_df], how="vertical_relaxed"), len(stubs)
 
 
 def _resolve_sim_rng(rng):

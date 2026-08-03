@@ -1458,8 +1458,18 @@ def test_predict_reuses_training_predvars():
         }
     )
     m = lm("y ~ poly(x,2) + ns(z, df=3) + scale(v)", tr)
-    # training params captured under their deparse keys
-    assert set(m._basis_state) == {"poly(x, 2)", "ns(z, df = 3)", "scale(v)"}
+    # training params captured under their deparse keys. ``_basis_state`` also
+    # carries the reserved ``__xlevels__`` slot (R keeps xlevels on the object
+    # rather than in predvars; hea rides it in the same fit→predict channel) —
+    # empty here since the formula has no factors.
+    from hea.formula import _XLEV_KEY
+
+    assert set(m._basis_state) - {_XLEV_KEY} == {
+        "poly(x, 2)",
+        "ns(z, df = 3)",
+        "scale(v)",
+    }
+    assert m._basis_state[_XLEV_KEY] == {}
     nd = pl.DataFrame(
         {"x": [-2.0, 0.0, 3.0], "z": [-1.0, 4.5, 12.0], "v": [-5.0, 5.5, 20.0]}
     )
@@ -1467,3 +1477,44 @@ def test_predict_reuses_training_predvars():
     np.testing.assert_allclose(
         pred, [9.11936405516604, 0.91132513915552, -3.87864686599048], rtol=1e-9
     )
+
+
+def test_predict_uses_fit_xlevels_not_newdata_levels():
+    """R stores ``xlevels`` at fit (lm.R:79) and re-levels newdata against them
+    (``model.frame(..., xlev=object$xlevels)``, lm.R:695-696), so a prediction
+    frame that omits a factor level — or carries an unseen one — cannot silently
+    re-code the contrast.
+
+    Regression: hea derived contrast levels from the frame in front of it
+    (``droplevels``). Training levels {a,b} give the single dummy ``gb``; a
+    newdata holding {b, zz} then sorted to baseline ``b`` / dummy ``zz`` — the
+    SAME width, so no error, and a ``g="b"`` row silently got the baseline
+    prediction. R raises ``factor g has new level zz`` (models.R:583-587).
+    """
+    from hea.models.glm import glm
+    from hea.family import Poisson
+
+    rng = np.random.default_rng(0)
+    n = 200
+    g = rng.choice(["a", "b"], n)
+    x = rng.uniform(size=n)
+    y = rng.poisson(np.exp(1 + (g == "b") * 1.5 + 0.3 * x))
+    d = pl.DataFrame({"y": y.astype(float), "g": g, "x": x})
+
+    for m, call in (
+        (glm("y ~ g + x", d, family=Poisson()), lambda mm, nd: mm.predict(nd)),
+        (lm("y ~ g + x", d), lambda mm, nd: mm.predict(nd)["fit"]),
+    ):
+        both = np.asarray(call(m, pl.DataFrame({"g": ["a", "b"], "x": [0.5, 0.5]})))
+        # Each level alone must reproduce its row from the joint prediction.
+        for i, lv in enumerate(["a", "b"]):
+            solo = np.asarray(call(m, pl.DataFrame({"g": [lv], "x": [0.5]})))
+            np.testing.assert_allclose(solo[0], both[i], rtol=1e-12)
+        # ...whatever dtype carries the level, including a narrower Enum.
+        narrow = pl.DataFrame({"g": pl.Series(["b"], dtype=pl.Enum(["b"])), "x": [0.5]})
+        np.testing.assert_allclose(np.asarray(call(m, narrow))[0], both[1], rtol=1e-12)
+        # ...and an unseen level is refused, not silently re-coded.
+        with pytest.raises(ValueError, match="factor g has new level zz"):
+            call(m, pl.DataFrame({"g": ["b", "zz"], "x": [0.5, 0.5]}))
+        with pytest.raises(ValueError, match="factor g has new levels ww, zz"):
+            call(m, pl.DataFrame({"g": ["ww", "zz"], "x": [0.5, 0.5]}))
