@@ -3483,14 +3483,18 @@ def test_influence_measures_vs_r():
         "hat",
     ]
     IM = f"influence.measures({_AOV_LM})$infmat"
+    # Fallbacks are FULL-PRECISION R doubles (sprintf("%.17g")), not R's printed
+    # 10-digit console output: off-macOS these ARE the comparison target, and
+    # `_assert_r_tol`'s rel_tol=1e-12 needs >12 significant digits to be
+    # satisfiable at all. hea sits ~1e-15 from R here on both arches.
     _assert_r_tol(
         [
-            (float(im.infmat["dfb.x1"][7]), f'{IM}[8,"dfb.x1"]', -1.0189642674),
-            (float(im.infmat["dfb.x2"][7]), f'{IM}[8,"dfb.x2"]', 2.2263450877),
-            (float(im.infmat["dffit"][7]), f'{IM}[8,"dffit"]', 2.6996421200),
-            (float(im.infmat["cov.r"][0]), f'{IM}[1,"cov.r"]', 1.0813620352),
-            (float(im.infmat["cook.d"][7]), f'{IM}[8,"cook.d"]', 1.3578356303),
-            (float(im.infmat["hat"][7]), f'{IM}[8,"hat"]', 0.5276606143),
+            (float(im.infmat["dfb.x1"][7]), f'{IM}[8,"dfb.x1"]', -1.018964267370979),
+            (float(im.infmat["dfb.x2"][7]), f'{IM}[8,"dfb.x2"]', 2.22634508768306),
+            (float(im.infmat["dffit"][7]), f'{IM}[8,"dffit"]', 2.6996421200219536),
+            (float(im.infmat["cov.r"][0]), f'{IM}[1,"cov.r"]', 1.081362035162268),
+            (float(im.infmat["cook.d"][7]), f'{IM}[8,"cook.d"]', 1.3578356303464199),
+            (float(im.infmat["hat"][7]), f'{IM}[8,"hat"]', 0.5276606143052539),
         ]
     )
     # is.inf flags are deterministic — compare the whole matrix to R's output.
