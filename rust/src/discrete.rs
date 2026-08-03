@@ -215,6 +215,14 @@ fn xwx_smooth_block<'py>(
                 }
             }
         } else if rfac {
+            // Row-outer / column-inner. mgcv instead hoists the column loop
+            // above the rows (discrete.c:1925) so each pass walks one m-length
+            // column of C and of Xjm; that is bit-for-bit the same result (for
+            // a fixed (a,q) the rows still accumulate in ascending order) but
+            // re-streams Ki/Kj once per column, and measured SLOWER here
+            // (1.69 vs 1.34 ms on a 979-bin, p=9 block) — this machine's L1
+            // already holds both m·p accumulators, so mgcv's locality trade
+            // buys nothing and the extra index traffic is pure cost.
             let mut cfac = vec![0.0f64; mim * pjm];
             accumulate_wbar(&acc, r, c, |a, b, v| {
                 let dst = &mut cfac[a * pjm..a * pjm + pjm];
@@ -234,6 +242,7 @@ fn xwx_smooth_block<'py>(
                 }
             }
         } else {
+            // Mirror image of the C branch (mgcv :1965), same loop-order note.
             let mut dfac = vec![0.0f64; mjm * pim];
             accumulate_wbar(&acc, r, c, |a, b, v| {
                 let dst = &mut dfac[b * pim..b * pim + pim];

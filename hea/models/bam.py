@@ -5868,6 +5868,11 @@ class bam(gam):
         self._reml_beta = res["reml_beta"]
         self._reml_A_inv = res["reml_A_inv"]
         self._outer_info = res["outer_info"]
+        # The non-discrete fREML rail reports c("perf","newton") (bam.r:1249/
+        # 1700). A discrete fit overwrites this with ("perf","chol") after its
+        # PIRLS loop, matching bgam.fitd (bam.r:784).
+        if self._method_in == "fREML":
+            self.optimizer = ("perf", "newton")
         return res["theta"]
 
     def _bgam_rsb_penalty(self, rho_full: np.ndarray, coef: np.ndarray) -> float:
@@ -6777,6 +6782,19 @@ class bam(gam):
         # final crit statement reads, NOT the response deviance.
         self._pi_last_out = last_out
         self._pi_last_dev = float(dev) if last_out is not None else None
+
+        # Reported rail identity (gam.check reads both). bgam.fitd sets
+        # ``optimizer=c("perf","chol")`` (bam.r:784) and, at object assembly,
+        # ``outer.info <- list(grad=prop$grad, hess=prop$hess)`` (bam.r:884) —
+        # ``prop`` is the last accepted Sl.fitChol proposal, i.e. ``last_out``.
+        # Only the fREML rail reaches bgam.fitd; REML/ML run the full gam
+        # fitter and keep its ("outer","newton"), GCV.Cp reports "magic".
+        if last_out is not None and self._method_in == "fREML":
+            self.optimizer = ("perf", "chol")
+            self._outer_info = {
+                "grad": np.asarray(last_out["grad"], dtype=float),
+                "hess": np.asarray(last_out["hess"], dtype=float),
+            }
 
         if not conv:
             warnings.warn("PIRLS algorithm did not converge", stacklevel=2)

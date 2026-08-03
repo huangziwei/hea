@@ -14928,29 +14928,46 @@ class gam:
             self.plot_check(type=type, rep=rep, level=level, s_rep=s_rep, seed=seed)
         out: list[str] = []
 
-        # --- method / optimizer header ---
-        method_label = self.method
-        optimizer_label = (
-            "outer efs"
-            if (self._outer_info or {}).get("conv")
-            in ("full convergence", "iteration limit reached")
-            and (
-                getattr(self.family, "available_derivs", 2) == 0
-                or getattr(self, "optimizer", ("outer",))[0] == "efs"
-            )
-            else "outer newton"
-        )
-        out.append(f"Method: {method_label}   Optimizer: {optimizer_label}")
-
-        # --- convergence info from _outer_newton ---
+        # --- method / optimizer header (plots.r:300) ---
+        # ``b$method`` is the method as SUPPLIED: bam maps fREML→REML internally
+        # for its score predicates but reports the user's label, so read
+        # ``_method_in`` when the subclass kept one.
+        method_label = getattr(self, "_method_in", None) or self.method
         info = self._outer_info
+        optimizer = getattr(self, "optimizer", None)
+        if (info or {}).get("optimizer") == "magic":
+            optimizer = ("magic",)  # mgcv.r/bam.r `object$optimizer="magic"`
+        elif optimizer is None:
+            optimizer = (
+                ("efs",)
+                if (
+                    (info or {}).get("conv")
+                    in ("full convergence", "iteration limit reached")
+                    and getattr(self.family, "available_derivs", 2) == 0
+                )
+                else ("outer", "newton")
+            )
+        elif isinstance(optimizer, str):
+            optimizer = (optimizer,)
+        out.append(f"Method: {method_label}   Optimizer: {' '.join(optimizer)}")
+
+        # --- convergence info (plots.r:301-329) ---
+        # mgcv branches on ``b$optimizer[2]``: the newton/bfgs report below, or
+        # a plain dump of whatever the rail recorded. bam's discrete
+        # ("perf","chol") and fast-REML rails take the dump.
+        newton_like = len(optimizer) > 1 and optimizer[1] in ("newton", "bfgs")
         if info is None:
-            if not self._blocks:
+            # No outer info: mgcv distinguishes only "no sp to select" from the
+            # performance-iteration/AM case (plots.r:314-323) — it never claims
+            # the user fixed the sp.
+            if not self._slots:
                 out.append("Model required no smoothing parameter selection")
             else:
-                out.append(
-                    "Smoothing parameters fixed by user — no outer optimization."
-                )
+                out.append("Smoothing parameter selection converged.")
+        elif not newton_like:
+            for key in ("conv", "message", "iter", "grad", "hess", "score"):
+                if info.get(key) is not None:
+                    out.append(f"${key}\n{info[key]}")
         else:
             iters = info["iter"]
             plural = "" if iters == 1 else "s"
