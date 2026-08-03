@@ -15663,7 +15663,9 @@ class gam:
             (1D only) Number of x points the curve is evaluated at.
             Default 100, matching mgcv's ``n``.
         n_grid : int
-            (2D only) Per-axis grid resolution. Default 40 (mgcv uses 30).
+            (2D only) Per-axis grid resolution. Default 40, matching mgcv's
+            ``n2`` (plot.gam, plots.r:351). Not to be confused with
+            :meth:`vis`, whose grid follows ``vis.gam``'s ``n.grid=30``.
         too_far : float
             (2D only) Mask grid points whose normalized distance to the
             nearest data point exceeds this threshold (mgcv's

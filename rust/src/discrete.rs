@@ -74,44 +74,87 @@ struct Acc<'a> {
 /// function pointer (discrete.c:1924-2006), and an indirect call per row costs
 /// more than the deposit itself on the `p ≈ 10` blocks that dominate a
 /// factor-`by` fit.
+///
+/// `tti`/`ttj` with an empty last axis mean mgcv's `tensi`/`tensj == 0`: that
+/// term is a singleton, its truncated row-tensor is identically 1, and the
+/// factor drops out of the product entirely. mgcv keeps four hand-written loops
+/// for the four `(tensi, tensj)` combinations (:1927-1962); `scatter` is
+/// monomorphised per combination, which is the same thing.
 #[inline]
 fn accumulate_wbar<F: FnMut(usize, usize, f64)>(a: &Acc<'_>, r: usize, c: usize, mut deposit: F) {
     let n = a.n;
+    let tens_i = !a.tti.is_empty();
+    let tens_j = !a.ttj.is_empty();
     for s in 0..a.si {
         let ki_s = &a.ki[s * n..s * n + n];
-        let tti_sr = &a.tti[(s * a.ndi + r) * n..(s * a.ndi + r) * n + n];
+        let tti_sr: &[f64] = if tens_i {
+            &a.tti[(s * a.ndi + r) * n..(s * a.ndi + r) * n + n]
+        } else {
+            &[]
+        };
         for t in 0..a.sj {
             let kj_t = &a.kj[t * n..t * n + n];
-            let ttj_tc = &a.ttj[(t * a.ndj + c) * n..(t * a.ndj + c) * n + n];
+            let ttj_tc: &[f64] = if tens_j {
+                &a.ttj[(t * a.ndj + c) * n..(t * a.ndj + c) * n + n]
+            } else {
+                &[]
+            };
             if a.tri {
+                // AR1: keep the general form — `tri` is rare and the extra
+                // per-row branch is dwarfed by the three scatters it guards.
+                let gi = |row: usize| if tens_i { tti_sr[row] } else { 1.0 };
+                let gj = |row: usize| if tens_j { ttj_tc[row] } else { 1.0 };
                 for row in 0..n - 1 {
                     let i0 = ki_s[row] as usize;
                     let i1 = ki_s[row + 1] as usize;
                     let j0 = kj_t[row] as usize;
                     let j1 = kj_t[row + 1] as usize;
                     // super: (K_i[l], K_j[l+1]) += w_off·dXi[l]·dXj[l+1]
-                    deposit(i0, j1, a.woff[row] * tti_sr[row] * ttj_tc[row + 1]);
+                    deposit(i0, j1, a.woff[row] * gi(row) * gj(row + 1));
                     // sub:   (K_i[l+1], K_j[l]) += w_off·dXi[l+1]·dXj[l]
-                    deposit(i1, j0, a.woff[row] * tti_sr[row + 1] * ttj_tc[row]);
+                    deposit(i1, j0, a.woff[row] * gi(row + 1) * gj(row));
                     // diag:  (K_i[l], K_j[l])   += w·dXi[l]·dXj[l]
-                    deposit(i0, j0, a.w[row] * tti_sr[row] * ttj_tc[row]);
+                    deposit(i0, j0, a.w[row] * gi(row) * gj(row));
                 }
                 let row = n - 1;
                 deposit(
                     ki_s[row] as usize,
                     kj_t[row] as usize,
-                    a.w[row] * tti_sr[row] * ttj_tc[row],
+                    a.w[row] * gi(row) * gj(row),
                 );
             } else {
-                for row in 0..n {
-                    deposit(
-                        ki_s[row] as usize,
-                        kj_t[row] as usize,
-                        a.w[row] * tti_sr[row] * ttj_tc[row],
-                    );
+                // The four mgcv branches, monomorphised. `w` alone for the
+                // singleton×singleton case — no all-ones factor streamed.
+                match (tens_i, tens_j) {
+                    (true, true) => scatter(n, ki_s, kj_t, &mut deposit, |row| {
+                        a.w[row] * tti_sr[row] * ttj_tc[row]
+                    }),
+                    (true, false) => {
+                        scatter(n, ki_s, kj_t, &mut deposit, |row| a.w[row] * tti_sr[row])
+                    }
+                    (false, true) => {
+                        scatter(n, ki_s, kj_t, &mut deposit, |row| a.w[row] * ttj_tc[row])
+                    }
+                    (false, false) => scatter(n, ki_s, kj_t, &mut deposit, |row| a.w[row]),
                 }
             }
         }
+    }
+}
+
+/// One `(K_i[row], K_j[row]) += weight(row)` pass — the row loop of mgcv's
+/// direct accumulation. Generic in `weight` so each `(tensi, tensj)` case
+/// compiles to its own straight-line loop.
+#[inline(always)]
+fn scatter<D: FnMut(usize, usize, f64), W: Fn(usize) -> f64>(
+    n: usize,
+    ki_s: &[i64],
+    kj_t: &[i64],
+    deposit: &mut D,
+    weight: W,
+) {
+    for row in 0..n {
+        deposit(ki_s[row] as usize, kj_t[row] as usize, weight(row));
     }
 }
 

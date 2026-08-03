@@ -7997,6 +7997,9 @@ class _DiscreteTerm:
     # Predict-time replay (used for predict.bamd, not the fitter).
     spec: Optional[BasisSpec] = None
     label: str = ""
+    # Cache for :func:`_term_k_rows` — ``(key, rows)``, rebuilt when the design's
+    # ``k`` changes. Not part of the design's identity.
+    _k_rows_cache: Optional[tuple] = None
 
 
 @dataclass(slots=True)
@@ -8703,8 +8706,31 @@ def _smooth_smooth_block(
     )
 
     diag_term = ti is tj  # same term ⇒ K_i and K_j are the same columns
-    TTi = [_truncated_tensor(ti, s, k, n) for s in range(si)]
-    TTj = TTi if diag_term else [_truncated_tensor(tj, t, k, n) for t in range(sj)]
+    # mgcv's ``tensi``/``tensj`` (discrete.c:1797-1798): is the term a tensor at
+    # all? A singleton's truncated row-tensor is identically 1, and mgcv keeps
+    # four separate accumulation loops so the singleton case never touches it
+    # (``Cq[*Kik] += *p0 * Xj[*Kjk]``, :1959).
+    tens_i = len(ti.Xd_list) > 1
+    tens_j = len(tj.Xd_list) > 1
+    ar1 = w_off is not None
+    use_rust = _rs_xwx_smooth_block is not None and not (
+        diag_term and si == 1 and not ar1
+    )
+    # A singleton's truncated row-tensor is all ones. Only materialise it for
+    # the paths that actually read it: the numpy spec and the diagonal
+    # shortcut. The rust kernel is told "no tensor" and drops the factor.
+    need_tt = not use_rust
+    TTi = (
+        [_truncated_tensor(ti, s, k, n) for s in range(si)]
+        if (tens_i or need_tt)
+        else []
+    )
+    if diag_term:
+        TTj = TTi
+    elif tens_j or need_tt:
+        TTj = [_truncated_tensor(tj, t, k, n) for t in range(sj)]
+    else:
+        TTj = []
 
     # Rust runs the (r,c)×(s,t)×rows accumulation in one tight pass, the way
     # mgcv's C does (discrete.c:1924-2006). numpy cannot: `_wbar_contract`'s
@@ -8718,20 +8744,27 @@ def _smooth_smooth_block(
     # below is a single bincount on a diagonal W̄ (mgcv's own simple branch,
     # :1742-1792) and has no per-row scatter to beat. It never applies under
     # AR1, where W̄ is tridiagonal, hence the `not ar1` guard.
-    ar1 = w_off is not None
-    if _rs_xwx_smooth_block is not None and not (diag_term and si == 1 and not ar1):
-        TTi3 = np.ascontiguousarray(np.stack([t.T for t in TTi]))  # (si, ndi, n)
-        TTj3 = TTi3 if diag_term else np.ascontiguousarray(np.stack([t.T for t in TTj]))
-        Ki = np.ascontiguousarray(
-            np.stack([k[:, ks_im + s] for s in range(si)]).astype(np.int64)
+    if use_rust:
+        # (si, ndi, n), or a (si, ndi, 0) stub for a singleton — the kernel
+        # reads the empty last axis as mgcv's ``tensi == 0`` and drops the
+        # all-ones factor from the row loop instead of streaming and
+        # multiplying by it.
+        TTi3 = (
+            np.ascontiguousarray(np.stack([t.T for t in TTi]))
+            if tens_i
+            else np.zeros((si, ndi, 0))
         )
-        Kj = (
-            Ki
-            if diag_term
-            else np.ascontiguousarray(
-                np.stack([k[:, ks_jm + t] for t in range(sj)]).astype(np.int64)
-            )
-        )
+        if diag_term:
+            TTj3 = TTi3
+        elif tens_j:
+            TTj3 = np.ascontiguousarray(np.stack([t.T for t in TTj]))
+        else:
+            TTj3 = np.zeros((sj, ndj, 0))
+        # (s, n) int64, contiguous. Depends only on the term's index columns,
+        # so it is identical across every PIRLS iteration and every block the
+        # term appears in — cache it on the term rather than restacking.
+        Ki = _term_k_rows(ti, k, ks_im, si)
+        Kj = Ki if diag_term else _term_k_rows(tj, k, ks_jm, sj)
         woff_arg = np.ascontiguousarray(w_off, dtype=float) if ar1 else _XWX_EMPTY_F64
         return _rs_xwx_smooth_block(
             np.ascontiguousarray(Xim),
@@ -8787,6 +8820,24 @@ def _smooth_smooth_block(
             if diag_term and c > r:
                 block[c * pim : (c + 1) * pim, r * pjm : (r + 1) * pjm] = sub.T
     return block
+
+
+def _term_k_rows(term, k: np.ndarray, ks: int, s_count: int) -> np.ndarray:
+    """The term's final-marginal index columns as a contiguous ``(s_count, n)``
+    int64 block, cached on the term.
+
+    ``k`` is fixed for a design, so this is invariant across PIRLS iterations
+    and across every block the term participates in; rebuilding it per block
+    was ~10% of ``XWXd``. Keyed on ``id(k)`` so a different design (or a
+    predict-time frame) rebuilds rather than reusing a stale block.
+    """
+    cache = getattr(term, "_k_rows_cache", None)
+    key = (id(k), ks, s_count)
+    if cache is not None and cache[0] == key:
+        return cache[1]
+    rows = np.ascontiguousarray(k[:, ks : ks + s_count].T, dtype=np.int64)
+    term._k_rows_cache = (key, rows)
+    return rows
 
 
 def _tri_matvec(w: np.ndarray, w_off: np.ndarray, V: np.ndarray) -> np.ndarray:
