@@ -1462,14 +1462,19 @@ def test_predict_reuses_training_predvars():
     # carries the reserved ``__xlevels__`` slot (R keeps xlevels on the object
     # rather than in predvars; hea rides it in the same fit→predict channel) —
     # empty here since the formula has no factors.
-    from hea.formula import _XLEV_KEY
+    from hea.formula import _MFCLASS_KEY, _XLEV_KEY
 
-    assert set(m._basis_state) - {_XLEV_KEY} == {
+    assert set(m._basis_state) - {_XLEV_KEY, _MFCLASS_KEY} == {
         "poly(x, 2)",
         "ns(z, df = 3)",
         "scale(v)",
     }
-    assert m._basis_state[_XLEV_KEY] == {}
+    assert m._basis_state[_XLEV_KEY] == {}  # no factors in this formula
+    assert m._basis_state[_MFCLASS_KEY] == {
+        "v": "numeric",
+        "x": "numeric",
+        "z": "numeric",
+    }
     nd = pl.DataFrame(
         {"x": [-2.0, 0.0, 3.0], "z": [-1.0, 4.5, 12.0], "v": [-5.0, 5.5, 20.0]}
     )

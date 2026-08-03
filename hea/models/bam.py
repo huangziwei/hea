@@ -69,8 +69,6 @@ from ..formula import (
     BasisSpec,
     SmoothBlock,
     _apply_smooth_arg_exprs,
-    capture_xlevels as _capture_xlevels,
-    with_xlevels as _with_xlevels,
     _collect_name_idents,
     _eval_atom,
     _factor_levels,
@@ -2950,10 +2948,9 @@ class bam(gam):
             # predict-on-newdata re-derives the family index from this
             # expression (mgcv.r:2819/3174) — same hook as gam.
             self._gfam_fi_expr = _gfam_expr
-        with _capture_xlevels() as _xlev:
-            d = prepare_design(formula, data)
-        # R's ``model$xlevels`` (lm.R:79) — see gam.__init__.
-        self._xlevels = _xlev
+        # predvars + xlevels for the parametric part — see gam.__init__.
+        self._basis_state: dict = {}
+        d = prepare_design(formula, data, basis_state=self._basis_state)
         self._expanded = d.expanded
         # R model.matrix's ``assign`` for the parametric block (0 = intercept,
         # i = expanded.terms[i-1]). The inherited predict()/summary() term
@@ -4404,8 +4401,13 @@ class bam(gam):
         # stores these columns directly (identity gather), so the parametric
         # part is exact (matching the fitter's ``X_param_full`` handling), not
         # re-binned.
-        with _with_xlevels(getattr(self, "_xlevels", None)):
-            X_param = materialize(self._expanded, newdata).to_numpy().astype(float)
+        X_param = (
+            materialize(
+                self._expanded, newdata, basis_state=getattr(self, "_basis_state", None)
+            )
+            .to_numpy()
+            .astype(float)
+        )
         # Discretise the smooth covariates at the default resolution.
         specs = _smooth_specs_from_expanded(self._expanded, newdata)
         names_pmf = [
@@ -4537,8 +4539,9 @@ class bam(gam):
         names_pmf: list[str] = []
         lp_parts: list[tuple[np.ndarray, list]] = []
         for lp in md.lps:
-            with _with_xlevels(getattr(lp, "xlevels", None)):
-                Xp_df = materialize(lp.expanded, newdata)
+            Xp_df = materialize(
+                lp.expanded, newdata, basis_state=getattr(lp, "basis_state", None)
+            )
             X_param = Xp_df.to_numpy().astype(float)
             if X_param.shape[1] == 0:
                 X_param = np.zeros((newdata.height, 0))
@@ -5871,7 +5874,7 @@ class bam(gam):
         # 1700). A discrete fit overwrites this with ("perf","chol") after its
         # PIRLS loop, matching bgam.fitd (bam.r:784).
         if self._method_in == "fREML":
-            self.optimizer = ("perf", "newton")
+            self._rail_optimizer = ("perf", "newton")
         return res["theta"]
 
     def _bgam_rsb_penalty(self, rho_full: np.ndarray, coef: np.ndarray) -> float:
@@ -6789,7 +6792,7 @@ class bam(gam):
         # Only the fREML rail reaches bgam.fitd; REML/ML run the full gam
         # fitter and keep its ("outer","newton"), GCV.Cp reports "magic".
         if last_out is not None and self._method_in == "fREML":
-            self.optimizer = ("perf", "chol")
+            self._rail_optimizer = ("perf", "chol")
             self._outer_info = {
                 "grad": np.asarray(last_out["grad"], dtype=float),
                 "hess": np.asarray(last_out["hess"], dtype=float),

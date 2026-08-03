@@ -11658,3 +11658,161 @@ def test_gam_bam_predict_uses_fit_xlevels():
             np.testing.assert_allclose(solo[0], both[i], rtol=1e-10, err_msg=name)
         with pytest.raises(ValueError, match="factor g has new level zz"):
             m.predict(newdata=pl.DataFrame({"g": ["zz"], "x": [0.3]}))
+
+
+def test_gam_bam_predict_replays_training_predvars():
+    """``poly``/``bs``/``ns``/``scale`` in the PARAMETRIC part must replay the
+    fit's basis on newdata (R's ``predvars``), not be recomputed from it.
+
+    Regression: gam/bam threaded no ``basis_state``, so ``poly(x,2)`` was
+    re-orthogonalised against whatever rows were handed in. Predicting on a
+    3-row subset of the TRAINING data disagreed with the in-sample fit by 5.05
+    — silently, since the design width is unchanged.
+    """
+    from hea.models.bam import bam
+
+    rng = np.random.default_rng(3)
+    n = 200
+    x = rng.uniform(0, 10, n)
+    z = rng.uniform(size=n)
+    d = pl.DataFrame(
+        {
+            "y": 1 + 0.5 * x - 0.03 * x**2 + np.sin(z) + rng.normal(0, 0.2, n),
+            "x": x,
+            "z": z,
+        }
+    )
+    f = "y ~ poly(x,2) + s(z)"
+    for name, m in (
+        ("gam", gam(f, d)),
+        ("bam-dense", bam(f, d, discrete=False)),
+        ("bam-discrete", bam(f, d, discrete=True)),
+    ):
+        head = m.predict(newdata=d.head(3), type="response")["fit"].to_numpy()
+        np.testing.assert_allclose(
+            head, np.asarray(m.fitted)[:3], rtol=1e-9, err_msg=name
+        )
+
+
+def test_predict_checks_variable_types_against_fit():
+    """R's ``.checkMFClasses`` (models.R:401-434, called from lm.R:697): a
+    variable whose type changed between fit and predict is refused, with R's
+    message. ``factor`` supplied where the fit saw ``character`` is allowed —
+    that is what R's own model.frame coercion produces."""
+    from hea.models.glm import glm
+    from hea.family import Poisson
+
+    rng = np.random.default_rng(0)
+    n = 200
+    g = rng.choice(["a", "b"], n)
+    x = rng.uniform(size=n)
+    d = pl.DataFrame(
+        {
+            "y": rng.poisson(np.exp(1 + (g == "b") * 1.5 + 0.3 * x)).astype(float),
+            "g": g,
+            "x": x,
+        }
+    )
+    m = glm("y ~ g + x", d, family=Poisson())
+    with pytest.raises(
+        ValueError,
+        match=r"variable 'x' was fitted with type \"numeric\" "
+        r"but type \"character\" was supplied",
+    ):
+        m.predict(pl.DataFrame({"g": ["a"], "x": ["0.5"]}))
+    with pytest.raises(
+        ValueError, match=r"variables 'g', 'x' were specified with different types"
+    ):
+        m.predict(pl.DataFrame({"g": [1.0], "x": ["0.5"]}))
+    # factor-for-character is forgiven, and matches the plain-string answer.
+    as_enum = pl.DataFrame(
+        {"g": pl.Series(["a"], dtype=pl.Enum(["a", "b"])), "x": [0.5]}
+    )
+    as_str = pl.DataFrame({"g": ["a"], "x": [0.5]})
+    np.testing.assert_allclose(
+        np.asarray(m.predict(as_enum, type="response")).ravel(),
+        np.asarray(m.predict(as_str, type="response")).ravel(),
+        rtol=1e-14,
+    )
+
+
+def test_check_reports_mgcv_method_and_optimizer():
+    """``gam.check``'s header is ``b$method`` + ``b$optimizer`` (plots.r:300).
+
+    ``b$method`` is the criterion actually optimized — ``GCV.Cp`` resolves to
+    GCV or UBRE by whether the family fixes the scale. ``b$optimizer`` follows
+    mgcv.r:2426, a REPORTING rule: an additive model (Gaussian+identity) on a
+    non-(RE)ML criterion is labelled ``magic`` even for ``GACV.Cp``, which
+    mgcv forces through outer looping (mgcv.r:1933). bam's own rails label
+    themselves (bam.r:784/1249). Expected column is live-R output.
+    """
+    import contextlib
+    import io
+
+    from hea.models.bam import bam
+
+    rng = np.random.default_rng(1)
+    n = 200
+    x = rng.uniform(size=n)
+    d = pl.DataFrame(
+        {
+            "x": x,
+            "y": np.sin(2 * np.pi * x) + rng.normal(0, 0.3, n),
+            "yp": rng.poisson(np.exp(np.sin(2 * np.pi * x))).astype(float),
+        }
+    )
+
+    def hdr(m):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            m.check(plots=False)
+        return buf.getvalue().splitlines()[0]
+
+    cases = [
+        (gam("y ~ s(x)", d, method="GCV.Cp"), "Method: GCV   Optimizer: magic"),
+        (
+            gam("yp ~ s(x)", d, family=Poisson(), method="GCV.Cp"),
+            "Method: UBRE   Optimizer: outer newton",
+        ),
+        (gam("y ~ s(x)", d, method="GACV.Cp"), "Method: GACV   Optimizer: magic"),
+        (gam("y ~ s(x)", d, method="REML"), "Method: REML   Optimizer: outer newton"),
+        (
+            bam("y ~ s(x)", d, method="fREML", discrete=False),
+            "Method: fREML   Optimizer: perf newton",
+        ),
+        (
+            bam("y ~ s(x)", d, method="fREML", discrete=True),
+            "Method: fREML   Optimizer: perf chol",
+        ),
+    ]
+    for m, expected in cases:
+        assert hdr(m) == expected
+
+    # The discrete rail reports bgam.fitd's prop grad/hess (bam.r:884), not
+    # the fabricated "fixed by user" line the old code emitted.
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bam("y ~ s(x)", d, method="fREML", discrete=True).check(plots=False)
+    txt = buf.getvalue()
+    assert "$grad" in txt and "$hess" in txt
+    assert "fixed by user" not in txt
+
+
+def test_plot_smooth_xlim_sets_evaluation_range():
+    """mgcv's ``xlim`` picks the range the term is EVALUATED over
+    (``xx <- seq(xlim[1],xlim[2],length=n)``, plots.r:930-931), so a range
+    wider than the data extrapolates rather than cropping the axis. Grid pinned
+    against ``plot(b, n=10, xlim=c(-0.5,1.5))``."""
+    rng = np.random.default_rng(1)
+    n = 300
+    x = rng.uniform(0, 1, n)
+    d = pl.DataFrame({"x": x, "y": np.sin(2 * np.pi * x) + rng.normal(0, 0.3, n)})
+    m = gam("y ~ s(x, k=8)", d)
+
+    xs, _ = _plot_curve(m, select=0, rug=False, n_grid_1d=10, xlim=(-0.5, 1.5))
+    np.testing.assert_allclose(xs, np.linspace(-0.5, 1.5, 10), rtol=1e-12)
+    assert xs[0] < x.min() and xs[-1] > x.max()  # genuinely extrapolated
+
+    # Default still spans the data exactly.
+    xs0, _ = _plot_curve(m, select=0, rug=False, n_grid_1d=10)
+    np.testing.assert_allclose(xs0[[0, -1]], [x.min(), x.max()], rtol=1e-12)

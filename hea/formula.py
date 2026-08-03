@@ -1191,6 +1191,9 @@ def with_xlevels(xlev):
 # ``basis_state`` is already threaded through every fit and predict design build
 # with exactly the right lifetime (empty dict at fit, same dict at predict).
 _XLEV_KEY = "__xlevels__"
+# ``attr(terms, "dataClasses")`` — the fit's per-variable ``.MFclass``, checked
+# by ``.checkMFClasses`` on every later design build.
+_MFCLASS_KEY = "__dataclasses__"
 
 
 @contextlib.contextmanager
@@ -2822,6 +2825,86 @@ def materialize(
     return (X, assign) if return_assign else X
 
 
+def _mf_class(col: pl.Series) -> str:
+    """R's ``.MFclass`` (models.R:436-453) — the classes ``model.matrix``
+    handles differently, so a fit/predict mismatch can be caught by name."""
+    dt = col.dtype
+    if dt == pl.Boolean:
+        return "logical"
+    if dt in (pl.Categorical, pl.Enum):
+        return "factor"
+    if dt == pl.Utf8:
+        # R keeps character separate from factor here; model.matrix
+        # auto-converts, and .checkMFClasses forgives factor-for-character.
+        return "character"
+    if is_matrix_col(col):
+        return f"nmatrix.{matrix_to_2d(col).shape[1]}"
+    if dt.is_numeric():
+        return "numeric"
+    return "other"
+
+
+def _check_mf_classes(expanded: ExpandedFormula, data: pl.DataFrame, basis_state):
+    """R's ``.checkMFClasses`` (models.R:401-434), invoked by ``predict.lm``
+    between the model frame and the model matrix (lm.R:697).
+
+    The fit pass records each referenced column's :func:`_mf_class`; later
+    passes compare against it and refuse a variable whose type changed. R's two
+    forgiving substitutions are kept: ``ordered`` counts as ``factor`` (the
+    ``ordNotOK=FALSE`` default — and hea carries orderedness out of band
+    anyway), and ``factor`` supplied for a ``character`` fit is fine, since
+    that is exactly what a fit-time auto-conversion produces.
+
+    Messages are R's verbatim, except that the multi-variable one quotes with
+    ASCII ``'`` where R's ``sQuote`` emits typographic quotes under the default
+    ``useFancyQuotes=TRUE`` (R itself falls back to ASCII when that is off).
+    """
+    if basis_state is None:
+        return
+    stored = basis_state.setdefault(_MFCLASS_KEY, {})
+    # Only what this design build actually encodes: the parametric terms and
+    # offsets. Smooth covariates belong to the smooth's own PredictMat (mgcv
+    # accepts a vector where the fit used a matrix column, so classing them
+    # here would reject a call mgcv allows), and bars go through
+    # ``materialize_bars``.
+    referenced: set[str] = set()
+    for t in expanded.terms:
+        for a in t.atoms:
+            _collect_names(a, referenced)
+    for o in expanded.offsets:
+        _collect_names(o, referenced)
+    names = sorted(referenced & set(data.columns))
+    new = {n: _mf_class(data[n]) for n in names}
+    # R checks the model frame AFTER the xlev fix-up, and that fix-up coerces a
+    # character column to a factor (models.R:573). So any variable carrying
+    # xlevels is a factor by the time .checkMFClasses sees it.
+    xlev = basis_state.get(_XLEV_KEY) or {}
+    for k, v in new.items():
+        if k in xlev and v in ("character", "factor"):
+            new[k] = "factor"
+    if not stored:
+        stored.update(new)
+        return
+    old = {k: stored[k] for k in new if k in stored}
+    wrong = [
+        k
+        for k in old
+        if old[k] != new[k] and not (new[k] == "factor" and old[k] == "character")
+    ]
+    if not wrong:
+        return
+    if len(wrong) == 1:
+        k = wrong[0]
+        raise ValueError(
+            f"variable '{k}' was fitted with type \"{old[k]}\" "
+            f'but type "{new[k]}" was supplied'
+        )
+    joined = ", ".join(f"'{k}'" for k in wrong)
+    raise ValueError(
+        f"variables {joined} were specified with different types from the fit"
+    )
+
+
 def _build_design(
     expanded: ExpandedFormula,
     data: pl.DataFrame,
@@ -2829,9 +2912,11 @@ def _build_design(
     drop_na: bool = True,
     basis_state: dict | None = None,
 ) -> tuple[Optional[np.ndarray], list[str], list[int]]:
-    """Core design assembly — :func:`_build_design_impl` under the xlevels
-    scope, so every factor in the design is coded on the FIT's level set."""
+    """Core design assembly — :func:`_build_design_impl` under the fit's
+    predict-time state: factors coded on the fit's level set, and the
+    variable types checked against the fit's."""
     with _xlevels_scope(basis_state):
+        _check_mf_classes(expanded, data, basis_state)
         return _build_design_impl(
             expanded, data, drop_na=drop_na, basis_state=basis_state
         )

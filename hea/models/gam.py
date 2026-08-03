@@ -71,12 +71,10 @@ from ..formula import (
     SmoothBlock,
     _eval_atom,
     _eval_lhs_expr,
-    capture_xlevels as _capture_xlevels,
     materialize_smooths,
     normalize_data,
     parse,
     prepare_design,
-    with_xlevels as _with_xlevels,
 )
 from .lm import _label_top_n, _lowess, _qq_plot
 from ..utils import (
@@ -8483,12 +8481,15 @@ class gam:
             # to recover the family index (mgcv reads the response from
             # newdata, mgcv.r:2819/3174).
             self._gfam_fi_expr = _gfam_expr
-        with _capture_xlevels() as _xlev:
-            d = prepare_design(formula, data)
-        # R's ``model$xlevels`` (lm.R:79): the parametric factor levels this fit
-        # saw. predict re-levels newdata against them so a frame missing a level
-        # (or carrying an unseen one) can't silently re-code the contrast.
-        self._xlevels = _xlev
+        # R's safe-prediction state for the PARAMETRIC part, captured once here
+        # and replayed by every predict: ``predvars`` (poly/bs/ns/scale training
+        # parameters — lm.R:551 ``fcall$xlev``/predvars) plus ``xlevels`` (the
+        # factor levels, lm.R:79). Recomputing either on newdata silently
+        # changes the basis: ``poly(x,2)`` re-orthogonalises against whatever
+        # rows are handed in, so predicting on a subset of the TRAINING rows
+        # disagreed with the in-sample fit.
+        self._basis_state: dict = {}
+        d = prepare_design(formula, data, basis_state=self._basis_state)
         self._expanded = d.expanded
         # Materialise smooth-arg expressions once into ``self.data`` so the
         # synth columns (``s(I(b.depth^.5))`` ⇒ ``"I(b.depth^0.5)"``) are
@@ -12965,8 +12966,13 @@ class gam:
         for exactly ``newdata.height`` rows."""
         from ..formula import materialize  # local to avoid cycle
 
-        with _with_xlevels(getattr(self, "_xlevels", None)):
-            X_param = materialize(self._expanded, newdata).to_numpy().astype(float)
+        X_param = (
+            materialize(
+                self._expanded, newdata, basis_state=getattr(self, "_basis_state", None)
+            )
+            .to_numpy()
+            .astype(float)
+        )
         if getattr(self, "_drop_intercept_param", None) is not None:
             # drop.intercept fits: materialize rebuilds the intercept
             # column; delete it like the fit did (mgcv.r:1165-1171).
@@ -14742,6 +14748,25 @@ class gam:
             )
         print("\n".join(out))
 
+    @property
+    def _reported_method(self) -> str:
+        """mgcv's ``b$method`` — the criterion actually optimized, which is what
+        ``gam.check`` prints (plots.r:300) and what ``summary.gam`` labels its
+        score line with.
+
+        ``GCV.Cp`` resolves to ``GCV`` or ``UBRE`` by whether the family fixes
+        the scale, and ``GACV.Cp`` likewise to ``GACV`` or ``UBRE`` (verified
+        against R: gaussian ``GCV.Cp``→GCV, poisson ``GCV.Cp``→UBRE, gaussian
+        ``GACV.Cp``→GACV, poisson ``GACV.Cp``→UBRE). bam's internal fREML→REML
+        rename is undone via ``_method_in``.
+        """
+        m = getattr(self, "_method_in", None) or self.method
+        if m in ("GCV.Cp", "GACV.Cp"):
+            if self._scale_known_fit:
+                return "UBRE"
+            return "GACV" if m == "GACV.Cp" else "GCV"
+        return m
+
     def _k_check(
         self,
         type: str = "deviance",
@@ -14916,25 +14941,33 @@ class gam:
         out: list[str] = []
 
         # --- method / optimizer header (plots.r:300) ---
-        # ``b$method`` is the method as SUPPLIED: bam maps fREML→REML internally
-        # for its score predicates but reports the user's label, so read
-        # ``_method_in`` when the subclass kept one.
-        method_label = getattr(self, "_method_in", None) or self.method
+        method_label = self._reported_method
         info = self._outer_info
-        optimizer = getattr(self, "optimizer", None)
-        if (info or {}).get("optimizer") == "magic":
-            optimizer = ("magic",)  # mgcv.r/bam.r `object$optimizer="magic"`
-        elif optimizer is None:
-            optimizer = (
-                ("efs",)
-                if (
-                    (info or {}).get("conv")
-                    in ("full convergence", "iteration limit reached")
-                    and getattr(self.family, "available_derivs", 2) == 0
-                )
-                else ("outer", "newton")
-            )
-        elif isinstance(optimizer, str):
+        # `object$optimizer` (mgcv.r:2426): `if (G$am && !(method %in%
+        # c("REML","ML","P-ML","P-REML"))) "magic" else optimizer`. A REPORTING
+        # rule, not a record of which rail ran — mgcv forces outer looping for
+        # GACV.Cp (mgcv.r:1933) yet still labels an additive-model fit "magic",
+        # and it overrides the user's `optimizer=` argument. `G$am` is
+        # Gaussian + identity (mgcv.r:2327). bam's own rails (bgam.fitd's
+        # ("perf","chol"), bam.r:784; the fast-REML ("perf","newton"), :1249)
+        # set `_rail_optimizer` and win, since bam labels outside this rule.
+        raw_method = getattr(self, "_method_in", None) or self.method
+        is_am = (
+            isinstance(self.family, Gaussian)
+            and getattr(self.family.link, "name", None) == "identity"
+        )
+        optimizer = getattr(self, "_rail_optimizer", None)
+        if optimizer is None:
+            if is_am and raw_method not in ("REML", "ML", "P-ML", "P-REML"):
+                optimizer = ("magic",)
+            elif (info or {}).get("conv") in (
+                "full convergence",
+                "iteration limit reached",
+            ) and getattr(self.family, "available_derivs", 2) == 0:
+                optimizer = ("efs",)
+            else:
+                optimizer = getattr(self, "optimizer", None) or ("outer", "newton")
+        if isinstance(optimizer, str):
             optimizer = (optimizer,)
         out.append(f"Method: {method_label}   Optimizer: {' '.join(optimizer)}")
 
@@ -15728,7 +15761,7 @@ class gam:
 
         wr_all = self.residuals_of("working") if partial_residuals else None
 
-        def draw_panel(ax_, item, sch):
+        def draw_panel(ax_, item, sch, xlim_=None, ylim_=None):
             kind = item[0]
             if kind == "smooth":
                 _, block, a, bcol = item
@@ -15750,6 +15783,7 @@ class gam:
                         wr_all=wr_all,
                         ylabel=title,
                         n_grid_1d=n_grid_1d,
+                        xlim=xlim_,
                     )
                 elif sch == 1:
                     self._plot_smooth_2d_persp(
@@ -15762,6 +15796,8 @@ class gam:
                         too_far=too_far,
                         zlim=zlim,
                         zlabel=title,
+                        xlim=xlim_,
+                        ylim=ylim_,
                     )
                 else:
                     self._plot_smooth_2d(
@@ -15773,6 +15809,8 @@ class gam:
                         n_grid=n_grid,
                         too_far=too_far,
                         title=title,
+                        xlim=xlim_,
+                        ylim=ylim_,
                     )
             else:  # "param"
                 _, term_label, col_idx, term_kind = item
@@ -15809,7 +15847,7 @@ class gam:
                     "scheme=1 (persp) on a 2D smooth requires a 3D Axes; "
                     "pass an axes built with projection='3d'."
                 )
-            draw_panel(ax, item, sch)
+            draw_panel(ax, item, sch, xlims[0], ylims[0])
             if xlims[0] is not None:
                 ax.set_xlim(xlims[0])
             if ylims[0] is not None:
@@ -15835,7 +15873,7 @@ class gam:
             needs_3d = item[0] == "smooth" and len(item[1].term) == 2 and sch == 1
             proj = "3d" if needs_3d else None
             ax_i = fig.add_subplot(n_rows, n_cols_eff, plot_i + 1, projection=proj)
-            draw_panel(ax_i, item, sch)
+            draw_panel(ax_i, item, sch, xlims[plot_i], ylims[plot_i])
             if xlims[plot_i] is not None:
                 ax_i.set_xlim(xlims[plot_i])
             if ylims[plot_i] is not None:
@@ -15971,6 +16009,7 @@ class gam:
         wr_all,
         ylabel,
         n_grid_1d,
+        xlim=None,
     ):
         """1D smooth panel: curve + 1.96·SE band + optional rug / partial residuals.
 
@@ -15991,7 +16030,14 @@ class gam:
         cov_name = block.term[0]
         # `raw <- data[x$term][[1]]` — the untouched model-frame column.
         raw = self.data[cov_name].to_numpy().astype(float).ravel()
-        xx = np.linspace(np.nanmin(raw), np.nanmax(raw), n_grid_1d)
+        # `if (is.null(xlim)) xx <- seq(min(raw),max(raw),length=n) else
+        #  xx <- seq(xlim[1],xlim[2],length=n)` (plots.r:930-931): xlim picks
+        # the range the term is EVALUATED over, so a range wider than the data
+        # extrapolates the smooth rather than just cropping the axis.
+        lo, hi = (
+            (np.nanmin(raw), np.nanmax(raw)) if xlim is None else (xlim[0], xlim[1])
+        )
+        xx = np.linspace(lo, hi, n_grid_1d)
         grid_df = pl.DataFrame({cov_name: xx})
         # by held at 1, so a factor-by panel shows its level's curve rather
         # than the mask-zeroed basis.
@@ -16067,6 +16113,8 @@ class gam:
         n_grid,
         too_far,
         title,
+        xlim=None,
+        ylim=None,
     ):
         """2D smooth panel: three-contour view (estimate / +SE / −SE) plus
         data-location scatter. Mirrors mgcv's ``plot.gam`` for ``s(x,y)`` /
@@ -16083,8 +16131,9 @@ class gam:
         x_data = self.data[x_name].to_numpy().astype(float)
         y_data = self.data[y_name].to_numpy().astype(float)
 
-        x_grid = np.linspace(np.nanmin(x_data), np.nanmax(x_data), n_grid)
-        y_grid = np.linspace(np.nanmin(y_data), np.nanmax(y_data), n_grid)
+        # xlim/ylim set the evaluation grid, as for 1D (plots.r:966-969).
+        x_grid = _plot_axis_grid(x_data, xlim, n_grid)
+        y_grid = _plot_axis_grid(y_data, ylim, n_grid)
         XX, YY = np.meshgrid(x_grid, y_grid)
         grid_df = pl.DataFrame(
             {
@@ -16165,6 +16214,8 @@ class gam:
         too_far,
         zlim,
         zlabel,
+        xlim=None,
+        ylim=None,
     ):
         """2D smooth as a 3D persp wireframe — mgcv's ``plot.gam(scheme=1)``.
 
@@ -16176,8 +16227,9 @@ class gam:
         x_data = self.data[x_name].to_numpy().astype(float)
         y_data = self.data[y_name].to_numpy().astype(float)
 
-        x_grid = np.linspace(np.nanmin(x_data), np.nanmax(x_data), n_grid)
-        y_grid = np.linspace(np.nanmin(y_data), np.nanmax(y_data), n_grid)
+        # xlim/ylim set the evaluation grid, as for 1D (plots.r:966-969).
+        x_grid = _plot_axis_grid(x_data, xlim, n_grid)
+        y_grid = _plot_axis_grid(y_data, ylim, n_grid)
         XX, YY = np.meshgrid(x_grid, y_grid, indexing="ij")
         grid_df = pl.DataFrame(
             {
@@ -17908,7 +17960,7 @@ class _LpDesign:
         "L",
         "n_work",
         "param_assign",
-        "xlevels",
+        "basis_state",
     )
 
     def __init__(self, **kw):
@@ -17967,8 +18019,8 @@ def _build_lp_design(
         _smooth_id_value,
     )
 
-    with _capture_xlevels() as xlevels:
-        d = prepare_design(formula, data)
+    basis_state: dict = {}
+    d = prepare_design(formula, data, basis_state=basis_state)
     expr_map = _smooth_arg_expr_map(d.expanded)
     data_m = _apply_smooth_arg_exprs(d.data, expr_map) if expr_map else d.data
     X_param_df = d.X
@@ -18071,7 +18123,7 @@ def _build_lp_design(
         L=L,
         n_work=n_work,
         param_assign=list(d.param_assign or []),
-        xlevels=xlevels,
+        basis_state=basis_state,
     )
 
 
@@ -18314,8 +18366,11 @@ def _multi_lpmatrix(md: _MultiDesign, newdata) -> tuple[np.ndarray, list[np.ndar
         expr_map = _smooth_arg_expr_map(lp.expanded)
         if expr_map:
             nd = _apply_smooth_arg_exprs(nd, expr_map)
-        with _with_xlevels(getattr(lp, "xlevels", None)):
-            X_param = materialize(lp.expanded, nd).to_numpy().astype(float)
+        X_param = (
+            materialize(lp.expanded, nd, basis_state=getattr(lp, "basis_state", None))
+            .to_numpy()
+            .astype(float)
+        )
         if X_param.shape[1] == 0:
             X_param = np.zeros((nd.height, 0))
         parts = [X_param]
@@ -19984,6 +20039,13 @@ def _coerce_schema(grid: pl.DataFrame, src: pl.DataFrame) -> pl.DataFrame:
         if name in src.columns and src[name].dtype != out[name].dtype:
             out = out.with_columns(out[name].cast(src[name].dtype))
     return out
+
+
+def _plot_axis_grid(data, lim, n):
+    """One axis of a plot.gam evaluation grid: ``seq(min,max,length=n)`` over
+    the data, or over ``lim`` when the user supplied one (plots.r:966-969)."""
+    lo, hi = (np.nanmin(data), np.nanmax(data)) if lim is None else (lim[0], lim[1])
+    return np.linspace(lo, hi, n)
 
 
 def _resolve_sim_rng(rng):
