@@ -47,6 +47,74 @@ use crate::nmath::util::rfma;
 /// `_XWX_DENSE_MSIZE_CAP` in `hea/models/bam.py`.
 const XWX_DENSE_MSIZE_CAP: usize = 4_000_000;
 
+/// Row-scan inputs shared by every `(r,c)` sub-block of one term pair.
+struct Acc<'a> {
+    si: usize,
+    sj: usize,
+    ndi: usize,
+    ndj: usize,
+    n: usize,
+    ki: &'a [i64],
+    kj: &'a [i64],
+    tti: &'a [f64],
+    ttj: &'a [f64],
+    w: &'a [f64],
+    woff: &'a [f64],
+    tri: bool,
+}
+
+/// Deposit every W̄ entry the `(r,c)` sub-block needs: the diagonal weight `w`
+/// for every row, plus — when `tri` — the AR1 super/sub couplings `w_off` (mgcv
+/// XWXijs tri branches, discrete.c:1843-1880; super then sub then diag per row
+/// `0..n-2`, then the final-row diag). `deposit(a, b, v)` adds `v` to `W̄[a,b]`
+/// in whatever factored form the caller's branch holds.
+///
+/// Generic (not `&mut dyn FnMut`) so the deposit body inlines into the row loop:
+/// mgcv hand-writes this loop once per branch rather than calling through a
+/// function pointer (discrete.c:1924-2006), and an indirect call per row costs
+/// more than the deposit itself on the `p ≈ 10` blocks that dominate a
+/// factor-`by` fit.
+#[inline]
+fn accumulate_wbar<F: FnMut(usize, usize, f64)>(a: &Acc<'_>, r: usize, c: usize, mut deposit: F) {
+    let n = a.n;
+    for s in 0..a.si {
+        let ki_s = &a.ki[s * n..s * n + n];
+        let tti_sr = &a.tti[(s * a.ndi + r) * n..(s * a.ndi + r) * n + n];
+        for t in 0..a.sj {
+            let kj_t = &a.kj[t * n..t * n + n];
+            let ttj_tc = &a.ttj[(t * a.ndj + c) * n..(t * a.ndj + c) * n + n];
+            if a.tri {
+                for row in 0..n - 1 {
+                    let i0 = ki_s[row] as usize;
+                    let i1 = ki_s[row + 1] as usize;
+                    let j0 = kj_t[row] as usize;
+                    let j1 = kj_t[row + 1] as usize;
+                    // super: (K_i[l], K_j[l+1]) += w_off·dXi[l]·dXj[l+1]
+                    deposit(i0, j1, a.woff[row] * tti_sr[row] * ttj_tc[row + 1]);
+                    // sub:   (K_i[l+1], K_j[l]) += w_off·dXi[l+1]·dXj[l]
+                    deposit(i1, j0, a.woff[row] * tti_sr[row + 1] * ttj_tc[row]);
+                    // diag:  (K_i[l], K_j[l])   += w·dXi[l]·dXj[l]
+                    deposit(i0, j0, a.w[row] * tti_sr[row] * ttj_tc[row]);
+                }
+                let row = n - 1;
+                deposit(
+                    ki_s[row] as usize,
+                    kj_t[row] as usize,
+                    a.w[row] * tti_sr[row] * ttj_tc[row],
+                );
+            } else {
+                for row in 0..n {
+                    deposit(
+                        ki_s[row] as usize,
+                        kj_t[row] as usize,
+                        a.w[row] * tti_sr[row] * ttj_tc[row],
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[pyfunction]
 #[pyo3(name = "xwx_smooth_block")]
 fn xwx_smooth_block<'py>(
@@ -105,52 +173,25 @@ fn xwx_smooth_block<'py>(
     // over the shared flat inputs ⇒ the (r,c) map is embarrassingly parallel.
     let compute_sub = |r: usize, c: usize| -> Vec<f64> {
         let mut sub = vec![0.0f64; pim * pjm];
-        // Deposit every W̄ entry the (r,c) sub-block needs: the diagonal weight
-        // `w` for every row, plus — when `tri` — the AR1 super/sub couplings
-        // `w_off` (mgcv XWXijs tri branches, discrete.c:1843-1880; super then sub
-        // then diag per row 0..n-2, then the final-row diag). `deposit(a,b,v)`
-        // adds `v` to W̄[a,b] in whatever factored form the active branch holds.
-        let accumulate = |deposit: &mut dyn FnMut(usize, usize, f64)| {
-            for s in 0..si {
-                let ki_s = &ki_f[s * n..s * n + n];
-                let tti_sr = &tti_f[(s * ndi + r) * n..(s * ndi + r) * n + n];
-                for t in 0..sj {
-                    let kj_t = &kj_f[t * n..t * n + n];
-                    let ttj_tc = &ttj_f[(t * ndj + c) * n..(t * ndj + c) * n + n];
-                    if tri {
-                        for row in 0..n - 1 {
-                            let a = ki_s[row] as usize;
-                            let a1 = ki_s[row + 1] as usize;
-                            let b = kj_t[row] as usize;
-                            let b1 = kj_t[row + 1] as usize;
-                            // super: (K_i[l], K_j[l+1]) += w_off·dXi[l]·dXj[l+1]
-                            deposit(a, b1, woff_f[row] * tti_sr[row] * ttj_tc[row + 1]);
-                            // sub:   (K_i[l+1], K_j[l]) += w_off·dXi[l+1]·dXj[l]
-                            deposit(a1, b, woff_f[row] * tti_sr[row + 1] * ttj_tc[row]);
-                            // diag:  (K_i[l], K_j[l])   += w·dXi[l]·dXj[l]
-                            deposit(a, b, w_f[row] * tti_sr[row] * ttj_tc[row]);
-                        }
-                        let row = n - 1;
-                        deposit(
-                            ki_s[row] as usize,
-                            kj_t[row] as usize,
-                            w_f[row] * tti_sr[row] * ttj_tc[row],
-                        );
-                    } else {
-                        for row in 0..n {
-                            deposit(
-                                ki_s[row] as usize,
-                                kj_t[row] as usize,
-                                w_f[row] * tti_sr[row] * ttj_tc[row],
-                            );
-                        }
-                    }
-                }
-            }
+        // Shared row-scan parameters; `accumulate_wbar` is generic over the
+        // deposit closure so each branch's body inlines into the row loop.
+        let acc = Acc {
+            si,
+            sj,
+            ndi,
+            ndj,
+            n,
+            ki: &ki_f,
+            kj: &kj_f,
+            tti: &tti_f,
+            ttj: &ttj_f,
+            w: &w_f,
+            woff: &woff_f,
+            tri,
         };
         if dense {
             let mut wbar = vec![0.0f64; msize];
-            accumulate(&mut |a, b, v| wbar[a * mjm + b] += v);
+            accumulate_wbar(&acc, r, c, |a, b, v| wbar[a * mjm + b] += v);
             // sub = Xim' W̄ Xjm  (via tmp = W̄ Xjm), iterating only nonzero W̄.
             let mut tmp = vec![0.0f64; mim * pjm];
             for a in 0..mim {
@@ -175,9 +216,11 @@ fn xwx_smooth_block<'py>(
             }
         } else if rfac {
             let mut cfac = vec![0.0f64; mim * pjm];
-            accumulate(&mut |a, b, v| {
+            accumulate_wbar(&acc, r, c, |a, b, v| {
+                let dst = &mut cfac[a * pjm..a * pjm + pjm];
+                let src = &xjm_f[b * pjm..b * pjm + pjm];
                 for bj in 0..pjm {
-                    cfac[a * pjm + bj] += v * xjm_f[b * pjm + bj];
+                    dst[bj] += v * src[bj];
                 }
             });
             for a in 0..mim {
@@ -192,9 +235,11 @@ fn xwx_smooth_block<'py>(
             }
         } else {
             let mut dfac = vec![0.0f64; mjm * pim];
-            accumulate(&mut |a, b, v| {
+            accumulate_wbar(&acc, r, c, |a, b, v| {
+                let dst = &mut dfac[b * pim..b * pim + pim];
+                let src = &xim_f[a * pim..a * pim + pim];
                 for ai in 0..pim {
-                    dfac[b * pim + ai] += v * xim_f[a * pim + ai];
+                    dst[ai] += v * src[ai];
                 }
             });
             // sub = D' Xjm  (D is m_jm×p_im)

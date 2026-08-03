@@ -8424,38 +8424,44 @@ def _term_Xty_raw(
 def _tensor_Xty_raw(
     term: _DiscreteTerm, wy: np.ndarray, k: np.ndarray, n: int
 ) -> np.ndarray:
+    """``tensorXty`` (discrete.c:346-373) + its summation loop (XWyd :1164-1167).
+
+    One pass per *pre-final* tensor column ``i``: multiply ``wy`` elementwise by
+    column ``i`` of the non-final row-tensor (``tensorXj``, :301 — the ``l =
+    jp/q`` decomposition below, first marginal slowest-varying), then hand the
+    result to ``singleXty`` (:327) on the final marginal — a 1-D bincount into
+    ``m_{d-1}`` bins plus one ``Xd'`` gemv, accumulated across the summation
+    index columns ``q`` (mgcv's ``add``).
+
+    Note this deliberately does NOT build the d-dimensional ``Π_j m_j`` weight
+    tensor an all-at-once vectorisation invites: mgcv only ever scatters into
+    the final marginal's ``m`` bins, and the d-D index costs a multiply-add per
+    marginal per row plus a ``Π_j m_j`` table, for a term whose ``pb`` is
+    usually tiny (``pb == 1`` for every factor-``by`` smooth, whose by-marginal
+    has a single column).
+    """
     Xd_list = term.Xd_list
     d = len(Xd_list)
-    ms = tuple(Xd.shape[0] for Xd in Xd_list)
-    M = int(np.prod(ms))
-
-    ks_lo_list = [term.k_cols[j][0] for j in range(d)]
+    M_final = Xd_list[-1]
+    m_final, pd = M_final.shape
+    pb = int(np.prod([Xd.shape[1] for Xd in Xd_list[:-1]]))
     n_sum = term.k_cols[0][1] - term.k_cols[0][0]
+    ks_final = term.k_cols[d - 1][0]
 
-    # W̄[g_1,…,g_d] = Σ_{rows with all k_j_q[row]=g_j} wy[row]
-    W_flat = np.zeros(M, dtype=float)
+    Xy = np.zeros(pb * pd, dtype=float)
     for q in range(n_sum):
-        flat_idx = np.zeros(n, dtype=np.int64)
-        stride = 1
-        for j in range(d - 1, -1, -1):
-            flat_idx = flat_idx + k[:, ks_lo_list[j] + q] * stride
-            stride *= ms[j]
-        W_flat += np.bincount(flat_idx, weights=wy, minlength=M)
-    W_total = W_flat.reshape(ms)
-
-    if d == 2:
-        result = np.einsum("ab,ai,bj->ij", W_total, Xd_list[0], Xd_list[1])
-    elif d == 3:
-        result = np.einsum(
-            "abc,ai,bj,ck->ijk", W_total, Xd_list[0], Xd_list[1], Xd_list[2]
-        )
-    else:
-        in_letters = "abcdefghij"[:d]
-        out_letters = "ABCDEFGHIJ"[:d]
-        operand_subs = [in_letters] + [in_letters[j] + out_letters[j] for j in range(d)]
-        expr = ",".join(operand_subs) + "->" + out_letters
-        result = np.einsum(expr, W_total, *Xd_list)
-    return result.reshape(-1)
+        for i in range(pb):
+            # tensorXj (:317-324): decompose the tensor column index over the
+            # non-final marginals, multiplying wy by each one's column l.
+            work = wy
+            jp, div = i, pb
+            for j in range(d - 1):
+                div //= Xd_list[j].shape[1]
+                col, jp = divmod(jp, div)
+                work = work * Xd_list[j][k[:, term.k_cols[j][0] + q], col]
+            temp = np.bincount(k[:, ks_final + q], weights=work, minlength=m_final)
+            Xy[i * pd : (i + 1) * pd] += M_final.T @ temp
+    return Xy
 
 
 def _khatri_rao_rows(A: np.ndarray, B: np.ndarray) -> np.ndarray:
@@ -8561,6 +8567,49 @@ def _wbar_contract(
     return D.T @ Xjm
 
 
+def _marginal_support_bins(term: _DiscreteTerm, ell: int) -> np.ndarray:
+    """Bins of ``term``'s marginal ``ell`` whose basis row is not all-zero.
+
+    A row of the data can only contribute to the term where its index into
+    marginal ``ell`` lands in this set.
+    """
+    Xd = term.Xd_list[ell]
+    return np.flatnonzero(np.any(Xd != 0.0, axis=1))
+
+
+def _terms_row_disjoint(ti: _DiscreteTerm, tj: _DiscreteTerm) -> bool:
+    """``X_i' W X_j`` is structurally zero — for every weight — because no data
+    row is in both terms' supports.
+
+    hea addition, not in mgcv: ``XWXijs`` accumulates the block regardless and
+    lands on exact zeros the long way round (discrete.c:1924-2006 has no such
+    guard). Skipping is bit-identical for any finite design — the accumulator
+    only ever receives ``0·Xd`` terms — and it removes the dominant cost of a
+    factor-``by`` fit, where the ``L`` level smooths give ``L(L-1)/2`` all-zero
+    off-diagonal blocks (36 of the 45 smooth pairs at ``L=9``).
+
+    The test is structural and costs ``O(m)``, not ``O(n)``: a ``by`` level's
+    indicator marginal is nonzero on exactly one bin, so two levels' supports
+    are disjoint sets of bins. Only marginals that both terms index through the
+    SAME single ``k`` column are compared — under the summation convention
+    (``stop-start > 1``) term ``i`` reads set ``s`` while term ``j`` reads set
+    ``t≠s``, so disjoint per-bin supports would no longer imply a zero product.
+    """
+    for ell_i in range(len(ti.Xd_list) - 1):
+        a0, a1 = ti.k_cols[ell_i]
+        if a1 - a0 != 1:
+            continue
+        for ell_j in range(len(tj.Xd_list) - 1):
+            b0, b1 = tj.k_cols[ell_j]
+            if b1 - b0 != 1 or a0 != b0:
+                continue
+            si = _marginal_support_bins(ti, ell_i)
+            sj = _marginal_support_bins(tj, ell_j)
+            if not np.intersect1d(si, sj, assume_unique=True).size:
+                return True
+    return False
+
+
 def _param_smooth_block(
     pterm: _DiscreteTerm,
     sterm: _DiscreteTerm,
@@ -8637,21 +8686,20 @@ def _smooth_smooth_block(
     TTi = [_truncated_tensor(ti, s, k, n) for s in range(si)]
     TTj = TTi if diag_term else [_truncated_tensor(tj, t, k, n) for t in range(sj)]
 
-    # Rust runs the (r,c)×(s,t)×rows accumulation in one tight pass — the
-    # signal-regression / tensor case where numpy's per-(s,t) bincount loop is
-    # call-overhead bound. The plain single×single off-diagonal (one bincount /
-    # small factor) and the non-AR1 si==1 diagonal shortcut already beat mgcv in
-    # numpy, so they stay; rust handles everything with a tensor or summation
-    # axis, including the AR1 ``tri`` weight (it does the diag + super/sub
-    # scatters internally — the ``si==1`` shortcut never applies under AR1, where
-    # ``W̄`` is tridiagonal not diagonal, so that exclusion is gated on non-AR1).
-    is_general = si > 1 or sj > 1 or ndi > 1 or ndj > 1
+    # Rust runs the (r,c)×(s,t)×rows accumulation in one tight pass, the way
+    # mgcv's C does (discrete.c:1924-2006). numpy cannot: `_wbar_contract`'s
+    # factor path has to materialise an (n, p) gather `vals[:,None]*Xjm[Kj]`
+    # and make p passes over n, where mgcv keeps one fused scalar loop with the
+    # p-column accumulator L1-resident. So every block goes to rust when it is
+    # built — including the plain single×single case, which an earlier revision
+    # excluded on the belief that numpy already beat mgcv there (measured: it is
+    # ~2× slower on the `s(x, by=fac)` blocks that dominate a by-factor fit).
+    # The one exception stays in numpy: the non-AR1 `si==1` diagonal shortcut
+    # below is a single bincount on a diagonal W̄ (mgcv's own simple branch,
+    # :1742-1792) and has no per-row scatter to beat. It never applies under
+    # AR1, where W̄ is tridiagonal, hence the `not ar1` guard.
     ar1 = w_off is not None
-    if (
-        _rs_xwx_smooth_block is not None
-        and is_general
-        and not (diag_term and si == 1 and not ar1)
-    ):
+    if _rs_xwx_smooth_block is not None and not (diag_term and si == 1 and not ar1):
         TTi3 = np.ascontiguousarray(np.stack([t.T for t in TTi]))  # (si, ndi, n)
         TTj3 = TTi3 if diag_term else np.ascontiguousarray(np.stack([t.T for t in TTj]))
         Ki = np.ascontiguousarray(
@@ -8764,7 +8812,14 @@ def _term_pair_XWX_raw(
         return _param_smooth_block(ti, tj, w, k, n, w_off=w_off)
     if pj:
         return _param_smooth_block(tj, ti, w, k, n, w_off=w_off).T
+    if ti is not tj and _terms_row_disjoint(ti, tj):
+        return np.zeros((_term_ncol(ti), _term_ncol(tj)), dtype=float)
     return _smooth_smooth_block(ti, tj, w, k, n, w_off=w_off)
+
+
+def _term_ncol(term: _DiscreteTerm) -> int:
+    """Raw (pre-constraint) column count of a term: ``Π_ell p_ell``."""
+    return int(np.prod([Xd.shape[1] for Xd in term.Xd_list]))
 
 
 # ---------------------------------------------------------------------------

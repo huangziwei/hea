@@ -3865,3 +3865,58 @@ def test_bam_general_discrete_drop_protocol():
     )
     pr = m.predict(nd, type="link", se_fit=True)
     assert np.all(np.isfinite(pr.to_numpy()))
+
+
+def test_disjoint_by_level_blocks_skip_is_exact():
+    """The structural zero-block skip in ``_term_pair_XWX_raw`` must be exactly
+    equivalent to accumulating the block.
+
+    ``_terms_row_disjoint`` is a hea addition, not an mgcv port: ``XWXijs``
+    accumulates every block and reaches the same zeros the long way round. That
+    makes it the one place in the discrete kernel where hea deliberately does
+    LESS work than the C, so pin the equivalence directly — assemble ``X'WX``
+    both ways on a factor-``by`` fit (where 36 of the 45 smooth-pair blocks are
+    all-zero) and require bit-identical output.
+    """
+    import sys
+
+    B = sys.modules["hea.models.bam"]
+
+    rng = np.random.default_rng(4)
+    n = 4000
+    x = np.round(rng.uniform(0, 1, n), 2)
+    g = rng.choice(list("abc"), n)
+    lin = np.where(g == "a", np.sin(2 * np.pi * x), np.cos(2 * np.pi * x))
+    d = pl.DataFrame(
+        {"x": x, "g": g, "y": rng.poisson(np.exp(0.5 * lin))}
+    ).with_columns(pl.col("g").cast(pl.Enum(list("abc"))))
+
+    m = hea.models.bam(
+        'y ~ g + s(x, by=g, bs="ps", k=8)',
+        d,
+        family=Poisson(),
+        method="fREML",
+        discrete=True,
+    )
+    design = m._discrete_design
+    w = rng.uniform(size=n) + 0.5
+
+    smooths = [t for t in design.terms if t.kind != "param"]
+    assert (
+        sum(
+            B._terms_row_disjoint(a, b)
+            for i, a in enumerate(smooths)
+            for b in smooths[i + 1 :]
+        )
+        == 3
+    ), "fixture should have 3 disjoint by-level smooth pairs"
+
+    fast = B.XWXd(design, w)
+    orig = B._terms_row_disjoint
+    try:
+        B._terms_row_disjoint = lambda ti, tj: False
+        full = B.XWXd(design, w)
+    finally:
+        B._terms_row_disjoint = orig
+
+    np.testing.assert_array_equal(fast, full)
