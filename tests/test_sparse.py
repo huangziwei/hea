@@ -28,6 +28,7 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 
+import hea.sparse
 from hea import _rs
 
 
@@ -1136,3 +1137,466 @@ def test_factorize_agrees_with_scikit_sparse(name, M):
     L, D = dense_ldl(got, n)
     np.testing.assert_array_equal(L, f.L.toarray())
     np.testing.assert_array_equal(D, np.asarray(f.D.diagonal()))
+
+
+# ---------------------------------------------------------------------------
+# cholmod_solve
+# ---------------------------------------------------------------------------
+#
+# The pins below are ``cholmod_l_solve`` on the factor the section above pins,
+# driven identically. Two shas per case rather than one, because they fail for
+# different reasons:
+#
+# * ``by_rank`` concatenates ``X`` for ``nrhs = 1..5``, which is what selects
+#   among the four separately-unrolled kernels (and, at 5, the blocking loop
+#   that runs a 4-block then a 1-block). Upstream's ``ltsolve`` rank-4 kernel is
+#   **not** the other three with a wider inner loop: its three-column branch is
+#   commented out (``t_cholmod_ltsolve_template.c:656``), so it walks a
+#   three-column chain as 2+1 and sums different products. That difference is
+#   invisible at ``nrhs <= 3`` and invisible in any residual norm.
+# * ``by_system`` concatenates ``X`` over all nine ``sys`` values at
+#   ``nrhs = 4``, which is what selects among the six kernels
+#   ``simplicial_solver`` dispatches to plus the two permutation applies.
+#
+# Both are pinned for ``LDL'`` and ``LL'`` separately: the two forms divide by
+# ``d`` at different points, and ``rowfac`` fails an ``LL'`` on any non-positive
+# pivot but an ``LDL'`` only on a zero one, so they do not agree entry for entry
+# and are not meant to.
+
+
+@dataclass(frozen=True)
+class _RefSolve:
+    by_rank: str
+    by_system: str
+    half_log_det: float
+    nnz: int
+
+
+REF_SOLVE: dict[tuple[str, int, bool], _RefSolve] = {
+    ("banded-50-2", 1, False): _RefSolve(
+        by_rank="b3e42e61a4b58a2f",
+        by_system="b12c8ed8326542a8",
+        half_log_det=51.85502920029276,
+        nnz=147,
+    ),
+    ("banded-50-2", 1, True): _RefSolve(
+        by_rank="5c34d46355996fe9",
+        by_system="50b906aabb225065",
+        half_log_det=51.85502920029276,
+        nnz=147,
+    ),
+    ("banded-50-2", -1, False): _RefSolve(
+        by_rank="b3e42e61a4b58a2f",
+        by_system="b12c8ed8326542a8",
+        half_log_det=51.85502920029276,
+        nnz=147,
+    ),
+    ("banded-50-2", -1, True): _RefSolve(
+        by_rank="5c34d46355996fe9",
+        by_system="50b906aabb225065",
+        half_log_det=51.85502920029276,
+        nnz=147,
+    ),
+    ("banded-200-3", 1, False): _RefSolve(
+        by_rank="ca0c07e824e8eb70",
+        by_system="5b884584ecc8a82f",
+        half_log_det=229.8662405766237,
+        nnz=794,
+    ),
+    ("banded-200-3", 1, True): _RefSolve(
+        by_rank="85ead7c33ccc3a97",
+        by_system="5f565f2d4721ff12",
+        half_log_det=229.8662405766237,
+        nnz=794,
+    ),
+    ("banded-200-3", -1, False): _RefSolve(
+        by_rank="ca0c07e824e8eb70",
+        by_system="5b884584ecc8a82f",
+        half_log_det=229.8662405766237,
+        nnz=794,
+    ),
+    ("banded-200-3", -1, True): _RefSolve(
+        by_rank="85ead7c33ccc3a97",
+        by_system="5f565f2d4721ff12",
+        half_log_det=229.8662405766237,
+        nnz=794,
+    ),
+    ("random-60", 1, False): _RefSolve(
+        by_rank="26588f2c9c573dcd",
+        by_system="1e35b9a9335587fc",
+        half_log_det=67.55521807419473,
+        nnz=824,
+    ),
+    ("random-60", 1, True): _RefSolve(
+        by_rank="22d55cc107432fbf",
+        by_system="0d67d5f0e35bb004",
+        half_log_det=67.55521807419473,
+        nnz=824,
+    ),
+    ("random-60", -1, False): _RefSolve(
+        by_rank="6fdb3470d7d370f3",
+        by_system="bdd473fcff5706f3",
+        half_log_det=67.55521807419473,
+        nnz=824,
+    ),
+    ("random-60", -1, True): _RefSolve(
+        by_rank="c9b26437fe723ead",
+        by_system="fdeb25a2c7a61787",
+        half_log_det=67.55521807419473,
+        nnz=824,
+    ),
+    ("random-300", 1, False): _RefSolve(
+        by_rank="bb929bb03cde74fe",
+        by_system="7ea0550c5a98fa0b",
+        half_log_det=426.52057262126283,
+        nnz=23541,
+    ),
+    ("random-300", 1, True): _RefSolve(
+        by_rank="239086e986b5834f",
+        by_system="01c43ac0530c59f9",
+        half_log_det=426.52057262126283,
+        nnz=23541,
+    ),
+    ("random-300", -1, False): _RefSolve(
+        by_rank="03c8daff36c296a2",
+        by_system="8e1e0e80e1ef592b",
+        half_log_det=426.52057262126283,
+        nnz=23541,
+    ),
+    ("random-300", -1, True): _RefSolve(
+        by_rank="7982117bc5c55ac9",
+        by_system="34e0f0d664e086d9",
+        half_log_det=426.52057262126283,
+        nnz=23541,
+    ),
+    ("random-400", 1, False): _RefSolve(
+        by_rank="f01d1adeec10afcc",
+        by_system="3e614a2f7370f7fd",
+        half_log_det=580.4342322486121,
+        nnz=36946,
+    ),
+    ("random-400", 1, True): _RefSolve(
+        by_rank="23e2559e666a54e1",
+        by_system="ce35b933b93b91e6",
+        half_log_det=580.4342322486121,
+        nnz=36946,
+    ),
+    ("random-400", -1, False): _RefSolve(
+        by_rank="c96879fe5eb7db2e",
+        by_system="73e380e7400145ff",
+        half_log_det=580.4342322486121,
+        nnz=36946,
+    ),
+    ("random-400", -1, True): _RefSolve(
+        by_rank="a98df719e8d9e304",
+        by_system="cc139784cd41d4ef",
+        half_log_det=580.4342322486121,
+        nnz=36946,
+    ),
+    ("block-diagonal", 1, False): _RefSolve(
+        by_rank="748381de6744fc04",
+        by_system="060f7da7d9767534",
+        half_log_det=64.01329336034428,
+        nnz=289,
+    ),
+    ("block-diagonal", 1, True): _RefSolve(
+        by_rank="11ac8d501814975d",
+        by_system="ec0f86e06c52f452",
+        half_log_det=64.01329336034426,
+        nnz=289,
+    ),
+    ("block-diagonal", -1, False): _RefSolve(
+        by_rank="57512f8719a70943",
+        by_system="c516b9674899d53c",
+        half_log_det=64.01329336034428,
+        nnz=289,
+    ),
+    ("block-diagonal", -1, True): _RefSolve(
+        by_rank="fea0d53d9b9e8cb0",
+        by_system="cf303bcbfea670e0",
+        half_log_det=64.01329336034426,
+        nnz=289,
+    ),
+    ("arrow-300", 1, False): _RefSolve(
+        by_rank="9844aa5fc62245fb",
+        by_system="56ffdf70317835f5",
+        half_log_det=209.96841354299235,
+        nnz=599,
+    ),
+    ("arrow-300", 1, True): _RefSolve(
+        by_rank="05754071abd6a611",
+        by_system="d3b8a83ee655fda8",
+        half_log_det=209.96841354299235,
+        nnz=599,
+    ),
+    ("arrow-300", -1, False): _RefSolve(
+        by_rank="9844aa5fc62245fb",
+        by_system="56ffdf70317835f5",
+        half_log_det=209.96841354299235,
+        nnz=599,
+    ),
+    ("arrow-300", -1, True): _RefSolve(
+        by_rank="05754071abd6a611",
+        by_system="d3b8a83ee655fda8",
+        half_log_det=209.96841354299235,
+        nnz=599,
+    ),
+    ("tridiagonal-200", 1, False): _RefSolve(
+        by_rank="4390891dfcb5dc58",
+        by_system="8194fd9d58ed5020",
+        half_log_det=131.73304197849657,
+        nnz=399,
+    ),
+    ("tridiagonal-200", 1, True): _RefSolve(
+        by_rank="c4b726272b19f5fc",
+        by_system="6ea1b4729ce9a12f",
+        half_log_det=131.73304197849657,
+        nnz=399,
+    ),
+    ("tridiagonal-200", -1, False): _RefSolve(
+        by_rank="4390891dfcb5dc58",
+        by_system="8194fd9d58ed5020",
+        half_log_det=131.73304197849657,
+        nnz=399,
+    ),
+    ("tridiagonal-200", -1, True): _RefSolve(
+        by_rank="c4b726272b19f5fc",
+        by_system="6ea1b4729ce9a12f",
+        half_log_det=131.73304197849657,
+        nnz=399,
+    ),
+    ("diagonal-32", 1, False): _RefSolve(
+        by_rank="ac73e4c83918f2b8",
+        by_system="5b4e20ba6bcbe892",
+        half_log_det=0.0,
+        nnz=32,
+    ),
+    ("diagonal-32", 1, True): _RefSolve(
+        by_rank="ac73e4c83918f2b8",
+        by_system="5b4e20ba6bcbe892",
+        half_log_det=0.0,
+        nnz=32,
+    ),
+    ("diagonal-32", -1, False): _RefSolve(
+        by_rank="ac73e4c83918f2b8",
+        by_system="5b4e20ba6bcbe892",
+        half_log_det=0.0,
+        nnz=32,
+    ),
+    ("diagonal-32", -1, True): _RefSolve(
+        by_rank="ac73e4c83918f2b8",
+        by_system="5b4e20ba6bcbe892",
+        half_log_det=0.0,
+        nnz=32,
+    ),
+    ("kron-duplicate-rows-120", 1, False): _RefSolve(
+        by_rank="c6451d89bd3efdc6",
+        by_system="cff539f1ebdf7b72",
+        half_log_det=287.1094728591422,
+        nnz=6544,
+    ),
+    ("kron-duplicate-rows-120", 1, True): _RefSolve(
+        by_rank="158a443ef230cd17",
+        by_system="8f4713f4501eba86",
+        half_log_det=287.1094728591422,
+        nnz=6544,
+    ),
+    ("kron-duplicate-rows-120", -1, False): _RefSolve(
+        by_rank="af2051f7272af7eb",
+        by_system="bc1fd6a62fa36f5b",
+        half_log_det=287.1094728591422,
+        nnz=6544,
+    ),
+    ("kron-duplicate-rows-120", -1, True): _RefSolve(
+        by_rank="a91221d70d16e6cc",
+        by_system="2a4a9e9c01f83e8c",
+        half_log_det=287.1094728591422,
+        nnz=6544,
+    ),
+}
+
+
+SYSTEMS = ("A", "LDLt", "LD", "DLt", "L", "Lt", "D", "P", "Pt")
+
+
+def _shaf(a: np.ndarray) -> str:
+    return hashlib.sha256(np.ascontiguousarray(a, np.float64).tobytes()).hexdigest()[
+        :16
+    ]
+
+
+def solve_rhs(n: int, nrhs: int) -> np.ndarray:
+    """The right-hand sides the pins were taken on. Seeded, like the corpus."""
+    return np.random.default_rng(20260805).standard_normal((n, nrhs))
+
+
+def cho(M, stype: int = 1, use_ll: bool = False, **kw):
+    """A factor of the stored triangle, through the public facade."""
+    tri = sp.csc_array((sp.triu(M) if stype > 0 else sp.tril(M)).tocsc())
+    tri.sort_indices()
+    return hea.sparse.Factor(tri, lower=stype < 0, use_ll=use_ll, **kw)
+
+
+@pytest.mark.parametrize("name,M", CORPUS, ids=[n for n, _ in CORPUS])
+@pytest.mark.parametrize("stype", [1, -1])
+@pytest.mark.parametrize("use_ll", [False, True])
+def test_solve_matches_cholmod(name, M, stype, use_ll):
+    """Every entry of ``X``, bit-exact to ``cholmod_l_solve``."""
+    ref = REF_SOLVE[(name, stype, use_ll)]
+    n = M.shape[0]
+    F = cho(M, stype, use_ll)
+    assert F.nnz == ref.nnz
+    assert F.half_log_det() == ref.half_log_det
+
+    parts = [
+        np.ravel(np.atleast_2d(F.solve(solve_rhs(n, k))).reshape(n, k), order="F")
+        for k in (1, 2, 3, 4, 5)
+    ]
+    assert _shaf(np.concatenate(parts) if n else np.zeros(0)) == ref.by_rank
+
+    parts = [
+        np.ravel(F.solve(solve_rhs(n, 4), s).reshape(n, 4), order="F") for s in SYSTEMS
+    ]
+    assert _shaf(np.concatenate(parts) if n else np.zeros(0)) == ref.by_system
+
+
+@pytest.mark.parametrize("name,M", CORPUS, ids=[n for n, _ in CORPUS])
+@pytest.mark.parametrize("stype", [1, -1])
+def test_solve_inverts_the_matrix(name, M, stype):
+    """The pins say we match CHOLMOD; this says what we both compute solves
+    the system."""
+    n = M.shape[0]
+    if n == 0:
+        pytest.skip("no system to solve")
+    F = cho(M, stype, use_ll=True)
+    B = solve_rhs(n, 3)
+    X = F.solve(B)
+    assert np.abs(M @ X - B).max() < 1e-9
+
+
+@pytest.mark.parametrize("name,M", CORPUS, ids=[n for n, _ in CORPUS])
+def test_solve_composes_out_of_its_pieces(name, M):
+    """``A \\ b`` built from ``P``, ``L``, ``D``, ``Lt``, ``Pt`` is the one-shot
+    solve, entry for entry — which is what makes the ``sys`` dispatch checkable
+    without a second oracle."""
+    n = M.shape[0]
+    if n == 0:
+        pytest.skip("no system to solve")
+    F = cho(M, use_ll=False)
+    b = solve_rhs(n, 2)
+    want = F.solve(b)
+    t = F.solve(F.solve(F.solve(F.solve(b, "P"), "L"), "D"), "Lt")
+    np.testing.assert_array_equal(F.solve(t, "Pt"), want)
+
+
+@pytest.mark.parametrize("name,M", CORPUS, ids=[n for n, _ in CORPUS])
+def test_solve_permutation_systems_are_inverses(name, M):
+    """``system="P"`` and ``"Pt"`` undo each other. scikit-sparse 0.5.0 rejects
+    both, which is why hea had to fancy-index the right-hand side instead."""
+    n = M.shape[0]
+    if n == 0:
+        pytest.skip("no system to solve")
+    F = cho(M)
+    b = solve_rhs(n, 2)
+    np.testing.assert_array_equal(F.solve(F.solve(b, "P"), "Pt"), b)
+    p = F.P
+    np.testing.assert_array_equal(F.solve(b, "P"), b[p])
+
+
+@pytest.mark.parametrize("name,M", CORPUS, ids=[n for n, _ in CORPUS])
+def test_solve_factor_reconstructs_the_permuted_matrix(name, M):
+    """``L @ L.T == A[p][:, p]``, which is the contract every consumer that
+    solves against ``L`` directly depends on."""
+    n = M.shape[0]
+    if n == 0:
+        pytest.skip("no factor")
+    F = cho(M, use_ll=True)
+    p = F.P
+    L = F.L
+    assert np.abs((L @ L.T).toarray() - M.toarray()[p][:, p]).max() < 1e-9
+
+
+def test_solve_reuses_the_analysis_for_new_values():
+    """``factorize`` on the same pattern must equal a factorization from
+    scratch, bit for bit — that reuse is the whole reason gmm holds a factor."""
+    _, M = CORPUS[1]
+    n = M.shape[0]
+    tri = sp.csc_array(sp.triu(M).tocsc())
+    tri.sort_indices()
+    F = hea.sparse.Factor(tri)
+    tri2 = tri.copy()
+    tri2.data = tri2.data * 1.5
+    F.factorize(tri2)
+    fresh = hea.sparse.Factor(tri2)
+    b = solve_rhs(n, 4)
+    np.testing.assert_array_equal(F.solve(b), fresh.solve(b))
+    np.testing.assert_array_equal(F.L.toarray(), fresh.L.toarray())
+    assert F.half_log_det() == fresh.half_log_det()
+
+
+def test_solve_accepts_the_full_matrix_or_its_triangle():
+    """``stype`` says which half is stored; the other is ignored rather than
+    folded in, so passing the full symmetric matrix is the same problem."""
+    _, M = CORPUS[2]
+    b = solve_rhs(M.shape[0], 3)
+    for stype in (1, -1):
+        full = hea.sparse.Factor(M, lower=stype < 0, use_ll=False).solve(b)
+        np.testing.assert_array_equal(cho(M, stype).solve(b), full)
+    # ...but the two *stypes* are not interchangeable: cholmod_factorize
+    # reaches rowfac's input by one ptranspose from a lower A and two from an
+    # upper one, so the dot products accumulate in a different order.
+    assert not np.array_equal(cho(M, 1).solve(b), cho(M, -1).solve(b))
+
+
+def test_solve_rejects_bad_input():
+    _, M = CORPUS[0]
+    F = cho(M)
+    n = M.shape[0]
+    with pytest.raises(ValueError, match="system must be one of"):
+        F.solve(np.ones(n), "Q")
+    with pytest.raises(ValueError, match="rows"):
+        F.solve(np.ones(n + 1))
+    with pytest.raises(ValueError, match="1- or 2-D"):
+        F.solve(np.ones((n, 1, 1)))
+    with pytest.raises(ValueError, match="square"):
+        hea.sparse.Factor(sp.csc_array(np.ones((3, 4))))
+
+
+def test_solve_not_positive_definite_is_an_error():
+    """``rowfac`` fails an ``LL'`` on any non-positive pivot but an ``LDL'``
+    only on a zero one, so the two forms disagree about what "not positive
+    definite" means, and this port disagrees the same way."""
+    indefinite = sp.csc_array(np.array([[1.0, 2.0], [2.0, 1.0]]))
+    singular = sp.csc_array(np.array([[0.0, 0.0], [0.0, 1.0]]))
+    with pytest.raises(hea.sparse.CholmodError, match="not positive definite"):
+        hea.sparse.cho_factor(indefinite)
+    hea.sparse.Factor(indefinite, use_ll=False)  # LDL' tolerates it, as CHOLMOD does
+    for use_ll in (True, False):
+        with pytest.raises(hea.sparse.CholmodError):
+            hea.sparse.Factor(singular, use_ll=use_ll)
+
+
+def test_cho_solve_one_shot_matches_the_factor():
+    _, M = CORPUS[3]
+    b = solve_rhs(M.shape[0], 1)
+    np.testing.assert_array_equal(
+        hea.sparse.cho_solve(M, b), hea.sparse.cho_factor(M).solve(b)
+    )
+
+
+@pytest.mark.parametrize("name,M", CORPUS, ids=[n for n, _ in CORPUS])
+def test_solve_agrees_with_scikit_sparse(name, M):
+    """The live cross-check on the whole pipeline, against whatever SuiteSparse
+    is installed."""
+    ck = pytest.importorskip("sksparse.cholmod")
+    n = M.shape[0]
+    if n == 0:
+        pytest.skip("no system to solve")
+    f = ck.cho_factor(M, order="amd", supernodal_mode="simplicial")
+    F = hea.sparse.Factor(M, use_ll=True)
+    np.testing.assert_array_equal(F.P, np.asarray(f.perm))
+    b = solve_rhs(n, 3)
+    np.testing.assert_allclose(F.solve(b), f.solve(b), rtol=0, atol=1e-10)
+    np.testing.assert_allclose(
+        F.half_log_det(), np.log(f.L.diagonal()).sum(), rtol=1e-12, atol=0
+    )

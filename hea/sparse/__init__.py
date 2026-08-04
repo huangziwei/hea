@@ -1,0 +1,200 @@
+"""Sparse Cholesky factorization — a self-contained replacement for
+``scikit-sparse``/CHOLMOD.
+
+Every routine behind this module is a mechanical port of SuiteSparse 7.6.0, the
+version R's ``Matrix`` ships and therefore the one ``lme4`` factorizes with. The
+factor, its permutation and its numeric values are bit-identical to what
+``cholmod_l_analyze`` + ``cholmod_l_factorize_p`` + ``cholmod_l_solve``
+produce — not equal to a tolerance, equal in every bit.
+
+The API mirrors the slice of ``sksparse.cholmod`` hea and pywarper use, with two
+additions CHOLMOD has and scikit-sparse 0.5.0 does not expose:
+``system="P"`` / ``"Pt"``, which is what any caller doing its own triangular
+solve against :attr:`Factor.L` needs, since ``L @ L.T == A[p][:, p]`` rather
+than ``A``.
+
+    >>> F = cho_factor(A)          # analyze + numeric factorization
+    >>> F.factorize(A2)            # new values, same pattern: reuses the analysis
+    >>> x = F.solve(b)             # A \\ b
+    >>> F.half_log_det()           # ½ log|det A|
+
+This module imports numpy, ``scipy.sparse`` and the compiled extension, and
+nothing else from hea.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+from scipy.sparse import csc_array, issparse
+
+from hea._rs import CholFactor as _CholFactor
+
+__all__ = ["CholmodError", "Factor", "cho_factor", "cho_solve"]
+
+#: The systems :meth:`Factor.solve` accepts, as ``cholmod_solve`` names them.
+#: ``D`` is the identity for an ``LL'`` factor, so ``LD``/``L`` and ``DLt``/``Lt``
+#: name the same solve there.
+SYSTEMS = ("A", "LDLt", "LD", "DLt", "L", "Lt", "D", "P", "Pt")
+
+
+class CholmodError(Exception):
+    """The matrix could not be factorized — it is not positive definite.
+
+    Named for ``sksparse.cholmod.CholmodError`` so that callers catching that
+    keep working after the switch.
+    """
+
+
+def _as_csc(A):
+    """The input as a sorted CSC matrix with the index and value types the
+    extension takes.
+
+    The full symmetric matrix may be passed: ``stype`` tells the factorization
+    which half is the stored one, and entries in the other half are ignored
+    rather than folded in — the same contract as ``A->stype``. So there is no
+    triangle to extract, which matters when refactorizing 742 times per fit.
+    """
+    if not issparse(A):
+        A = csc_array(np.asarray(A, dtype=np.float64))
+    A = csc_array(A)
+    if A.ndim != 2 or A.shape[0] != A.shape[1]:
+        raise ValueError(f"expected a square matrix, got shape {A.shape}")
+    A.sort_indices()
+    return (
+        A.shape[0],
+        np.ascontiguousarray(A.indptr, dtype=np.int64),
+        np.ascontiguousarray(A.indices, dtype=np.int64),
+        np.ascontiguousarray(A.data, dtype=np.float64),
+    )
+
+
+class Factor:
+    """A numeric Cholesky factorization, reusable for new values and repeated
+    solves.
+
+    Holds its own workspace, so a sequence of ``factorize``/``solve`` calls
+    against one symbolic analysis pays for it once. That is the property
+    ``gmm`` depends on and the one scikit-sparse 0.5.0 gives up.
+    """
+
+    __slots__ = ("_F", "_lower", "_n")
+
+    def __init__(self, A, beta=0.0, *, lower=False, order="amd", use_ll=True):
+        n, indptr, indices, data = _as_csc(A)
+        self._n = n
+        self._lower = bool(lower)
+        self._F = _CholFactor(
+            n,
+            indptr,
+            indices,
+            data,
+            -1 if lower else 1,
+            float(beta),
+            order,
+            bool(use_ll),
+        )
+        self._check()
+
+    def _check(self):
+        if self._F.minor < self._n:
+            raise CholmodError(
+                "matrix is not positive definite: the leading minor of order "
+                f"{self._F.minor + 1} is not"
+            )
+
+    def factorize(self, A, beta=0.0) -> None:
+        """Refactorize new values on the same pattern, reusing the analysis."""
+        _, _, _, data = _as_csc(A)
+        self._F.refactorize(data, float(beta))
+        self._check()
+
+    def solve(self, b, system="A"):
+        """``A \\ b`` for ``b`` of shape ``(n,)`` or ``(n, k)``.
+
+        ``system`` selects which factor to solve against; see :data:`SYSTEMS`.
+        """
+        b = np.asarray(b, dtype=np.float64)
+        if b.ndim > 2:
+            raise ValueError(f"b must be 1- or 2-D, got {b.ndim}-D")
+        if b.shape[0] != self._n:
+            raise ValueError(f"b has {b.shape[0]} rows, expected n = {self._n}")
+        flat = b.ndim == 1
+        b2 = b.reshape(self._n, 1) if flat else b
+        nrhs = b2.shape[1]
+        # cholmod_dense is column-major; ravel(order="F") is that layout flat
+        x = self._F.solve(np.ravel(b2, order="F"), nrhs, system)
+        x = x.reshape((self._n, nrhs), order="F")
+        return x[:, 0] if flat else x
+
+    def half_log_det(self) -> float:
+        """``½ log|det A|``."""
+        return float(self._F.half_log_det())
+
+    @property
+    def L(self):
+        """The factor as a sparse lower-triangular matrix, in the permuted
+        ordering: ``L @ L.T == A[p][:, p]`` for ``p = self.P``.
+
+        For an ``LDL'`` factorization the diagonal holds ``D``, not ones — the
+        same convention CHOLMOD's ``L`` uses.
+        """
+        indptr, indices, data = self._F.factor_csc()
+        out = csc_array((data, indices, indptr), shape=(self._n, self._n))
+        out.sort_indices()
+        return out
+
+    @property
+    def P(self):
+        """The fill-reducing permutation ``p``, with ``L @ L.T == A[p][:, p]``."""
+        return np.asarray(self._F.perm, dtype=np.intp)
+
+    #: ``scikit-sparse`` spells the permutation ``perm``; both names work.
+    perm = P
+
+    @property
+    def n(self) -> int:
+        return self._n
+
+    @property
+    def is_ll(self) -> bool:
+        """``LL'`` if set, ``LDL'`` if not."""
+        return bool(self._F.is_ll)
+
+    @property
+    def nnz(self) -> int:
+        """Entries in ``L``."""
+        return int(self._F.nnz)
+
+    def __repr__(self) -> str:
+        return (
+            f"<hea.sparse.Factor n={self._n} nnz={self.nnz} "
+            f"{'LL' if self.is_ll else 'LDL'}' "
+            f"{'lower' if self._lower else 'upper'}>"
+        )
+
+
+def cho_factor(A, beta=0.0, *, lower=False, order="amd", use_ll=True) -> Factor:
+    """Factorize ``beta*I + A`` and return a reusable :class:`Factor`.
+
+    ``lower`` selects which triangle of ``A`` is the stored half, matching
+    ``sksparse.cholmod.cho_factor``'s argument of the same name.
+
+    ``use_ll`` defaults to ``True`` here, where CHOLMOD's own default is
+    ``LDL'``, because that is what ``sksparse.cholmod.cho_factor`` does and this
+    is its replacement: it makes :attr:`Factor.L` the Cholesky factor with unit
+    ``D``, and it makes a merely *indefinite* matrix an error rather than a
+    successful factorization. ``rowfac`` fails an ``LL'`` on any non-positive
+    pivot but an ``LDL'`` only on a zero one
+    (``t_cholmod_rowfac_worker.c:424``), so the two forms disagree about what
+    "not positive definite" means. Pass ``use_ll=False`` for the ``LDL'``.
+    """
+    return Factor(A, beta, lower=lower, order=order, use_ll=use_ll)
+
+
+def cho_solve(A, b, beta=0.0, *, lower=False, order="amd"):
+    """One-shot ``A \\ b`` — analyze, factorize and solve.
+
+    For repeated solves against one matrix, or repeated factorizations of one
+    pattern, build a :class:`Factor` instead: this throws the analysis away.
+    """
+    return cho_factor(A, beta, lower=lower, order=order).solve(b)

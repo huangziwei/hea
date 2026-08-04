@@ -15,6 +15,8 @@
 
 pub mod amd;
 pub mod numeric;
+pub mod py;
+pub mod solve;
 pub mod symbolic;
 #[cfg(test)]
 pub mod testcorpus;
@@ -278,5 +280,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(amd_order, m)?)?;
     m.add_function(wrap_pyfunction!(analyze, m)?)?;
     m.add_function(wrap_pyfunction!(factorize, m)?)?;
+    m.add_class::<py::CholFactor>()?;
     Ok(())
 }

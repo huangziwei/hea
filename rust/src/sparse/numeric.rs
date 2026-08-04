@@ -1104,7 +1104,7 @@ fn subtree(
 /// target-cpu=native`, and the CHOLMOD they are being compared against is a
 /// baseline x86-64 build that does not fuse.
 #[inline(always)]
-fn mulsub(x: f64, a: f64, b: f64) -> f64 {
+pub(super) fn mulsub(x: f64, a: f64, b: f64) -> f64 {
     /* negating a is exact, so this is `x - a*b` under one rounding */
     rfma(-a, b, x)
 }
