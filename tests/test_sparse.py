@@ -686,3 +686,453 @@ def test_analyze_rejects_bad_input():
     bad[2] = 0
     with pytest.raises(ValueError, match="non-decreasing"):
         _rs.analyze(5, bad, indices, 1)
+
+
+# ---------------------------------------------------------------------------
+# cholmod_rowfac
+# ---------------------------------------------------------------------------
+#
+# The pins below are ``cholmod_l_analyze`` + ``cholmod_l_factorize_p`` driven
+# the way the port drives them (``supernodal = CHOLMOD_SIMPLICIAL``,
+# ``nmethods = 1`` with ``method[0].ordering = CHOLMOD_AMD``, every other
+# ``Common`` field at its default), reading ``L``'s raw internal arrays rather
+# than any accessor's re-derivation of them.
+#
+# Two things about this stage are not intuitions and were measured:
+#
+# 1. ``stype`` is **not** immaterial here, unlike at the AMD and analyze stages.
+#    ``cholmod_factorize`` reaches ``rowfac``'s input by one ``ptranspose`` from
+#    a lower ``A`` and by two from an upper one, and the two routes leave the
+#    columns of that input in different orders. The row subtree is gathered in
+#    that order, so the dot products accumulate in a different order and ``L``
+#    differs in the last bit — 1042 of 3702 entries on a 400-node Laplacian.
+#    Both readings are pinned separately for that reason.
+#
+# 2. ``scikit-sparse``'s ``ldl_factor`` defaults to ``lower=True``, i.e.
+#    ``stype = -1``. Comparing it against the ``stype = +1`` factorization looks
+#    like a 1-ulp port defect and is not one.
+
+
+def _sha(a: np.ndarray) -> str:
+    return hashlib.sha256(np.ascontiguousarray(a).tobytes()).hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class _RefFactor:
+    n: int
+    nnz: int
+    nzmax: int
+    minor: int
+    lp_sha: str
+    lnz_sha: str
+    li_sha: str
+    lx_sha: str
+    rowfacfl: float
+
+
+REF_FACTOR: dict[tuple[str, int], _RefFactor] = {
+    ("banded-50-2", 1): _RefFactor(
+        n=50,
+        nnz=147,
+        nzmax=147,
+        minor=50,
+        lp_sha="6af2a582b1936279",
+        lnz_sha="865156499aecbf3d",
+        li_sha="9e66f884da8d629b",
+        lx_sha="2290d18d163f796f",
+        rowfacfl=387.0,
+    ),
+    ("banded-50-2", -1): _RefFactor(
+        n=50,
+        nnz=147,
+        nzmax=147,
+        minor=50,
+        lp_sha="6af2a582b1936279",
+        lnz_sha="865156499aecbf3d",
+        li_sha="9e66f884da8d629b",
+        lx_sha="2290d18d163f796f",
+        rowfacfl=387.0,
+    ),
+    ("banded-200-3", 1): _RefFactor(
+        n=200,
+        nnz=794,
+        nzmax=794,
+        minor=200,
+        lp_sha="4a3be5d58a61601b",
+        lnz_sha="4c586cf3222672ae",
+        li_sha="15bc059d03669e8f",
+        lx_sha="c4e945cc5cfab9d2",
+        rowfacfl=2966.0,
+    ),
+    ("banded-200-3", -1): _RefFactor(
+        n=200,
+        nnz=794,
+        nzmax=794,
+        minor=200,
+        lp_sha="4a3be5d58a61601b",
+        lnz_sha="4c586cf3222672ae",
+        li_sha="15bc059d03669e8f",
+        lx_sha="c4e945cc5cfab9d2",
+        rowfacfl=2966.0,
+    ),
+    ("random-60", 1): _RefFactor(
+        n=60,
+        nnz=824,
+        nzmax=824,
+        minor=60,
+        lp_sha="e2cff2be76a52029",
+        lnz_sha="c0b682d588e71da7",
+        li_sha="c696af543d1d7903",
+        lx_sha="01b818b855cfbec3",
+        rowfacfl=14814.0,
+    ),
+    ("random-60", -1): _RefFactor(
+        n=60,
+        nnz=824,
+        nzmax=824,
+        minor=60,
+        lp_sha="e2cff2be76a52029",
+        lnz_sha="c0b682d588e71da7",
+        li_sha="c696af543d1d7903",
+        lx_sha="ddc544a9daeeeac2",
+        rowfacfl=14814.0,
+    ),
+    ("random-300", 1): _RefFactor(
+        n=300,
+        nnz=23541,
+        nzmax=23541,
+        minor=300,
+        lp_sha="e0afbd5dc9892e75",
+        lnz_sha="92aea86e3f8a50b6",
+        li_sha="8a144f151496a722",
+        lx_sha="0b58f70634e6a7d4",
+        rowfacfl=2915259.0,
+    ),
+    ("random-300", -1): _RefFactor(
+        n=300,
+        nnz=23541,
+        nzmax=23541,
+        minor=300,
+        lp_sha="e0afbd5dc9892e75",
+        lnz_sha="92aea86e3f8a50b6",
+        li_sha="8a144f151496a722",
+        lx_sha="b5204e0254dfeca7",
+        rowfacfl=2915259.0,
+    ),
+    ("random-400", 1): _RefFactor(
+        n=400,
+        nnz=36946,
+        nzmax=36946,
+        minor=400,
+        lp_sha="790e67d16de86eb3",
+        lnz_sha="fc3a5493740ce535",
+        li_sha="7f2dd9766114ce7d",
+        lx_sha="e35399ba32a60278",
+        rowfacfl=5775708.0,
+    ),
+    ("random-400", -1): _RefFactor(
+        n=400,
+        nnz=36946,
+        nzmax=36946,
+        minor=400,
+        lp_sha="790e67d16de86eb3",
+        lnz_sha="fc3a5493740ce535",
+        li_sha="7f2dd9766114ce7d",
+        lx_sha="4afffbb544167b62",
+        rowfacfl=5775708.0,
+    ),
+    ("block-diagonal", 1): _RefFactor(
+        n=55,
+        nnz=289,
+        nzmax=289,
+        minor=55,
+        lp_sha="88458d28d71490ee",
+        lnz_sha="6f6a0e55b43fff0e",
+        li_sha="853fc1e3e66190fe",
+        lx_sha="436f8b0493d15d69",
+        rowfacfl=2102.0,
+    ),
+    ("block-diagonal", -1): _RefFactor(
+        n=55,
+        nnz=289,
+        nzmax=289,
+        minor=55,
+        lp_sha="88458d28d71490ee",
+        lnz_sha="6f6a0e55b43fff0e",
+        li_sha="853fc1e3e66190fe",
+        lx_sha="8633debf1f0da1da",
+        rowfacfl=2102.0,
+    ),
+    ("arrow-300", 1): _RefFactor(
+        n=300,
+        nnz=599,
+        nzmax=599,
+        minor=300,
+        lp_sha="e0e20bc1372bebcc",
+        lnz_sha="5a05756d08f2e75e",
+        li_sha="ec4d5a84f794f211",
+        lx_sha="dd8f2c6fc038d9d8",
+        rowfacfl=897.0,
+    ),
+    ("arrow-300", -1): _RefFactor(
+        n=300,
+        nnz=599,
+        nzmax=599,
+        minor=300,
+        lp_sha="e0e20bc1372bebcc",
+        lnz_sha="5a05756d08f2e75e",
+        li_sha="ec4d5a84f794f211",
+        lx_sha="dd8f2c6fc038d9d8",
+        rowfacfl=897.0,
+    ),
+    ("tridiagonal-200", 1): _RefFactor(
+        n=200,
+        nnz=399,
+        nzmax=399,
+        minor=200,
+        lp_sha="6903593832f56f1f",
+        lnz_sha="643b7fb9515a8a78",
+        li_sha="ab288bfd44b154df",
+        lx_sha="1620eef639965fce",
+        rowfacfl=597.0,
+    ),
+    ("tridiagonal-200", -1): _RefFactor(
+        n=200,
+        nnz=399,
+        nzmax=399,
+        minor=200,
+        lp_sha="6903593832f56f1f",
+        lnz_sha="643b7fb9515a8a78",
+        li_sha="ab288bfd44b154df",
+        lx_sha="1620eef639965fce",
+        rowfacfl=597.0,
+    ),
+    ("diagonal-32", 1): _RefFactor(
+        n=32,
+        nnz=32,
+        nzmax=32,
+        minor=32,
+        lp_sha="4e8adfac993e338c",
+        lnz_sha="6ba64591dc5d5fa6",
+        li_sha="bcc9bcfc670935c6",
+        lx_sha="acfc7c36fce590b1",
+        rowfacfl=0.0,
+    ),
+    ("diagonal-32", -1): _RefFactor(
+        n=32,
+        nnz=32,
+        nzmax=32,
+        minor=32,
+        lp_sha="4e8adfac993e338c",
+        lnz_sha="6ba64591dc5d5fa6",
+        li_sha="bcc9bcfc670935c6",
+        lx_sha="acfc7c36fce590b1",
+        rowfacfl=0.0,
+    ),
+    ("kron-duplicate-rows-120", 1): _RefFactor(
+        n=120,
+        nnz=6544,
+        nzmax=6544,
+        minor=120,
+        lp_sha="1ea65d7e3ce4c0a0",
+        lnz_sha="5ee6d99e18ede87a",
+        li_sha="0177729cb00e2d22",
+        lx_sha="bfaf6a07daf5abd7",
+        rowfacfl=451224.0,
+    ),
+    ("kron-duplicate-rows-120", -1): _RefFactor(
+        n=120,
+        nnz=6544,
+        nzmax=6544,
+        minor=120,
+        lp_sha="1ea65d7e3ce4c0a0",
+        lnz_sha="5ee6d99e18ede87a",
+        li_sha="0177729cb00e2d22",
+        lx_sha="622ea1aa286fe3a4",
+        rowfacfl=451224.0,
+    ),
+}
+
+
+def factorize(M, stype: int = 1, **kw):
+    M = sp.csc_array(M)
+    tri = sp.triu(M) if stype > 0 else sp.tril(M)
+    T = sp.csc_array(tri.tocsc())
+    T.sort_indices()
+    return _rs.factorize(
+        T.shape[0],
+        T.indptr.astype(np.int64),
+        T.indices.astype(np.int64),
+        T.data.astype(np.float64),
+        stype,
+        **kw,
+    )
+
+
+def live(got) -> tuple[np.ndarray, np.ndarray]:
+    """The entries ``L`` actually holds.
+
+    ``rowfac`` leaves ``L`` unpacked: column ``j`` runs from ``Lp[j]`` for
+    ``Lnz[j]`` entries, which is ``Lp[j+1]`` only when the columns happen to
+    have been sized exactly. Everything between is untouched allocation and
+    carries whatever the allocator left there, so it is not comparable.
+    """
+    lp, lnz = np.asarray(got["Lp"]), np.asarray(got["Lnz"])
+    idx = np.concatenate([np.arange(lp[j], lp[j] + lnz[j]) for j in range(len(lnz))])
+    return np.asarray(got["Li"])[idx], np.asarray(got["Lx"])[idx]
+
+
+def dense_ldl(got, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """``L`` (unit diagonal) and ``D``, densely, from the unpacked columns."""
+    lp, lnz, li, lx = (np.asarray(got[k]) for k in ("Lp", "Lnz", "Li", "Lx"))
+    L = np.zeros((n, n))
+    D = np.zeros(n)
+    for j in range(n):
+        p = lp[j]
+        D[j] = lx[p]
+        L[j, j] = lx[p] if got["is_ll"] else 1.0
+        L[li[p + 1 : p + lnz[j]], j] = lx[p + 1 : p + lnz[j]]
+    return L, D
+
+
+@pytest.mark.parametrize("name,M", CORPUS, ids=[n for n, _ in CORPUS])
+@pytest.mark.parametrize("stype", [1, -1])
+def test_factorize_matches_cholmod(name, M, stype):
+    """Every entry of ``L``, bit-exact to ``cholmod_l_factorize``."""
+    ref = REF_FACTOR[(name, stype)]
+    got = factorize(M, stype=stype)
+
+    assert got["minor"] == ref.minor
+    assert got["nzmax"] == ref.nzmax
+    assert int(np.asarray(got["Lnz"]).sum()) == ref.nnz
+    assert got["rowfacfl"] == ref.rowfacfl
+    assert not got["is_ll"], "cholmod_defaults leaves final_ll false"
+    assert _sha(np.asarray(got["Lp"])) == ref.lp_sha
+    assert _sha(np.asarray(got["Lnz"])) == ref.lnz_sha
+    li, lx = live(got)
+    assert _sha(li) == ref.li_sha
+    assert _sha(lx) == ref.lx_sha, "L's values are not bit-exact to CHOLMOD's"
+
+
+@pytest.mark.parametrize("name,M", CORPUS, ids=[n for n, _ in CORPUS])
+@pytest.mark.parametrize("stype", [1, -1])
+def test_factorize_reconstructs_the_matrix(name, M, stype):
+    """``L D L' == P A P'`` — the pins above say we match CHOLMOD, this says
+    what we both compute is the factorization."""
+    n = M.shape[0]
+    got = factorize(M, stype=stype)
+    L, D = dense_ldl(got, n)
+    p = np.asarray(got["perm"])
+    pap = np.asarray(M.todense())[np.ix_(p, p)]
+    resid = np.abs(L @ np.diag(D) @ L.T - pap).max()
+    assert resid < 1e-9 * max(1.0, np.abs(pap).max())
+
+
+@pytest.mark.parametrize("name,M", CORPUS, ids=[n for n, _ in CORPUS])
+def test_factorize_ll_is_the_ldl_with_d_folded_in(name, M):
+    """``final_ll`` factorizes to ``LL'`` directly rather than converting, so it
+    is a separate code path in the worker and gets its own check."""
+    n = M.shape[0]
+    ldl = factorize(M, final_ll=False)
+    ll = factorize(M, final_ll=True)
+    assert ll["is_ll"] and not ldl["is_ll"]
+    np.testing.assert_array_equal(np.asarray(ll["Lnz"]), np.asarray(ldl["Lnz"]))
+    np.testing.assert_array_equal(live(ll)[0], live(ldl)[0])
+
+    Lu, D = dense_ldl(ldl, n)
+    Ll, _ = dense_ldl(ll, n)
+    assert (D > 0).all(), "the corpus is positive definite"
+    np.testing.assert_allclose(Ll, Lu * np.sqrt(D)[None, :], rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("name,M", CORPUS, ids=[n for n, _ in CORPUS])
+def test_factorize_columns_are_exactly_colcount_long(name, M):
+    """``cholmod_factorize`` zeroes ``Common->grow2`` for the first
+    factorization of a symbolic factor (``cholmod_factorize.c:388-392``), so
+    every column comes out sized to its exact ``ColCount`` and ``L`` is packed
+    and monotonic despite ``final_asis`` leaving it "unpacked"."""
+    got = factorize(M)
+    lp, lnz = np.asarray(got["Lp"]), np.asarray(got["Lnz"])
+    analysis = analyze(M)
+    np.testing.assert_array_equal(lnz, np.asarray(analysis["colcount"]))
+    np.testing.assert_array_equal(np.diff(lp), lnz)
+    assert got["is_monotonic"]
+    assert got["nzmax"] == int(lnz.sum())
+
+
+def test_factorize_beta_shifts_the_diagonal():
+    """``beta`` factorizes ``beta*I + A`` without touching the pattern."""
+    M = dict(CORPUS)["random-60"]
+    plain = factorize(M)
+    shifted = factorize(M, beta=2.5)
+    np.testing.assert_array_equal(np.asarray(plain["Lnz"]), np.asarray(shifted["Lnz"]))
+    np.testing.assert_array_equal(live(plain)[0], live(shifted)[0])
+    _, d0 = dense_ldl(plain, M.shape[0])
+    _, d1 = dense_ldl(shifted, M.shape[0])
+    assert (d1 > d0).all()
+
+    n = M.shape[0]
+    L, D = dense_ldl(shifted, n)
+    p = np.asarray(shifted["perm"])
+    pap = np.asarray((M + sp.eye_array(n) * 2.5).todense())[np.ix_(p, p)]
+    assert np.abs(L @ np.diag(D) @ L.T - pap).max() < 1e-9 * np.abs(pap).max()
+
+
+def test_factorize_reports_where_it_stopped_being_positive_definite():
+    """Not positive definite is reported through ``L->minor``, not an error —
+    ``rowfac`` sets it and carries on (``t_cholmod_rowfac_worker.c:430-434``)."""
+    # eigenvalues 3 and -1: an LDL' exists (D goes negative), an LL' does not
+    M = sp.csc_array(np.array([[1.0, 2.0], [2.0, 1.0]]))
+    ldl = factorize(M, ordering="natural")
+    assert ldl["minor"] == 2
+    assert np.asarray(ldl["Lx"])[np.asarray(ldl["Lp"])[1]] == -3.0
+    ll = factorize(M, ordering="natural", final_ll=True)
+    assert ll["minor"] == 1
+
+    # an exactly singular matrix stops the LDL' too, at the zero pivot
+    S = sp.csc_array(np.array([[1.0, 1.0], [1.0, 1.0]]))
+    assert factorize(S, ordering="natural")["minor"] == 1
+
+
+def test_factorize_empty_and_singleton():
+    got = factorize(sp.csc_array((0, 0)))
+    assert np.asarray(got["Lp"]).tolist() == [0]
+    assert np.asarray(got["Lnz"]).size == 0
+    assert got["minor"] == 0
+
+    got = factorize(sp.csc_array(np.array([[4.0]])))
+    np.testing.assert_array_equal(np.asarray(got["Lnz"]), [1])
+    assert np.asarray(got["Lx"])[0] == 4.0
+    assert factorize(sp.csc_array(np.array([[4.0]])), final_ll=True)["Lx"][0] == 2.0
+
+
+def test_factorize_rejects_bad_input():
+    ip = np.array([0, 1, 2], dtype=np.int64)
+    ii = np.array([0, 1], dtype=np.int64)
+    ax = np.array([1.0, 1.0])
+    with pytest.raises(ValueError, match="stype must be nonzero"):
+        _rs.factorize(2, ip, ii, ax, 0)
+    with pytest.raises(ValueError, match="ordering must be"):
+        _rs.factorize(2, ip, ii, ax, 1, ordering="metis")
+    with pytest.raises(ValueError, match="indptr"):
+        _rs.factorize(2, np.array([0, 2, 1], dtype=np.int64), ii, ax, 1)
+    with pytest.raises(ValueError, match="row index"):
+        _rs.factorize(2, ip, np.array([0, 9], dtype=np.int64), ax, 1)
+
+
+@pytest.mark.parametrize("name,M", CORPUS, ids=[n for n, _ in CORPUS])
+def test_factorize_agrees_with_scikit_sparse(name, M):
+    """The live cross-check, against whatever SuiteSparse is installed.
+
+    ``ldl_factor`` defaults to ``lower=True``, so the comparison is against the
+    ``stype = -1`` factorization; see the note at the head of this section for
+    why that distinction is load-bearing rather than cosmetic.
+    """
+    ck = pytest.importorskip("sksparse.cholmod")
+    n = M.shape[0]
+    f = ck.ldl_factor(M, order="amd", supernodal_mode="simplicial")
+    got = factorize(M, stype=-1)
+    np.testing.assert_array_equal(np.asarray(got["perm"]), np.asarray(f.perm))
+    L, D = dense_ldl(got, n)
+    np.testing.assert_array_equal(L, f.L.toarray())
+    np.testing.assert_array_equal(D, np.asarray(f.D.diagonal()))

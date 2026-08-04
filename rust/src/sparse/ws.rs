@@ -16,22 +16,26 @@
 /// module using `Ws` keeps a `#[cfg(test)]` corpus that walks its branches —
 /// `cargo test` is a debug build, so each of those asserts fires on every index
 /// the corpus touches.
+///
+/// `T` defaults to `Int`, which is what the symbolic kernels index; the numeric
+/// ones subscript `Common->Xwork` and `L->x` the same way, and get the same
+/// treatment through `Ws<f64>`.
 #[repr(transparent)]
-pub struct Ws([i64]);
+pub struct Ws<T = i64>([T]);
 
-impl Ws {
+impl<T> Ws<T> {
     /// Borrow a workspace slice. `#[inline(always)]` because the whole point is
     /// that this compiles to nothing.
     #[inline(always)]
-    pub(super) fn new(s: &mut [i64]) -> &mut Ws {
-        // SAFETY: `Ws` is `#[repr(transparent)]` over `[i64]`.
-        unsafe { &mut *(s as *mut [i64] as *mut Ws) }
+    pub(super) fn new(s: &mut [T]) -> &mut Ws<T> {
+        // SAFETY: `Ws` is `#[repr(transparent)]` over `[T]`.
+        unsafe { &mut *(s as *mut [T] as *mut Ws<T>) }
     }
 
     #[inline(always)]
-    pub(super) fn new_ref(s: &[i64]) -> &Ws {
-        // SAFETY: `Ws` is `#[repr(transparent)]` over `[i64]`.
-        unsafe { &*(s as *const [i64] as *const Ws) }
+    pub(super) fn new_ref(s: &[T]) -> &Ws<T> {
+        // SAFETY: `Ws` is `#[repr(transparent)]` over `[T]`.
+        unsafe { &*(s as *const [T] as *const Ws<T>) }
     }
 
     /// `self[lo..hi]`, for the column loops that the C writes as
@@ -46,8 +50,18 @@ impl Ws {
     /// Only applicable where the loop does not also *write* the array it walks:
     /// where it does, the C is scaled-index-bound too and there is nothing to
     /// win.
+    /// `set_empty (X, n)` / `memset` — the whole-array reset the mark trick
+    /// falls back to on overflow.
+    #[inline]
+    pub(super) fn fill(&mut self, v: T)
+    where
+        T: Copy,
+    {
+        self.0.fill(v);
+    }
+
     #[inline(always)]
-    pub(super) fn range(&self, lo: i64, hi: i64) -> &[i64] {
+    pub(super) fn range(&self, lo: i64, hi: i64) -> &[T] {
         debug_assert!(
             lo >= 0 && hi >= lo && (hi as usize) <= self.0.len(),
             "Ws range {lo}..{hi} out of order or out of range for len {}",
@@ -64,10 +78,10 @@ impl Ws {
 /// arrive. Both land on the same unchecked access.
 macro_rules! ws_index {
     ($t:ty) => {
-        impl core::ops::Index<$t> for Ws {
-            type Output = i64;
+        impl<T> core::ops::Index<$t> for Ws<T> {
+            type Output = T;
             #[inline(always)]
-            fn index(&self, i: $t) -> &i64 {
+            fn index(&self, i: $t) -> &T {
                 debug_assert!(
                     i as i64 >= 0 && (i as usize) < self.0.len(),
                     "Ws index {i} out of range for len {}",
@@ -78,9 +92,9 @@ macro_rules! ws_index {
             }
         }
 
-        impl core::ops::IndexMut<$t> for Ws {
+        impl<T> core::ops::IndexMut<$t> for Ws<T> {
             #[inline(always)]
-            fn index_mut(&mut self, i: $t) -> &mut i64 {
+            fn index_mut(&mut self, i: $t) -> &mut T {
                 debug_assert!(
                     i as i64 >= 0 && (i as usize) < self.0.len(),
                     "Ws index {i} out of range for len {}",
@@ -133,16 +147,31 @@ pub struct Work {
     /// `Common->Head`, size `n+1`, all `EMPTY` between users. Every routine
     /// that scribbles on it restores it before returning.
     pub(super) head: Vec<i64>,
+    /// `Common->Xwork`, size `n` for the real case. `Xwork [i] == 0` must hold
+    /// between users, and every routine that scatters into it clears the
+    /// entries it touched rather than the whole array.
+    pub(super) xwork: Vec<f64>,
+    /// `Common->mark`. `Flag [i] < mark` is the invariant every user of `Flag`
+    /// relies on; bumping `mark` is how a kernel invalidates the whole array in
+    /// O(1) instead of rewriting it (`cholmod_types.h:49-57`).
+    pub(super) mark: i64,
 }
 
 impl Work {
     /// `cholmod_allocate_work (n, 6*n, 0, Common)`, the call
-    /// `cholmod_analyze` opens with.
+    /// `cholmod_analyze` opens with, followed by the `cholmod_alloc_work (n, n,
+    /// n, ...)` that `cholmod_rowfac` adds on top of it — `alloc_work` only
+    /// ever grows (`t_cholmod_alloc_work.c:59,81,99`), so one factor's
+    /// workspace is the union.
     pub fn new(n: usize) -> Work {
         Work {
             iwork: vec![0; 6 * n],
             flag: vec![EMPTY; n],
             head: vec![EMPTY; n + 1],
+            /* `alloc_work` zeroes Xwork once, at allocation (`:106-108`) */
+            xwork: vec![0.0; n],
+            /* `Common->mark = 0` accompanies a fresh `Flag` (`:71`) */
+            mark: 0,
         }
     }
 
@@ -154,6 +183,8 @@ impl Work {
             iwork: &mut self.iwork,
             flag: &mut self.flag,
             head: &mut self.head,
+            xwork: &mut self.xwork,
+            mark: &mut self.mark,
         }
     }
 
@@ -168,6 +199,8 @@ impl Work {
             iwork: scratch,
             flag: &mut self.flag,
             head: &mut self.head,
+            xwork: &mut self.xwork,
+            mark: &mut self.mark,
         };
         (w, first, level)
     }
@@ -179,6 +212,8 @@ pub struct WorkRef<'a> {
     pub(super) iwork: &'a mut [i64],
     pub(super) flag: &'a mut [i64],
     pub(super) head: &'a mut [i64],
+    pub(super) xwork: &'a mut [f64],
+    pub(super) mark: &'a mut i64,
 }
 
 impl WorkRef<'_> {
@@ -188,9 +223,26 @@ impl WorkRef<'_> {
         self.iwork[..2 * n].split_at_mut(n)
     }
 
-    /// `CLEAR_FLAG` with `Common->mark = EMPTY` — `cholmod_clear_flag`.
+    /// `cholmod_clear_flag` (`t_cholmod_clear_flag.c:34-49`) — bump `mark`, and
+    /// rewrite `Flag` only if that overflowed.
+    #[inline]
     pub(super) fn clear_flag(&mut self) {
-        self.flag.fill(EMPTY);
+        *self.mark += 1;
+        if *self.mark <= 0 {
+            *self.mark = 0;
+            self.flag.fill(EMPTY);
+        }
+    }
+
+    /// `Common->mark = EMPTY ; CLEAR_FLAG (Common)`, the two lines that
+    /// unconditionally reset `Flag` to all-`EMPTY`
+    /// (`cholmod_rowcolcounts.c:504-505`). Spelled out rather than folded into
+    /// a `fill`, because the resulting `mark` is 0 and not `EMPTY`, and the
+    /// next kernel to use `Flag` reads it.
+    #[inline]
+    pub(super) fn reset_flag(&mut self) {
+        *self.mark = EMPTY;
+        self.clear_flag();
     }
 }
 
@@ -287,6 +339,20 @@ pub fn validate_csc(n: usize, indptr: &[i64], indices: &[i64]) -> Result<usize, 
         return Err(CscError::RowOutOfRange { at, got, n });
     }
     Ok(nz)
+}
+
+/// `A->sorted` — whether the row indices ascend within every column.
+///
+/// CHOLMOD takes this as a claim from the caller rather than checking it, but
+/// the caller here is numpy, which does not carry the flag through a raw array.
+/// One O(nnz) pass to establish it is cheap next to what reads it, and getting
+/// it wrong is silent: `cholmod_rowfac` stops scanning a column at the first
+/// entry below the diagonal when it is set (`cholmod_rowfac.c:149-152`).
+pub fn columns_are_sorted(n: usize, indptr: &[i64], indices: &[i64]) -> bool {
+    (0..n).all(|j| {
+        let (lo, hi) = (indptr[j] as usize, indptr[j + 1] as usize);
+        indices[lo..hi].windows(2).all(|w| w[0] < w[1])
+    })
 }
 
 #[cfg(test)]

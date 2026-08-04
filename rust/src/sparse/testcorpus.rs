@@ -65,6 +65,42 @@ pub fn triangle_csc(n: usize, edges: &[(usize, usize)], lower: bool) -> (Vec<i64
     (indptr, indices)
 }
 
+/// The same triangle, given values that make the full symmetric matrix
+/// positive definite: off-diagonals from the LCG, then a diagonal that makes
+/// every row strictly dominant. Numeric kernels need a factorization that
+/// exists, and diagonal dominance is the cheapest way to guarantee one without
+/// bringing in an eigensolver to check.
+pub fn spd_triangle(
+    n: usize,
+    edges: &[(usize, usize)],
+    lower: bool,
+) -> (Vec<i64>, Vec<i64>, Vec<f64>) {
+    let (indptr, indices) = triangle_csc(n, edges, lower);
+    let mut x = vec![0.0f64; indices.len()];
+    let mut rng = Lcg(0xC0FFEE);
+    /* off-diagonal magnitudes accumulate into both endpoints' rows */
+    let mut absrow = vec![0.0f64; n];
+    for j in 0..n {
+        for p in indptr[j] as usize..indptr[j + 1] as usize {
+            let i = indices[p] as usize;
+            if i != j {
+                let v = (rng.below(2000) as f64) / 1000.0 - 1.0;
+                x[p] = v;
+                absrow[i] += v.abs();
+                absrow[j] += v.abs();
+            }
+        }
+    }
+    for j in 0..n {
+        for p in indptr[j] as usize..indptr[j + 1] as usize {
+            if indices[p] as usize == j {
+                x[p] = absrow[j] + 1.0;
+            }
+        }
+    }
+    (indptr, indices, x)
+}
+
 /// Matrices that between them reach every branch of these kernels that computes
 /// a subscript from data.
 pub fn corpus() -> Vec<(&'static str, usize, Vec<(usize, usize)>)> {

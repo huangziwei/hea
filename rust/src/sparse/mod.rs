@@ -14,6 +14,7 @@
 //! coincides when that postorder is the identity.
 
 pub mod amd;
+pub mod numeric;
 pub mod symbolic;
 #[cfg(test)]
 pub mod testcorpus;
@@ -178,8 +179,104 @@ fn analyze(
     Ok(d.unbind())
 }
 
+/// `cholmod_analyze` followed by `cholmod_factorize` — the simplicial numeric
+/// `LDL'` (or `LL'`) of `beta*I + P A P'`.
+///
+/// `indptr`/`indices`/`data` are a CSC matrix and `stype` selects the stored
+/// half. The remaining arguments are the `cholmod_common` fields
+/// `cholmod_factorize_p` reads, at their `cholmod_defaults` values.
+///
+/// Returns `L` in the internal unpacked form `cholmod_rowfac` leaves it in —
+/// column `j` occupies `Li [Lp[j] .. Lp[j]+Lnz[j])`, which is not `Lp[j+1]`
+/// unless `L` happens to be packed — plus `minor`, which is `n` when `A` was
+/// positive definite and otherwise the column where it stopped being so.
+#[pyfunction]
+#[pyo3(signature = (n, indptr, indices, data, stype, beta=0.0, ordering="amd",
+                    final_ll=false, final_asis=true, final_pack=true,
+                    final_monotonic=true))]
+#[allow(clippy::too_many_arguments)]
+fn factorize(
+    py: Python<'_>,
+    n: usize,
+    indptr: PyReadonlyArray1<'_, i64>,
+    indices: PyReadonlyArray1<'_, i64>,
+    data: PyReadonlyArray1<'_, f64>,
+    stype: i32,
+    beta: f64,
+    ordering: &str,
+    final_ll: bool,
+    final_asis: bool,
+    final_pack: bool,
+    final_monotonic: bool,
+) -> PyResult<Py<PyDict>> {
+    let indptr = indptr.as_slice()?;
+    let indices = indices.as_slice()?;
+    let data = data.as_slice()?;
+    let order = match ordering {
+        "amd" => symbolic::Ordering::Amd,
+        "natural" => symbolic::Ordering::Natural,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "ordering must be 'amd' or 'natural', not {other:?}"
+            )));
+        }
+    };
+    let params = numeric::Params {
+        final_ll,
+        final_asis,
+        final_pack,
+        final_monotonic,
+        ..numeric::Params::default()
+    };
+
+    let (l, fl) = py
+        .allow_threads(|| -> Result<_, String> {
+            let nz = ws::validate_csc(n, indptr, indices).map_err(|e| e.to_string())?;
+            if nz > data.len() {
+                return Err(format!(
+                    "data has length {}, expected at least indptr[n] = {nz}",
+                    data.len()
+                ));
+            }
+            /* one copy, analyzed and factorized from — `cholmod_analyze` and
+             * `cholmod_factorize` take the same `cholmod_sparse *A` */
+            let a = symbolic::Sparse {
+                n,
+                p: indptr[..n + 1].to_vec(),
+                i: indices[..nz].to_vec(),
+                x: data[..nz].to_vec(),
+                numeric: true,
+                stype,
+                sorted: ws::columns_are_sorted(n, indptr, indices),
+            };
+            let s = symbolic::analyze_sparse(&a, order, true, IntWidth::I64)
+                .map_err(|e| e.to_string())?;
+            let mut l = numeric::Factor::from_symbolic(&s);
+            let mut work = ws::Work::new(n);
+            let fl = numeric::factorize(&a, beta, &mut l, &params, &mut work)
+                .map_err(|e| e.to_string())?;
+            Ok((l, fl))
+        })
+        .map_err(PyValueError::new_err)?;
+
+    let d = PyDict::new(py);
+    d.set_item("perm", l.perm.into_pyarray(py))?;
+    d.set_item("colcount", l.colcount.into_pyarray(py))?;
+    d.set_item("Lp", l.p.into_pyarray(py))?;
+    d.set_item("Lnz", l.nz.into_pyarray(py))?;
+    d.set_item("nzmax", l.i.len())?;
+    d.set_item("Li", l.i.into_pyarray(py))?;
+    d.set_item("Lx", l.x.into_pyarray(py))?;
+    d.set_item("minor", l.minor)?;
+    d.set_item("is_ll", l.is_ll)?;
+    d.set_item("is_monotonic", l.is_monotonic)?;
+    d.set_item("rowfacfl", fl)?;
+    Ok(d.unbind())
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(amd_order, m)?)?;
     m.add_function(wrap_pyfunction!(analyze, m)?)?;
+    m.add_function(wrap_pyfunction!(factorize, m)?)?;
     Ok(())
 }

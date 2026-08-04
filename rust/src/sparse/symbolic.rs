@@ -64,33 +64,49 @@ impl core::fmt::Display for SymbolicError {
     }
 }
 
-/// The pattern half of a `cholmod_sparse`, which is all any routine here reads.
+/// A `cholmod_sparse`, restricted to the two xtypes this crate builds:
+/// `CHOLMOD_PATTERN` (`x` empty) and `CHOLMOD_REAL` + `CHOLMOD_DOUBLE`.
 ///
 /// Always packed with `nz == NULL`: that is what `cholmod_allocate_sparse`
 /// produces, and what arrives from scipy. The upstream templates select their
 /// `pend` with `#ifdef PACKED` at compile time, so the unpacked arms are a
 /// different instantiation rather than a branch, and are simply not built here.
-pub struct Pattern {
+pub struct Sparse {
     pub n: usize,
     /// `A->p`, size `n + 1`.
     pub p: Vec<i64>,
     /// `A->i`, size `p[n]`.
     pub i: Vec<i64>,
+    /// `A->x`, size `p[n]`, and empty when [`Sparse::numeric`] is false.
+    pub x: Vec<f64>,
+    /// `A->xtype != CHOLMOD_PATTERN`. A field rather than `!x.is_empty()`,
+    /// because upstream's discriminator is `A->xtype` and a real matrix with no
+    /// entries still has a non-NULL `A->x`; deriving it would make an empty
+    /// matrix un-factorizable.
+    pub numeric: bool,
     /// `A->stype`: `> 0` upper triangle stored, `< 0` lower.
     pub stype: i32,
+    /// `A->sorted`: row indices ascend within every column. A field the caller
+    /// sets and CHOLMOD trusts; `cholmod_rowfac` is the one routine here that
+    /// reads it, and reads it per entry (`cholmod_rowfac.c:149`).
+    pub sorted: bool,
 }
 
 /* ========================================================================= */
 /* === cholmod_transpose_sym =============================================== */
 /* ========================================================================= */
 
-/// `C = A'` or `C = A(p,p)'`, pattern only — `cholmod_transpose_sym` with
-/// `mode = 0` (`t_cholmod_transpose_sym.c:71-244`).
+/// `C = A'` or `C = A(p,p)'` — `cholmod_transpose_sym`
+/// (`t_cholmod_transpose_sym.c:71-244`).
 ///
 /// `C->stype = -A->stype`, so this is how the upper form and the lower form of
 /// the same matrix are obtained from one another, permuted or not. `C` is
 /// sorted only when `Perm` is `NULL` (`:240`); nothing downstream needs sorted
 /// columns, and both `cholmod_etree` and `cholmod_rowcolcounts` say so.
+///
+/// `values` is upstream's `mode >= 1`, forced off when `A` is pattern-only
+/// (`:96-100`). Real values make `mode = 1` and `mode = 2` the same thing, so
+/// the conjugating instantiations are not built.
 ///
 /// `Perm` is trusted here: the upstream validity check (`:134-148`) is a
 /// property of what produced it, and every caller in this module passes either
@@ -98,16 +114,24 @@ pub struct Pattern {
 ///
 /// `Wi` and `Pinv` are `Iwork [0..n)` and `Iwork [n..2n)`, as upstream slices
 /// them (`:126,136`); only `C` itself is allocated.
-pub fn transpose_sym(a: &Pattern, perm: Option<&[i64]>, work: &mut WorkRef<'_>) -> Pattern {
+pub fn transpose_sym(
+    a: &Sparse,
+    values: bool,
+    perm: Option<&[i64]>,
+    work: &mut WorkRef<'_>,
+) -> Sparse {
     let n = a.n;
     /* C = A(p,p)' A is symmetric, or C=A' where A is any matrix */
     let cnz = a.p[n] as usize;
+    let values = values && a.numeric;
 
     let mut cp = vec![0i64; n + 1];
     let mut ci = vec![0i64; cnz];
+    let mut cx = vec![0.0f64; if values { cnz } else { 0 }];
 
     let ap = Ws::new_ref(&a.p);
     let ai = Ws::new_ref(&a.i[..cnz]);
+    let ax = Ws::new_ref(if values { &a.x[..cnz] } else { &[] });
 
     let (wi_buf, pinv_buf) = work.scratch2(n);
     wi_buf.fill(0);
@@ -131,23 +155,32 @@ pub fn transpose_sym(a: &Pattern, perm: Option<&[i64]>, work: &mut WorkRef<'_>) 
      * compiled out — and *compiled* out is the point: the counting pass is the
      * template included directly into `cholmod_transpose_sym` with `NUMERIC`
      * undefined (`:158`), the fill pass is the same template inside the worker
-     * with it defined, so neither body carries a test. */
+     * with it defined, so neither body carries a test. `VALUES` is the same
+     * story one level up: upstream dispatches on `C->xtype` to a worker where
+     * `ASSIGN` is either a copy or nothing at all (`:177-234`). */
     macro_rules! pass {
-        ($numeric:literal) => {{
+        ($numeric:literal, $values:literal) => {{
             let wi = Ws::new(wi_buf);
             let ci = Ws::new(&mut ci);
+            let cx = Ws::new(&mut cx);
             match (pinv, a.stype < 0) {
-                (None, true) => transpose_unpermuted::<true, $numeric>(n, ap, ai, wi, ci),
-                (None, false) => transpose_unpermuted::<false, $numeric>(n, ap, ai, wi, ci),
-                (Some(pinv), true) => transpose_permuted::<true, $numeric>(n, ap, ai, pinv, wi, ci),
+                (None, true) => {
+                    transpose_unpermuted::<true, $numeric, $values>(n, ap, ai, ax, wi, ci, cx)
+                }
+                (None, false) => {
+                    transpose_unpermuted::<false, $numeric, $values>(n, ap, ai, ax, wi, ci, cx)
+                }
+                (Some(pinv), true) => {
+                    transpose_permuted::<true, $numeric, $values>(n, ap, ai, ax, pinv, wi, ci, cx)
+                }
                 (Some(pinv), false) => {
-                    transpose_permuted::<false, $numeric>(n, ap, ai, pinv, wi, ci)
+                    transpose_permuted::<false, $numeric, $values>(n, ap, ai, ax, pinv, wi, ci, cx)
                 }
             }
         }};
     }
 
-    pass!(false);
+    pass!(false, false);
 
     /* compute the column pointers of C: cumsum (C->p, Wi, n), then Wi = C->p */
     let mut acc = 0i64;
@@ -158,36 +191,52 @@ pub fn transpose_sym(a: &Pattern, perm: Option<&[i64]>, work: &mut WorkRef<'_>) 
     cp[n] = acc;
     wi_buf.copy_from_slice(&cp[..n]);
 
-    /* compute the pattern of C */
-    pass!(true);
+    /* compute the pattern and values of C */
+    if values {
+        pass!(true, true);
+    } else {
+        pass!(true, false);
+    }
 
     /* Entries in the half of A that is not stored were skipped, so C holds
      * fewer than nnz(A) of them; upstream leaves the slack as C->nzmax. */
     ci.truncate(cp[n] as usize);
+    if values {
+        cx.truncate(cp[n] as usize);
+    }
 
-    Pattern {
+    Sparse {
         n,
         p: cp,
         i: ci,
+        x: cx,
+        numeric: values,
         stype: -a.stype.signum(),
+        /* `C->sorted = (Perm == NULL)` (`t_cholmod_transpose_sym.c:240`): the
+         * unpermuted walk visits j ascending so each column of C comes out
+         * ordered, the permuted one does not. */
+        sorted: perm.is_none(),
     }
 }
 
 /// `C = A'` — `t_cholmod_transpose_sym_unpermuted.c`.
 ///
-/// `LO` and `NUMERIC` are the template's `#ifdef LO` and `#ifdef NUMERIC`, so
-/// they are const: upstream instantiates this body once per (triangle, phase)
-/// rather than testing either per entry.
+/// `LO`, `NUMERIC` and `VALUES` are the template's `#ifdef LO` / `#ifdef
+/// NUMERIC` and its xtype, so they are const: upstream instantiates this body
+/// once per combination rather than testing any of them per entry.
 #[inline]
-fn transpose_unpermuted<const LO: bool, const NUMERIC: bool>(
+fn transpose_unpermuted<const LO: bool, const NUMERIC: bool, const VALUES: bool>(
     n: usize,
     ap: &Ws,
     ai: &Ws,
+    ax: &Ws<f64>,
     wi: &mut Ws,
     ci: &mut Ws,
+    cx: &mut Ws<f64>,
 ) {
     for j in 0..n as i64 {
-        for &i in ai.range(ap[j], ap[j + 1]) {
+        let (pa, paend) = (ap[j], ap[j + 1]);
+        for (k, &i) in ai.range(pa, paend).iter().enumerate() {
             /* get A(i,j) */
             if LO {
                 /* A is symmetric lower, C is symmetric upper */
@@ -204,6 +253,9 @@ fn transpose_unpermuted<const LO: bool, const NUMERIC: bool>(
             let pc = wi[i];
             wi[i] += 1;
             if NUMERIC {
+                if VALUES {
+                    cx[pc] = ax[pa + k as i64];
+                }
                 ci[pc] = j;
             }
         }
@@ -212,17 +264,21 @@ fn transpose_unpermuted<const LO: bool, const NUMERIC: bool>(
 
 /// `C = A(p,p)'` — `t_cholmod_transpose_sym_permuted.c`.
 #[inline]
-fn transpose_permuted<const LO: bool, const NUMERIC: bool>(
+#[allow(clippy::too_many_arguments)]
+fn transpose_permuted<const LO: bool, const NUMERIC: bool, const VALUES: bool>(
     n: usize,
     ap: &Ws,
     ai: &Ws,
+    ax: &Ws<f64>,
     pinv: &Ws,
     wi: &mut Ws,
     ci: &mut Ws,
+    cx: &mut Ws<f64>,
 ) {
     for jold in 0..n as i64 {
         let jnew = pinv[jold];
-        for &iold in ai.range(ap[jold], ap[jold + 1]) {
+        let (pa, paend) = (ap[jold], ap[jold + 1]);
+        for (k, &iold) in ai.range(pa, paend).iter().enumerate() {
             /* get A(iold,jold) */
             let inew = pinv[iold];
             let flip = if LO {
@@ -243,6 +299,9 @@ fn transpose_permuted<const LO: bool, const NUMERIC: bool>(
                 let pc = wi[inew];
                 wi[inew] += 1;
                 if NUMERIC {
+                    if VALUES {
+                        cx[pc] = ax[pa + k as i64];
+                    }
                     ci[pc] = jnew;
                 }
             } else {
@@ -250,6 +309,9 @@ fn transpose_permuted<const LO: bool, const NUMERIC: bool>(
                 let pc = wi[jnew];
                 wi[jnew] += 1;
                 if NUMERIC {
+                    if VALUES {
+                        cx[pc] = ax[pa + k as i64];
+                    }
                     ci[pc] = inew;
                 }
             }
@@ -261,8 +323,13 @@ fn transpose_permuted<const LO: bool, const NUMERIC: bool>(
 /// (`t_cholmod_ptranspose.c:25-115`). For `A->stype != 0` it is exactly
 /// [`transpose_sym`]; the `fset` counting above it only runs when `stype == 0`.
 #[inline]
-fn ptranspose(a: &Pattern, perm: Option<&[i64]>, work: &mut WorkRef<'_>) -> Pattern {
-    transpose_sym(a, perm, work)
+pub fn ptranspose(
+    a: &Sparse,
+    values: bool,
+    perm: Option<&[i64]>,
+    work: &mut WorkRef<'_>,
+) -> Sparse {
+    transpose_sym(a, values, perm, work)
 }
 
 /* ========================================================================= */
@@ -299,7 +366,7 @@ fn update_etree(mut k: i64, i: i64, parent: &mut Ws, ancestor: &mut Ws) {
 /// not supported"), because the algorithm needs the columns of `triu(A)` and
 /// the lower form stores its transpose.
 pub fn etree(
-    a: &Pattern,
+    a: &Sparse,
     parent_buf: &mut [i64],
     work: &mut WorkRef<'_>,
 ) -> Result<(), SymbolicError> {
@@ -626,7 +693,7 @@ pub struct RowColCounts {
 /// including the diagonal; `cholmod_analyze` never asks for it.
 #[allow(clippy::too_many_arguments)]
 pub fn rowcolcounts(
-    a: &Pattern,
+    a: &Sparse,
     parent: &[i64],
     post: &[i64],
     row_count: Option<&mut [i64]>,
@@ -733,7 +800,7 @@ pub fn rowcolcounts(
     }
 
     /* clear workspace: Flag is shared, and PrevLeaf left it dirty */
-    work.clear_flag();
+    work.reset_flag();
 
     /* flop count and nnz(L) for subsequent LL' numerical factorization.
      * use double to avoid integer overflow.  lnz cannot be NaN. */
@@ -779,8 +846,8 @@ pub enum Ordering {
 /// Keeping that distinction is the whole point of the type — on the natural
 /// path one of `S`/`F` is `A` itself, so only one transpose gets built.
 struct Permuted {
-    a1: Option<Pattern>,
-    a2: Option<Pattern>,
+    a1: Option<Sparse>,
+    a2: Option<Sparse>,
     /// `S`, the upper form `cholmod_etree` needs.
     s: Handle,
     /// `F`, the lower form `cholmod_rowcolcounts` needs.
@@ -796,7 +863,7 @@ enum Handle {
 }
 
 impl Permuted {
-    fn get<'a>(&'a self, a: &'a Pattern, h: Handle) -> &'a Pattern {
+    fn get<'a>(&'a self, a: &'a Sparse, h: Handle) -> &'a Sparse {
         match h {
             Handle::A => a,
             Handle::A1 => self.a1.as_ref().expect("A1 was not built"),
@@ -805,11 +872,15 @@ impl Permuted {
     }
 }
 
+/// `cholmod_analyze` transposes for the pattern alone — every `ptranspose`
+/// inside `permute_matrices` passes `mode = 0` (`cholmod_analyze.c:199,211,...`).
+const PATTERN: bool = false;
+
 /// `permute_matrices` (`cholmod_analyze.c:161-280`) for a symmetric `A`, with
 /// `do_rowcolcounts` true — this port's only caller always wants the column
 /// counts, so the `F`-not-needed arm is never taken.
 fn permute_matrices(
-    a: &Pattern,
+    a: &Sparse,
     ordering: Ordering,
     perm: &[i64],
     work: &mut WorkRef<'_>,
@@ -824,12 +895,12 @@ fn permute_matrices(
         /* natural ordering of A */
         if a.stype < 0 {
             /* symmetric lower case: A already in lower form, so S=A' */
-            p.a2 = Some(ptranspose(a, None, work));
+            p.a2 = Some(ptranspose(a, PATTERN, None, work));
             p.f = Handle::A;
             p.s = Handle::A2;
         } else {
             /* symmetric upper case: F = pattern of triu (A)', S = A */
-            p.a1 = Some(ptranspose(a, None, work));
+            p.a1 = Some(ptranspose(a, PATTERN, None, work));
             p.f = Handle::A1;
             p.s = Handle::A;
         }
@@ -837,15 +908,15 @@ fn permute_matrices(
         /* A is permuted */
         if a.stype < 0 {
             /* symmetric lower case: S = tril (A (p,p))' and F = S' */
-            p.a2 = Some(ptranspose(a, Some(perm), work));
+            p.a2 = Some(ptranspose(a, PATTERN, Some(perm), work));
             p.s = Handle::A2;
-            p.a1 = Some(ptranspose(p.a2.as_ref().unwrap(), None, work));
+            p.a1 = Some(ptranspose(p.a2.as_ref().unwrap(), PATTERN, None, work));
             p.f = Handle::A1;
         } else {
             /* symmetric upper case: F = triu (A (p,p))' and S = F' */
-            p.a1 = Some(ptranspose(a, Some(perm), work));
+            p.a1 = Some(ptranspose(a, PATTERN, Some(perm), work));
             p.f = Handle::A1;
-            p.a2 = Some(ptranspose(p.a1.as_ref().unwrap(), None, work));
+            p.a2 = Some(ptranspose(p.a1.as_ref().unwrap(), PATTERN, None, work));
             p.s = Handle::A2;
         }
     }
@@ -860,7 +931,7 @@ fn permute_matrices(
 /// taken by reference here for the same reason, because `cholmod_analyze`
 /// reuses them for the composition afterwards.
 pub fn analyze_ordering(
-    a: &Pattern,
+    a: &Sparse,
     ordering: Ordering,
     perm: &[i64],
     parent: &mut [i64],
@@ -953,12 +1024,33 @@ pub fn analyze(
         return Err(SymbolicError::Unsymmetric);
     }
     let nz = validate_csc(n, indptr, indices)?;
-    let a = Pattern {
+    let a = Sparse {
         n,
         p: indptr[..n + 1].to_vec(),
         i: indices[..nz].to_vec(),
+        x: Vec::new(),
+        numeric: false,
         stype,
+        sorted: true,
     };
+    analyze_sparse(&a, ordering, default_strategy, width)
+}
+
+/// [`analyze`] for a matrix the caller already holds.
+///
+/// The two exist separately because a caller that goes on to factorize has the
+/// matrix in hand and should not pay to have it copied twice: `cholmod_analyze`
+/// takes the same `cholmod_sparse *A` that `cholmod_factorize` does.
+pub fn analyze_sparse(
+    a: &Sparse,
+    ordering: Ordering,
+    default_strategy: bool,
+    width: IntWidth,
+) -> Result<Symbolic, SymbolicError> {
+    if a.stype == 0 {
+        return Err(SymbolicError::Unsymmetric);
+    }
+    let n = a.n;
 
     /* allocate workspace.  Note: enough space needs to be allocated here so
      * that routines called by cholmod_analyze do not reallocate the space. */
@@ -971,9 +1063,9 @@ pub fn analyze(
         Ordering::Amd => {
             let (perm, info) = amd::cholmod_amd(
                 n,
-                indptr,
-                indices,
-                stype,
+                &a.p,
+                &a.i,
+                a.stype,
                 DEFAULT_DENSE,
                 DEFAULT_AGGRESSIVE,
                 width,
@@ -1005,7 +1097,7 @@ pub fn analyze(
     let (mut w, first, level) = work.split_analyze(n);
 
     let counts = analyze_ordering(
-        &a,
+        a,
         ordering,
         &lperm,
         &mut lparent,
@@ -1153,27 +1245,36 @@ mod tests {
     }
 
     /// `transpose_sym` is an involution up to `stype`, and the permuted form
-    /// has to agree with permuting the unpermuted one.
+    /// has to agree with permuting the unpermuted one. Run with values, so the
+    /// `VALUES` instantiation is walked under `debug_assertions` too — that is
+    /// what licenses its unchecked indexing.
     #[test]
     fn transpose_sym_round_trips() {
         for (name, n, edges) in corpus() {
             let (indptr, indices) = triangle_csc(n, &edges, true);
-            let a = Pattern {
+            /* a value that identifies its own (i,j), so a misplaced entry is
+             * a mismatch rather than a coincidence */
+            let x: Vec<f64> = (0..indices.len()).map(|p| p as f64 + 0.5).collect();
+            let a = Sparse {
                 n,
                 p: indptr,
                 i: indices,
+                x,
+                numeric: true,
                 stype: -1,
+                sorted: true,
             };
             let mut work = Work::new(n);
-            let t = transpose_sym(&a, None, &mut work.all());
+            let t = transpose_sym(&a, true, None, &mut work.all());
             assert_eq!(t.stype, 1, "{name}");
-            let tt = transpose_sym(&t, None, &mut work.all());
+            assert_eq!(t.x.len(), t.i.len(), "{name}");
+            let tt = transpose_sym(&t, true, None, &mut work.all());
             assert_eq!(tt.stype, -1, "{name}");
-            assert_eq!((tt.p, tt.i), (a.p.clone(), a.i.clone()), "{name}");
+            assert_eq!((&tt.p, &tt.i, &tt.x), (&a.p, &a.i, &a.x), "{name}");
 
             /* the permuted transpose is unsorted, so compare as sets */
             let p: Vec<i64> = (0..n as i64).rev().collect();
-            let mut got = transpose_sym(&a, Some(&p), &mut work.all());
+            let mut got = transpose_sym(&a, true, Some(&p), &mut work.all());
             assert_eq!(got.p[n], a.p[n], "{name}: permuting changed nnz");
             for j in 0..n {
                 let (lo, hi) = (got.p[j] as usize, got.p[j + 1] as usize);
@@ -1183,6 +1284,11 @@ mod tests {
                     assert!(i <= j as i64, "{name}: C({i},{j}) is not in the upper half");
                 }
             }
+            /* a value-carrying transpose moves the same multiset of values */
+            let (mut before, mut after) = (a.x.clone(), got.x.clone());
+            before.sort_by(f64::total_cmp);
+            after.sort_by(f64::total_cmp);
+            assert_eq!(before, after, "{name}: values were not carried");
         }
     }
 
@@ -1193,14 +1299,17 @@ mod tests {
     fn row_counts_and_column_counts_agree() {
         for (name, n, edges) in corpus() {
             let (indptr, indices) = triangle_csc(n, &edges, false);
-            let a = Pattern {
+            let a = Sparse {
                 n,
                 p: indptr,
                 i: indices,
+                x: Vec::new(),
+                numeric: false,
                 stype: 1,
+                sorted: true,
             };
             let mut work = Work::new(n);
-            let f = transpose_sym(&a, None, &mut work.all());
+            let f = transpose_sym(&a, PATTERN, None, &mut work.all());
             let mut parent = vec![EMPTY; n];
             etree(&a, &mut parent, &mut work.all()).unwrap();
             let mut post = vec![0i64; n];
@@ -1242,11 +1351,14 @@ mod tests {
             analyze(1, &[0, 1], &[0], 0, Ordering::Amd, true, IntWidth::I64),
             Err(SymbolicError::Unsymmetric)
         ));
-        let lower = Pattern {
+        let lower = Sparse {
             n: 1,
             p: vec![0, 1],
             i: vec![0],
+            x: Vec::new(),
+            numeric: false,
             stype: -1,
+            sorted: true,
         };
         let mut work = Work::new(1);
         let mut par = vec![EMPTY; 1];
@@ -1254,7 +1366,7 @@ mod tests {
             etree(&lower, &mut par, &mut work.all()),
             Err(SymbolicError::Unsymmetric)
         ));
-        let upper = Pattern { stype: 1, ..lower };
+        let upper = Sparse { stype: 1, ..lower };
         let (mut c, mut f, mut l) = (vec![0i64; 1], vec![0i64; 1], vec![0i64; 1]);
         assert!(matches!(
             rowcolcounts(
