@@ -59,45 +59,16 @@ fn amd_order(
              stype selects which triangle is the stored half",
         ));
     }
-    if indptr.len() != n + 1 {
-        return Err(PyValueError::new_err(format!(
-            "indptr has length {}, expected n+1 = {}",
-            indptr.len(),
-            n + 1
-        )));
-    }
-    let nz = *indptr.last().unwrap_or(&0);
-    if nz < 0 || (nz as usize) > indices.len() {
-        return Err(PyValueError::new_err(
-            "indptr[n] is out of range for the given indices",
-        ));
-    }
-    // A branchless min/max fold so the O(nnz) validation vectorizes; the
-    // reporting scan below only runs when it has already failed. Written as a
-    // loop rather than `any` because the early exit costs more than it saves
-    // on the overwhelmingly common valid input.
-    let (lo, hi) = indices[..nz as usize]
-        .iter()
-        .fold((0i64, 0i64), |(lo, hi), &i| (lo.min(i), hi.max(i)));
-    if nz > 0 && (lo < 0 || hi >= n as i64) {
-        let (p, i) = indices[..nz as usize]
-            .iter()
-            .enumerate()
-            .find(|(_, &i)| i < 0 || i >= n as i64)
-            .map(|(p, &i)| (p, i))
-            .unwrap();
-        return Err(PyValueError::new_err(format!(
-            "row index {i} at position {p} is out of range for n = {n}"
-        )));
-    }
-
     let width = if use_long {
         IntWidth::I64
     } else {
         IntWidth::I32
     };
-    let (perm, info) =
-        py.allow_threads(|| amd::cholmod_amd(n, indptr, indices, stype, dense, aggressive, width));
+    // `cholmod_amd` validates the pattern itself — that check is what licenses
+    // its kernels to index without re-checking, so it cannot be hoisted here.
+    let (perm, info) = py
+        .allow_threads(|| amd::cholmod_amd(n, indptr, indices, stype, dense, aggressive, width))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let d = PyDict::new(py);
     d.set_item("AMD_LNZ", info.lnz)?;

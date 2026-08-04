@@ -294,15 +294,41 @@ def test_amd_empty_and_singleton():
 
 
 def test_amd_rejects_bad_input():
+    """The port indexes its workspaces without a per-access bounds check, so
+    this validation is what stands between a malformed pattern and an
+    out-of-bounds write. It runs on the arrays as they arrive from Python,
+    which is the only place they are untrusted."""
     M = sp.csc_array(sp.eye_array(5).tocsc())
+    indptr = M.indptr.astype(np.int64)
+    indices = M.indices.astype(np.int64)
+
     with pytest.raises(ValueError, match="stype must be nonzero"):
         amd_order(M, stype=0)
     with pytest.raises(ValueError, match="indptr has length"):
-        _rs.amd_order(6, M.indptr.astype(np.int64), M.indices.astype(np.int64), 1)
-    bad = M.indices.astype(np.int64).copy()
+        _rs.amd_order(6, indptr, indices, 1)
+
+    bad = indices.copy()
     bad[0] = 99
     with pytest.raises(ValueError, match="out of range"):
-        _rs.amd_order(5, M.indptr.astype(np.int64), bad, 1)
+        _rs.amd_order(5, indptr, bad, 1)
+    bad[0] = -1
+    with pytest.raises(ValueError, match="out of range"):
+        _rs.amd_order(5, indptr, bad, 1)
+
+    # a non-monotone indptr is what would otherwise send the column loop past
+    # the end of `indices`
+    bad = indptr.copy()
+    bad[2] = 0
+    with pytest.raises(ValueError, match="non-decreasing"):
+        _rs.amd_order(5, bad, indices, 1)
+    bad = indptr.copy()
+    bad[0] = -1
+    with pytest.raises(ValueError, match="non-decreasing"):
+        _rs.amd_order(5, bad, indices, 1)
+    bad = indptr.copy()
+    bad[5] = 99
+    with pytest.raises(ValueError, match="out of range for 5 row indices"):
+        _rs.amd_order(5, bad, indices, 1)
 
 
 def test_amd_ignores_the_unstored_triangle():

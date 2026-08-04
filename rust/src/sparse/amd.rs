@@ -21,6 +21,170 @@
 //! where `hash` overflows, so the width is carried explicitly in [`IntWidth`]
 //! rather than baked in: everything else runs in `i64`.
 
+/// A workspace array indexed by `Int`, the way the C indexes it.
+///
+/// AMD is a dense mesh of `Iw [Pe [e]]`-style indirections whose subscripts are
+/// values the algorithm itself wrote into another workspace array a few lines
+/// earlier. Nothing in those data flows is visible to the optimizer, so a plain
+/// `slice[i as usize]` costs a compare-and-branch on every access; on these
+/// loops that is a measured 1.3x against the C, which walks raw pointers.
+///
+/// The bound is therefore checked under `debug_assertions` and elided
+/// otherwise. That is only worth anything if the debug build is actually
+/// exercised, so [`tests`] runs a corpus covering garbage collection, dense
+/// rows, mass elimination, and supervariable detection through every routine
+/// here — `cargo test` is a debug build, so each of those asserts fires on
+/// every index the corpus touches.
+#[repr(transparent)]
+pub struct Ws([i64]);
+
+impl Ws {
+    /// Borrow a workspace slice. `#[inline(always)]` because the whole point is
+    /// that this compiles to nothing.
+    #[inline(always)]
+    fn new(s: &mut [i64]) -> &mut Ws {
+        // SAFETY: `Ws` is `#[repr(transparent)]` over `[i64]`.
+        unsafe { &mut *(s as *mut [i64] as *mut Ws) }
+    }
+
+    #[inline(always)]
+    fn new_ref(s: &[i64]) -> &Ws {
+        // SAFETY: `Ws` is `#[repr(transparent)]` over `[i64]`.
+        unsafe { &*(s as *const [i64] as *const Ws) }
+    }
+}
+
+/// `i64` is how the C spells a subscript; `usize` is how the loop counters
+/// arrive. Both land on the same unchecked access.
+macro_rules! ws_index {
+    ($t:ty) => {
+        impl core::ops::Index<$t> for Ws {
+            type Output = i64;
+            #[inline(always)]
+            fn index(&self, i: $t) -> &i64 {
+                debug_assert!(
+                    i as i64 >= 0 && (i as usize) < self.0.len(),
+                    "Ws index {i} out of range for len {}",
+                    self.0.len()
+                );
+                // SAFETY: checked in debug builds, which is where the corpus runs.
+                unsafe { self.0.get_unchecked(i as usize) }
+            }
+        }
+
+        impl core::ops::IndexMut<$t> for Ws {
+            #[inline(always)]
+            fn index_mut(&mut self, i: $t) -> &mut i64 {
+                debug_assert!(
+                    i as i64 >= 0 && (i as usize) < self.0.len(),
+                    "Ws index {i} out of range for len {}",
+                    self.0.len()
+                );
+                // SAFETY: checked in debug builds, which is where the corpus runs.
+                unsafe { self.0.get_unchecked_mut(i as usize) }
+            }
+        }
+    };
+}
+
+ws_index!(i64);
+ws_index!(usize);
+
+/// Why a CSC pattern was rejected. Carries enough to name the offending entry,
+/// because the O(nnz) scan that finds it only runs once validation has already
+/// failed.
+#[derive(Debug)]
+pub enum CscError {
+    /// `indptr` was not `n + 1` long.
+    IndptrLen { got: usize, want: usize },
+    /// `indptr` was not non-negative and non-decreasing.
+    IndptrNotMonotone { at: usize, prev: i64, got: i64 },
+    /// `indptr[n]` ran past the end of `indices`.
+    IndptrPastEnd { nz: i64, len: usize },
+    /// A row index fell outside `[0, n)`.
+    RowOutOfRange { at: usize, got: i64, n: usize },
+}
+
+impl core::fmt::Display for CscError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            CscError::IndptrLen { got, want } => {
+                write!(f, "indptr has length {got}, expected n+1 = {want}")
+            }
+            CscError::IndptrNotMonotone { at, prev, got } => write!(
+                f,
+                "indptr must be non-negative and non-decreasing: \
+                 indptr[{at}] = {got} follows {prev}"
+            ),
+            CscError::IndptrPastEnd { nz, len } => {
+                write!(f, "indptr[n] = {nz} is out of range for {len} row indices")
+            }
+            CscError::RowOutOfRange { at, got, n } => write!(
+                f,
+                "row index {got} at position {at} is out of range for n = {n}"
+            ),
+        }
+    }
+}
+
+/// Check that `(indptr, indices)` is a well-formed CSC pattern over `n`
+/// columns, and return its `nnz`.
+///
+/// This is a precondition, not a courtesy: it is what makes every subscript
+/// derived from `indptr`/`indices` downstream provably in range, so the
+/// O(nnz) kernels can index without re-checking. O(n) for the pointers plus
+/// one branchless O(nnz) pass for the row indices — the reporting scan that
+/// locates a bad entry only runs after that pass has already failed.
+pub fn validate_csc(n: usize, indptr: &[i64], indices: &[i64]) -> Result<usize, CscError> {
+    if indptr.len() != n + 1 {
+        return Err(CscError::IndptrLen {
+            got: indptr.len(),
+            want: n + 1,
+        });
+    }
+    let mut prev = 0i64;
+    for (j, &p) in indptr.iter().enumerate() {
+        if p < prev {
+            return Err(CscError::IndptrNotMonotone {
+                at: j,
+                prev,
+                got: p,
+            });
+        }
+        prev = p;
+    }
+    let nz = indptr[n];
+    if nz as usize > indices.len() {
+        return Err(CscError::IndptrPastEnd {
+            nz,
+            len: indices.len(),
+        });
+    }
+    let nz = nz as usize;
+
+    // Two independent accumulators so the reduction is a pair of vector
+    // min/max chains rather than one tuple-carrying loop LLVM declines to
+    // widen. The `find` below is the slow path and never runs on valid input.
+    //
+    // `hi` starts below every legal index rather than at 0, so an empty
+    // pattern stays legal at n = 0 instead of tripping `hi >= n`.
+    let (mut lo, mut hi) = (0i64, -1i64);
+    for &i in &indices[..nz] {
+        lo = lo.min(i);
+        hi = hi.max(i);
+    }
+    if lo < 0 || hi >= n as i64 {
+        let (at, got) = indices[..nz]
+            .iter()
+            .enumerate()
+            .find(|(_, &i)| i < 0 || i >= n as i64)
+            .map(|(p, &i)| (p, i))
+            .expect("the min/max fold only fails when some index is out of range");
+        return Err(CscError::RowOutOfRange { at, got, n });
+    }
+    Ok(nz)
+}
+
 /// `amd_internal.h:71`.
 const EMPTY: i64 = -1;
 
@@ -89,7 +253,7 @@ pub struct AmdInfo {
 /* ========================================================================= */
 
 /// `amd_2.c:22-35`.
-fn clear_flag(wflg: i64, wbig: i64, w: &mut [i64], n: i64) -> i64 {
+fn clear_flag(wflg: i64, wbig: i64, w: &mut Ws, n: i64) -> i64 {
     if wflg < 2 || wflg >= wbig {
         for x in 0..n as usize {
             if w[x] != 0 {
@@ -111,16 +275,16 @@ fn clear_flag(wflg: i64, wbig: i64, w: &mut [i64], n: i64) -> i64 {
 fn post_tree(
     root: i64,
     k_in: i64,
-    child: &mut [i64],
-    sibling: &[i64],
-    order: &mut [i64],
-    stack: &mut [i64],
+    child: &mut Ws,
+    sibling: &Ws,
+    order: &mut Ws,
+    stack: &mut Ws,
 ) -> i64 {
     let mut k = k_in;
 
     /* push root on the stack */
     let mut head: i64 = 0;
-    stack[0] = root;
+    stack[0usize] = root;
 
     while head >= 0 {
         /* get head of stack */
@@ -165,13 +329,13 @@ fn post_tree(
 #[allow(clippy::too_many_arguments)]
 fn postorder(
     nn: i64,
-    parent: &[i64],
-    nv: &[i64],
-    fsize: &[i64],
-    order: &mut [i64],
-    child: &mut [i64],
-    sibling: &mut [i64],
-    stack: &mut [i64],
+    parent: &Ws,
+    nv: &Ws,
+    fsize: &Ws,
+    order: &mut Ws,
+    child: &mut Ws,
+    sibling: &mut Ws,
+    stack: &mut Ws,
 ) {
     for j in 0..nn as usize {
         child[j] = EMPTY;
@@ -284,6 +448,38 @@ pub fn amd_2(
     control_aggressive: bool,
     width: IntWidth,
 ) -> AmdInfo {
+    assert!(
+        n >= 0
+            && (n as usize)
+                <= pe
+                    .len()
+                    .min(len.len())
+                    .min(nv.len())
+                    .min(next.len())
+                    .min(last.len())
+                    .min(head.len())
+                    .min(elen.len())
+                    .min(degree.len())
+                    .min(w.len())
+            && iwlen >= 0
+            && (iwlen as usize) <= iw.len()
+            && (0..=iwlen).contains(&pfree_in),
+        "amd_2 workspace is too small for n = {n}, iwlen = {iwlen}"
+    );
+    /* Every subscript in the body is either a loop counter below `n`/`iwlen` or
+     * a value AMD wrote into one of these arrays itself, so the assertion above
+     * is what licenses `Ws` to index them without a per-access check. */
+    let pe = Ws::new(pe);
+    let iw = Ws::new(iw);
+    let len = Ws::new(len);
+    let nv = Ws::new(nv);
+    let next = Ws::new(next);
+    let last = Ws::new(last);
+    let head = Ws::new(head);
+    let elen = Ws::new(elen);
+    let degree = Ws::new(degree);
+    let w = Ws::new(w);
+
     let mut pfree = pfree_in;
     let hash_mask = width.hash_mask();
 
@@ -1214,27 +1410,38 @@ pub fn copy_sym_to_unsym(
     a_indptr: &[i64],
     a_indices: &[i64],
     stype: i32,
-) -> (Vec<i64>, Vec<i64>, usize) {
+) -> Result<(Vec<i64>, Vec<i64>, usize), CscError> {
     let up = stype > 0;
     let lo = stype < 0;
+
+    /* ------------------------------------------------------------------ */
+    /* check the pattern is a well-formed CSC over n columns */
+    /* ------------------------------------------------------------------ */
+
+    /* Every subscript below is then provably in range, which is what lets the
+     * two O(nnz) passes index through `Ws` without re-checking per access. */
+    let nz = validate_csc(n, a_indptr, a_indices)?;
+    let a_indptr = Ws::new_ref(&a_indptr[..n + 1]);
+    let a_indices = Ws::new_ref(&a_indices[..nz]);
 
     /* ------------------------------------------------------------------ */
     /* count entries in each column of C */
     /* ------------------------------------------------------------------ */
 
-    let mut wj = vec![0i64; n];
+    let mut wj_buf = vec![0i64; n];
+    let wj = Ws::new(&mut wj_buf);
     let mut cnz: usize = 0;
 
-    for j in 0..n {
+    for j in 0..n as i64 {
         for p in a_indptr[j]..a_indptr[j + 1] {
-            let i = a_indices[p as usize];
-            if i == j as i64 {
+            let i = a_indices[p];
+            if i == j {
                 /* diagonal entry A(i,i): ignore_diag is always true here */
                 continue;
-            } else if (up && i < j as i64) || (lo && i > j as i64) {
+            } else if (up && i < j) || (lo && i > j) {
                 /* A(i,j) is placed in both upper and lower part of C */
                 wj[j] += 1;
-                wj[i as usize] += 1;
+                wj[i] += 1;
                 cnz += 2;
             }
         }
@@ -1257,35 +1464,37 @@ pub fn copy_sym_to_unsym(
         acc += wj[j];
     }
     cp[n] = acc;
-    wj[..n].copy_from_slice(&cp[..n]);
+    wj_buf.copy_from_slice(&cp[..n]);
+    let wj = Ws::new(&mut wj_buf);
 
     /* ------------------------------------------------------------------ */
     /* construct C */
     /* ------------------------------------------------------------------ */
 
     let mut ci = vec![0i64; cnzmax];
-    for j in 0..n {
+    let cw = Ws::new(&mut ci);
+    for j in 0..n as i64 {
         for p in a_indptr[j]..a_indptr[j + 1] {
-            let i = a_indices[p as usize];
+            let i = a_indices[p];
             /* skip entries in the half that isn't stored */
-            if (up && i > j as i64) || (lo && i < j as i64) {
+            if (up && i > j) || (lo && i < j) {
                 continue;
             }
             /* the diagonal is dropped: `keep_diag` is false for mode -2 */
-            if i == j as i64 {
+            if i == j {
                 continue;
             }
             /* place A(i,j) in C(:,j) and A(i,j)' in C(:,i) */
             let q = wj[j];
             wj[j] += 1;
-            ci[q as usize] = i;
-            let q = wj[i as usize];
-            wj[i as usize] += 1;
-            ci[q as usize] = j as i64;
+            cw[q] = i;
+            let q = wj[i];
+            wj[i] += 1;
+            cw[q] = j;
         }
     }
 
-    (cp, ci, cnzmax)
+    Ok((cp, ci, cnzmax))
 }
 
 /// `cholmod_amd` (`Cholesky/cholmod_amd.c:44-194`) for a symmetric `A`.
@@ -1300,13 +1509,14 @@ pub fn cholmod_amd(
     control_dense: f64,
     control_aggressive: bool,
     width: IntWidth,
-) -> (Vec<i64>, AmdInfo) {
+) -> Result<(Vec<i64>, AmdInfo), CscError> {
     if n == 0 {
-        return (Vec::new(), AmdInfo::default());
+        validate_csc(n, a_indptr, a_indices)?;
+        return Ok((Vec::new(), AmdInfo::default()));
     }
 
     /* construct the input matrix for AMD */
-    let (mut cp, mut ci, cnzmax) = copy_sym_to_unsym(n, a_indptr, a_indices, stype);
+    let (mut cp, mut ci, cnzmax) = copy_sym_to_unsym(n, a_indptr, a_indices, stype)?;
 
     let mut len = vec![0i64; n];
     for j in 0..n {
@@ -1344,5 +1554,291 @@ pub fn cholmod_amd(
         width,
     );
 
-    (perm, info)
+    Ok((perm, info))
+}
+
+/* ========================================================================= */
+/* === tests =============================================================== */
+/* ========================================================================= */
+
+#[cfg(test)]
+mod tests {
+    //! What this module is for, and what it is *not* for.
+    //!
+    //! [`Ws`] elides its bounds check outside `debug_assertions`, so the
+    //! guarantee that AMD never indexes out of range rests on a debug build
+    //! actually walking every one of those subscripts. `cargo test` is a debug
+    //! build; the corpus below is chosen so that between them the cases reach
+    //! garbage collection, dense-row removal, mass elimination, supervariable
+    //! detection via hash collisions, and the degree-0 path — i.e. the branches
+    //! that compute subscripts in the least obvious ways.
+    //!
+    //! Bit-exactness against upstream's C is *not* checked here. That lives in
+    //! the Python suite, which pins values taken from AMD 3.3.1 compiled at the
+    //! target tag and driven the way `cholmod_amd` drives it. These tests check
+    //! memory safety and structural invariants; that one checks the numbers.
+
+    use super::*;
+
+    /// Deterministic, so a failing case is reproducible without a seed to
+    /// thread through. Numerical Recipes' LCG constants.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next_u32(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) as u32
+        }
+
+        /// Uniform on `[0, hi)`; the modulo bias is irrelevant for a pattern
+        /// generator.
+        fn below(&mut self, hi: usize) -> usize {
+            self.next_u32() as usize % hi
+        }
+    }
+
+    /// CSC pattern of one triangle of a symmetric matrix, from its off-diagonal
+    /// edges plus a full diagonal. `lower` picks which triangle is stored, i.e.
+    /// which sign of `stype` the result is meant for.
+    fn triangle_csc(n: usize, edges: &[(usize, usize)], lower: bool) -> (Vec<i64>, Vec<i64>) {
+        let mut cols: Vec<Vec<i64>> = vec![Vec::new(); n];
+        for j in 0..n {
+            cols[j].push(j as i64);
+        }
+        for &(a, b) in edges {
+            if a == b || a >= n || b >= n {
+                continue;
+            }
+            let (hi, lo) = (a.max(b), a.min(b));
+            /* the stored half puts the entry in the column that keeps it on
+             * the correct side of the diagonal */
+            if lower {
+                cols[lo].push(hi as i64);
+            } else {
+                cols[hi].push(lo as i64);
+            }
+        }
+        let mut indptr = vec![0i64; n + 1];
+        let mut indices = Vec::new();
+        for j in 0..n {
+            cols[j].sort_unstable();
+            cols[j].dedup();
+            indices.extend_from_slice(&cols[j]);
+            indptr[j + 1] = indices.len() as i64;
+        }
+        (indptr, indices)
+    }
+
+    /// Matrices that between them reach every branch of [`amd_2`] that computes
+    /// a subscript from data.
+    fn corpus() -> Vec<(&'static str, usize, Vec<(usize, usize)>)> {
+        let mut out: Vec<(&'static str, usize, Vec<(usize, usize)>)> = Vec::new();
+
+        out.push(("empty", 0, Vec::new()));
+        out.push(("singleton", 1, Vec::new()));
+        /* every degree is 0: the all-empty-rows path */
+        out.push(("diagonal-32", 32, Vec::new()));
+
+        for &(n, bw) in &[(50usize, 2usize), (400, 5)] {
+            let mut e = Vec::new();
+            for j in 0..n {
+                for k in 1..=bw {
+                    if j + k < n {
+                        e.push((j, j + k));
+                    }
+                }
+            }
+            out.push(("banded", n, e));
+        }
+
+        /* one row touching everything: the `deg > dense` removal path */
+        let mut arrow = Vec::new();
+        for j in 1..300 {
+            arrow.push((0usize, j));
+            if j + 1 < 300 {
+                arrow.push((j, j + 1));
+            }
+        }
+        out.push(("arrow-300", 300, arrow));
+
+        /* Sparse random graphs, which is what forces Iw to run out: the elbow
+         * room amd_2 gets is proportional to nnz, while the fill-in these
+         * produce is not, so the element lists outgrow it and garbage
+         * collection runs. Denser random matrices never reach that branch. */
+        let mut rng = Lcg(0x5eed);
+        for &(n, m) in &[
+            (200usize, 400usize),
+            (400, 1600),
+            (1000, 2000),
+            (600, 12000),
+        ] {
+            let mut e = Vec::with_capacity(m);
+            for _ in 0..m {
+                e.push((rng.below(n), rng.below(n)));
+            }
+            out.push(("random", n, e));
+        }
+
+        /* rows repeated in blocks of four have identical patterns, which is
+         * what drives supervariable detection through its hash buckets */
+        let mut dup = Vec::new();
+        let (n, blk) = (160usize, 4usize);
+        for a in 0..n / blk {
+            for b in 0..n / blk {
+                if rng.below(3) == 0 {
+                    for p in 0..blk {
+                        for q in 0..blk {
+                            dup.push((a * blk + p, b * blk + q));
+                        }
+                    }
+                }
+            }
+        }
+        out.push(("duplicate-rows-160", n, dup));
+
+        /* disconnected components exercise the multiple-roots path in postorder */
+        let mut blocks = Vec::new();
+        let mut base = 0usize;
+        for &k in &[7usize, 13, 5, 21, 9] {
+            for a in 0..k {
+                for b in 0..a {
+                    if rng.below(2) == 0 {
+                        blocks.push((base + a, base + b));
+                    }
+                }
+            }
+            base += k;
+        }
+        out.push(("block-diagonal", base, blocks));
+
+        out
+    }
+
+    fn widths() -> [IntWidth; 2] {
+        [IntWidth::I32, IntWidth::I64]
+    }
+
+    /// The corpus below is only evidence if the check it relies on is live in
+    /// this profile, so prove that separately rather than assuming it.
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn ws_still_checks_its_bound_under_cfg_test() {
+        let mut buf = [0i64; 4];
+        let ws = Ws::new(&mut buf);
+        std::hint::black_box(ws[10i64]);
+    }
+
+    /// The point of the whole module: every subscript AMD forms, under a build
+    /// where [`Ws`] still checks them.
+    #[test]
+    fn amd_never_indexes_out_of_bounds() {
+        for (name, n, edges) in corpus() {
+            for lower in [true, false] {
+                let (indptr, indices) = triangle_csc(n, &edges, lower);
+                let stype = if lower { -1 } else { 1 };
+                for width in widths() {
+                    let (perm, _) = cholmod_amd(
+                        n,
+                        &indptr,
+                        &indices,
+                        stype,
+                        DEFAULT_DENSE,
+                        DEFAULT_AGGRESSIVE,
+                        width,
+                    )
+                    .unwrap_or_else(|e| panic!("{name} (stype {stype}): {e}"));
+
+                    assert_eq!(perm.len(), n, "{name}: Perm should have n entries");
+                    let mut seen = vec![false; n];
+                    for &p in &perm {
+                        assert!(
+                            p >= 0 && (p as usize) < n,
+                            "{name}: Perm has {p}, which is not a row of an n = {n} matrix"
+                        );
+                        assert!(!seen[p as usize], "{name}: Perm repeats {p}");
+                        seen[p as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// A corpus that misses the awkward branches would let this module pass
+    /// while checking nothing, so assert the branches were reached.
+    #[test]
+    fn corpus_reaches_the_branches_worth_checking() {
+        let (mut any_gc, mut any_dense, mut any_super) = (false, false, false);
+        for (_, n, edges) in corpus() {
+            let (indptr, indices) = triangle_csc(n, &edges, true);
+            let (_, info) = cholmod_amd(
+                n,
+                &indptr,
+                &indices,
+                -1,
+                DEFAULT_DENSE,
+                DEFAULT_AGGRESSIVE,
+                IntWidth::I64,
+            )
+            .unwrap();
+            any_gc |= info.ncmpa > 0.0;
+            any_dense |= info.ndense > 0.0;
+            /* fewer pivots than rows means supervariables were merged */
+            any_super |= info.lnz > 0.0 && info.dmax > 1.0;
+        }
+        assert!(
+            any_gc,
+            "no matrix made Iw run out, so garbage collection never ran"
+        );
+        assert!(
+            any_dense,
+            "no matrix had a dense row, so that removal path never ran"
+        );
+        assert!(any_super, "no matrix formed a supervariable");
+    }
+
+    /// The unchecked indexing downstream is licensed by this check, so it has
+    /// to actually reject each way a pattern can be malformed.
+    #[test]
+    fn validate_csc_rejects_malformed_patterns() {
+        assert!(matches!(
+            validate_csc(3, &[0, 1, 2], &[0, 1, 2]),
+            Err(CscError::IndptrLen { got: 3, want: 4 })
+        ));
+        /* a non-monotone indptr is what would otherwise let the column loop
+         * walk off the end of `indices` */
+        assert!(matches!(
+            validate_csc(3, &[0, 2, 1, 3], &[0, 1, 2]),
+            Err(CscError::IndptrNotMonotone { at: 2, .. })
+        ));
+        assert!(matches!(
+            validate_csc(3, &[-1, 0, 1, 2], &[0, 1, 2]),
+            Err(CscError::IndptrNotMonotone { at: 0, .. })
+        ));
+        assert!(matches!(
+            validate_csc(2, &[0, 1, 9], &[0, 1]),
+            Err(CscError::IndptrPastEnd { nz: 9, len: 2 })
+        ));
+        assert!(matches!(
+            validate_csc(3, &[0, 1, 2, 3], &[0, 7, 2]),
+            Err(CscError::RowOutOfRange {
+                at: 1,
+                got: 7,
+                n: 3
+            })
+        ));
+        assert!(matches!(
+            validate_csc(3, &[0, 1, 2, 3], &[0, -1, 2]),
+            Err(CscError::RowOutOfRange {
+                at: 1,
+                got: -1,
+                n: 3
+            })
+        ));
+        /* an empty pattern at n = 0 is well-formed, not a row-out-of-range */
+        assert!(matches!(validate_csc(0, &[0], &[]), Ok(0)));
+        assert!(matches!(validate_csc(3, &[0, 1, 2, 3], &[0, 1, 2]), Ok(3)));
+    }
 }
