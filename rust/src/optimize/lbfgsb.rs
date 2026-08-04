@@ -143,8 +143,15 @@ impl State {
 }
 
 /// lbfgsb.c `active` (:929).
-fn active(n: usize, lo: &[f64], up: &[f64], nbd: &[i32], x: &mut [f64], iwhere: &mut [i32],
-          st: &mut State) {
+fn active(
+    n: usize,
+    lo: &[f64],
+    up: &[f64],
+    nbd: &[i32],
+    x: &mut [f64],
+    iwhere: &mut [i32],
+    st: &mut State,
+) {
     st.prjctd = false;
     st.cnstnd = false;
     st.boxed = true;
@@ -777,8 +784,7 @@ fn formk(
     }
     for is_ in (col + 1)..=col2 {
         for js in is_..=col2 {
-            wn[(is_ - 1) + (js - 1) * m2] +=
-                ddot_same(col, wn, (is_ - 1) * m2, (js - 1) * m2);
+            wn[(is_ - 1) + (js - 1) * m2] += ddot_same(col, wn, (is_ - 1) * m2, (js - 1) * m2);
         }
     }
     let info = dpofa(wn, col + col * m2, m2, col);
@@ -1577,9 +1583,28 @@ pub fn mainlb(
                 let mut z = std::mem::take(&mut st.z);
                 let mut wa = std::mem::take(&mut st.wa);
                 let (nint, info) = cauchy(
-                    n, x, lo, up, nbd, g, &mut iorder, &mut iwhere, &mut t, &mut d, &mut z, m,
-                    &st.wy, &st.ws, &st.sy, &st.wt, st.theta, st.col, st.head, &mut wa,
-                    st.sbgnrm, st.epsmch,
+                    n,
+                    x,
+                    lo,
+                    up,
+                    nbd,
+                    g,
+                    &mut iorder,
+                    &mut iwhere,
+                    &mut t,
+                    &mut d,
+                    &mut z,
+                    m,
+                    &st.wy,
+                    &st.ws,
+                    &st.sy,
+                    &st.wt,
+                    st.theta,
+                    st.col,
+                    st.head,
+                    &mut wa,
+                    st.sbgnrm,
+                    st.epsmch,
                 );
                 st.indx2 = iorder;
                 st.iwhere = iwhere;
@@ -1603,8 +1628,7 @@ pub fn mainlb(
                 let mut indx = std::mem::take(&mut st.indx);
                 let mut indx2 = std::mem::take(&mut st.indx2);
                 let (nfree, nenter, ileave, w) = freev(
-                    n, st.nfree, &mut indx, &mut indx2, &st.iwhere, st.updatd, st.cnstnd,
-                    st.iter,
+                    n, st.nfree, &mut indx, &mut indx2, &st.iwhere, st.updatd, st.cnstnd, st.iter,
                 );
                 st.indx = indx;
                 st.indx2 = indx2;
@@ -1625,8 +1649,8 @@ pub fn mainlb(
                     let mut snd = std::mem::take(&mut st.snd);
                     st.info = formk(
                         n, st.nfree, &st.indx, st.nenter, st.ileave, &st.indx2, st.iupdat,
-                        st.updatd, &mut wn, &mut snd, m, &st.ws, &st.wy, &st.sy, st.theta,
-                        st.col, st.head,
+                        st.updatd, &mut wn, &mut snd, m, &st.ws, &st.wy, &st.sy, st.theta, st.col,
+                        st.head,
                     );
                     st.wn = wn;
                     st.snd = snd;
@@ -1688,8 +1712,8 @@ pub fn mainlb(
                 let z = std::mem::take(&mut st.z);
                 let mut r = std::mem::take(&mut st.r);
                 let mut t = std::mem::take(&mut st.t);
-                let (fnew, tnew) = lnsrlb(n, lo, up, nbd, x, f, g, &d, &mut r, &mut t, &z,
-                                          &task, st);
+                let (fnew, tnew) =
+                    lnsrlb(n, lo, up, nbd, x, f, g, &d, &mut r, &mut t, &z, &task, st);
                 st.d = d;
                 st.z = z;
                 st.r = r;
@@ -1835,7 +1859,9 @@ pub fn lbfgsb_drive(
     let mut f = 0.0;
     let mut iter = 0;
     loop {
-        let (fnew, tnew) = mainlb(n, m, x, lo, up, nbd, f, &mut g, factr, pgtol, &task, &mut st);
+        let (fnew, tnew) = mainlb(
+            n, m, x, lo, up, nbd, f, &mut g, factr, pgtol, &task, &mut st,
+        );
         f = fnew;
         task = tnew;
         if task.starts_with("FG") {

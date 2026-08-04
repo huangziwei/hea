@@ -22,13 +22,15 @@ _PT_PER_MM = 72.27 / 25.4
 
 @dataclass
 class GeomPolygon(Geom):
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": None,
-        "fill": "grey20",
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": None,
+            "fill": "grey20",
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+        }
+    )
     required_aes: tuple = ("x", "y")
     key_glyph: str = "polygon"
 
@@ -56,8 +58,9 @@ class GeomPolygon(Geom):
             xy = np.column_stack([sub["x"].to_numpy(), sub["y"].to_numpy()])
             patches.append(Polygon(xy, closed=True))
             per_patch_fills.append(_first_color(sub, "fill", "grey20"))
-            per_patch_edges.append(_first_color(sub, "colour", "none",
-                                                missing_value="none"))
+            per_patch_edges.append(
+                _first_color(sub, "colour", "none", missing_value="none")
+            )
 
         if not patches:
             return
@@ -77,8 +80,10 @@ class GeomPolygon(Geom):
         all_x = data["x"].to_numpy()
         all_y = data["y"].to_numpy()
         ax.update_datalim(
-            [(float(all_x.min()), float(all_y.min())),
-             (float(all_x.max()), float(all_y.max()))]
+            [
+                (float(all_x.min()), float(all_y.min())),
+                (float(all_x.max()), float(all_y.max())),
+            ]
         )
         ax.autoscale_view()
 
@@ -107,8 +112,9 @@ def _first_color(df, col, default, *, missing_value=None):
     return missing_value if missing_value is not None else r_color(default)
 
 
-def geom_polygon(mapping=None, data=None, *, stat="identity",
-                 position="identity", **kwargs):
+def geom_polygon(
+    mapping=None, data=None, *, stat="identity", position="identity", **kwargs
+):
     """Filled polygons. Each ``group`` becomes one polygon, vertices in
     row order. Aesthetics: ``x``, ``y``, ``group``, ``fill``, ``colour``,
     ``alpha``, ``size``, ``linetype``."""

@@ -7,7 +7,7 @@
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
 
-use super::gamma::pgamma_scalar;
+use super::gamma::{lgamma1p, pgamma_scalar, r_dt_clog};
 use super::loader::{dbinom_raw, dpois_raw};
 use super::norm::{dt0, dt1, qnorm5_scalar};
 use super::toms708::{bratio, lbeta_scalar, pbeta_scalar};
@@ -55,13 +55,7 @@ pub(crate) fn pbinom_scalar(x: f64, n: f64, p: f64, lower_tail: bool, log_p: boo
     pbeta_scalar(p, x + 1.0, n - x, !lower_tail, log_p)
 }
 
-pub(crate) fn pnbinom_mu_scalar(
-    x: f64,
-    size: f64,
-    mu: f64,
-    lower_tail: bool,
-    log_p: bool,
-) -> f64 {
+pub(crate) fn pnbinom_mu_scalar(x: f64, size: f64, mu: f64, lower_tail: bool, log_p: bool) -> f64 {
     if x.is_nan() || size.is_nan() || mu.is_nan() {
         return x + size + mu;
     }
@@ -155,7 +149,11 @@ pub(crate) fn dbeta_scalar(x: f64, a: f64, b: f64, give_log: bool) -> f64 {
     }
     if a == 0.0 || b == 0.0 || !a.is_finite() || !b.is_finite() {
         if a == 0.0 && b == 0.0 {
-            return if x == 0.0 || x == 1.0 { f64::INFINITY } else { rd0 };
+            return if x == 0.0 || x == 1.0 {
+                f64::INFINITY
+            } else {
+                rd0
+            };
         }
         if a == 0.0 || a / b == 0.0 {
             return if x == 0.0 { f64::INFINITY } else { rd0 };
@@ -384,13 +382,7 @@ pub(crate) fn qbinom_scalar(p: f64, n: f64, pr: f64, lower_tail: bool, log_p: bo
     q_discrete(p, lower_tail, log_p, mu, sigma, gamma, &cdf, Some(n))
 }
 
-pub(crate) fn qnbinom_mu_scalar(
-    p: f64,
-    size: f64,
-    mu: f64,
-    lower_tail: bool,
-    log_p: bool,
-) -> f64 {
+pub(crate) fn qnbinom_mu_scalar(p: f64, size: f64, mu: f64, lower_tail: bool, log_p: bool) -> f64 {
     if size == f64::INFINITY {
         // limit case: Poisson
         return qpois_scalar(p, mu, lower_tail, log_p);
@@ -434,6 +426,290 @@ pub(crate) fn qnbinom_mu_scalar(
     q_discrete(p, lower_tail, log_p, mu, sigma, gamma, &cdf, None)
 }
 
+// === Negative binomial, prob parameterization (dnbinom.c/pnbinom.c/qnbinom.c) =
+// R_D_exp(x) = log_p ? x : exp(x); ldexp(v,-1) == v*0.5 (exact power-of-2 mul).
+pub(crate) fn dnbinom_scalar(x: f64, size: f64, prob: f64, give_log: bool) -> f64 {
+    if x.is_nan() || size.is_nan() || prob.is_nan() {
+        return x + size + prob;
+    }
+    if prob <= 0.0 || prob > 1.0 || size < 0.0 {
+        return f64::NAN;
+    }
+    let rd0 = if give_log { f64::NEG_INFINITY } else { 0.0 };
+    if r_nonint(x) {
+        return rd0;
+    }
+    if x < 0.0 || !x.is_finite() {
+        return rd0;
+    }
+    let x = round_half_even(x);
+    if x == 0.0 {
+        // limiting case as size -> 0 is point mass at zero
+        if size == 0.0 {
+            return if give_log { 0.0 } else { 1.0 };
+        }
+        return if give_log {
+            size * prob.ln()
+        } else {
+            prob.powf(size)
+        };
+    }
+    let size = if !size.is_finite() { f64::MAX } else { size };
+    if x < 1e-10 * size {
+        // 2 terms of Abramowitz & Stegun (6.1.47)
+        let xx2s = if x < f64::MAX.sqrt() {
+            (x * (x - 1.0) * 0.5) / size
+        } else {
+            x * ((x * 0.5) / size)
+        };
+        let v = size * prob.ln() + x * (size.ln() + (-prob).ln_1p()) - lgamma1p(x) + xx2s.ln_1p();
+        return if give_log { v } else { v.exp() };
+    }
+    let p = if give_log {
+        if x < size {
+            (-x / (size + x)).ln_1p()
+        } else {
+            (size / (size + x)).ln()
+        }
+    } else {
+        size / (size + x)
+    };
+    let ans = dbinom_raw(size, x + size, prob, 1.0 - prob, give_log);
+    if give_log {
+        p + ans
+    } else {
+        p * ans
+    }
+}
+
+pub(crate) fn dnbinom_mu_scalar(x: f64, size: f64, mu: f64, give_log: bool) -> f64 {
+    if x.is_nan() || size.is_nan() || mu.is_nan() {
+        return x + size + mu;
+    }
+    if mu < 0.0 || size < 0.0 {
+        return f64::NAN;
+    }
+    let rd0 = if give_log { f64::NEG_INFINITY } else { 0.0 };
+    if r_nonint(x) {
+        return rd0;
+    }
+    if x < 0.0 || !x.is_finite() {
+        return rd0;
+    }
+    if x == 0.0 && size == 0.0 {
+        return if give_log { 0.0 } else { 1.0 };
+    }
+    let x = round_half_even(x);
+    if !size.is_finite() {
+        return dpois_raw(x, mu, give_log); // limit case: Poisson
+    }
+    if x == 0.0 {
+        let v = size
+            * (if size < mu {
+                (size / (size + mu)).ln()
+            } else {
+                (-mu / (size + mu)).ln_1p()
+            });
+        return if give_log { v } else { v.exp() };
+    }
+    if x < 1e-10 * size {
+        let p = if size < mu {
+            (size / (1.0 + size / mu)).ln()
+        } else {
+            (mu / (1.0 + mu / size)).ln()
+        };
+        let xx2s = if x < f64::MAX.sqrt() {
+            (x * (x - 1.0) * 0.5) / size
+        } else {
+            x * ((x * 0.5) / size)
+        };
+        let v = x * p - mu - lgamma1p(x) + xx2s.ln_1p();
+        return if give_log { v } else { v.exp() };
+    }
+    let p = if give_log {
+        if x < size {
+            (-x / (size + x)).ln_1p()
+        } else {
+            (size / (size + x)).ln()
+        }
+    } else {
+        size / (size + x)
+    };
+    let ans = dbinom_raw(
+        size,
+        x + size,
+        size / (size + mu),
+        mu / (size + mu),
+        give_log,
+    );
+    if give_log {
+        p + ans
+    } else {
+        p * ans
+    }
+}
+
+pub(crate) fn pnbinom_scalar(x: f64, size: f64, prob: f64, lower_tail: bool, log_p: bool) -> f64 {
+    if x.is_nan() || size.is_nan() || prob.is_nan() {
+        return x + size + prob;
+    }
+    if !size.is_finite() || !prob.is_finite() {
+        return f64::NAN;
+    }
+    if size < 0.0 || prob <= 0.0 || prob > 1.0 {
+        return f64::NAN;
+    }
+    if size == 0.0 {
+        // limiting case: point mass at zero
+        return if x >= 0.0 {
+            dt1(lower_tail, log_p)
+        } else {
+            dt0(lower_tail, log_p)
+        };
+    }
+    if x < 0.0 {
+        return dt0(lower_tail, log_p);
+    }
+    if !x.is_finite() {
+        return dt1(lower_tail, log_p);
+    }
+    let x = (x + 1e-7).floor();
+    pbeta_scalar(prob, size, x + 1.0, lower_tail, log_p)
+}
+
+pub(crate) fn qnbinom_scalar(p: f64, size: f64, prob: f64, lower_tail: bool, log_p: bool) -> f64 {
+    if p.is_nan() || size.is_nan() || prob.is_nan() {
+        return p + size + prob;
+    }
+    // prob == 0 && size == 0 happens if specified via (mu, size): prob = size/(size+mu)
+    if prob == 0.0 && size == 0.0 {
+        return 0.0;
+    }
+    if prob <= 0.0 || prob > 1.0 || size < 0.0 {
+        return f64::NAN;
+    }
+    if prob == 1.0 || size == 0.0 {
+        return 0.0;
+    }
+    // R_Q_P01_boundaries(p, 0, ML_POSINF)
+    if log_p {
+        if p > 0.0 {
+            return f64::NAN;
+        }
+        if p == 0.0 {
+            return if lower_tail { f64::INFINITY } else { 0.0 };
+        }
+        if p == f64::NEG_INFINITY {
+            return if lower_tail { 0.0 } else { f64::INFINITY };
+        }
+    } else {
+        if p < 0.0 || p > 1.0 {
+            return f64::NAN;
+        }
+        if p == 0.0 {
+            return if lower_tail { 0.0 } else { f64::INFINITY };
+        }
+        if p == 1.0 {
+            return if lower_tail { f64::INFINITY } else { 0.0 };
+        }
+    }
+    let qq = 1.0 / prob;
+    let pp = (1.0 - prob) * qq; // = (1 - prob)/prob = Q - 1
+    let mu = size * pp;
+    let sigma = (size * pp * qq).sqrt();
+    let gamma = (qq + pp) / sigma;
+    let cdf = |y: f64, lt: bool, lg: bool| pnbinom_scalar(y, size, prob, lt, lg);
+    q_discrete(p, lower_tail, log_p, mu, sigma, gamma, &cdf, None)
+}
+
+// === Geometric (dgeom.c / pgeom.c / qgeom.c) =================================
+pub(crate) fn dgeom_scalar(x: f64, p: f64, give_log: bool) -> f64 {
+    if x.is_nan() || p.is_nan() {
+        return x + p;
+    }
+    if p <= 0.0 || p > 1.0 {
+        return f64::NAN;
+    }
+    let rd0 = if give_log { f64::NEG_INFINITY } else { 0.0 };
+    if r_nonint(x) {
+        return rd0;
+    }
+    if x < 0.0 || !x.is_finite() || p == 0.0 {
+        return rd0;
+    }
+    let x = round_half_even(x);
+    // prob = (1-p)^x, stable for small p
+    let prob = dbinom_raw(0.0, x, p, 1.0 - p, give_log);
+    if give_log {
+        p.ln() + prob
+    } else {
+        p * prob
+    }
+}
+
+pub(crate) fn pgeom_scalar(x: f64, p: f64, lower_tail: bool, log_p: bool) -> f64 {
+    if x.is_nan() || p.is_nan() {
+        return x + p;
+    }
+    if p <= 0.0 || p > 1.0 {
+        return f64::NAN;
+    }
+    if x < 0.0 {
+        return dt0(lower_tail, log_p);
+    }
+    if !x.is_finite() {
+        return dt1(lower_tail, log_p);
+    }
+    let x = (x + 1e-7).floor();
+    if p == 1.0 {
+        // we cannot assume IEEE
+        let xv: f64 = if lower_tail { 1.0 } else { 0.0 };
+        return if log_p { xv.ln() } else { xv };
+    }
+    let x = (-p).ln_1p() * (x + 1.0);
+    if log_p {
+        r_dt_clog(x, lower_tail, log_p)
+    } else if lower_tail {
+        -x.exp_m1()
+    } else {
+        x.exp()
+    }
+}
+
+pub(crate) fn qgeom_scalar(p: f64, prob: f64, lower_tail: bool, log_p: bool) -> f64 {
+    if p.is_nan() || prob.is_nan() {
+        return p + prob;
+    }
+    if prob <= 0.0 || prob > 1.0 {
+        return f64::NAN;
+    }
+    // R_Q_P01_check(p)
+    if (log_p && p > 0.0) || (!log_p && (p < 0.0 || p > 1.0)) {
+        return f64::NAN;
+    }
+    if prob == 1.0 {
+        return 0.0;
+    }
+    // R_Q_P01_boundaries(p, 0, ML_POSINF)
+    if log_p {
+        if p == 0.0 {
+            return if lower_tail { f64::INFINITY } else { 0.0 };
+        }
+        if p == f64::NEG_INFINITY {
+            return if lower_tail { 0.0 } else { f64::INFINITY };
+        }
+    } else {
+        if p == 0.0 {
+            return if lower_tail { 0.0 } else { f64::INFINITY };
+        }
+        if p == 1.0 {
+            return if lower_tail { f64::INFINITY } else { 0.0 };
+        }
+    }
+    // add a fuzz to ensure left continuity, but value must be >= 0
+    0.0_f64.max((r_dt_clog(p, lower_tail, log_p) / (-prob).ln_1p() - 1.0 - 1e-12).ceil())
+}
+
 // === PyO3 wrappers ===========================================================
 macro_rules! wrap2 {
     ($name:literal, $fn:ident, $sc:path, ($p2:ident=$d2:literal), ($p3:ident=$d3:literal)) => {
@@ -454,8 +730,48 @@ macro_rules! wrap2 {
     };
 }
 
-wrap2!("ppois", ppois, ppois_scalar, (lower_tail = true), (log_p = false));
-wrap2!("qpois", qpois, qpois_scalar, (lower_tail = true), (log_p = false));
+wrap2!(
+    "ppois",
+    ppois,
+    ppois_scalar,
+    (lower_tail = true),
+    (log_p = false)
+);
+wrap2!(
+    "qpois",
+    qpois,
+    qpois_scalar,
+    (lower_tail = true),
+    (log_p = false)
+);
+wrap2!(
+    "pgeom",
+    pgeom,
+    pgeom_scalar,
+    (lower_tail = true),
+    (log_p = false)
+);
+wrap2!(
+    "qgeom",
+    qgeom,
+    qgeom_scalar,
+    (lower_tail = true),
+    (log_p = false)
+);
+
+#[pyfunction]
+#[pyo3(name = "dgeom", signature = (x, p, give_log=false))]
+pub fn dgeom<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<'py, f64>,
+    p: PyReadonlyArray1<'py, f64>,
+    give_log: bool,
+) -> Bound<'py, PyArray1<f64>> {
+    let v = crate::par::map2(py, x.as_slice().unwrap(), p.as_slice().unwrap(), |x, p| {
+        dgeom_scalar(x, p, give_log)
+    });
+    v.into_pyarray(py)
+}
 
 #[pyfunction]
 #[pyo3(name = "dpois", signature = (x, lam, give_log=false))]
@@ -465,9 +781,12 @@ pub fn dpois<'py>(
     lam: PyReadonlyArray1<'py, f64>,
     give_log: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let v = crate::par::map2(py, x.as_slice().unwrap(), lam.as_slice().unwrap(), |x, l| {
-        dpois_scalar(x, l, give_log)
-    });
+    let v = crate::par::map2(
+        py,
+        x.as_slice().unwrap(),
+        lam.as_slice().unwrap(),
+        |x, l| dpois_scalar(x, l, give_log),
+    );
     v.into_pyarray(py)
 }
 
@@ -566,6 +885,84 @@ pub fn qnbinom_mu<'py>(
         size.as_slice().unwrap(),
         mu.as_slice().unwrap(),
         |p, s, m| qnbinom_mu_scalar(p, s, m, lower_tail, log_p),
+    );
+    v.into_pyarray(py)
+}
+
+#[pyfunction]
+#[pyo3(name = "dnbinom", signature = (x, size, prob, give_log=false))]
+pub fn dnbinom<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<'py, f64>,
+    size: PyReadonlyArray1<'py, f64>,
+    prob: PyReadonlyArray1<'py, f64>,
+    give_log: bool,
+) -> Bound<'py, PyArray1<f64>> {
+    let v = crate::par::map3(
+        py,
+        x.as_slice().unwrap(),
+        size.as_slice().unwrap(),
+        prob.as_slice().unwrap(),
+        |x, s, p| dnbinom_scalar(x, s, p, give_log),
+    );
+    v.into_pyarray(py)
+}
+
+#[pyfunction]
+#[pyo3(name = "dnbinom_mu", signature = (x, size, mu, give_log=false))]
+pub fn dnbinom_mu<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<'py, f64>,
+    size: PyReadonlyArray1<'py, f64>,
+    mu: PyReadonlyArray1<'py, f64>,
+    give_log: bool,
+) -> Bound<'py, PyArray1<f64>> {
+    let v = crate::par::map3(
+        py,
+        x.as_slice().unwrap(),
+        size.as_slice().unwrap(),
+        mu.as_slice().unwrap(),
+        |x, s, m| dnbinom_mu_scalar(x, s, m, give_log),
+    );
+    v.into_pyarray(py)
+}
+
+#[pyfunction]
+#[pyo3(name = "pnbinom", signature = (x, size, prob, lower_tail=true, log_p=false))]
+pub fn pnbinom<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<'py, f64>,
+    size: PyReadonlyArray1<'py, f64>,
+    prob: PyReadonlyArray1<'py, f64>,
+    lower_tail: bool,
+    log_p: bool,
+) -> Bound<'py, PyArray1<f64>> {
+    let v = crate::par::map3(
+        py,
+        x.as_slice().unwrap(),
+        size.as_slice().unwrap(),
+        prob.as_slice().unwrap(),
+        |x, s, p| pnbinom_scalar(x, s, p, lower_tail, log_p),
+    );
+    v.into_pyarray(py)
+}
+
+#[pyfunction]
+#[pyo3(name = "qnbinom", signature = (p, size, prob, lower_tail=true, log_p=false))]
+pub fn qnbinom<'py>(
+    py: Python<'py>,
+    p: PyReadonlyArray1<'py, f64>,
+    size: PyReadonlyArray1<'py, f64>,
+    prob: PyReadonlyArray1<'py, f64>,
+    lower_tail: bool,
+    log_p: bool,
+) -> Bound<'py, PyArray1<f64>> {
+    let v = crate::par::map3(
+        py,
+        p.as_slice().unwrap(),
+        size.as_slice().unwrap(),
+        prob.as_slice().unwrap(),
+        |p, s, pr| qnbinom_scalar(p, s, pr, lower_tail, log_p),
     );
     v.into_pyarray(py)
 }

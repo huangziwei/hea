@@ -25,9 +25,7 @@ class StatSum(Stat):
             return pl.DataFrame()
         keys = [c for c in _GROUP_KEYS if c in data.columns]
         out = (
-            data.group_by(keys, maintain_order=True)
-            .agg(pl.len().alias("n"))
-            .sort(keys)
+            data.group_by(keys, maintain_order=True).agg(pl.len().alias("n")).sort(keys)
         )
         # ggplot2 also computes ``prop = n / sum(n)`` for after_stat use.
         total = out["n"].sum()
@@ -38,8 +36,7 @@ class StatSum(Stat):
         return out
 
 
-def stat_sum(mapping=None, data=None, *, geom="point",
-             position="identity", **kwargs):
+def stat_sum(mapping=None, data=None, *, geom="point", position="identity", **kwargs):
     """Count rows per ``(x, y)``. Output: ``n`` (count), ``prop``
     (fraction of total), ``size = n`` for visual sizing."""
     from ..geoms.point import GeomPoint

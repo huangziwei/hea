@@ -45,8 +45,9 @@ class StatEcdf(Stat):
         return pl.DataFrame({"x": xs, "y": ys})
 
 
-def stat_ecdf(mapping=None, data=None, *, geom="step", n=None,
-              position="identity", **kwargs):
+def stat_ecdf(
+    mapping=None, data=None, *, geom="step", n=None, position="identity", **kwargs
+):
     """Step plot of the empirical CDF. ``n=`` evaluates at evenly-spaced x."""
     from ..geoms.path import GeomPath
     from ..layer import Layer

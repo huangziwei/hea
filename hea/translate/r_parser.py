@@ -44,7 +44,11 @@ class RParseError(Exception):
     def __init__(self, message: str, span: Span, source: str):
         self.span = span
         self.source = source
-        snippet = source[span[0]:span[1]] if span[1] > span[0] else source[span[0]:span[0]+1]
+        snippet = (
+            source[span[0] : span[1]]
+            if span[1] > span[0]
+            else source[span[0] : span[0] + 1]
+        )
         super().__init__(f"{message} at byte {span[0]}: {snippet!r}")
 
 
@@ -52,21 +56,37 @@ class RParseError(Exception):
 _LBP = {
     "?": 5,
     "=": 10,
-    "<-": 15, "<<-": 15,
-    "->": 20, "->>": 20,
+    "<-": 15,
+    "<<-": 15,
+    "->": 20,
+    "->>": 20,
     "~": 25,
-    "|": 30, "||": 30,
-    "&": 35, "&&": 35,
-    "<": 40, "<=": 40, ">": 40, ">=": 40, "==": 40, "!=": 40,
-    "+": 45, "-": 45,
-    "*": 50, "/": 50,
-    "%infix%": 55, "|>": 55,
+    "|": 30,
+    "||": 30,
+    "&": 35,
+    "&&": 35,
+    "<": 40,
+    "<=": 40,
+    ">": 40,
+    ">=": 40,
+    "==": 40,
+    "!=": 40,
+    "+": 45,
+    "-": 45,
+    "*": 50,
+    "/": 50,
+    "%infix%": 55,
+    "|>": 55,
     ":": 60,
     "^": 70,
-    "$": 80, "@": 80,
-    "::": 85, ":::": 85,
+    "$": 80,
+    "@": 80,
+    "::": 85,
+    ":::": 85,
     # Postfix
-    "(": 90, "[": 90, "[[": 90,
+    "(": 90,
+    "[": 90,
+    "[[": 90,
 }
 
 # Right-associative ops use a slightly lower rbp than lbp.
@@ -108,7 +128,9 @@ class _Parser:
     def _expect(self, kind: str) -> Token:
         tok = self._peek()
         if tok.kind != kind:
-            raise RParseError(f"expected {kind!r}, got {tok.kind!r}", tok.span, self.src)
+            raise RParseError(
+                f"expected {kind!r}, got {tok.kind!r}", tok.span, self.src
+            )
         return self._advance()
 
     def _skip_terms(self):
@@ -237,7 +259,9 @@ class _Parser:
             rhs = self.parse_expr(5)
             return A.UnaryOp("?", rhs, (tok.span[0], _end(rhs)))
 
-        raise RParseError(f"unexpected token in expression: {kind!r}", tok.span, self.src)
+        raise RParseError(
+            f"unexpected token in expression: {kind!r}", tok.span, self.src
+        )
 
     # -- led: infix / postfix handlers -------------------------------------
 
@@ -280,7 +304,9 @@ class _Parser:
         if kind == "::" or kind == ":::":
             name_tok = self._advance()
             if name_tok.kind != "IDENT":
-                raise RParseError(f"expected identifier after {kind!r}", name_tok.span, self.src)
+                raise RParseError(
+                    f"expected identifier after {kind!r}", name_tok.span, self.src
+                )
             rhs = self._nud(name_tok)
             return A.BinOp(kind, left, rhs, (_start(left), _end(rhs)))
 
@@ -332,13 +358,19 @@ class _Parser:
         self._skip_terms()
         while self._peek().kind != "}":
             if self._peek().kind == "EOF":
-                raise RParseError("unterminated brace block", (start, self.src.__len__() - 1), self.src)
+                raise RParseError(
+                    "unterminated brace block",
+                    (start, self.src.__len__() - 1),
+                    self.src,
+                )
             stmts.append(self.parse_expr(0))
             self._skip_terms()
         end = self._expect("}").span[1]
         return A.Block(tuple(stmts), (start, end))
 
-    def _parse_arg_list(self, closer: str, *, allow_missing: bool = False) -> list[Node]:
+    def _parse_arg_list(
+        self, closer: str, *, allow_missing: bool = False
+    ) -> list[Node]:
         """Parse a comma-separated argument list up to but not consuming
         ``closer``. ``=`` inside the list is a named-arg, not assignment.
 
@@ -408,7 +440,16 @@ class _Parser:
                 default: Optional[Node] = None
                 if self._accept("="):
                     default = self.parse_expr(0)
-                params.append(A.Param(name, default, (name_tok.span[0], _end(default) if default else name_tok.span[1])))
+                params.append(
+                    A.Param(
+                        name,
+                        default,
+                        (
+                            name_tok.span[0],
+                            _end(default) if default else name_tok.span[1],
+                        ),
+                    )
+                )
                 self._skip_terms()
                 if self._peek().kind == ",":
                     self._advance()
@@ -416,7 +457,9 @@ class _Parser:
                 break
         self._expect(")")
         body = self.parse_expr(0)
-        return A.FunctionDef(tuple(params), body, (start, _end(body)), shorthand=shorthand)
+        return A.FunctionDef(
+            tuple(params), body, (start, _end(body)), shorthand=shorthand
+        )
 
     def _parse_if(self, start: int) -> A.If:
         self._expect("(")
@@ -430,7 +473,9 @@ class _Parser:
             self._skip_terms()
             self._advance()  # 'else'
             otherwise = self.parse_expr(0)
-        return A.If(cond, then, otherwise, (start, _end(otherwise) if otherwise else _end(then)))
+        return A.If(
+            cond, then, otherwise, (start, _end(otherwise) if otherwise else _end(then))
+        )
 
     def _parse_for(self, start: int) -> A.For:
         self._expect("(")
@@ -472,6 +517,7 @@ def _end(node: Node) -> int:
 def _with_span(node: Node, span: Span) -> Node:
     """Return a copy of ``node`` with ``span`` replaced. Uses dataclasses.replace."""
     from dataclasses import replace
+
     return replace(node, span=span)
 
 
@@ -484,4 +530,6 @@ def _component_name_from(tok: Token, src: str) -> str:
         return name
     if tok.kind == "STR":
         return str(tok.cooked)
-    raise RParseError(f"expected identifier or string after $/@, got {tok.kind!r}", tok.span, src)
+    raise RParseError(
+        f"expected identifier or string after $/@, got {tok.kind!r}", tok.span, src
+    )

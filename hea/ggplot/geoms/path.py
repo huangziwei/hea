@@ -21,12 +21,14 @@ from .geom import Geom
 
 @dataclass
 class GeomPath(Geom):
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "black",
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+        }
+    )
     required_aes: tuple = ("x", "y")
     key_glyph: str = "path"
 
@@ -65,8 +67,14 @@ class GeomPath(Geom):
         alpha = float(_first(sub, "alpha", 1.0))
 
         # ggplot2 size in mm → matplotlib linewidth in pt (1pt ≈ 0.353mm).
-        lines = ax.plot(x, y, color=colour, linewidth=size * 2.83,
-                        linestyle=r_lty(linetype), alpha=alpha)
+        lines = ax.plot(
+            x,
+            y,
+            color=colour,
+            linewidth=size * 2.83,
+            linestyle=r_lty(linetype),
+            alpha=alpha,
+        )
         polar_arc_interp(ax, *lines)
 
 
@@ -126,6 +134,7 @@ def _stairstep(x, y, direction: str):
 # Factories
 # ---------------------------------------------------------------------------
 
+
 def _layer(geom, mapping, data, position, stat, kwargs):
     from ..layer import Layer
     from ..positions import resolve_position
@@ -145,15 +154,32 @@ def _layer(geom, mapping, data, position, stat, kwargs):
     )
 
 
-def geom_path(mapping=None, data=None, *, stat="identity", position="identity", **kwargs):
+def geom_path(
+    mapping=None, data=None, *, stat="identity", position="identity", **kwargs
+):
     return _layer(GeomPath(), mapping, data, position, stat, kwargs)
 
 
-def geom_line(mapping=None, data=None, *, stat="identity", position="identity", **kwargs):
+def geom_line(
+    mapping=None, data=None, *, stat="identity", position="identity", **kwargs
+):
     return _layer(GeomPath(sort_by_x=True), mapping, data, position, stat, kwargs)
 
 
-def geom_step(mapping=None, data=None, *, stat="identity", direction="hv",
-              position="identity", **kwargs):
-    return _layer(GeomPath(sort_by_x=True, step_direction=direction),
-                  mapping, data, position, stat, kwargs)
+def geom_step(
+    mapping=None,
+    data=None,
+    *,
+    stat="identity",
+    direction="hv",
+    position="identity",
+    **kwargs,
+):
+    return _layer(
+        GeomPath(sort_by_x=True, step_direction=direction),
+        mapping,
+        data,
+        position,
+        stat,
+        kwargs,
+    )

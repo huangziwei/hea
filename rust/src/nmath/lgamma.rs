@@ -10,7 +10,7 @@ use pyo3::prelude::*;
 
 use super::coeffs::{ALGMCS, GAMCS};
 use super::consts::{
-    GAM_XMAX, GAM_XMIN, GAM_XSML, LGC_XBIG, LGM_XMAX, M_LN_SQRT_2PI, M_LN_SQRT_PId2, NALGM, NGAM,
+    M_LN_SQRT_PId2, GAM_XMAX, GAM_XMIN, GAM_XSML, LGC_XBIG, LGM_XMAX, M_LN_SQRT_2PI, NALGM, NGAM,
 };
 use super::loader::stirlerr;
 use super::util::rfma;
@@ -199,14 +199,20 @@ pub fn lgammafn(x: f64) -> f64 {
 
 #[pyfunction]
 #[pyo3(name = "lgammafn")]
-pub fn py_lgammafn<'py>(py: Python<'py>, x: PyReadonlyArray1<'py, f64>) -> Bound<'py, PyArray1<f64>> {
+pub fn py_lgammafn<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<'py, f64>,
+) -> Bound<'py, PyArray1<f64>> {
     let v = crate::par::map1(py, x.as_slice().unwrap(), lgammafn);
     v.into_pyarray(py)
 }
 
 #[pyfunction]
 #[pyo3(name = "gammafn")]
-pub fn py_gammafn<'py>(py: Python<'py>, x: PyReadonlyArray1<'py, f64>) -> Bound<'py, PyArray1<f64>> {
+pub fn py_gammafn<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<'py, f64>,
+) -> Bound<'py, PyArray1<f64>> {
     let v = crate::par::map1(py, x.as_slice().unwrap(), gammafn);
     v.into_pyarray(py)
 }

@@ -40,17 +40,41 @@ class ScalePercent(ScaleContinuous):
         target_axis.set_major_formatter(fmt)
 
 
-def scale_x_percent(*, name=_NAME_MISSING, breaks="default", labels="default",
-                    limits=None, xmax=1.0, decimals=None):
+def scale_x_percent(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    xmax=1.0,
+    decimals=None,
+):
     return ScalePercent(
-        aesthetics=("x",), name=name, breaks=breaks, labels=labels,
-        limits=limits, xmax=xmax, decimals=decimals,
+        aesthetics=("x",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        xmax=xmax,
+        decimals=decimals,
     )
 
 
-def scale_y_percent(*, name=_NAME_MISSING, breaks="default", labels="default",
-                    limits=None, xmax=1.0, decimals=None):
+def scale_y_percent(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    xmax=1.0,
+    decimals=None,
+):
     return ScalePercent(
-        aesthetics=("y",), name=name, breaks=breaks, labels=labels,
-        limits=limits, xmax=xmax, decimals=decimals,
+        aesthetics=("y",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        xmax=xmax,
+        decimals=decimals,
     )

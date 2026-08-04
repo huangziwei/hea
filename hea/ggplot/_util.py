@@ -71,9 +71,7 @@ def to_numeric_aes(s: pl.Series) -> np.ndarray:
         levels = sorted(s.drop_nulls().unique().to_list())
         coded = s.cast(pl.Enum(levels))
         return coded.to_physical().to_numpy().astype(float)
-    raise TypeError(
-        f"cannot coerce {dt} to a numeric aesthetic; cast first."
-    )
+    raise TypeError(f"cannot coerce {dt} to a numeric aesthetic; cast first.")
 
 
 def to_series(x, length: int, name: str = "value") -> pl.Series:
@@ -89,13 +87,17 @@ def to_series(x, length: int, name: str = "value") -> pl.Series:
         if len(x) == 1 and length != 1:
             return pl.Series(name=name, values=[x[0]] * length, dtype=x.dtype)
         if len(x) != length:
-            raise ValueError(f"length mismatch: aes value has {len(x)} rows, data has {length}")
+            raise ValueError(
+                f"length mismatch: aes value has {len(x)} rows, data has {length}"
+            )
         return x.alias(name)
     arr = np.asarray(x)
     if arr.ndim == 0:
         arr = np.repeat(arr, length)
     if len(arr) != length:
-        raise ValueError(f"length mismatch: aes value has {len(arr)} rows, data has {length}")
+        raise ValueError(
+            f"length mismatch: aes value has {len(arr)} rows, data has {length}"
+        )
     return pl.Series(name=name, values=arr)
 
 
@@ -114,51 +116,63 @@ _GREY_RX = re.compile(r"^gr(a|e)y(\d{1,3})$", re.IGNORECASE)
 # 14 has two synonymous names ("square triangle" and "triangle square");
 # both map to the same row.
 _GGPLOT_SHAPE_NAMES: dict[str, tuple[str, str]] = {
-    "square open":         ("s", "open"),
-    "circle open":         ("o", "open"),
-    "triangle open":       ("^", "open"),
-    "plus":                ("+", "stroke"),
-    "cross":               ("x", "stroke"),
-    "diamond open":        ("D", "open"),
-    "triangle down open":  ("v", "open"),
-    "square cross":        ("$⊠$", "solid"),  # ⊠
-    "asterisk":            ("*", "solid"),
-    "diamond plus":        ("$⟐$", "solid"),  # ⟐
-    "circle plus":         ("$⊕$", "solid"),  # ⊕
-    "star":                ("*", "solid"),
-    "square plus":         ("$⊞$", "solid"),  # ⊞
-    "circle cross":        ("$⊗$", "solid"),  # ⊗
-    "square triangle":     ("$⧈$", "solid"),  # ⧈
-    "triangle square":     ("$⧈$", "solid"),
-    "square":              ("s", "solid"),
-    "circle small":        (".", "solid"),
-    "triangle":            ("^", "solid"),
-    "diamond":             ("D", "solid"),
-    "circle":              ("o", "solid"),
-    "bullet":              (".", "solid"),
-    "circle filled":       ("o", "fillable"),
-    "square filled":       ("s", "fillable"),
-    "diamond filled":      ("D", "fillable"),
-    "triangle filled":     ("^", "fillable"),
-    "triangle down filled":("v", "fillable"),
+    "square open": ("s", "open"),
+    "circle open": ("o", "open"),
+    "triangle open": ("^", "open"),
+    "plus": ("+", "stroke"),
+    "cross": ("x", "stroke"),
+    "diamond open": ("D", "open"),
+    "triangle down open": ("v", "open"),
+    "square cross": ("$⊠$", "solid"),  # ⊠
+    "asterisk": ("*", "solid"),
+    "diamond plus": ("$⟐$", "solid"),  # ⟐
+    "circle plus": ("$⊕$", "solid"),  # ⊕
+    "star": ("*", "solid"),
+    "square plus": ("$⊞$", "solid"),  # ⊞
+    "circle cross": ("$⊗$", "solid"),  # ⊗
+    "square triangle": ("$⧈$", "solid"),  # ⧈
+    "triangle square": ("$⧈$", "solid"),
+    "square": ("s", "solid"),
+    "circle small": (".", "solid"),
+    "triangle": ("^", "solid"),
+    "diamond": ("D", "solid"),
+    "circle": ("o", "solid"),
+    "bullet": (".", "solid"),
+    "circle filled": ("o", "fillable"),
+    "square filled": ("s", "fillable"),
+    "diamond filled": ("D", "fillable"),
+    "triangle filled": ("^", "fillable"),
+    "triangle down filled": ("v", "fillable"),
 }
 
 # R pch integer code → ggplot2 shape name. Mirrors
 # ggplot2:::translate_shape_string's reverse table.
 _R_PCH_TO_NAME: dict[int, str] = {
-    0:  "square open",          1:  "circle open",
-    2:  "triangle open",        3:  "plus",
-    4:  "cross",                5:  "diamond open",
-    6:  "triangle down open",   7:  "square cross",
-    8:  "asterisk",             9:  "diamond plus",
-    10: "circle plus",          11: "star",
-    12: "square plus",          13: "circle cross",
+    0: "square open",
+    1: "circle open",
+    2: "triangle open",
+    3: "plus",
+    4: "cross",
+    5: "diamond open",
+    6: "triangle down open",
+    7: "square cross",
+    8: "asterisk",
+    9: "diamond plus",
+    10: "circle plus",
+    11: "star",
+    12: "square plus",
+    13: "circle cross",
     14: "square triangle",
-    15: "square",               16: "circle small",
-    17: "triangle",             18: "diamond",
-    19: "circle",               20: "bullet",
-    21: "circle filled",        22: "square filled",
-    23: "diamond filled",       24: "triangle filled",
+    15: "square",
+    16: "circle small",
+    17: "triangle",
+    18: "diamond",
+    19: "circle",
+    20: "bullet",
+    21: "circle filled",
+    22: "square filled",
+    23: "diamond filled",
+    24: "triangle filled",
     25: "triangle down filled",
 }
 

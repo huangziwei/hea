@@ -144,9 +144,7 @@ def test_mgcv_smooths_match_R(fx_id: str):
             tol_X = max(1e-6, 1e-5 * float(np.max(np.abs(X_ref))))
             assert np.allclose(
                 X_got[:, ~is_null], X_ref[:, ~is_null], atol=tol_X, rtol=0
-            ), (
-                f"smooth #{i} block {k} ({r_meta['class']}): X values diverge"
-            )
+            ), f"smooth #{i} block {k} ({r_meta['class']}): X values diverge"
             if is_null.any():
                 # Null block: same span, orthogonal relative rotation.
                 for j in range(nf):
@@ -154,8 +152,7 @@ def test_mgcv_smooths_match_R(fx_id: str):
                     A, B = X_got[:, cols], X_ref[:, cols]
                     G, *_ = np.linalg.lstsq(A, B, rcond=None)
                     assert float(np.max(np.abs(A @ G - B))) < tol_X, (
-                        f"smooth #{i} block {k}: fs null span diverges "
-                        f"(level {j})"
+                        f"smooth #{i} block {k}: fs null span diverges (level {j})"
                     )
                     assert np.allclose(G.T @ G, np.eye(null_d), atol=1e-6), (
                         f"smooth #{i} block {k}: fs null relative rotation "
@@ -166,10 +163,15 @@ def test_mgcv_smooths_match_R(fx_id: str):
                 f"smooth #{i} block {k}: got {len(blk.S)} penalties want {r_meta['n_penalties']}"
             )
             for j, S_got in enumerate(blk.S, start=1):
-                S_ref = np.asarray(
-                    mmread(fx / f"smooth_{i}_{k}_S_{j}.mtx", spmatrix=False).toarray(),
-                    dtype=float,
-                ) * s_scale_ratio
+                S_ref = (
+                    np.asarray(
+                        mmread(
+                            fx / f"smooth_{i}_{k}_S_{j}.mtx", spmatrix=False
+                        ).toarray(),
+                        dtype=float,
+                    )
+                    * s_scale_ratio
+                )
                 assert S_got.shape == S_ref.shape, (
                     f"smooth #{i} block {k} S_{j}: got {S_got.shape} want {S_ref.shape}"
                 )
@@ -190,6 +192,7 @@ def test_mgcv_smooths_match_R(fx_id: str):
 # each block's BasisSpec to produce the design at predict_data and compare
 # against R's output.
 
+
 def _load_predict_data(fx_id: str, pkg: str, name: str) -> pl.DataFrame:
     """Load `predict_data.csv` and re-apply factor schema (CSV round-trip
     erases R factor types — without this, fs/sz/by=factor smooths fail to
@@ -203,7 +206,8 @@ def _has_predict_data(fx_id: str) -> bool:
 
 
 MGCV_OK_PREDICT = [
-    e["id"] for e in MGCV_FIXTURES
+    e["id"]
+    for e in MGCV_FIXTURES
     if not _has_error(e["id"]) and _has_predict_data(e["id"])
 ]
 
@@ -281,7 +285,7 @@ def test_mgcv_predict_mat_matches_R(fx_id: str):
             else:
                 anchor_ref = np.asarray(
                     mmread(fx / f"smooth_{i}_{k}_X.mtx", spmatrix=False).toarray(),
-                dtype=float,
+                    dtype=float,
                 )
                 anchor_ours = blk.X
 
@@ -299,9 +303,7 @@ def test_mgcv_predict_mat_matches_R(fx_id: str):
             # new data, so the fit-time relative rotation carries over
             # exactly.
             if r_meta["class"] == "fs.smooth.spec":
-                p_lev, fs_rank, null_d, nf, _ = _fs_null_layout(
-                    r_meta, blk.X.shape[1]
-                )
+                p_lev, fs_rank, null_d, nf, _ = _fs_null_layout(r_meta, blk.X.shape[1])
                 for j in range(nf):
                     cols = np.arange(j * p_lev + fs_rank, (j + 1) * p_lev)
                     G, *_ = np.linalg.lstsq(

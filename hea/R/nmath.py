@@ -17,6 +17,7 @@ The ``q*`` normal coefficients live in :mod:`hea.R.rng` (``_QN_A`` .. ``_QN_F``,
 shared with the ``rnorm`` Inversion path) and are imported here rather than
 duplicated.
 """
+
 from __future__ import annotations
 
 import ctypes
@@ -56,22 +57,27 @@ def _norm_rs(kern, x, mu, sigma, flags):
     ma = np.asarray(mu, dtype=float)
     sa = np.asarray(sigma, dtype=float)
     if ma.ndim == 0 and sa.ndim == 0:
-        flat = kern(np.ascontiguousarray(xa.reshape(-1)),
-                    ma.reshape(1), sa.reshape(1), *flags)
+        flat = kern(
+            np.ascontiguousarray(xa.reshape(-1)), ma.reshape(1), sa.reshape(1), *flags
+        )
         return flat.reshape(xa.shape)
     xa, ma, sa = np.broadcast_arrays(xa, ma, sa)
     return kern(
-        np.ascontiguousarray(xa.reshape(-1)), np.ascontiguousarray(ma.reshape(-1)),
-        np.ascontiguousarray(sa.reshape(-1)), *flags).reshape(xa.shape)
+        np.ascontiguousarray(xa.reshape(-1)),
+        np.ascontiguousarray(ma.reshape(-1)),
+        np.ascontiguousarray(sa.reshape(-1)),
+        *flags,
+    ).reshape(xa.shape)
+
 
 # --- R constants (Rmath.h) ----------------------------------------------------
-_M_SQRT_32 = 5.656854249492380195206754896838      # sqrt(32)
-_M_1_SQRT_2PI = 0.398942280401432677939946059934   # 1/sqrt(2pi)
+_M_SQRT_32 = 5.656854249492380195206754896838  # sqrt(32)
+_M_1_SQRT_2PI = 0.398942280401432677939946059934  # 1/sqrt(2pi)
 _M_LN_SQRT_2PI = 0.918938533204672741780329736406  # log(sqrt(2pi))
-_M_2PI = 6.283185307179586476925286766559          # 2*pi
-_M_SQRT2 = 1.414213562373095048801688724210        # sqrt(2)
-_M_LN2 = 0.693147180559945309417232121458          # ln(2)
-_M_LOG10_2 = 0.301029995663981195213738894724       # log10(2) (R d1mach(5))
+_M_2PI = 6.283185307179586476925286766559  # 2*pi
+_M_SQRT2 = 1.414213562373095048801688724210  # sqrt(2)
+_M_LN2 = 0.693147180559945309417232121458  # ln(2)
+_M_LOG10_2 = 0.301029995663981195213738894724  # log10(2) (R d1mach(5))
 _M_LN_2PI = 1.8378770664093454835606594728112352798  # log(2*pi)
 _M_SQRT_2PI = 2.50662827463100050241576528481104525301  # sqrt(2*pi)
 _X_LRG = 2.86111748575702815380240589208115399625e307  # 2^1023 / pi
@@ -131,8 +137,13 @@ def _vec(fn, *args):
 
 
 # === qnorm5 — normal quantile (nmath/qnorm.c, Wichura AS-241) =================
-def qnorm5(p: float, mu: float = 0.0, sigma: float = 1.0,
-           lower_tail: bool = True, log_p: bool = False) -> float:
+def qnorm5(
+    p: float,
+    mu: float = 0.0,
+    sigma: float = 1.0,
+    lower_tail: bool = True,
+    log_p: bool = False,
+) -> float:
     """R's ``qnorm5(p, mu, sigma, lower_tail, log_p)`` — full semantics, bit-exact.
 
     Unlike :func:`hea.R.rng._qnorm5` (the ``lower_tail=TRUE, log_p=FALSE`` fast
@@ -199,20 +210,39 @@ def qnorm5(p: float, mu: float = 0.0, sigma: float = 1.0,
         if r >= 6.4e8:
             val = r * _M_SQRT2
         else:
-            s2 = -math.ldexp(lp, 1)            # = 2s
-            x2 = s2 - math.log(_M_2PI * s2)    # xs_1
+            s2 = -math.ldexp(lp, 1)  # = 2s
+            x2 = s2 - math.log(_M_2PI * s2)  # xs_1
             if r < 36000.0:
                 x2 = s2 - math.log(_M_2PI * x2) - 2.0 / (2.0 + x2)  # xs_2
                 if r < 840.0:
-                    x2 = (s2 - math.log(_M_2PI * x2)
-                          + 2.0 * math.log1p(-(1 - 1 / (4 + x2)) / (2.0 + x2)))
+                    x2 = (
+                        s2
+                        - math.log(_M_2PI * x2)
+                        + 2.0 * math.log1p(-(1 - 1 / (4 + x2)) / (2.0 + x2))
+                    )
                     if r < 109.0:
-                        x2 = (s2 - math.log(_M_2PI * x2) + 2.0 * math.log1p(
-                            -(1 - (1 - 5 / (6 + x2)) / (4.0 + x2)) / (2.0 + x2)))
+                        x2 = (
+                            s2
+                            - math.log(_M_2PI * x2)
+                            + 2.0
+                            * math.log1p(
+                                -(1 - (1 - 5 / (6 + x2)) / (4.0 + x2)) / (2.0 + x2)
+                            )
+                        )
                         if r < 55.0:
-                            x2 = (s2 - math.log(_M_2PI * x2) + 2.0 * math.log1p(
-                                -(1 - (1 - (5 - 9 / (8.0 + x2)) / (6.0 + x2))
-                                  / (4.0 + x2)) / (2.0 + x2)))
+                            x2 = (
+                                s2
+                                - math.log(_M_2PI * x2)
+                                + 2.0
+                                * math.log1p(
+                                    -(
+                                        1
+                                        - (1 - (5 - 9 / (8.0 + x2)) / (6.0 + x2))
+                                        / (4.0 + x2)
+                                    )
+                                    / (2.0 + x2)
+                                )
+                            )
             val = math.sqrt(x2)
     if q < 0.0:
         val = -val
@@ -225,8 +255,9 @@ _DNORM_BIG = math.sqrt(-2.0 * _M_LN2 * (-1021 + 1 - 53))
 _TWO_SQRT_DBL_MAX = 2.0 * math.sqrt(1.7976931348623157e308)
 
 
-def dnorm5(x: float, mu: float = 0.0, sigma: float = 1.0,
-           give_log: bool = False) -> float:
+def dnorm5(
+    x: float, mu: float = 0.0, sigma: float = 1.0, give_log: bool = False
+) -> float:
     """R's ``dnorm4/dnorm5`` (nmath/dnorm.c), bit-exact (non-FAST variant)."""
     if math.isnan(x) or math.isnan(mu) or math.isnan(sigma):
         return x + mu + sigma
@@ -256,8 +287,11 @@ def dnorm5(x: float, mu: float = 0.0, sigma: float = 1.0,
     x1 = math.ldexp(round(math.ldexp(x, 16)), -16)
     x2 = x - x1
     # dnorm.c:85 `(-0.5*x2 - x1)*x2`: fma(-0.5, x2, -x1), outer mul plain.
-    return _M_1_SQRT_2PI / sigma * (math.exp(-0.5 * x1 * x1)
-                                    * math.exp(_rfma(-0.5, x2, -x1) * x2))
+    return (
+        _M_1_SQRT_2PI
+        / sigma
+        * (math.exp(-0.5 * x1 * x1) * math.exp(_rfma(-0.5, x2, -x1) * x2))
+    )
 
 
 def dnorm5_vec(x, mu=0.0, sigma=1.0, give_log=False):
@@ -289,9 +323,11 @@ def dnorm5_vec(x, mu=0.0, sigma=1.0, give_log=False):
         xb = z[big]
         x1 = np.ldexp(np.rint(np.ldexp(xb, 16)), -16)
         x2 = xb - x1
-        out[big] = _M_1_SQRT_2PI / sigma * (
-            np.exp(-0.5 * x1 * x1)
-            * np.exp(_rfma_vec(-0.5, x2, -x1) * x2))
+        out[big] = (
+            _M_1_SQRT_2PI
+            / sigma
+            * (np.exp(-0.5 * x1 * x1) * np.exp(_rfma_vec(-0.5, x2, -x1) * x2))
+        )
     out = np.where((~small) & (z > _DNORM_BIG) & np.isfinite(z), 0.0, out)
     out = np.where(np.isinf(z), rd0, out)
     out = np.where(np.isnan(x), x, out)
@@ -299,20 +335,55 @@ def dnorm5_vec(x, mu=0.0, sigma=1.0, give_log=False):
 
 
 # === pnorm5 — normal CDF (nmath/pnorm.c, Cody 1993) ==========================
-_PN_A = (2.2352520354606839287, 161.02823106855587881, 1067.6894854603709582,
-         18154.981253343561249, 0.065682337918207449113)
-_PN_B = (47.20258190468824187, 976.09855173777669322, 10260.932208618978205,
-         45507.789335026729956)
-_PN_C = (0.39894151208813466764, 8.8831497943883759412, 93.506656132177855979,
-         597.27027639480026226, 2494.5375852903726711, 6848.1904505362823326,
-         11602.651437647350124, 9842.7148383839780218, 1.0765576773720192317e-8)
-_PN_D = (22.266688044328115691, 235.38790178262499861, 1519.377599407554805,
-         6485.558298266760755, 18615.571640885098091, 34900.952721145977266,
-         38912.003286093271411, 19685.429676859990727)
-_PN_P = (0.21589853405795699, 0.1274011611602473639, 0.022235277870649807,
-         0.001421619193227893466, 2.9112874951168792e-5, 0.02307344176494017303)
-_PN_Q = (1.28426009614491121, 0.468238212480865118, 0.0659881378689285515,
-         0.00378239633202758244, 7.29751555083966205e-5)
+_PN_A = (
+    2.2352520354606839287,
+    161.02823106855587881,
+    1067.6894854603709582,
+    18154.981253343561249,
+    0.065682337918207449113,
+)
+_PN_B = (
+    47.20258190468824187,
+    976.09855173777669322,
+    10260.932208618978205,
+    45507.789335026729956,
+)
+_PN_C = (
+    0.39894151208813466764,
+    8.8831497943883759412,
+    93.506656132177855979,
+    597.27027639480026226,
+    2494.5375852903726711,
+    6848.1904505362823326,
+    11602.651437647350124,
+    9842.7148383839780218,
+    1.0765576773720192317e-8,
+)
+_PN_D = (
+    22.266688044328115691,
+    235.38790178262499861,
+    1519.377599407554805,
+    6485.558298266760755,
+    18615.571640885098091,
+    34900.952721145977266,
+    38912.003286093271411,
+    19685.429676859990727,
+)
+_PN_P = (
+    0.21589853405795699,
+    0.1274011611602473639,
+    0.022235277870649807,
+    0.001421619193227893466,
+    2.9112874951168792e-5,
+    0.02307344176494017303,
+)
+_PN_Q = (
+    1.28426009614491121,
+    0.468238212480865118,
+    0.0659881378689285515,
+    0.00378239633202758244,
+    7.29751555083966205e-5,
+)
 
 
 def _pnorm_both(x: float, i_tail: int, log_p: bool):
@@ -365,11 +436,17 @@ def _pnorm_both(x: float, i_tail: int, log_p: bool):
         if log_p:
             cum = (-xsq * math.ldexp(xsq, -1)) - math.ldexp(del_, -1) + math.log(temp)
             if (lower and x > 0.0) or (upper and x <= 0.0):
-                ccum = math.log1p(-math.exp(-xsq * math.ldexp(xsq, -1))
-                                  * math.exp(-math.ldexp(del_, -1)) * temp)
+                ccum = math.log1p(
+                    -math.exp(-xsq * math.ldexp(xsq, -1))
+                    * math.exp(-math.ldexp(del_, -1))
+                    * temp
+                )
         else:
-            cum = (math.exp(-xsq * math.ldexp(xsq, -1))
-                   * math.exp(-math.ldexp(del_, -1)) * temp)
+            cum = (
+                math.exp(-xsq * math.ldexp(xsq, -1))
+                * math.exp(-math.ldexp(del_, -1))
+                * temp
+            )
             ccum = 1.0 - cum
         if x > 0.0:  # swap_tail
             temp = cum
@@ -379,9 +456,11 @@ def _pnorm_both(x: float, i_tail: int, log_p: bool):
         return cum, ccum
 
     # |x| > sqrt(32)
-    if ((log_p and y < 1e170)
-            or (lower and -38.4674 < x < 8.2924)
-            or (upper and -8.2924 < x < 38.4674)):
+    if (
+        (log_p and y < 1e170)
+        or (lower and -38.4674 < x < 8.2924)
+        or (upper and -8.2924 < x < 38.4674)
+    ):
         xsq = 1.0 / (x * x)
         xnum = _PN_P[5] * xsq
         xden = xsq
@@ -396,11 +475,17 @@ def _pnorm_both(x: float, i_tail: int, log_p: bool):
         if log_p:
             cum = (-xsq * math.ldexp(xsq, -1)) - math.ldexp(del_, -1) + math.log(temp)
             if (lower and x > 0.0) or (upper and x <= 0.0):
-                ccum = math.log1p(-math.exp(-xsq * math.ldexp(xsq, -1))
-                                  * math.exp(-math.ldexp(del_, -1)) * temp)
+                ccum = math.log1p(
+                    -math.exp(-xsq * math.ldexp(xsq, -1))
+                    * math.exp(-math.ldexp(del_, -1))
+                    * temp
+                )
         else:
-            cum = (math.exp(-xsq * math.ldexp(xsq, -1))
-                   * math.exp(-math.ldexp(del_, -1)) * temp)
+            cum = (
+                math.exp(-xsq * math.ldexp(xsq, -1))
+                * math.exp(-math.ldexp(del_, -1))
+                * temp
+            )
             ccum = 1.0 - cum
         if x > 0.0:  # swap_tail
             temp = cum
@@ -419,8 +504,13 @@ def _pnorm_both(x: float, i_tail: int, log_p: bool):
     return cum, ccum
 
 
-def pnorm5(x: float, mu: float = 0.0, sigma: float = 1.0,
-           lower_tail: bool = True, log_p: bool = False) -> float:
+def pnorm5(
+    x: float,
+    mu: float = 0.0,
+    sigma: float = 1.0,
+    lower_tail: bool = True,
+    log_p: bool = False,
+) -> float:
     """R's ``pnorm5(x, mu, sigma, lower_tail, log_p)`` (nmath/pnorm.c), bit-exact."""
     if math.isnan(x) or math.isnan(mu) or math.isnan(sigma):
         return x + mu + sigma
@@ -457,11 +547,31 @@ def _dt1(lower_tail, log_p):
     return _NEGINF if log_p else 0.0
 
 
+def _dt_val(x, lower_tail, log_p):
+    # R_DT_val(x) = lower_tail ? R_D_val(x) : R_D_Clog(x)
+    if lower_tail:
+        return math.log(x) if log_p else x
+    return math.log1p(-x) if log_p else (0.5 - x + 0.5)
+
+
+def _dt_qiv(p, lower_tail, log_p):
+    # R_DT_qIv(p): map (lower_tail, log_p) p back to the lower-tail identity prob
+    if log_p:
+        return math.exp(p) if lower_tail else -math.expm1(p)
+    return p if lower_tail else (0.5 - p + 0.5)
+
+
+def _r_forceint(x):
+    # R_forceint(x) = (double) nearbyint(x); Python round() is round-half-to-even
+    return float(round(x))
+
+
 # === Vectorised fast paths (numpy) ===========================================
 # The common case (log_p=False, finite/in-range argument, non-extreme tail) is
 # evaluated with numpy across the whole array; the rare lanes (nan, boundaries,
 # log_p=True, qnorm r>27 extreme tail) fall back to the bit-exact scalar
 # functions above, so the result is identical to a scalar loop but ~elementwise.
+
 
 def qnorm5_vec(p, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
     """Vectorised :func:`qnorm5`; bit-identical to the scalar version."""
@@ -476,7 +586,7 @@ def qnorm5_vec(p, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
         for v in it:
             out[it.multi_index] = qnorm5(float(v), mu, sigma, lower_tail, True)
         return out
-    reg = (p > 0.0) & (p < 1.0)            # regular open-interval lanes
+    reg = (p > 0.0) & (p < 1.0)  # regular open-interval lanes
     pr = p[reg]
     p_ = pr if lower_tail else (0.5 - pr + 0.5)
     q = p_ - 0.5
@@ -487,13 +597,15 @@ def qnorm5_vec(p, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
     # vector path: pass the per-arch ARRAY fma (`_rfma_vec`); the default scalar
     # `_rfma` is `math.fma` on arm64, which rejects array args (rng.py qnorm does
     # the same). x86's default `_rfma` is `a*b+c` so this was latent there.
-    res[central] = qc * _qn_horner(rc, _QN_A, _rfma_vec) / _qn_horner(rc, _QN_B, _rfma_vec)
+    res[central] = (
+        qc * _qn_horner(rc, _QN_A, _rfma_vec) / _qn_horner(rc, _QN_B, _rfma_vec)
+    )
     tail = ~central
     qt = q[tail]
-    civ = (0.5 - pr[tail] + 0.5) if lower_tail else pr[tail]   # R_DT_CIv (log_p=F)
+    civ = (0.5 - pr[tail] + 0.5) if lower_tail else pr[tail]  # R_DT_CIv (log_p=F)
     lp = np.log(np.where(qt > 0.0, civ, p_[tail]))
     r = np.sqrt(-lp)
-    valt = np.full(qt.shape, np.nan, dtype=float)   # r>27 lanes stay nan
+    valt = np.full(qt.shape, np.nan, dtype=float)  # r>27 lanes stay nan
     near = r <= 5.0
     rn = r[near] - 1.6
     valt[near] = _qn_horner(rn, _QN_C, _rfma_vec) / _qn_horner(rn, _QN_D, _rfma_vec)
@@ -508,8 +620,9 @@ def qnorm5_vec(p, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
     fb = np.isnan(out)
     if fb.any():
         pb = p[fb]
-        out[fb] = np.array([qnorm5(float(pp), mu, sigma, lower_tail, False)
-                            for pp in pb])
+        out[fb] = np.array(
+            [qnorm5(float(pp), mu, sigma, lower_tail, False) for pp in pb]
+        )
     return out
 
 
@@ -579,8 +692,9 @@ def pnorm5_vec(x, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
 
     # region 3: y > sqrt(32) within finite range for the requested tail
     m_rest = (~m1) & (~m2)
-    in_rng = ((-38.4674 < z) & (z < 8.2924)) if lower \
-        else ((-8.2924 < z) & (z < 38.4674))
+    in_rng = (
+        ((-38.4674 < z) & (z < 8.2924)) if lower else ((-8.2924 < z) & (z < 38.4674))
+    )
     m3 = m_rest & in_rng
     if m3.any():
         xv = z[m3]
@@ -633,58 +747,57 @@ def pnorm5_vec(x, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
 # Exact table for half-integer arguments 0, 0.5, 1.0, …, 15.0
 # (stirlerr.c:78-110).
 _STIRLERR_HALVES = (
-    0.0,                              # n=0 — placeholder, never used
-    0.1534264097200273452913848,      # 0.5
-    0.0810614667953272582196702,      # 1.0
-    0.0548141210519176538961390,      # 1.5
-    0.0413406959554092940938221,      # 2.0
-    0.03316287351993628748511048,     # 2.5
-    0.02767792568499833914878929,     # 3.0
-    0.02374616365629749597132920,     # 3.5
-    0.02079067210376509311152277,     # 4.0
-    0.01848845053267318523077934,     # 4.5
-    0.01664469118982119216319487,     # 5.0
-    0.01513497322191737887351255,     # 5.5
-    0.01387612882307074799874573,     # 6.0
-    0.01281046524292022692424986,     # 6.5
-    0.01189670994589177009505572,     # 7.0
-    0.01110455975820691732662991,     # 7.5
-    0.010411265261972096497478567,    # 8.0
-    0.009799416126158803298389475,    # 8.5
-    0.009255462182712732917728637,    # 9.0
-    0.008768700134139385462952823,    # 9.5
-    0.008330563433362871256469318,    # 10.0
-    0.007934114564314020547248100,    # 10.5
-    0.007573675487951840794972024,    # 11.0
-    0.007244554301320383179543912,    # 11.5
-    0.006942840107209529865664152,    # 12.0
-    0.006665247032707682442354394,    # 12.5
-    0.006408994188004207068439631,    # 13.0
-    0.006171712263039457647532867,    # 13.5
-    0.005951370112758847735624416,    # 14.0
-    0.005746216513010115682023589,    # 14.5
-    0.005554733551962801371038690,    # 15.0
+    0.0,  # n=0 — placeholder, never used
+    0.1534264097200273452913848,  # 0.5
+    0.0810614667953272582196702,  # 1.0
+    0.0548141210519176538961390,  # 1.5
+    0.0413406959554092940938221,  # 2.0
+    0.03316287351993628748511048,  # 2.5
+    0.02767792568499833914878929,  # 3.0
+    0.02374616365629749597132920,  # 3.5
+    0.02079067210376509311152277,  # 4.0
+    0.01848845053267318523077934,  # 4.5
+    0.01664469118982119216319487,  # 5.0
+    0.01513497322191737887351255,  # 5.5
+    0.01387612882307074799874573,  # 6.0
+    0.01281046524292022692424986,  # 6.5
+    0.01189670994589177009505572,  # 7.0
+    0.01110455975820691732662991,  # 7.5
+    0.010411265261972096497478567,  # 8.0
+    0.009799416126158803298389475,  # 8.5
+    0.009255462182712732917728637,  # 9.0
+    0.008768700134139385462952823,  # 9.5
+    0.008330563433362871256469318,  # 10.0
+    0.007934114564314020547248100,  # 10.5
+    0.007573675487951840794972024,  # 11.0
+    0.007244554301320383179543912,  # 11.5
+    0.006942840107209529865664152,  # 12.0
+    0.006665247032707682442354394,  # 12.5
+    0.006408994188004207068439631,  # 13.0
+    0.006171712263039457647532867,  # 13.5
+    0.005951370112758847735624416,  # 14.0
+    0.005746216513010115682023589,  # 14.5
+    0.005554733551962801371038690,  # 15.0
 )
 
 # Asymptotic-series coefficients (stirlerr.c:56-72).
-_S0  = 0.083333333333333333333          # 1/12
-_S1  = 0.00277777777777777777778        # 1/360
-_S2  = 0.00079365079365079365079365     # 1/1260
-_S3  = 0.000595238095238095238095238    # 1/1680
-_S4  = 0.0008417508417508417508417508   # 1/1188
-_S5  = 0.0019175269175269175269175262   # 691/360360
-_S6  = 0.0064102564102564102564102561   # 1/156
-_S7  = 0.029550653594771241830065352    # 3617/122400
-_S8  = 0.17964437236883057316493850     # 43867/244188
-_S9  = 1.3924322169059011164274315      # 174611/125400
-_S10 = 13.402864044168391994478957      # 77683/5796
-_S11 = 156.84828462600201730636509      # 236364091/1506960
-_S12 = 2193.1033333333333333333333      # 657931/300
-_S13 = 36108.771253724989357173269      # 3392780147/93960
-_S14 = 691472.26885131306710839498      # 1723168255201/2492028
-_S15 = 15238221.539407416192283370      # 7709321041217/505920
-_S16 = 382900751.39141414141414141      # 151628697551/396
-
+_S0 = 0.083333333333333333333  # 1/12
+_S1 = 0.00277777777777777777778  # 1/360
+_S2 = 0.00079365079365079365079365  # 1/1260
+_S3 = 0.000595238095238095238095238  # 1/1680
+_S4 = 0.0008417508417508417508417508  # 1/1188
+_S5 = 0.0019175269175269175269175262  # 691/360360
+_S6 = 0.0064102564102564102564102561  # 1/156
+_S7 = 0.029550653594771241830065352  # 3617/122400
+_S8 = 0.17964437236883057316493850  # 43867/244188
+_S9 = 1.3924322169059011164274315  # 174611/125400
+_S10 = 13.402864044168391994478957  # 77683/5796
+_S11 = 156.84828462600201730636509  # 236364091/1506960
+_S12 = 2193.1033333333333333333333  # 657931/300
+_S13 = 36108.771253724989357173269  # 3392780147/93960
+_S14 = 691472.26885131306710839498  # 1723168255201/2492028
+_S15 = 15238221.539407416192283370  # 7709321041217/505920
+_S16 = 382900751.39141414141414141  # 151628697551/396
 
 
 _STIRLERR_HALVES_ARR = np.array(_STIRLERR_HALVES, dtype=float)
@@ -700,7 +813,7 @@ def _stirlerr(n):
     ``np.where``, all arithmetic ops in the same order.
     """
     n = np.asarray(n, dtype=float)
-    scalar_input = (n.ndim == 0)
+    scalar_input = n.ndim == 0
     n = np.atleast_1d(n)
 
     out = np.empty_like(n)
@@ -721,16 +834,15 @@ def _stirlerr(n):
         nm = n[mm2_mask]
         l_n = np.log(nm)
         lg = np.array([_c_lgamma(float(v)) for v in nm])
-        out[mm2_mask] = (_rfma_vec(nm, 1.0 - l_n, lg)
-                         + (l_n - _M_LN_2PI) * 0.5)
+        out[mm2_mask] = _rfma_vec(nm, 1.0 - l_n, lg) + (l_n - _M_LN_2PI) * 0.5
 
     # n < 1, not in table
     lt1_mask = le_235 & ~table_mask & ~mm2_mask & (n < 1.0)
     if np.any(lt1_mask):
         nm = n[lt1_mask]
-        out[lt1_mask] = (_rfma_vec(-(nm + 0.5), np.log(nm),
-                                   _lgamma1p_vec(nm))
-                         + nm - _M_LN_SQRT_2PI)
+        out[lt1_mask] = (
+            _rfma_vec(-(nm + 0.5), np.log(nm), _lgamma1p_vec(nm)) + nm - _M_LN_SQRT_2PI
+        )
 
     # 5.25 < n <= 23.5 — asymptotic series, branches by n threshold.
     series_mask = le_235 & ~table_mask & ~mm2_mask & ~lt1_mask
@@ -739,20 +851,234 @@ def _stirlerr(n):
         nn = nm * nm
         # We need different series lengths per element. Compute the longest
         # branch (k=16) and shorter ones; np.where picks per element.
-        s_k7  = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - _S6 / nn) / nn) / nn) / nn) / nn) / nn) / nm
-        s_k8  = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - _S7 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
-        s_k9  = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - _S8 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
-        s_k11 = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - (_S8 - (_S9 - _S10 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
-        s_k13 = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - (_S8 - (_S9 - (_S10 - (_S11 - _S12 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
-        s_k15 = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - (_S8 - (_S9 - (_S10 - (_S11 - (_S12 - (_S13 - _S14 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
-        s_k16 = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - (_S7 - (_S8 - (_S9 - (_S10 - (_S11 - (_S12 - (_S13 - (_S14 - (_S15 - _S16 / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nn) / nm
+        s_k7 = (
+            _S0
+            - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - _S6 / nn) / nn) / nn) / nn) / nn) / nn
+        ) / nm
+        s_k8 = (
+            _S0
+            - (
+                _S1
+                - (_S2 - (_S3 - (_S4 - (_S5 - (_S6 - _S7 / nn) / nn) / nn) / nn) / nn)
+                / nn
+            )
+            / nn
+        ) / nm
+        s_k9 = (
+            _S0
+            - (
+                _S1
+                - (
+                    _S2
+                    - (
+                        _S3
+                        - (_S4 - (_S5 - (_S6 - (_S7 - _S8 / nn) / nn) / nn) / nn) / nn
+                    )
+                    / nn
+                )
+                / nn
+            )
+            / nn
+        ) / nm
+        s_k11 = (
+            _S0
+            - (
+                _S1
+                - (
+                    _S2
+                    - (
+                        _S3
+                        - (
+                            _S4
+                            - (
+                                _S5
+                                - (
+                                    _S6
+                                    - (_S7 - (_S8 - (_S9 - _S10 / nn) / nn) / nn) / nn
+                                )
+                                / nn
+                            )
+                            / nn
+                        )
+                        / nn
+                    )
+                    / nn
+                )
+                / nn
+            )
+            / nn
+        ) / nm
+        s_k13 = (
+            _S0
+            - (
+                _S1
+                - (
+                    _S2
+                    - (
+                        _S3
+                        - (
+                            _S4
+                            - (
+                                _S5
+                                - (
+                                    _S6
+                                    - (
+                                        _S7
+                                        - (
+                                            _S8
+                                            - (
+                                                _S9
+                                                - (_S10 - (_S11 - _S12 / nn) / nn) / nn
+                                            )
+                                            / nn
+                                        )
+                                        / nn
+                                    )
+                                    / nn
+                                )
+                                / nn
+                            )
+                            / nn
+                        )
+                        / nn
+                    )
+                    / nn
+                )
+                / nn
+            )
+            / nn
+        ) / nm
+        s_k15 = (
+            _S0
+            - (
+                _S1
+                - (
+                    _S2
+                    - (
+                        _S3
+                        - (
+                            _S4
+                            - (
+                                _S5
+                                - (
+                                    _S6
+                                    - (
+                                        _S7
+                                        - (
+                                            _S8
+                                            - (
+                                                _S9
+                                                - (
+                                                    _S10
+                                                    - (
+                                                        _S11
+                                                        - (
+                                                            _S12
+                                                            - (_S13 - _S14 / nn) / nn
+                                                        )
+                                                        / nn
+                                                    )
+                                                    / nn
+                                                )
+                                                / nn
+                                            )
+                                            / nn
+                                        )
+                                        / nn
+                                    )
+                                    / nn
+                                )
+                                / nn
+                            )
+                            / nn
+                        )
+                        / nn
+                    )
+                    / nn
+                )
+                / nn
+            )
+            / nn
+        ) / nm
+        s_k16 = (
+            _S0
+            - (
+                _S1
+                - (
+                    _S2
+                    - (
+                        _S3
+                        - (
+                            _S4
+                            - (
+                                _S5
+                                - (
+                                    _S6
+                                    - (
+                                        _S7
+                                        - (
+                                            _S8
+                                            - (
+                                                _S9
+                                                - (
+                                                    _S10
+                                                    - (
+                                                        _S11
+                                                        - (
+                                                            _S12
+                                                            - (
+                                                                _S13
+                                                                - (
+                                                                    _S14
+                                                                    - (_S15 - _S16 / nn)
+                                                                    / nn
+                                                                )
+                                                                / nn
+                                                            )
+                                                            / nn
+                                                        )
+                                                        / nn
+                                                    )
+                                                    / nn
+                                                )
+                                                / nn
+                                            )
+                                            / nn
+                                        )
+                                        / nn
+                                    )
+                                    / nn
+                                )
+                                / nn
+                            )
+                            / nn
+                        )
+                        / nn
+                    )
+                    / nn
+                )
+                / nn
+            )
+            / nn
+        ) / nm
         # Select per-element by threshold.
-        ser = np.where(nm > 12.8, s_k7,
-              np.where(nm > 12.3, s_k8,
-              np.where(nm > 8.9,  s_k9,
-              np.where(nm > 7.3,  s_k11,
-              np.where(nm > 6.6,  s_k13,
-              np.where(nm > 6.1,  s_k15, s_k16))))))
+        ser = np.where(
+            nm > 12.8,
+            s_k7,
+            np.where(
+                nm > 12.3,
+                s_k8,
+                np.where(
+                    nm > 8.9,
+                    s_k9,
+                    np.where(
+                        nm > 7.3,
+                        s_k11,
+                        np.where(nm > 6.6, s_k13, np.where(nm > 6.1, s_k15, s_k16)),
+                    ),
+                ),
+            ),
+        )
         out[series_mask] = ser
 
     # ---- n > 23.5 ----
@@ -766,11 +1092,19 @@ def _stirlerr(n):
         a_k4 = (_S0 - (_S1 - (_S2 - _S3 / nn) / nn) / nn) / nm
         a_k5 = (_S0 - (_S1 - (_S2 - (_S3 - _S4 / nn) / nn) / nn) / nn) / nm
         a_k6 = (_S0 - (_S1 - (_S2 - (_S3 - (_S4 - _S5 / nn) / nn) / nn) / nn) / nn) / nm
-        a = np.where(nm > 15.7e6, a_k1,
-            np.where(nm > 6180.0, a_k2,
-            np.where(nm > 205.0,  a_k3,
-            np.where(nm > 86.0,   a_k4,
-            np.where(nm > 27.0,   a_k5, a_k6)))))
+        a = np.where(
+            nm > 15.7e6,
+            a_k1,
+            np.where(
+                nm > 6180.0,
+                a_k2,
+                np.where(
+                    nm > 205.0,
+                    a_k3,
+                    np.where(nm > 86.0, a_k4, np.where(nm > 27.0, a_k5, a_k6)),
+                ),
+            ),
+        )
         out[gt235] = a
 
     return float(out[0]) if scalar_input else out
@@ -786,7 +1120,7 @@ def _bd0(x, np_):
     """
     x = np.asarray(x, dtype=float)
     np_ = np.asarray(np_, dtype=float)
-    scalar = (x.ndim == 0 and np_.ndim == 0)
+    scalar = x.ndim == 0 and np_.ndim == 0
     x = np.atleast_1d(x)
     np_ = np.atleast_1d(np.broadcast_to(np_, x.shape).copy())
 
@@ -803,12 +1137,14 @@ def _bd0(x, np_):
         xnp = xf / nf
         # Safe log: fall back to log(x) - log(np_) if xnp non-finite.
         with np.errstate(invalid="ignore"):
-            lg_x_n = np.where(np.isfinite(xnp),
-                              np.log(np.where(np.isfinite(xnp), xnp, 1.0)),
-                              np.log(xf) - np.log(nf))
-        out[far] = np.where(xf > nf,
-                            _rfma_vec(xf, lg_x_n - 1.0, nf),
-                            _rfma_vec(xf, lg_x_n, nf) - xf)
+            lg_x_n = np.where(
+                np.isfinite(xnp),
+                np.log(np.where(np.isfinite(xnp), xnp, 1.0)),
+                np.log(xf) - np.log(nf),
+            )
+        out[far] = np.where(
+            xf > nf, _rfma_vec(xf, lg_x_n - 1.0, nf), _rfma_vec(xf, lg_x_n, nf) - xf
+        )
 
     # Close branch: Taylor series with per-element early exit.
     if np.any(close):
@@ -857,27 +1193,48 @@ def _bd0(x, np_):
 _M_LN_SQRT_PId2 = 0.225791352644727432363097614947  # log(sqrt(pi/2))
 
 _GAMCS = (
-    +.8571195590989331421920062399942e-2, +.4415381324841006757191315771652e-2,
-    +.5685043681599363378632664588789e-1, -.4219835396418560501012500186624e-2,
-    +.1326808181212460220584006796352e-2, -.1893024529798880432523947023886e-3,
-    +.3606925327441245256578082217225e-4, -.6056761904460864218485548290365e-5,
-    +.1055829546302283344731823509093e-5, -.1811967365542384048291855891166e-6,
-    +.3117724964715322277790254593169e-7, -.5354219639019687140874081024347e-8,
-    +.9193275519859588946887786825940e-9, -.1577941280288339761767423273953e-9,
-    +.2707980622934954543266540433089e-10, -.4646818653825730144081661058933e-11,
-    +.7973350192007419656460767175359e-12, -.1368078209830916025799499172309e-12,
-    +.2347319486563800657233471771688e-13, -.4027432614949066932766570534699e-14,
-    +.6910051747372100912138336975257e-15, -.1185584500221992907052387126192e-15,
-    +.2034148542496373955201026051932e-16, -.3490054341717405849274012949108e-17,
-    +.5987993856485305567135051066026e-18, -.1027378057872228074490069778431e-18,
-    +.1762702816060529824942759660748e-19, -.3024320653735306260958772112042e-20,
-    +.5188914660218397839717833550506e-21, -.8902770842456576692449251601066e-22,
-    +.1527474068493342602274596891306e-22, -.2620731256187362900257328332799e-23,
-    +.4496464047830538670331046570666e-24, -.7714712731336877911703901525333e-25,
-    +.1323635453126044036486572714666e-25, -.2270999412942928816702313813333e-26,
-    +.3896418998003991449320816639999e-27, -.6685198115125953327792127999999e-28,
-    +.1146998663140024384347613866666e-28, -.1967938586345134677295103999999e-29,
-    +.3376448816585338090334890666666e-30, -.5793070335782135784625493333333e-31,
+    +0.8571195590989331421920062399942e-2,
+    +0.4415381324841006757191315771652e-2,
+    +0.5685043681599363378632664588789e-1,
+    -0.4219835396418560501012500186624e-2,
+    +0.1326808181212460220584006796352e-2,
+    -0.1893024529798880432523947023886e-3,
+    +0.3606925327441245256578082217225e-4,
+    -0.6056761904460864218485548290365e-5,
+    +0.1055829546302283344731823509093e-5,
+    -0.1811967365542384048291855891166e-6,
+    +0.3117724964715322277790254593169e-7,
+    -0.5354219639019687140874081024347e-8,
+    +0.9193275519859588946887786825940e-9,
+    -0.1577941280288339761767423273953e-9,
+    +0.2707980622934954543266540433089e-10,
+    -0.4646818653825730144081661058933e-11,
+    +0.7973350192007419656460767175359e-12,
+    -0.1368078209830916025799499172309e-12,
+    +0.2347319486563800657233471771688e-13,
+    -0.4027432614949066932766570534699e-14,
+    +0.6910051747372100912138336975257e-15,
+    -0.1185584500221992907052387126192e-15,
+    +0.2034148542496373955201026051932e-16,
+    -0.3490054341717405849274012949108e-17,
+    +0.5987993856485305567135051066026e-18,
+    -0.1027378057872228074490069778431e-18,
+    +0.1762702816060529824942759660748e-19,
+    -0.3024320653735306260958772112042e-20,
+    +0.5188914660218397839717833550506e-21,
+    -0.8902770842456576692449251601066e-22,
+    +0.1527474068493342602274596891306e-22,
+    -0.2620731256187362900257328332799e-23,
+    +0.4496464047830538670331046570666e-24,
+    -0.7714712731336877911703901525333e-25,
+    +0.1323635453126044036486572714666e-25,
+    -0.2270999412942928816702313813333e-26,
+    +0.3896418998003991449320816639999e-27,
+    -0.6685198115125953327792127999999e-28,
+    +0.1146998663140024384347613866666e-28,
+    -0.1967938586345134677295103999999e-29,
+    +0.3376448816585338090334890666666e-30,
+    -0.5793070335782135784625493333333e-31,
 )
 _NGAM = 22
 _GAM_XMIN = -170.5674972726612
@@ -885,18 +1242,25 @@ _GAM_XMAX = 171.61447887182298
 _GAM_XSML = 2.2474362225598545e-308
 
 _ALGMCS = (
-    +.1666389480451863247205729650822e+0, -.1384948176067563840732986059135e-4,
-    +.9810825646924729426157171547487e-8, -.1809129475572494194263306266719e-10,
-    +.6221098041892605227126015543416e-13, -.3399615005417721944303330599666e-15,
-    +.2683181998482698748957538846666e-17, -.2868042435334643284144622399999e-19,
-    +.3962837061046434803679306666666e-21, -.6831888753985766870111999999999e-23,
-    +.1429227355942498147573333333333e-24, -.3547598158101070547199999999999e-26,
-    +.1025680058010470912000000000000e-27, -.3401102254316748799999999999999e-29,
-    +.1276642195630062933333333333333e-30,
+    +0.1666389480451863247205729650822e0,
+    -0.1384948176067563840732986059135e-4,
+    +0.9810825646924729426157171547487e-8,
+    -0.1809129475572494194263306266719e-10,
+    +0.6221098041892605227126015543416e-13,
+    -0.3399615005417721944303330599666e-15,
+    +0.2683181998482698748957538846666e-17,
+    -0.2868042435334643284144622399999e-19,
+    +0.3962837061046434803679306666666e-21,
+    -0.6831888753985766870111999999999e-23,
+    +0.1429227355942498147573333333333e-24,
+    -0.3547598158101070547199999999999e-26,
+    +0.1025680058010470912000000000000e-27,
+    -0.3401102254316748799999999999999e-29,
+    +0.1276642195630062933333333333333e-30,
 )
 _NALGM = 5
 _LGC_XBIG = 94906265.62425156
-_LGM_XMAX = 2.5327372760800758e+305
+_LGM_XMAX = 2.5327372760800758e305
 
 
 def _chebyshev_eval(x, a, n):
@@ -921,7 +1285,7 @@ def _lgammacor(x):
         return _NAN
     if x < _LGC_XBIG:
         tmp = 10 / x
-        return _chebyshev_eval(_rfma(tmp * tmp, 2., -1.), _ALGMCS, _NALGM) / x
+        return _chebyshev_eval(_rfma(tmp * tmp, 2.0, -1.0), _ALGMCS, _NALGM) / x
     return 1 / (x * 12)
 
 
@@ -943,6 +1307,7 @@ if sys.platform == "darwin":
     _c_tanpi.restype = ctypes.c_double
 else:
     import ctypes.util as _ctypes_util
+
     _libm_c = ctypes.CDLL(_ctypes_util.find_library("m") or "libm.so.6")
     _c_sinpi = _c_tanpi = None
 _c_lgamma = _libm_c["lgamma"]
@@ -976,7 +1341,7 @@ def _sinpi(x):
 # --- psigamma / polygamma (R nmath/polygamma.c, Amos TOMS 610) --------------
 # Bernoulli numbers B_2k for the asymptotic expansion (polygamma.c:177-200).
 _BVALUES = (
-    1.00000000000000000e+00,
+    1.00000000000000000e00,
     -5.00000000000000000e-01,
     1.66666666666666667e-01,
     -3.33333333333333333e-02,
@@ -984,20 +1349,20 @@ _BVALUES = (
     -3.33333333333333333e-02,
     7.57575757575757576e-02,
     -2.53113553113553114e-01,
-    1.16666666666666667e+00,
-    -7.09215686274509804e+00,
-    5.49711779448621554e+01,
-    -5.29124242424242424e+02,
-    6.19212318840579710e+03,
-    -8.65802531135531136e+04,
-    1.42551716666666667e+06,
-    -2.72982310678160920e+07,
-    6.01580873900642368e+08,
-    -1.51163157670921569e+10,
-    4.29614643061166667e+11,
-    -1.37116552050883328e+13,
-    4.88332318973593167e+14,
-    -1.92965793419400681e+16,
+    1.16666666666666667e00,
+    -7.09215686274509804e00,
+    5.49711779448621554e01,
+    -5.29124242424242424e02,
+    6.19212318840579710e03,
+    -8.65802531135531136e04,
+    1.42551716666666667e06,
+    -2.72982310678160920e07,
+    6.01580873900642368e08,
+    -1.51163157670921569e10,
+    4.29614643061166667e11,
+    -1.37116552050883328e13,
+    4.88332318973593167e14,
+    -1.92965793419400681e16,
 )
 
 
@@ -1030,17 +1395,17 @@ def _d_n_cot(x, n):
     """``(d/dx)^n cot(x)`` for n in {0..5} (polygamma.c:149-172); else NaN."""
     if n == 0:
         return math.cos(x) / math.sin(x)
-    elif n == 1:                                       # -1/sin^2
+    elif n == 1:  # -1/sin^2
         return -1.0 / _r_pow_di(math.sin(x), 2)
-    elif n == 2:                                       # 2 cos / sin^3
+    elif n == 2:  # 2 cos / sin^3
         return 2.0 * math.cos(x) / _r_pow_di(math.sin(x), 3)
-    elif n == 3:                                       # -2(3 - 2 sin^2)/sin^4
+    elif n == 3:  # -2(3 - 2 sin^2)/sin^4
         sin2 = _r_pow_di(math.sin(x), 2)
         return -2.0 * (3 - 2 * sin2) / _r_pow_di(sin2, 2)
-    elif n == 4:                                       # 8 cos (cos^2 + 2)/sin^5
+    elif n == 4:  # 8 cos (cos^2 + 2)/sin^5
         co = math.cos(x)
         return 8 * co * (_r_pow_di(co, 2) + 2) / _r_pow_di(math.sin(x), 5)
-    elif n == 5:                                       # (-16 c^4 -88 c^2 -16)/sin^6
+    elif n == 5:  # (-16 c^4 -88 c^2 -16)/sin^6
         co2 = _r_pow_di(math.cos(x), 2)
         return -8 * (2 * _r_pow_di(co2, 2) + 11 * co2 + 2) / _r_pow_di(math.sin(x), 6)
     else:
@@ -1052,23 +1417,23 @@ def _dpsifn_m1(x, n):
     scaled derivative ``(-1)^(n+1)/gamma(n+1) * psi(n,x)``. Returns NaN on the
     C ``ierr != 0`` exits. Only the R case (kode=1, m=1) is ported."""
     if n < 0:
-        return _NAN                                    # ierr = 1
+        return _NAN  # ierr = 1
     if x <= 0.0:
-        if x == round(x):                              # non-positive integer
+        if x == round(x):  # non-positive integer
             return _INF if (n % 2) else _NAN
-        ans = _dpsifn_m1(1.0 - x, n)                   # reflection (A&S 6.4.7)
+        ans = _dpsifn_m1(1.0 - x, n)  # reflection (A&S 6.4.7)
         if n > 5:
-            return _NAN                                # ierr = 4
+            return _NAN  # ierr = 4
         x = x * math.pi
         t1 = 1.0
         t2 = 1.0
         s = 1.0
         k = 0
         j = k - n
-        while j < 1:                                   # m == 1  => j < 1
-            t1 *= math.pi                              # t1 == pi^(k+1)
+        while j < 1:  # m == 1  => j < 1
+            t1 *= math.pi  # t1 == pi^(k+1)
             if k >= 2:
-                t2 *= k                                # t2 == k!
+                t2 *= k  # t2 == k!
             if j >= 0:
                 # R fuses `ans + (t1/t2)*d_n_cot` to one fmadd on arm64 (clang
                 # -ffp-contract); the reflection cancels badly so the 1-ulp FMA
@@ -1084,13 +1449,13 @@ def _dpsifn_m1(x, n):
     if n == 0 and x * xln > lrg:
         return -xln
     if n >= 1 and x > n * lrg:
-        return math.exp(-n * xln) / n                  # x^-n / n
-    nx = 1021                                          # imin2(-i1mach(15), i1mach(16))
+        return math.exp(-n * xln) / n  # x^-n / n
+    nx = 1021  # imin2(-i1mach(15), i1mach(16))
     r1m5 = _M_LOG10_2
     r1m4 = _DBL_EPSILON * 0.5
     wdtol = max(r1m4, 0.5e-18)
     elim = 2.302 * (nx * r1m5 - 3.0)
-    rln = min(r1m5 * 53, 18.06)                        # i1mach(14) == 53
+    rln = min(r1m5 * 53, 18.06)  # i1mach(14) == 53
     fln = max(rln, 3.0) - 3.0
     yint = 3.50 + 0.40 * fln
     slope = 0.21 + fln * (0.0006038 * fln + 0.008677)
@@ -1099,10 +1464,10 @@ def _dpsifn_m1(x, n):
     t = (fn + 1) * xln
     if abs(t) > elim:
         if t <= 0.0:
-            return _NAN                                # ierr = 2 (overflow)
-        return 0.0                                     # underflow (m == 1)
+            return _NAN  # ierr = 2 (overflow)
+        return 0.0  # underflow (m == 1)
     if x < wdtol:
-        return _r_pow_di(x, -n - 1)                    # kode == 1: no +xln
+        return _r_pow_di(x, -n - 1)  # kode == 1: no +xln
     xm = yint + slope * fn
     xmin = float(int(xm) + 1)
     if n != 0:
@@ -1112,7 +1477,7 @@ def _dpsifn_m1(x, n):
         xm = (-arg) if abs(arg) < 1.0e-3 else (1.0 - eps)
         fln = x * xm / eps
         xm = xmin - x
-        if xm > 7.0 and fln < 15.0:                    # rapidly-converging series
+        if xm > 7.0 and fln < 15.0:  # rapidly-converging series
             nn = int(fln) + 1
             np_ = n + 1
             t = math.exp(-(n + 1) * xln)
@@ -1135,7 +1500,7 @@ def _dpsifn_m1(x, n):
     t2 = t + xdmln
     tk = max(abs(t), abs(t1), abs(t2))
     if tk > elim:
-        return 0.0                                     # underflow
+        return 0.0  # underflow
     # L10: asymptotic (Bernoulli) expansion in 1/xdmy^2
     tss = math.exp(-t)
     tt = 0.5 / xdmy
@@ -1157,15 +1522,15 @@ def _dpsifn_m1(x, n):
             s += trm_k
             tk += 2.0
     s = (s + t1) * tss
-    if xinc != 0.0:                                    # backward recur xdmy -> x
+    if xinc != 0.0:  # backward recur xdmy -> x
         nx = int(xinc)
         np_ = nn + 1
-        if nx > 100:                                   # n_max
-            return _NAN                                # ierr = 3
+        if nx > 100:  # n_max
+            return _NAN  # ierr = 3
         if nn == 0:
-            for i in range(1, nx + 1):                 # L20 (avoids cancellation)
+            for i in range(1, nx + 1):  # L20 (avoids cancellation)
                 s += 1.0 / (x + (nx - i))
-            return s - xdmln                           # L30, kode == 1
+            return s - xdmln  # L30, kode == 1
         xm = xinc - 1.0
         fx = x + xm
         for _i in range(1, nx + 1):
@@ -1173,7 +1538,7 @@ def _dpsifn_m1(x, n):
             xm -= 1.0
             fx = x + xm
     if fn == 0:
-        return s - xdmln                               # L30, kode == 1
+        return s - xdmln  # L30, kode == 1
     return s
 
 
@@ -1182,13 +1547,13 @@ def psigamma5(x, deriv):
     derivative of the digamma function; ``psigamma(x, 0) == digamma(x)``."""
     if math.isnan(x):
         return x
-    n = int(round(deriv))                              # R_forceint (half-even)
+    n = int(round(deriv))  # R_forceint (half-even)
     if n > 100:
         return _NAN
     ans = _dpsifn_m1(x, n)
-    ans = -ans                                         # (-1)^(0+1) gamma(1) A
+    ans = -ans  # (-1)^(0+1) gamma(1) A
     for k in range(1, n + 1):
-        ans = ans * (-k)                               # (-1)^(k+1) gamma(k+1) A
+        ans = ans * (-k)  # (-1)^(k+1) gamma(k+1) A
     return ans
 
 
@@ -1227,7 +1592,7 @@ def gammafn(x):
             n -= 1
         y = x - n
         n -= 1
-        value = _chebyshev_eval(_rfma(y, 2., -1.), _GAMCS, _NGAM) + .9375
+        value = _chebyshev_eval(_rfma(y, 2.0, -1.0), _GAMCS, _NGAM) + 0.9375
         if n == 0:
             return value
         if n < 0:
@@ -1235,10 +1600,10 @@ def gammafn(x):
                 return _INF if x > 0 else _NEGINF
             n = -n
             for i in range(n):
-                value /= (x + i)
+                value /= x + i
             return value
         for i in range(1, n + 1):
-            value *= (y + i)
+            value *= y + i
         return value
     # y = |x| > 10
     if x > _GAM_XMAX:
@@ -1251,8 +1616,7 @@ def gammafn(x):
             value *= i
     else:
         corr = _stirlerr(y) if (2 * y == int(2 * y)) else _lgammacor(y)
-        value = math.exp(_rfma(y - 0.5, math.log(y), -y)
-                         + _M_LN_SQRT_2PI + corr)
+        value = math.exp(_rfma(y - 0.5, math.log(y), -y) + _M_LN_SQRT_2PI + corr)
     if x > 0:
         return value
     sinpiy = _sinpi(y)
@@ -1281,8 +1645,12 @@ def _lgammafn(x):
             return _rfma(x - 0.5, math.log(x), _M_LN_SQRT_2PI) - x
         return _rfma(x - 0.5, math.log(x), _M_LN_SQRT_2PI) - x + _lgammacor(x)
     sinpiy = abs(_sinpi(y))
-    return (_rfma(x - 0.5, math.log(y), _M_LN_SQRT_PId2) - x
-            - math.log(sinpiy) - _lgammacor(y))
+    return (
+        _rfma(x - 0.5, math.log(y), _M_LN_SQRT_PId2)
+        - x
+        - math.log(sinpiy)
+        - _lgammacor(y)
+    )
 
 
 def _lgammafn_arr(x):
@@ -1299,8 +1667,8 @@ def _lgammafn_arr(x):
 
 
 # --- gamma-family scalar foundations (pgamma.c) ------------------------------
-_PG_SCALEFACTOR = 2.0 ** 256        # (2^32)^8
-_M_CUTOFF = _M_LN2 * 1024 / _DBL_EPSILON   # = 3.196577e18
+_PG_SCALEFACTOR = 2.0**256  # (2^32)^8
+_M_CUTOFF = _M_LN2 * 1024 / _DBL_EPSILON  # = 3.196577e18
 _DBL_MIN = 2.2250738585072014e-308
 
 
@@ -1311,10 +1679,10 @@ def _logcf(x, i, d, eps):
     c4 = c2 + d
     a1 = c2
     # C: `a*b - c*d` fuses the first product (clang fmadd/fnmul), `a - c` → fmsub.
-    b1 = i * _rfma(-i, x, c2)           # i*(c2 - i*x)
+    b1 = i * _rfma(-i, x, c2)  # i*(c2 - i*x)
     b2 = d * d * x
-    a2 = _rfma(c4, c2, -b2)             # c4*c2 - b2
-    b2 = _rfma(c4, b1, -(i * b2))       # c4*b1 - i*b2
+    a2 = _rfma(c4, c2, -b2)  # c4*c2 - b2
+    b2 = _rfma(c4, b1, -(i * b2))  # c4*b1 - i*b2
     sf = _PG_SCALEFACTOR
     while abs(_rfma(a2, b1, -(a1 * b2))) > abs(eps * b1 * b2):
         c3 = c2 * c2 * x
@@ -1350,8 +1718,8 @@ def _log1pmx(x):
     if abs(x) < 1e-2:
         two = 2.0
         return r * _rfma(
-            _rfma(_rfma(_rfma(two / 9, y, two / 7), y, two / 5), y, two / 3),
-            y, -x)
+            _rfma(_rfma(_rfma(two / 9, y, two / 7), y, two / 5), y, two / 3), y, -x
+        )
     tol_logcf = 1e-14
     return r * _rfma(2 * y, _logcf(y, 3, 2, tol_logcf), -x)
 
@@ -1425,9 +1793,9 @@ def _R_Log1_Exp(x):
     """
     if x > -_M_LN2:
         v = -math.expm1(x)
-        if v > 0.:
+        if v > 0.0:
             return math.log(v)
-        return _NEGINF if v == 0. else _NAN
+        return _NEGINF if v == 0.0 else _NAN
     return math.log1p(-math.exp(x))
 
 
@@ -1443,6 +1811,7 @@ def _logspace_sub(logx, logy):
 # dpois. The 128-entry log table from bd0.c:102-231 (each row: 4 floats
 # encoding log(p/1024) where p = floor(1024/(0.5+i/256)+0.5), p ≈ 1024 to
 # 2048). Decoded from hex-float to plain double values.
+
 
 # Hex-float decoder: each entry "+0x1.62e430p-1" → that float value.
 def _hex_to_float(s: str) -> float:
@@ -1581,10 +1950,12 @@ _BD0_SCALE_HEX = (
     ("+0x1.7dc474p-7", "+0x1.f810a8p-31", "-0x1.245b5cp-56", "-0x1.a1f4f8p-80"),
     ("+0x1.fe02a8p-8", "-0x1.4ef988p-32", "+0x1.1f86ecp-57", "+0x1.20723cp-81"),
     ("+0x1.ff00acp-9", "-0x1.d4ef44p-33", "+0x1.2821acp-63", "+0x1.5a6d32p-87"),
-    ("0",              "0",               "0",               "0"),  # log(1) = 0
+    ("0", "0", "0", "0"),  # log(1) = 0
 )
 _BD0_SCALE = tuple(tuple(_hex_to_float(s) for s in row) for row in _BD0_SCALE_HEX)
-_BD0_SCALE_NP = np.array(_BD0_SCALE, dtype=float)  # shape (129, 4) for vectorized lookup
+_BD0_SCALE_NP = np.array(
+    _BD0_SCALE, dtype=float
+)  # shape (129, 4) for vectorized lookup
 
 
 def _ebd0(x, M):
@@ -1600,7 +1971,7 @@ def _ebd0(x, M):
 
     x = np.asarray(x, dtype=float)
     M = np.asarray(M, dtype=float)
-    scalar = (x.ndim == 0 and M.ndim == 0)
+    scalar = x.ndim == 0 and M.ndim == 0
     x = np.atleast_1d(x)
     M = np.atleast_1d(np.broadcast_to(M, x.shape).copy())
 
@@ -1678,7 +2049,9 @@ def _ebd0(x, M):
 
     # ADD1(-x * log1pmx((M*fg - x) / x))
     arg = _rfma_vec(Ma, fg, -xa) / xa
-    log1pmx_val = _log1pmx_vec(arg)  # R's ebd0 uses the accurate log1pmx, not log1p(arg)-arg
+    log1pmx_val = _log1pmx_vec(
+        arg
+    )  # R's ebd0 uses the accurate log1pmx, not log1p(arg)-arg
     add1(-xa * log1pmx_val)
 
     fg_ne_1 = fg != 1.0
@@ -1735,14 +2108,17 @@ def _pow1p(x, y):
     # small non-negative integer y in {0,1,2,3,4}: exact polynomial
     is_int = (y == np.trunc(y)) & (y >= 0) & (y <= 4.0)
     done = np.zeros(x.shape, dtype=bool)
-    for k, poly in enumerate((
+    for k, poly in enumerate(
+        (
             lambda xx: np.ones_like(xx),
             lambda xx: xx + 1.0,
             lambda xx: _rfma_vec(xx, xx + 2.0, 1.0),
             lambda xx: _rfma_vec(xx, _rfma_vec(xx, xx + 3.0, 3.0), 1.0),
-            lambda xx: _rfma_vec(xx, _rfma_vec(xx, _rfma_vec(xx, xx + 4.0,
-                                                             6.0), 4.0),
-                                 1.0))):
+            lambda xx: _rfma_vec(
+                xx, _rfma_vec(xx, _rfma_vec(xx, xx + 4.0, 6.0), 4.0), 1.0
+            ),
+        )
+    ):
         m = is_int & (y == k) & ~done
         if m.any():
             out[m] = poly(x[m])
@@ -1771,17 +2147,17 @@ def _dpois_raw(x, lambda_, give_log: bool = True):
     """
     x_in = np.asarray(x, dtype=float)
     l_in = np.asarray(lambda_, dtype=float)
-    scalar = (x_in.ndim == 0 and l_in.ndim == 0)
+    scalar = x_in.ndim == 0 and l_in.ndim == 0
     x = np.atleast_1d(x_in.copy())
     lam = np.atleast_1d(np.broadcast_to(l_in, x.shape).copy())
 
-    NEG_INF = float('-inf')
+    NEG_INF = float("-inf")
     out = np.empty_like(x)
 
     # Edge cases (rare in PIRLS; cheap to test).
-    lam_zero = (lam == 0.0)
-    lam_inf  = ~np.isfinite(lam)
-    x_neg    = x < 0
+    lam_zero = lam == 0.0
+    lam_inf = ~np.isfinite(lam)
+    x_neg = x < 0
     tiny = np.finfo(float).tiny
     x_le_lt = (x <= lam * tiny) & ~lam_zero & ~lam_inf & ~x_neg
     lam_lt_xt = (lam < x * tiny) & ~lam_zero & ~lam_inf & ~x_neg & ~x_le_lt
@@ -1800,10 +2176,11 @@ def _dpois_raw(x, lambda_, give_log: bool = True):
         sub = lam_lt_xt
         xn = x[sub]
         ln = lam[sub]
-        out[sub] = np.where(~np.isfinite(xn),
-                            NEG_INF,
-                            _rfma_vec(xn, np.log(ln), -ln)
-                            - _lgammafn_arr(xn + 1.0))
+        out[sub] = np.where(
+            ~np.isfinite(xn),
+            NEG_INF,
+            _rfma_vec(xn, np.log(ln), -ln) - _lgammafn_arr(xn + 1.0),
+        )
 
     # Common (saddlepoint) path.
     m_yl = m_yh = m_r = m_Lrg = None
@@ -1824,8 +2201,9 @@ def _dpois_raw(x, lambda_, give_log: bool = True):
         # (dpois.c:68), which differs from exp(log-result) at the last ulp.
         out = np.exp(out)
         if m_yl is not None:
-            out[main] = (np.exp(-m_yl) * np.exp(-m_yh)
-                         / np.where(m_Lrg, m_r, np.sqrt(m_r)))
+            out[main] = (
+                np.exp(-m_yl) * np.exp(-m_yh) / np.where(m_Lrg, m_r, np.sqrt(m_r))
+            )
     return float(out[0]) if scalar else out
 
 
@@ -1839,7 +2217,7 @@ def _dbinom_raw(x, n, p, q, give_log: bool = True):
     n_in = np.asarray(n, dtype=float)
     p_in = np.asarray(p, dtype=float)
     q_in = np.asarray(q, dtype=float)
-    scalar = (x_in.ndim == 0 and n_in.ndim == 0 and p_in.ndim == 0 and q_in.ndim == 0)
+    scalar = x_in.ndim == 0 and n_in.ndim == 0 and p_in.ndim == 0 and q_in.ndim == 0
     # Broadcast to common shape.
     shape = np.broadcast_shapes(x_in.shape, n_in.shape, p_in.shape, q_in.shape)
     x = np.broadcast_to(x_in, shape).astype(float).copy()
@@ -1847,7 +2225,7 @@ def _dbinom_raw(x, n, p, q, give_log: bool = True):
     p = np.broadcast_to(p_in, shape).astype(float).copy()
     q = np.broadcast_to(q_in, shape).astype(float).copy()
 
-    NEG_INF = float('-inf')
+    NEG_INF = float("-inf")
     out = np.empty(shape, dtype=float)
 
     p_zero = p == 0.0
@@ -1902,8 +2280,13 @@ def _dbinom_raw(x, n, p, q, give_log: bool = True):
         nm = n[main]
         pm = p[main]
         qm = q[main]
-        lc = (_stirlerr(nm) - _stirlerr(xm) - _stirlerr(nm - xm)
-              - _bd0(xm, nm * pm) - _bd0(nm - xm, nm * qm))
+        lc = (
+            _stirlerr(nm)
+            - _stirlerr(xm)
+            - _stirlerr(nm - xm)
+            - _bd0(xm, nm * pm)
+            - _bd0(nm - xm, nm * qm)
+        )
         lf = _M_LN_2PI + np.log(xm) + np.log1p(-xm / nm)
         out[main] = _rfma_vec(-0.5, lf, lc)
 
@@ -1914,15 +2297,12 @@ def _dbinom_raw(x, n, p, q, give_log: bool = True):
         if np.any(edge_x0):
             n0, p0, q0 = n[edge_x0], p[edge_x0], q[edge_x0]
             out[edge_x0] = np.where(
-                n0 == 0.0, 1.0,
-                np.where(p0 > q0, np.power(q0, n0), _pow1p(-p0, n0)))
+                n0 == 0.0, 1.0, np.where(p0 > q0, np.power(q0, n0), _pow1p(-p0, n0))
+            )
         if np.any(edge_xn):
             n0, p0, q0 = n[edge_xn], p[edge_xn], q[edge_xn]
-            out[edge_xn] = np.where(
-                p0 > q0, _pow1p(-q0, n0), np.power(p0, n0))
+            out[edge_xn] = np.where(p0 > q0, _pow1p(-q0, n0), np.power(p0, n0))
     return float(out.reshape(())) if scalar else out
-
-
 
 
 # === pgamma — gamma/chi-square CDF (nmath/pgamma.c, Welinder) ================
@@ -1935,8 +2315,7 @@ def _dpois_wrap(x_plus_1, lambda_, give_log):
         v = -lambda_ - _lgammafn(x_plus_1)
         return v if give_log else math.exp(v)
     d = _dpois_raw(x_plus_1, lambda_, give_log)
-    return (d + math.log(x_plus_1 / lambda_)) if give_log \
-        else d * (x_plus_1 / lambda_)
+    return (d + math.log(x_plus_1 / lambda_)) if give_log else d * (x_plus_1 / lambda_)
 
 
 def _pgamma_smallx(x, alph, lower_tail, log_p):
@@ -2065,11 +2444,26 @@ def _dpnorm(x, lower_tail, lp):
     return d / math.exp(lp)
 
 
-_PPA_COEFS_A = (-1e99, 2 / 3., -4 / 135., 8 / 2835., 16 / 8505.,
-                -8992 / 12629925., -334144 / 492567075., 698752 / 1477701225.)
-_PPA_COEFS_B = (-1e99, 1 / 12., 1 / 288., -139 / 51840., -571 / 2488320.,
-                163879 / 209018880., 5246819 / 75246796800.,
-                -534703531 / 902961561600.)
+_PPA_COEFS_A = (
+    -1e99,
+    2 / 3.0,
+    -4 / 135.0,
+    8 / 2835.0,
+    16 / 8505.0,
+    -8992 / 12629925.0,
+    -334144 / 492567075.0,
+    698752 / 1477701225.0,
+)
+_PPA_COEFS_B = (
+    -1e99,
+    1 / 12.0,
+    1 / 288.0,
+    -139 / 51840.0,
+    -571 / 2488320.0,
+    163879 / 209018880.0,
+    5246819 / 75246796800.0,
+    -534703531 / 902961561600.0,
+)
 
 
 def _ppois_asymp(x, lambda_, lower_tail, log_p):
@@ -2116,7 +2510,7 @@ def pgamma_raw(x, alph, lower_tail, log_p):
         sum_ = _pd_upper_series(x, alph, log_p)
         d = _dpois_wrap(alph, x, log_p)
         if not lower_tail:
-            res = _R_Log1_Exp(d + sum_) if log_p else _rfma(-d, sum_, 1.)
+            res = _R_Log1_Exp(d + sum_) if log_p else _rfma(-d, sum_, 1.0)
         else:
             res = (sum_ + d) if log_p else sum_ * d
     elif alph - 1 < x and alph < 0.8 * (x + 50):
@@ -2133,7 +2527,7 @@ def pgamma_raw(x, alph, lower_tail, log_p):
         if not lower_tail:
             res = (sum_ + d) if log_p else sum_ * d
         else:
-            res = _R_Log1_Exp(d + sum_) if log_p else _rfma(-d, sum_, 1.)
+            res = _R_Log1_Exp(d + sum_) if log_p else _rfma(-d, sum_, 1.0)
     else:
         res = _ppois_asymp(alph - 1, x, not lower_tail, log_p)
     if (not log_p) and res < _DBL_MIN / _DBL_EPSILON:
@@ -2177,8 +2571,9 @@ def dgamma(x, shape, scale, give_log=False):
         pr = _dpois_raw(shape, x / scale, give_log)
         if give_log:
             sx = shape / x
-            return pr + (math.log(sx) if math.isfinite(sx)
-                         else math.log(shape) - math.log(x))
+            return pr + (
+                math.log(sx) if math.isfinite(sx) else math.log(shape) - math.log(x)
+            )
         return pr * shape / x
     pr = _dpois_raw(shape - 1, x / scale, give_log)
     return (pr - math.log(scale)) if give_log else pr / scale
@@ -2223,21 +2618,24 @@ def _qchisq_appr(p, nu, g, lower_tail, log_p, tol):
         ch = math.exp((lgam1pa + p1) / alpha + _M_LN2)
     elif nu > 0.32:
         x = qnorm5(p, 0, 1, lower_tail, log_p)
-        p1 = 2. / (9 * nu)
-        ch = nu * math.pow(_rfma(x, math.sqrt(p1), 1.) - p1, 3)
-        if ch > _rfma(2.2, nu, 6.):
-            ch = -2 * (_rfma(-c, math.log(0.5 * ch),
-                             _R_DT_Clog(p, lower_tail, log_p)) + g)
+        p1 = 2.0 / (9 * nu)
+        ch = nu * math.pow(_rfma(x, math.sqrt(p1), 1.0) - p1, 3)
+        if ch > _rfma(2.2, nu, 6.0):
+            ch = -2 * (
+                _rfma(-c, math.log(0.5 * ch), _R_DT_Clog(p, lower_tail, log_p)) + g
+            )
     else:
         ch = 0.4
         a = _rfma(c, _M_LN2, _R_DT_Clog(p, lower_tail, log_p) + g)
         while True:
             q = ch
-            p1 = 1. / _rfma(ch, C7 + ch, 1.)
+            p1 = 1.0 / _rfma(ch, C7 + ch, 1.0)
             p2 = ch * _rfma(ch, C8 + ch, C9)
-            t = (_rfma(_rfma(2., ch, C7), p1, -0.5)
-                 - _rfma(ch, _rfma(3., ch, C10), C9) / p2)
-            ch -= _rfma(-(math.exp(_rfma(0.5, ch, a)) * p2), p1, 1.) / t
+            t = (
+                _rfma(_rfma(2.0, ch, C7), p1, -0.5)
+                - _rfma(ch, _rfma(3.0, ch, C10), C9) / p2
+            )
+            ch -= _rfma(-(math.exp(_rfma(0.5, ch, a)) * p2), p1, 1.0) / t
             if not (abs(q - ch) > tol * abs(ch)):
                 break
     return ch
@@ -2251,7 +2649,7 @@ def qgamma(p, alpha, scale, lower_tail=True, log_p=False):
     MAXIT = 1000
     pMIN = 1e-100
     pMAX = 1 - 1e-14
-    i420, i2520, i5040 = 1. / 420., 1. / 2520., 1. / 5040.
+    i420, i2520, i5040 = 1.0 / 420.0, 1.0 / 2520.0, 1.0 / 5040.0
     if math.isnan(p) or math.isnan(alpha) or math.isnan(scale):
         return p + alpha + scale
     # R_Q_P01_boundaries(p, 0, +Inf)
@@ -2291,7 +2689,7 @@ def qgamma(p, alpha, scale, lower_tail=True, log_p=False):
         at_end = True
     if not at_end:
         c = alpha - 1
-        s6 = _rfma(c, _rfma(127., c, 346.), 120.) * i5040
+        s6 = _rfma(c, _rfma(127.0, c, 346.0), 120.0) * i5040
         ch0 = ch
         for i in range(1, MAXIT + 1):
             q = ch
@@ -2301,25 +2699,41 @@ def qgamma(p, alpha, scale, lower_tail=True, log_p=False):
                 ch = ch0
                 max_it_Newton = 27
                 break
-            t = p2 * math.exp(_rfma(-c, math.log(ch),
-                                    _rfma(alpha, _M_LN2, g) + p1))
+            t = p2 * math.exp(_rfma(-c, math.log(ch), _rfma(alpha, _M_LN2, g) + p1))
             b = t / ch
             a = _rfma(0.5, t, -(b * c))
             # Nested Horners; clang fuses every `acc*a + C` within the
             # expression.
-            s1 = _rfma(a, _rfma(a, _rfma(a, _rfma(a, _rfma(60., a, 70.),
-                                                  84.), 105.), 140.),
-                       210.) * i420
-            s2 = _rfma(a, _rfma(a, _rfma(a, _rfma(1278., a, 1141.), 966.),
-                                735.), 420.) * i2520
-            s3 = _rfma(a, _rfma(a, _rfma(932., a, 707.), 462.), 210.) * i2520
-            s4 = _rfma(c, _rfma(a, _rfma(1740., a, 889.), 294.),
-                       _rfma(a, _rfma(1182., a, 672.), 252.)) * i5040
-            s5 = _rfma(c, _rfma(606., a, 1175.),
-                       _rfma(2264., a, 84.)) * i2520
-            poly = _rfma(-b, _rfma(-b, _rfma(-b, _rfma(-b, _rfma(-b, s6, s5),
-                                                       s4), s3), s2), s1)
-            ch = _rfma(t, _rfma(-(b * c), poly, _rfma(0.5 * t, s1, 1.)), ch)
+            s1 = (
+                _rfma(
+                    a,
+                    _rfma(
+                        a, _rfma(a, _rfma(a, _rfma(60.0, a, 70.0), 84.0), 105.0), 140.0
+                    ),
+                    210.0,
+                )
+                * i420
+            )
+            s2 = (
+                _rfma(
+                    a, _rfma(a, _rfma(a, _rfma(1278.0, a, 1141.0), 966.0), 735.0), 420.0
+                )
+                * i2520
+            )
+            s3 = _rfma(a, _rfma(a, _rfma(932.0, a, 707.0), 462.0), 210.0) * i2520
+            s4 = (
+                _rfma(
+                    c,
+                    _rfma(a, _rfma(1740.0, a, 889.0), 294.0),
+                    _rfma(a, _rfma(1182.0, a, 672.0), 252.0),
+                )
+                * i5040
+            )
+            s5 = _rfma(c, _rfma(606.0, a, 1175.0), _rfma(2264.0, a, 84.0)) * i2520
+            poly = _rfma(
+                -b, _rfma(-b, _rfma(-b, _rfma(-b, _rfma(-b, s6, s5), s4), s3), s2), s1
+            )
+            ch = _rfma(t, _rfma(-(b * c), poly, _rfma(0.5 * t, s1, 1.0)), ch)
             if abs(q - ch) < EPS2 * ch:
                 break
             if abs(q - ch) > 0.1 * ch:
@@ -2331,12 +2745,11 @@ def qgamma(p, alpha, scale, lower_tail=True, log_p=False):
             p = math.log(p)
             log_p = True
         if x == 0:
-            _1_p = 1. + 1e-7
-            _1_m = 1. - 1e-7
+            _1_p = 1.0 + 1e-7
+            _1_m = 1.0 - 1e-7
             x = _DBL_MIN
             p_ = pgamma(x, alpha, scale, lower_tail, log_p)
-            if ((lower_tail and p_ > p * _1_p)
-                    or ((not lower_tail) and p_ < p * _1_m)):
+            if (lower_tail and p_ > p * _1_p) or ((not lower_tail) and p_ < p * _1_m):
                 return 0.0
         else:
             p_ = pgamma(x, alpha, scale, lower_tail, log_p)
@@ -2353,8 +2766,7 @@ def qgamma(p, alpha, scale, lower_tail=True, log_p=False):
             t = (p1 * math.exp(p_ - g)) if log_p else (p1 / g)
             t = (x - t) if lower_tail else (x + t)
             p_ = pgamma(t, alpha, scale, lower_tail, log_p)
-            if (abs(p_ - p) > abs(p1)
-                    or (i > 1 and abs(p_ - p) == abs(p1))):
+            if abs(p_ - p) > abs(p1) or (i > 1 and abs(p_ - p) == abs(p1)):
                 break
             x = t
     return x
@@ -2363,7 +2775,7 @@ def qgamma(p, alpha, scale, lower_tail=True, log_p=False):
 # === pbeta — incomplete beta (nmath/toms708.c, Morris ALGORITHM 708) =========
 # Direct port of bratio() + all its sub-algorithms. Feeds pbeta -> pt/pf/
 # pbinom/ppois and (via qbeta) the t/F/beta/binom quantiles.
-_TOMS_EPS = 2.220446049250313e-16   # = 2 * d1mach(3) = DBL_EPSILON
+_TOMS_EPS = 2.220446049250313e-16  # = 2 * d1mach(3) = DBL_EPSILON
 _M_SQRT_PI = 1.772453850905516027298167483341
 
 
@@ -2381,100 +2793,122 @@ def _horner(x, c):
 
 
 def _exparg(which):
-    lnb = .69314718055995
+    lnb = 0.69314718055995
     m = 1024 if which == 0 else (-1021 - 1)
-    return m * lnb * .99999
+    return m * lnb * 0.99999
 
 
 def _esum(mu, x, give_log):
     if give_log:
         return x + mu
-    if x > 0.:
+    if x > 0.0:
         if mu > 0:
             return math.exp(mu) * math.exp(x)
         w = mu + x
-        if w < 0.:
+        if w < 0.0:
             return math.exp(mu) * math.exp(x)
     else:
         if mu < 0:
             return math.exp(mu) * math.exp(x)
         w = mu + x
-        if w > 0.:
+        if w > 0.0:
             return math.exp(mu) * math.exp(x)
     return math.exp(w)
 
 
 def _rexpm1(x):
     p1 = 9.14041914819518e-10
-    p2 = .0238082361044469
-    q1 = -.499999999085958
-    q2 = .107141568980644
-    q3 = -.0119041179760821
+    p2 = 0.0238082361044469
+    q1 = -0.499999999085958
+    q2 = 0.107141568980644
+    q3 = -0.0119041179760821
     q4 = 5.95130811860248e-4
     if abs(x) <= 0.15:
-        return x * (_horner(x, (p2, p1, 1.))
-                    / _horner(x, (q4, q3, q2, q1, 1.)))
+        return x * (_horner(x, (p2, p1, 1.0)) / _horner(x, (q4, q3, q2, q1, 1.0)))
     w = math.exp(x)
-    if x > 0.:
-        return w * (0.5 - 1. / w + 0.5)
+    if x > 0.0:
+        return w * (0.5 - 1.0 / w + 0.5)
     return w - 0.5 - 0.5
 
 
 def _alnrel(a):
     if abs(a) > 0.375:
-        return math.log(1. + a)
+        return math.log(1.0 + a)
     p1 = -1.29418923021993
-    p2 = .405303492862024
-    p3 = -.0178874546012214
+    p2 = 0.405303492862024
+    p3 = -0.0178874546012214
     q1 = -1.62752256355323
-    q2 = .747811014037616
-    q3 = -.0845104217945565
-    t = a / (a + 2.)
+    q2 = 0.747811014037616
+    q3 = -0.0845104217945565
+    t = a / (a + 2.0)
     t2 = t * t
-    w = (_horner(t2, (p3, p2, p1, 1.))
-         / _horner(t2, (q3, q2, q1, 1.)))
-    return t * 2. * w
+    w = _horner(t2, (p3, p2, p1, 1.0)) / _horner(t2, (q3, q2, q1, 1.0))
+    return t * 2.0 * w
 
 
 def _rlog1(x):
-    a = .0566749439387324
-    b = .0456512608815524
-    p0 = .333333333333333
-    p1 = -.224696413112536
-    p2 = .00620886815375787
+    a = 0.0566749439387324
+    b = 0.0456512608815524
+    p0 = 0.333333333333333
+    p1 = -0.224696413112536
+    p2 = 0.00620886815375787
     q1 = -1.27408923933623
-    q2 = .354508718369557
+    q2 = 0.354508718369557
     if x < -0.39 or x > 0.57:
         w = x + 0.5 + 0.5
         return x - math.log(w)
     if x < -0.18:
-        h = (x + .3) / .7
-        w1 = _rfma(-h, .3, a)
+        h = (x + 0.3) / 0.7
+        w1 = _rfma(-h, 0.3, a)
     elif x > 0.18:
-        h = _rfma(x, .75, -.25)
-        w1 = b + h / 3.
+        h = _rfma(x, 0.75, -0.25)
+        w1 = b + h / 3.0
     else:
         h = x
-        w1 = 0.
-    r = h / (h + 2.)
+        w1 = 0.0
+    r = h / (h + 2.0)
     t = r * r
-    w = _horner(t, (p2, p1, p0)) / _horner(t, (q2, q1, 1.))
-    return _rfma(t * 2., _rfma(-r, w, 1. / (1. - r)), w1)
+    w = _horner(t, (p2, p1, p0)) / _horner(t, (q2, q1, 1.0))
+    return _rfma(t * 2.0, _rfma(-r, w, 1.0 / (1.0 - r)), w1)
 
 
-_ERF_A = (7.7105849500132e-5, -.00133733772997339, .0323076579225834,
-          .0479137145607681, .128379167095513)
-_ERF_B = (.00301048631703895, .0538971687740286, .375795757275549)
-_ERF_P = (-1.36864857382717e-7, .564195517478974, 7.21175825088309,
-          43.1622272220567, 152.98928504694, 339.320816734344,
-          451.918953711873, 300.459261020162)
-_ERF_Q = (1., 12.7827273196294, 77.0001529352295, 277.585444743988,
-          638.980264465631, 931.35409485061, 790.950925327898,
-          300.459260956983)
-_ERF_R = (2.10144126479064, 26.2370141675169, 21.3688200555087,
-          4.6580782871847, .282094791773523)
+_ERF_A = (
+    7.7105849500132e-5,
+    -0.00133733772997339,
+    0.0323076579225834,
+    0.0479137145607681,
+    0.128379167095513,
+)
+_ERF_B = (0.00301048631703895, 0.0538971687740286, 0.375795757275549)
+_ERF_P = (
+    -1.36864857382717e-7,
+    0.564195517478974,
+    7.21175825088309,
+    43.1622272220567,
+    152.98928504694,
+    339.320816734344,
+    451.918953711873,
+    300.459261020162,
+)
+_ERF_Q = (
+    1.0,
+    12.7827273196294,
+    77.0001529352295,
+    277.585444743988,
+    638.980264465631,
+    931.35409485061,
+    790.950925327898,
+    300.459260956983,
+)
+_ERF_R = (
+    2.10144126479064,
+    26.2370141675169,
+    21.3688200555087,
+    4.6580782871847,
+    0.282094791773523,
+)
 _ERF_S = (94.153775055546, 187.11481179959, 99.0191814623914, 18.0124575948747)
-_ERF_C = .564189583547756
+_ERF_C = 0.564189583547756
 
 
 def _erf__(x):
@@ -2482,20 +2916,20 @@ def _erf__(x):
     ax = abs(x)
     if ax <= 0.5:
         t = x * x
-        top = _horner(t, a) + 1.
-        bot = _horner(t, (b[0], b[1], b[2], 1.))
+        top = _horner(t, a) + 1.0
+        bot = _horner(t, (b[0], b[1], b[2], 1.0))
         return x * (top / bot)
-    if ax <= 4.:
+    if ax <= 4.0:
         top = _horner(ax, p)
         bot = _horner(ax, q)
         R = 0.5 - math.exp(-x * x) * top / bot + 0.5
         return -R if x < 0 else R
     if ax >= 5.8:
-        return 1. if x > 0 else -1.
+        return 1.0 if x > 0 else -1.0
     x2 = x * x
-    t = 1. / x2
+    t = 1.0 / x2
     top = _horner(t, r)
-    bot = _horner(t, (s[0], s[1], s[2], s[3], 1.))
+    bot = _horner(t, (s[0], s[1], s[2], s[3], 1.0))
     t = (_ERF_C - top / (x2 * bot)) / ax
     R = _rfma(-math.exp(-x2), t, 0.5) + 0.5
     return -R if x < 0 else R
@@ -2506,117 +2940,145 @@ def _erfc1(ind, x):
     ax = abs(x)
     if ax <= 0.5:
         t = x * x
-        top = _horner(t, a) + 1.
-        bot = _horner(t, (b[0], b[1], b[2], 1.))
+        top = _horner(t, a) + 1.0
+        bot = _horner(t, (b[0], b[1], b[2], 1.0))
         ret = _rfma(-x, top / bot, 0.5) + 0.5
         if ind != 0:
             ret = math.exp(t) * ret
         return ret
-    if ax <= 4.:
+    if ax <= 4.0:
         top = _horner(ax, p)
         bot = _horner(ax, q)
         ret = top / bot
     else:
         if x <= -5.6:
-            ret = 2.
+            ret = 2.0
             if ind != 0:
-                ret = math.exp(x * x) * 2.
+                ret = math.exp(x * x) * 2.0
             return ret
-        if ind == 0 and (x > 100. or x * x > -_exparg(1)):
-            return 0.
-        t = 1. / (x * x)
+        if ind == 0 and (x > 100.0 or x * x > -_exparg(1)):
+            return 0.0
+        t = 1.0 / (x * x)
         top = _horner(t, r)
-        bot = _horner(t, (s[0], s[1], s[2], s[3], 1.))
+        bot = _horner(t, (s[0], s[1], s[2], s[3], 1.0))
         ret = (_ERF_C - t * top / bot) / ax
     if ind != 0:
-        if x < 0.:
-            ret = math.exp(x * x) * 2. - ret
+        if x < 0.0:
+            ret = math.exp(x * x) * 2.0 - ret
     else:
         w = x * x
         t = w
         e = w - t
         ret = (0.5 - e + 0.5) * math.exp(-t) * ret
-        if x < 0.:
-            ret = 2. - ret
+        if x < 0.0:
+            ret = 2.0 - ret
     return ret
 
 
 def _gam1(a):
     d = a - 0.5
-    t = (d - 0.5) if d > 0. else a
-    if t < 0.:
-        r = (-.422784335098468, -.771330383816272, -.244757765222226,
-             .118378989872749, 9.30357293360349e-4, -.0118290993445146,
-             .00223047661158249, 2.66505979058923e-4, -1.32674909766242e-4)
-        s1 = .273076135303957
-        s2 = .0559398236957378
-        top = _horner(t, (r[8], r[7], r[6], r[5], r[4], r[3], r[2], r[1],
-                          r[0]))
-        bot = _horner(t, (s2, s1, 1.))
+    t = (d - 0.5) if d > 0.0 else a
+    if t < 0.0:
+        r = (
+            -0.422784335098468,
+            -0.771330383816272,
+            -0.244757765222226,
+            0.118378989872749,
+            9.30357293360349e-4,
+            -0.0118290993445146,
+            0.00223047661158249,
+            2.66505979058923e-4,
+            -1.32674909766242e-4,
+        )
+        s1 = 0.273076135303957
+        s2 = 0.0559398236957378
+        top = _horner(t, (r[8], r[7], r[6], r[5], r[4], r[3], r[2], r[1], r[0]))
+        bot = _horner(t, (s2, s1, 1.0))
         w = top / bot
-        return (t * w / a) if d > 0. else (a * (w + 0.5 + 0.5))
+        return (t * w / a) if d > 0.0 else (a * (w + 0.5 + 0.5))
     elif t == 0:
-        return 0.
+        return 0.0
     else:
-        p = (.577215664901533, -.409078193005776, -.230975380857675,
-             .0597275330452234, .0076696818164949, -.00514889771323592,
-             5.89597428611429e-4)
-        q = (1., .427569613095214, .158451672430138, .0261132021441447,
-             .00423244297896961)
+        p = (
+            0.577215664901533,
+            -0.409078193005776,
+            -0.230975380857675,
+            0.0597275330452234,
+            0.0076696818164949,
+            -0.00514889771323592,
+            5.89597428611429e-4,
+        )
+        q = (
+            1.0,
+            0.427569613095214,
+            0.158451672430138,
+            0.0261132021441447,
+            0.00423244297896961,
+        )
         top = _horner(t, (p[6], p[5], p[4], p[3], p[2], p[1], p[0]))
-        bot = _horner(t, (q[4], q[3], q[2], q[1], 1.))
+        bot = _horner(t, (q[4], q[3], q[2], q[1], 1.0))
         w = top / bot
-        return (t / a * (w - 0.5 - 0.5)) if d > 0. else (a * w)
+        return (t / a * (w - 0.5 - 0.5)) if d > 0.0 else (a * w)
 
 
 def _gamln1(a):
     if a < 0.6:
-        p0 = .577215664901533
-        p1 = .844203922187225
-        p2 = -.168860593646662
-        p3 = -.780427615533591
-        p4 = -.402055799310489
-        p5 = -.0673562214325671
-        p6 = -.00271935708322958
+        p0 = 0.577215664901533
+        p1 = 0.844203922187225
+        p2 = -0.168860593646662
+        p3 = -0.780427615533591
+        p4 = -0.402055799310489
+        p5 = -0.0673562214325671
+        p6 = -0.00271935708322958
         q1 = 2.88743195473681
         q2 = 3.12755088914843
         q3 = 1.56875193295039
-        q4 = .361951990101499
-        q5 = .0325038868253937
+        q4 = 0.361951990101499
+        q5 = 0.0325038868253937
         q6 = 6.67465618796164e-4
-        w = (_horner(a, (p6, p5, p4, p3, p2, p1, p0))
-             / _horner(a, (q6, q5, q4, q3, q2, q1, 1.)))
+        w = _horner(a, (p6, p5, p4, p3, p2, p1, p0)) / _horner(
+            a, (q6, q5, q4, q3, q2, q1, 1.0)
+        )
         return -a * w
-    r0 = .422784335098467
-    r1 = .848044614534529
-    r2 = .565221050691933
-    r3 = .156513060486551
-    r4 = .017050248402265
+    r0 = 0.422784335098467
+    r1 = 0.848044614534529
+    r2 = 0.565221050691933
+    r3 = 0.156513060486551
+    r4 = 0.017050248402265
     r5 = 4.97958207639485e-4
     s1 = 1.24313399877507
-    s2 = .548042109832463
-    s3 = .10155218743983
-    s4 = .00713309612391
+    s2 = 0.548042109832463
+    s3 = 0.10155218743983
+    s4 = 0.00713309612391
     s5 = 1.16165475989616e-4
     x = a - 0.5 - 0.5
-    w = (_horner(x, (r5, r4, r3, r2, r1, r0))
-         / _horner(x, (s5, s4, s3, s2, s1, 1.)))
+    w = _horner(x, (r5, r4, r3, r2, r1, r0)) / _horner(x, (s5, s4, s3, s2, s1, 1.0))
     return x * w
 
 
-_PSI_P1 = (.0089538502298197, 4.77762828042627, 142.441585084029,
-           1186.45200713425, 3633.51846806499, 4138.10161269013,
-           1305.60269827897)
-_PSI_Q1 = (44.8452573429826, 520.752771467162, 2210.0079924783,
-           3641.27349079381, 1908.310765963, 6.91091682714533e-6)
-_PSI_P2 = (-2.12940445131011, -7.01677227766759, -4.48616543918019,
-           -.648157123766197)
-_PSI_Q2 = (32.2703493791143, 89.2920700481861, 54.6117738103215,
-           7.77788548522962)
+_PSI_P1 = (
+    0.0089538502298197,
+    4.77762828042627,
+    142.441585084029,
+    1186.45200713425,
+    3633.51846806499,
+    4138.10161269013,
+    1305.60269827897,
+)
+_PSI_Q1 = (
+    44.8452573429826,
+    520.752771467162,
+    2210.0079924783,
+    3641.27349079381,
+    1908.310765963,
+    6.91091682714533e-6,
+)
+_PSI_P2 = (-2.12940445131011, -7.01677227766759, -4.48616543918019, -0.648157123766197)
+_PSI_Q2 = (32.2703493791143, 89.2920700481861, 54.6117738103215, 7.77788548522962)
 
 
 def _psi(x):
-    piov4 = .785398163397448
+    piov4 = 0.785398163397448
     dx0 = 1.461632144968362341262659542325721325
     p1, q1, p2, q2 = _PSI_P1, _PSI_Q1, _PSI_P2, _PSI_Q2
     xmax1 = 2147483647.0  # INT_MAX
@@ -2624,27 +3086,27 @@ def _psi(x):
     if xmax1 > d2:
         xmax1 = d2
     xsmall = 1e-9
-    aug = 0.
+    aug = 0.0
     if x < 0.5:
         if abs(x) <= xsmall:
-            if x == 0.:
-                return 0.
-            aug = -1. / x
+            if x == 0.0:
+                return 0.0
+            aug = -1.0 / x
         else:
             w = -x
             sgn = piov4
-            if w <= 0.:
+            if w <= 0.0:
                 w = -w
                 sgn = -sgn
             if w >= xmax1:
-                return 0.
+                return 0.0
             nq = int(w)
             w -= nq
-            nq = int(w * 4.)
-            w = _rfma(-float(nq), 0.25, w) * 4.
+            nq = int(w * 4.0)
+            w = _rfma(-float(nq), 0.25, w) * 4.0
             n = nq // 2
             if n + n != nq:
-                w = 1. - w
+                w = 1.0 - w
             z = piov4 * w
             m = n // 2
             if m + m != n:
@@ -2653,13 +3115,13 @@ def _psi(x):
             m = n // 2
             m += m
             if m == n:
-                if z == 0.:
-                    return 0.
-                aug = sgn * (math.cos(z) / math.sin(z) * 4.)
+                if z == 0.0:
+                    return 0.0
+                aug = sgn * (math.cos(z) / math.sin(z) * 4.0)
             else:
-                aug = sgn * (math.sin(z) / math.cos(z) * 4.)
-        x = 1. - x
-    if x <= 3.:
+                aug = sgn * (math.sin(z) / math.cos(z) * 4.0)
+        x = 1.0 - x
+    if x <= 3.0:
         den = x
         upper = p1[0] * x
         for i in range(1, 6):
@@ -2669,7 +3131,7 @@ def _psi(x):
         xmx0 = x - dx0
         return _rfma(den, xmx0, aug)
     if x < xmax1:
-        w = 1. / (x * x)
+        w = 1.0 / (x * x)
         den = w
         upper = p2[0] * w
         for i in range(1, 4):
@@ -2679,8 +3141,14 @@ def _psi(x):
     return aug + math.log(x)
 
 
-_BCORR_C = (.0833333333333333, -.00277777777760991, 7.9365066682539e-4,
-            -5.9520293135187e-4, 8.37308034031215e-4, -.00165322962780713)
+_BCORR_C = (
+    0.0833333333333333,
+    -0.00277777777760991,
+    7.9365066682539e-4,
+    -5.9520293135187e-4,
+    8.37308034031215e-4,
+    -0.00165322962780713,
+)
 
 
 def _bcorr(a0, b0):
@@ -2688,20 +3156,27 @@ def _bcorr(a0, b0):
     a = min(a0, b0)
     b = max(a0, b0)
     h = a / b
-    c = h / (h + 1.)
-    x = 1. / (h + 1.)
+    c = h / (h + 1.0)
+    x = 1.0 / (h + 1.0)
     x2 = x * x
-    s3 = x + x2 + 1.
-    s5 = _rfma(x2, s3, x) + 1.
-    s7 = _rfma(x2, s5, x) + 1.
-    s9 = _rfma(x2, s7, x) + 1.
-    s11 = _rfma(x2, s9, x) + 1.
-    t = 1. / b
+    s3 = x + x2 + 1.0
+    s5 = _rfma(x2, s3, x) + 1.0
+    s7 = _rfma(x2, s5, x) + 1.0
+    s9 = _rfma(x2, s7, x) + 1.0
+    s11 = _rfma(x2, s9, x) + 1.0
+    t = 1.0 / b
     t *= t
-    w = _rfma(_rfma(_rfma(_rfma(_rfma(c5 * s11, t, c4 * s9), t, c3 * s7),
-                          t, c2 * s5), t, c1 * s3), t, c0)
+    w = _rfma(
+        _rfma(
+            _rfma(_rfma(_rfma(c5 * s11, t, c4 * s9), t, c3 * s7), t, c2 * s5),
+            t,
+            c1 * s3,
+        ),
+        t,
+        c0,
+    )
     w *= c / b
-    t = 1. / a
+    t = 1.0 / a
     t *= t
     return _horner(t, (c5, c4, c3, c2, c1, c0)) / a + w
 
@@ -2710,107 +3185,115 @@ def _algdiv(a, b):
     c0, c1, c2, c3, c4, c5 = _BCORR_C
     if a > b:
         h = b / a
-        c = 1. / (h + 1.)
-        x = h / (h + 1.)
+        c = 1.0 / (h + 1.0)
+        x = h / (h + 1.0)
         d = a + (b - 0.5)
     else:
         h = a / b
-        c = h / (h + 1.)
-        x = 1. / (h + 1.)
+        c = h / (h + 1.0)
+        x = 1.0 / (h + 1.0)
         d = b + (a - 0.5)
     x2 = x * x
-    s3 = x + x2 + 1.
-    s5 = _rfma(x2, s3, x) + 1.
-    s7 = _rfma(x2, s5, x) + 1.
-    s9 = _rfma(x2, s7, x) + 1.
-    s11 = _rfma(x2, s9, x) + 1.
-    t = 1. / (b * b)
-    w = _rfma(_rfma(_rfma(_rfma(_rfma(c5 * s11, t, c4 * s9), t, c3 * s7),
-                          t, c2 * s5), t, c1 * s3), t, c0)
+    s3 = x + x2 + 1.0
+    s5 = _rfma(x2, s3, x) + 1.0
+    s7 = _rfma(x2, s5, x) + 1.0
+    s9 = _rfma(x2, s7, x) + 1.0
+    s11 = _rfma(x2, s9, x) + 1.0
+    t = 1.0 / (b * b)
+    w = _rfma(
+        _rfma(
+            _rfma(_rfma(_rfma(c5 * s11, t, c4 * s9), t, c3 * s7), t, c2 * s5),
+            t,
+            c1 * s3,
+        ),
+        t,
+        c0,
+    )
     w *= c / b
     u = d * _alnrel(a / b)
-    v = a * (math.log(b) - 1.)
+    v = a * (math.log(b) - 1.0)
     return (w - v - u) if u > v else (w - u - v)
 
 
 def _gamln(a):
     c0, c1, c2, c3, c4, c5 = _BCORR_C
-    d = .418938533204673
+    d = 0.418938533204673
     if a <= 0.8:
         return _gamln1(a) - math.log(a)
     elif a <= 2.25:
         return _gamln1(a - 0.5 - 0.5)
-    elif a < 10.:
+    elif a < 10.0:
         n = int(a - 1.25)
         t = a
-        w = 1.
+        w = 1.0
         for _i in range(1, n + 1):
-            t += -1.
+            t += -1.0
             w *= t
-        return _gamln1(t - 1.) + math.log(w)
-    t = 1. / (a * a)
+        return _gamln1(t - 1.0) + math.log(w)
+    t = 1.0 / (a * a)
     w = _horner(t, (c5, c4, c3, c2, c1, c0)) / a
-    return _rfma(a - 0.5, math.log(a) - 1., d + w)
+    return _rfma(a - 0.5, math.log(a) - 1.0, d + w)
 
 
 def _gsumln(a, b):
-    x = a + b - 2.
+    x = a + b - 2.0
     if x <= 0.25:
-        return _gamln1(x + 1.)
+        return _gamln1(x + 1.0)
     if x <= 1.25:
         return _gamln1(x) + _alnrel(x)
-    return _gamln1(x - 1.) + math.log(x * (x + 1.))
+    return _gamln1(x - 1.0) + math.log(x * (x + 1.0))
 
 
 def _betaln(a0, b0):
     a = min(a0, b0)
     b = max(a0, b0)
-    if a < 8.:
-        if a < 1.:
-            if b < 8.:
+    if a < 8.0:
+        if a < 1.0:
+            if b < 8.0:
                 return _gamln(a) + (_gamln(b) - _gamln(a + b))
             return _gamln(a) + _algdiv(a, b)
-        w = 0.
+        w = 0.0
         skip_to_40 = False
-        if a < 2.:
-            if b <= 2.:
+        if a < 2.0:
+            if b <= 2.0:
                 return _gamln(a) + _gamln(b) - _gsumln(a, b)
-            if b < 8.:
-                w = 0.
+            if b < 8.0:
+                w = 0.0
                 skip_to_40 = True
             else:
                 return _gamln(a) + _algdiv(a, b)
         if not skip_to_40:
             if b <= 1e3:
-                n = int(a - 1.)
-                w = 1.
+                n = int(a - 1.0)
+                w = 1.0
                 for _i in range(1, n + 1):
-                    a += -1.
+                    a += -1.0
                     h = a / b
-                    w *= h / (h + 1.)
+                    w *= h / (h + 1.0)
                 w = math.log(w)
-                if b >= 8.:
+                if b >= 8.0:
                     return w + _gamln(a) + _algdiv(a, b)
                 # else fall to L40
             else:
-                n = int(a - 1.)
-                w = 1.
+                n = int(a - 1.0)
+                w = 1.0
                 for _i in range(1, n + 1):
-                    a += -1.
-                    w *= a / (a / b + 1.)
+                    a += -1.0
+                    w *= a / (a / b + 1.0)
                 return _rfma(-float(n), math.log(b), math.log(w)) + (
-                    _gamln(a) + _algdiv(a, b))
+                    _gamln(a) + _algdiv(a, b)
+                )
         # L40: 1 < A <= B < 8 reduction of B
-        n = int(b - 1.)
-        z = 1.
+        n = int(b - 1.0)
+        z = 1.0
         for _i in range(1, n + 1):
-            b += -1.
+            b += -1.0
             z *= b / (a + b)
         return w + math.log(z) + (_gamln(a) + (_gamln(b) - _gsumln(a, b)))
-    e = .918938533204673
+    e = 0.918938533204673
     w = _bcorr(a, b)
     h = a / b
-    u = -(a - 0.5) * math.log(h / (h + 1.))
+    u = -(a - 0.5) * math.log(h / (h + 1.0))
     v = b * _alnrel(h)
     if u > v:
         return _rfma(math.log(b), -0.5, e) + w - v - u
@@ -2823,20 +3306,20 @@ def _fpser(a, b, x, eps, log_p):
     elif a > eps * 0.001:
         t = a * math.log(x)
         if t < _exparg(1):
-            return 0.
+            return 0.0
         ans = math.exp(t)
     else:
-        ans = 1.
+        ans = 1.0
     if log_p:
         ans += math.log(b) - math.log(a)
     else:
         ans *= b / a
     tol = eps / a
-    an = a + 1.
+    an = a + 1.0
     t = x
     s = t / an
     while True:
-        an += 1.
+        an += 1.0
         t = x * t
         c = t / an
         s += c
@@ -2845,23 +3328,23 @@ def _fpser(a, b, x, eps, log_p):
     if log_p:
         ans += math.log1p(a * s)
     else:
-        ans *= _rfma(a, s, 1.)
+        ans *= _rfma(a, s, 1.0)
     return ans
 
 
 def _apser(a, b, x, eps):
-    g = .577215664901533
+    g = 0.577215664901533
     bx = b * x
     t = x - bx
     if b * eps <= 0.02:
         c = math.log(x) + _psi(b) + g + t
     else:
         c = math.log(bx) + g + t
-    tol = eps * 5. * abs(c)
-    j = 1.
-    s = 0.
+    tol = eps * 5.0 * abs(c)
+    j = 1.0
+    s = 0.0
     while True:
-        j += 1.
+        j += 1.0
         t *= x - bx / j
         aj = t / j
         s += aj
@@ -2872,54 +3355,54 @@ def _apser(a, b, x, eps):
 
 def _bpser(a, b, x, eps, log_p):
     rd0 = _NEGINF if log_p else 0.0
-    if x == 0.:
+    if x == 0.0:
         return rd0
     a0 = min(a, b)
-    if a0 >= 1.:
+    if a0 >= 1.0:
         z = _rfma(a, math.log(x), -_betaln(a, b))
         ans = (z - math.log(a)) if log_p else (math.exp(z) / a)
     else:
         b0 = max(a, b)
-        if b0 < 8.:
-            if b0 <= 1.:
+        if b0 < 8.0:
+            if b0 <= 1.0:
                 if log_p:
                     ans = a * math.log(x)
                 else:
                     ans = math.pow(x, a)
-                    if ans == 0.:
+                    if ans == 0.0:
                         return ans
                 apb = a + b
-                if apb > 1.:
-                    u = a + b - 1.
-                    z = (_gam1(u) + 1.) / apb
+                if apb > 1.0:
+                    u = a + b - 1.0
+                    z = (_gam1(u) + 1.0) / apb
                 else:
-                    z = _gam1(apb) + 1.
-                c = (_gam1(a) + 1.) * (_gam1(b) + 1.) / z
+                    z = _gam1(apb) + 1.0
+                c = (_gam1(a) + 1.0) * (_gam1(b) + 1.0) / z
                 if log_p:
                     ans += math.log(c * (b / apb))
                 else:
                     ans *= c * (b / apb)
             else:
                 u = _gamln1(a0)
-                m = int(b0 - 1.)
+                m = int(b0 - 1.0)
                 if m >= 1:
-                    c = 1.
+                    c = 1.0
                     for _i in range(1, m + 1):
-                        b0 += -1.
+                        b0 += -1.0
                         c *= b0 / (a0 + b0)
                     u += math.log(c)
                 z = _rfma(a, math.log(x), -u)
-                b0 += -1.
+                b0 += -1.0
                 apb = a0 + b0
-                if apb > 1.:
-                    u = a0 + b0 - 1.
-                    t = (_gam1(u) + 1.) / apb
+                if apb > 1.0:
+                    u = a0 + b0 - 1.0
+                    t = (_gam1(u) + 1.0) / apb
                 else:
-                    t = _gam1(apb) + 1.
+                    t = _gam1(apb) + 1.0
                 if log_p:
                     ans = z + math.log(a0 / a) + math.log1p(_gam1(b0)) - math.log(t)
                 else:
-                    ans = math.exp(z) * (a0 / a) * (_gam1(b0) + 1.) / t
+                    ans = math.exp(z) * (a0 / a) * (_gam1(b0) + 1.0) / t
         else:
             u = _gamln1(a0) + _algdiv(a0, b0)
             z = _rfma(a, math.log(x), -u)
@@ -2927,33 +3410,33 @@ def _bpser(a, b, x, eps, log_p):
     if ans == rd0 or ((not log_p) and a <= eps * 0.1):
         return ans
     tol = eps / a
-    n = 0.
-    sum_ = 0.
-    c = 1.
-    w = 0.
+    n = 0.0
+    sum_ = 0.0
+    c = 1.0
+    w = 0.0
     while True:
-        n += 1.
+        n += 1.0
         c *= (0.5 - b / n + 0.5) * x
         w = c / (a + n)
         sum_ += w
         if not (n < 1e7 and abs(w) > tol):
             break
     if log_p:
-        if a * sum_ > -1.:
+        if a * sum_ > -1.0:
             ans += math.log1p(a * sum_)
         else:
             ans = _NEGINF
-    elif a * sum_ > -1.:
-        ans *= _rfma(a, sum_, 1.)
+    elif a * sum_ > -1.0:
+        ans *= _rfma(a, sum_, 1.0)
     else:
-        ans = 0.
+        ans = 0.0
     return ans
 
 
 def _bup(a, b, x, y, n, eps, give_log):
     apb = a + b
-    ap1 = a + 1.
-    if n > 1 and a >= 1. and apb >= ap1 * 1.1:
+    ap1 = a + 1.0
+    if n > 1 and a >= 1.0 and apb >= ap1 * 1.1:
         mu = int(abs(_exparg(1)))
         k = int(_exparg(0))
         if mu > k:
@@ -2961,18 +3444,21 @@ def _bup(a, b, x, y, n, eps, give_log):
         d = math.exp(-float(mu))
     else:
         mu = 0
-        d = 1.
-    ret = (_brcmp1(mu, a, b, x, y, True) - math.log(a)) if give_log \
+        d = 1.0
+    ret = (
+        (_brcmp1(mu, a, b, x, y, True) - math.log(a))
+        if give_log
         else (_brcmp1(mu, a, b, x, y, False) / a)
-    if n == 1 or (give_log and ret == _NEGINF) or ((not give_log) and ret == 0.):
+    )
+    if n == 1 or (give_log and ret == _NEGINF) or ((not give_log) and ret == 0.0):
         return ret
     nm1 = n - 1
     w = d
     k = 0
-    if b > 1.:
+    if b > 1.0:
         if y > 1e-4:
-            r = (b - 1.) * x / y - a
-            if r >= 1.:
+            r = (b - 1.0) * x / y - a
+            if r >= 1.0:
                 k = int(r) if r < nm1 else nm1
         else:
             k = nm1
@@ -2999,24 +3485,24 @@ def _bfrac(a, b, x, y, lambda_, eps, log_p):
     brc = _brcomp(a, b, x, y, log_p)
     if math.isnan(brc):
         return _NAN
-    if (not log_p) and brc == 0.:
-        return 0.
-    c = lambda_ + 1.
+    if (not log_p) and brc == 0.0:
+        return 0.0
+    c = lambda_ + 1.0
     c0 = b / a
-    c1 = 1. / a + 1.
-    yp1 = y + 1.
-    n = 0.
-    p = 1.
-    s = a + 1.
-    an = 0.
-    bn = 1.
-    anp1 = 1.
+    c1 = 1.0 / a + 1.0
+    yp1 = y + 1.0
+    n = 0.0
+    p = 1.0
+    s = a + 1.0
+    an = 0.0
+    bn = 1.0
+    anp1 = 1.0
     bnp1 = c / c1
     r = c1 / c
-    r0 = 0.
+    r0 = 0.0
     MAXIT = 1000
     while n < MAXIT:
-        n += 1.
+        n += 1.0
         w = n * x * (b - n)
         rescale = not math.isfinite(w)
         if rescale:
@@ -3024,11 +3510,14 @@ def _bfrac(a, b, x, y, lambda_, eps, log_p):
         t = n / a
         e = a / s
         alpha = p * (p + c0) * e * e * (w * x)
-        e = (t + 1.) / (c1 + t + t)
-        beta = w / s + (math.ldexp(_rfma(e, _rfma(n, yp1, c), n), -20)
-                        if rescale else _rfma(e, _rfma(n, yp1, c), n))
-        p = t + 1.
-        s += 2.
+        e = (t + 1.0) / (c1 + t + t)
+        beta = w / s + (
+            math.ldexp(_rfma(e, _rfma(n, yp1, c), n), -20)
+            if rescale
+            else _rfma(e, _rfma(n, yp1, c), n)
+        )
+        p = t + 1.0
+        s += 2.0
         t = _rfma(alpha, an, beta * anp1)
         an = anp1
         anp1 = t
@@ -3042,165 +3531,192 @@ def _bfrac(a, b, x, y, lambda_, eps, log_p):
         an /= bnp1
         bn /= bnp1
         anp1 = r
-        bnp1 = 1.
+        bnp1 = 1.0
     return (brc + math.log(r)) if log_p else (brc * r)
 
 
 def _brcomp(a, b, x, y, log_p):
     rd0 = _NEGINF if log_p else 0.0
-    if x == 0. or y == 0.:
+    if x == 0.0 or y == 0.0:
         return rd0
     a0 = min(a, b)
-    if a0 < 8.:
-        if x <= .375:
+    if a0 < 8.0:
+        if x <= 0.375:
             lnx = math.log(x)
             lny = _alnrel(-x)
-        elif y > .375:
+        elif y > 0.375:
             lnx = math.log(x)
             lny = math.log(y)
         else:
             lnx = _alnrel(-y)
             lny = math.log(y)
         z = _rfma(a, lnx, b * lny)
-        if a0 >= 1.:
+        if a0 >= 1.0:
             z -= _betaln(a, b)
             return z if log_p else math.exp(z)
         b0 = max(a, b)
-        if b0 >= 8.:
+        if b0 >= 8.0:
             u = _gamln1(a0) + _algdiv(a0, b0)
             return (math.log(a0) + (z - u)) if log_p else (a0 * math.exp(z - u))
-        if b0 <= 1.:
+        if b0 <= 1.0:
             e_z = z if log_p else math.exp(z)
-            if (not log_p) and e_z == 0.:
-                return 0.
+            if (not log_p) and e_z == 0.0:
+                return 0.0
             apb = a + b
-            if apb > 1.:
-                z = (_gam1(apb - 1.) + 1.) / apb
+            if apb > 1.0:
+                z = (_gam1(apb - 1.0) + 1.0) / apb
             else:
-                z = _gam1(apb) + 1.
-            c = (_gam1(a) + 1.) * (_gam1(b) + 1.) / z
-            return (e_z + math.log(a0 * c) - math.log1p(a0 / b0)) if log_p \
-                else (e_z * (a0 * c) / (a0 / b0 + 1.))
+                z = _gam1(apb) + 1.0
+            c = (_gam1(a) + 1.0) * (_gam1(b) + 1.0) / z
+            return (
+                (e_z + math.log(a0 * c) - math.log1p(a0 / b0))
+                if log_p
+                else (e_z * (a0 * c) / (a0 / b0 + 1.0))
+            )
         u = _gamln1(a0)
-        n = int(b0 - 1.)
+        n = int(b0 - 1.0)
         if n >= 1:
-            c = 1.
+            c = 1.0
             for _i in range(1, n + 1):
-                b0 += -1.
+                b0 += -1.0
                 c *= b0 / (a0 + b0)
             u = math.log(c) + u
         z -= u
-        b0 += -1.
+        b0 += -1.0
         apb = a0 + b0
-        if apb > 1.:
-            u = a0 + b0 - 1.
-            t = (_gam1(u) + 1.) / apb
+        if apb > 1.0:
+            u = a0 + b0 - 1.0
+            t = (_gam1(u) + 1.0) / apb
         else:
-            t = _gam1(apb) + 1.
-        return (math.log(a0) + z + math.log1p(_gam1(b0)) - math.log(t)) if log_p \
-            else (a0 * math.exp(z) * (_gam1(b0) + 1.) / t)
+            t = _gam1(apb) + 1.0
+        return (
+            (math.log(a0) + z + math.log1p(_gam1(b0)) - math.log(t))
+            if log_p
+            else (a0 * math.exp(z) * (_gam1(b0) + 1.0) / t)
+        )
     else:
-        const__ = .398942280401433
+        const__ = 0.398942280401433
         apb = a + b
-        lambda_ = ((_rfma(-apb, x, a) if a <= b else _rfma(apb, y, -b))
-                   if math.isfinite(apb) else _rfma(a, y, -(b * x)))
+        lambda_ = (
+            (_rfma(-apb, x, a) if a <= b else _rfma(apb, y, -b))
+            if math.isfinite(apb)
+            else _rfma(a, y, -(b * x))
+        )
         if a <= b:
             h = a / b
-            x0 = h / (h + 1.)
-            y0 = 1. / (h + 1.)
+            x0 = h / (h + 1.0)
+            y0 = 1.0 / (h + 1.0)
         else:
             h = b / a
-            x0 = 1. / (h + 1.)
-            y0 = h / (h + 1.)
+            x0 = 1.0 / (h + 1.0)
+            y0 = h / (h + 1.0)
         e = -lambda_ / a
-        u = (e - math.log(x / x0)) if abs(e) > .6 else _rlog1(e)
+        u = (e - math.log(x / x0)) if abs(e) > 0.6 else _rlog1(e)
         e = lambda_ / b
-        v = _rlog1(e) if abs(e) <= .6 else (e - math.log(y / y0))
+        v = _rlog1(e) if abs(e) <= 0.6 else (e - math.log(y / y0))
         z = -_rfma(a, u, b * v) if log_p else math.exp(-_rfma(a, u, b * v))
-        return (_rfma(0.5, math.log(b * x0), -_M_LN_SQRT_2PI) + z
-                - _bcorr(a, b)) \
-            if log_p else (const__ * math.sqrt(b * x0) * z * math.exp(-_bcorr(a, b)))
+        return (
+            (_rfma(0.5, math.log(b * x0), -_M_LN_SQRT_2PI) + z - _bcorr(a, b))
+            if log_p
+            else (const__ * math.sqrt(b * x0) * z * math.exp(-_bcorr(a, b)))
+        )
 
 
 def _brcmp1(mu, a, b, x, y, give_log):
     a0 = min(a, b)
-    if a0 < 8.:
-        if x <= .375:
+    if a0 < 8.0:
+        if x <= 0.375:
             lnx = math.log(x)
             lny = _alnrel(-x)
-        elif y > .375:
+        elif y > 0.375:
             lnx = math.log(x)
             lny = math.log(y)
         else:
             lnx = _alnrel(-y)
             lny = math.log(y)
         z = _rfma(a, lnx, b * lny)
-        if a0 >= 1.:
+        if a0 >= 1.0:
             z -= _betaln(a, b)
             return _esum(mu, z, give_log)
         b0 = max(a, b)
-        if b0 >= 8.:
+        if b0 >= 8.0:
             u = _gamln1(a0) + _algdiv(a0, b0)
-            return (math.log(a0) + _esum(mu, z - u, True)) if give_log \
+            return (
+                (math.log(a0) + _esum(mu, z - u, True))
+                if give_log
                 else (a0 * _esum(mu, z - u, False))
-        elif b0 <= 1.:
+            )
+        elif b0 <= 1.0:
             ans = _esum(mu, z, give_log)
-            if ans == (_NEGINF if give_log else 0.):
+            if ans == (_NEGINF if give_log else 0.0):
                 return ans
             apb = a + b
-            if apb > 1.:
-                z = (_gam1(apb - 1.) + 1.) / apb
+            if apb > 1.0:
+                z = (_gam1(apb - 1.0) + 1.0) / apb
             else:
-                z = _gam1(apb) + 1.
-            c = (math.log1p(_gam1(a)) + math.log1p(_gam1(b)) - math.log(z)) \
-                if give_log else ((_gam1(a) + 1.) * (_gam1(b) + 1.) / z)
-            return (ans + math.log(a0) + c - math.log1p(a0 / b0)) if give_log \
-                else (ans * (a0 * c) / (a0 / b0 + 1.))
+                z = _gam1(apb) + 1.0
+            c = (
+                (math.log1p(_gam1(a)) + math.log1p(_gam1(b)) - math.log(z))
+                if give_log
+                else ((_gam1(a) + 1.0) * (_gam1(b) + 1.0) / z)
+            )
+            return (
+                (ans + math.log(a0) + c - math.log1p(a0 / b0))
+                if give_log
+                else (ans * (a0 * c) / (a0 / b0 + 1.0))
+            )
         u = _gamln1(a0)
-        n = int(b0 - 1.)
+        n = int(b0 - 1.0)
         if n >= 1:
-            c = 1.
+            c = 1.0
             for _i in range(1, n + 1):
-                b0 += -1.
+                b0 += -1.0
                 c *= b0 / (a0 + b0)
             u += math.log(c)
         z -= u
-        b0 += -1.
+        b0 += -1.0
         apb = a0 + b0
-        if apb > 1.:
-            t = (_gam1(apb - 1.) + 1.) / apb
+        if apb > 1.0:
+            t = (_gam1(apb - 1.0) + 1.0) / apb
         else:
-            t = _gam1(apb) + 1.
-        return (math.log(a0) + _esum(mu, z, True) + math.log1p(_gam1(b0))
-                - math.log(t)) if give_log \
-            else (a0 * _esum(mu, z, False) * (_gam1(b0) + 1.) / t)
+            t = _gam1(apb) + 1.0
+        return (
+            (math.log(a0) + _esum(mu, z, True) + math.log1p(_gam1(b0)) - math.log(t))
+            if give_log
+            else (a0 * _esum(mu, z, False) * (_gam1(b0) + 1.0) / t)
+        )
     else:
-        const__ = .398942280401433
+        const__ = 0.398942280401433
         apb = a + b
-        lambda_ = ((_rfma(-apb, x, a) if a <= b else _rfma(apb, y, -b))
-                   if math.isfinite(apb) else _rfma(a, y, -(b * x)))
+        lambda_ = (
+            (_rfma(-apb, x, a) if a <= b else _rfma(apb, y, -b))
+            if math.isfinite(apb)
+            else _rfma(a, y, -(b * x))
+        )
         if a > b:
             h = b / a
-            x0 = 1. / (h + 1.)
-            y0 = h / (h + 1.)
+            x0 = 1.0 / (h + 1.0)
+            y0 = h / (h + 1.0)
         else:
             h = a / b
-            x0 = h / (h + 1.)
-            y0 = 1. / (h + 1.)
+            x0 = h / (h + 1.0)
+            y0 = 1.0 / (h + 1.0)
         lx0 = -math.log1p(b / a)
         e = -lambda_ / a
         u = (e - math.log(x / x0)) if abs(e) > 0.6 else _rlog1(e)
         e = lambda_ / b
         v = (e - math.log(y / y0)) if abs(e) > 0.6 else _rlog1(e)
         z = _esum(mu, -_rfma(a, u, b * v), give_log)
-        return (math.log(const__) + (math.log(b) + lx0) / 2. + z - _bcorr(a, b)) \
-            if give_log \
+        return (
+            (math.log(const__) + (math.log(b) + lx0) / 2.0 + z - _bcorr(a, b))
+            if give_log
             else (const__ * math.sqrt(b * x0) * z * math.exp(-_bcorr(a, b)))
+        )
 
 
 def _grat_r(a, x, log_r, eps):
-    if a * x == 0.:
-        return math.exp(-log_r) if x <= a else 0.
+    if a * x == 0.0:
+        return math.exp(-log_r) if x <= a else 0.0
     elif a == 0.5:
         if x < 0.25:
             p = _erf__(math.sqrt(x))
@@ -3208,39 +3724,39 @@ def _grat_r(a, x, log_r, eps):
         sx = math.sqrt(x)
         return _erfc1(1, sx) / sx * _M_SQRT_PI
     elif x < 1.1:
-        an = 3.
+        an = 3.0
         c = x
-        sum_ = x / (a + 3.)
-        tol = eps * 0.1 / (a + 1.)
+        sum_ = x / (a + 3.0)
+        tol = eps * 0.1 / (a + 1.0)
         while True:
-            an += 1.
+            an += 1.0
             c *= -(x / an)
             t = c / (a + an)
             sum_ += t
             if not (abs(t) > tol):
                 break
-        j = a * x * _rfma(sum_ / 6. - 0.5 / (a + 2.), x, 1. / (a + 1.))
+        j = a * x * _rfma(sum_ / 6.0 - 0.5 / (a + 2.0), x, 1.0 / (a + 1.0))
         z = a * math.log(x)
         h = _gam1(a)
-        g = h + 1.
+        g = h + 1.0
         if (x >= 0.25 and (a < x / 2.59)) or (z > -0.13394):
             ll = _rexpm1(z)
             q = _rfma(_rfma(ll + 0.5 + 0.5, j, -ll), g, -h)
-            return 0. if q <= 0. else q * math.exp(-log_r)
+            return 0.0 if q <= 0.0 else q * math.exp(-log_r)
         else:
             p = math.exp(z) * g * (0.5 - j + 0.5)
             return (0.5 - p + 0.5) * math.exp(-log_r)
     else:
-        a2n_1 = 1.
-        a2n = 1.
+        a2n_1 = 1.0
+        a2n = 1.0
         b2n_1 = x
-        b2n = x + (1. - a)
-        c = 1.
+        b2n = x + (1.0 - a)
+        c = 1.0
         while True:
             a2n_1 = _rfma(x, a2n, c * a2n_1)
             b2n_1 = _rfma(x, b2n, c * b2n_1)
             am0 = a2n_1 / b2n_1
-            c += 1.
+            c += 1.0
             c_a = c - a
             a2n = _rfma(c_a, a2n, a2n_1)
             b2n = _rfma(c_a, b2n, b2n_1)
@@ -3259,37 +3775,36 @@ def _bgrat(a, b, x, y, w, eps, log_w):
     nu = a + bm1 * 0.5
     lnx = math.log(x) if y > 0.375 else _alnrel(-y)
     z = -nu * lnx
-    if b * z == 0.:
+    if b * z == 0.0:
         return w, 1
-    log_r = _rfma(nu, lnx,
-                  _rfma(b, math.log(z), math.log(b) + math.log1p(_gam1(b))))
+    log_r = _rfma(nu, lnx, _rfma(b, math.log(z), math.log(b) + math.log1p(_gam1(b))))
     log_u = log_r - _rfma(b, math.log(nu), _algdiv(b, a))
     u = math.exp(log_u)
     if log_u == _NEGINF:
         return w, 2
-    u_0 = (u == 0.)
+    u_0 = u == 0.0
     if log_w:
-        ll = 0. if w == _NEGINF else math.exp(w - log_u)
+        ll = 0.0 if w == _NEGINF else math.exp(w - log_u)
     else:
-        ll = 0. if w == 0. else math.exp(math.log(w) - log_u)
+        ll = 0.0 if w == 0.0 else math.exp(math.log(w) - log_u)
     q_r = _grat_r(b, z, log_r, eps)
     v = 0.25 / (nu * nu)
     t2 = lnx * 0.25 * lnx
     j = q_r
     sum_ = j
-    t = 1.
-    cn = 1.
-    n2 = 0.
+    t = 1.0
+    cn = 1.0
+    n2 = 0.0
     ierr = 0
     for n in range(1, n_terms + 1):
         bp2n = b + n2
-        j = _rfma(bp2n * (bp2n + 1.), j, (z + bp2n + 1.) * t) * v
-        n2 += 2.
+        j = _rfma(bp2n * (bp2n + 1.0), j, (z + bp2n + 1.0) * t) * v
+        n2 += 2.0
         t *= t2
-        cn /= n2 * (n2 + 1.)
+        cn /= n2 * (n2 + 1.0)
         nm1 = n - 1
         c[nm1] = cn
-        s = 0.
+        s = 0.0
         if n > 1:
             coef = b - n
             for i in range(1, nm1 + 1):
@@ -3298,7 +3813,7 @@ def _bgrat(a, b, x, y, w, eps, log_w):
         d[nm1] = _rfma(bm1, cn, s / n)
         dj = d[nm1] * j
         sum_ += dj
-        if sum_ <= 0.:
+        if sum_ <= 0.0:
             return w, 3
         if abs(dj) <= eps * (sum_ + ll):
             ierr = 0
@@ -3308,14 +3823,14 @@ def _bgrat(a, b, x, y, w, eps, log_w):
     if log_w:
         w = _logspace_add(w, log_u + math.log(sum_))
     else:
-        w += (math.exp(log_u + math.log(sum_)) if u_0 else u * sum_)
+        w += math.exp(log_u + math.log(sum_)) if u_0 else u * sum_
     return w, ierr
 
 
 def _basym(a, b, lambda_, eps, log_p):
     num_IT = 20
     e0 = 1.12837916709551
-    e1 = .353553390593274
+    e1 = 0.353553390593274
     ln_e0 = 0.120782237635245
     a0 = [0.0] * (num_IT + 1)
     b0 = [0.0] * (num_IT + 1)
@@ -3326,55 +3841,56 @@ def _basym(a, b, lambda_, eps, log_p):
         t = -f
     else:
         t = math.exp(-f)
-        if t == 0.:
-            return 0.
+        if t == 0.0:
+            return 0.0
     z0 = math.sqrt(f)
     z = z0 / e1 * 0.5
     z2 = f + f
     if a < b:
         h = a / b
-        r0 = 1. / (h + 1.)
+        r0 = 1.0 / (h + 1.0)
         r1 = (b - a) / b
-        w0 = 1. / math.sqrt(a * (h + 1.))
+        w0 = 1.0 / math.sqrt(a * (h + 1.0))
     else:
         h = b / a
-        r0 = 1. / (h + 1.)
+        r0 = 1.0 / (h + 1.0)
         r1 = (b - a) / a
-        w0 = 1. / math.sqrt(b * (h + 1.))
-    a0[0] = r1 * .66666666666666663
+        w0 = 1.0 / math.sqrt(b * (h + 1.0))
+    a0[0] = r1 * 0.66666666666666663
     c[0] = a0[0] * -0.5
     d[0] = -c[0]
     j0 = 0.5 / e0 * _erfc1(1, z0)
     j1 = e1
     sum_ = _rfma(d[0] * w0, j1, j0)
-    s = 1.
+    s = 1.0
     h2 = h * h
-    hn = 1.
+    hn = 1.0
     w = w0
     znm1 = z
     zn = z2
     for n in range(2, num_IT + 1, 2):
         hn *= h2
-        a0[n - 1] = r0 * 2. * _rfma(h, hn, 1.) / (n + 2.)
+        a0[n - 1] = r0 * 2.0 * _rfma(h, hn, 1.0) / (n + 2.0)
         np1 = n + 1
         s += hn
-        a0[np1 - 1] = r1 * 2. * s / (n + 3.)
+        a0[np1 - 1] = r1 * 2.0 * s / (n + 3.0)
         for i in range(n, np1 + 1):
-            r = (i + 1.) * -0.5
+            r = (i + 1.0) * -0.5
             b0[0] = r * a0[0]
             for m in range(2, i + 1):
-                bsum = 0.
+                bsum = 0.0
                 for jj in range(1, m):
                     mmj = m - jj
-                    bsum = _rfma(_rfma(jj, r, -float(mmj)) * a0[jj - 1],
-                                 b0[mmj - 1], bsum)
+                    bsum = _rfma(
+                        _rfma(jj, r, -float(mmj)) * a0[jj - 1], b0[mmj - 1], bsum
+                    )
                 b0[m - 1] = _rfma(r, a0[m - 1], bsum / m)
-            c[i - 1] = b0[i - 1] / (i + 1.)
-            dsum = 0.
+            c[i - 1] = b0[i - 1] / (i + 1.0)
+            dsum = 0.0
             for jj in range(1, i):
                 dsum = _rfma(d[i - jj - 1], c[jj - 1], dsum)
             d[i - 1] = -(dsum + c[i - 1])
-        j0 = _rfma(e1, znm1, (n - 1.) * j0)
+        j0 = _rfma(e1, znm1, (n - 1.0) * j0)
         j1 = _rfma(e1, zn, n * j1)
         znm1 = z2 * znm1
         zn = z2 * zn
@@ -3403,9 +3919,9 @@ def _R_Log1_Exp_toms(x):
     """
     if x > -_M_LN2:
         v = -_rexpm1(x)
-        if v > 0.:
+        if v > 0.0:
             return math.log(v)
-        return _NEGINF if v == 0. else _NAN
+        return _NEGINF if v == 0.0 else _NAN
     return math.log1p(-math.exp(x))
 
 
@@ -3418,28 +3934,28 @@ def _bratio(a, b, x, y, log_p):
     w1 = rd0
     if math.isnan(x) or math.isnan(y) or math.isnan(a) or math.isnan(b):
         return w, w1, 9
-    if a < 0. or b < 0.:
+    if a < 0.0 or b < 0.0:
         return w, w1, 1
-    if a == 0. and b == 0.:
+    if a == 0.0 and b == 0.0:
         return w, w1, 2
-    if x < 0. or x > 1.:
+    if x < 0.0 or x > 1.0:
         return w, w1, 3
-    if y < 0. or y > 1.:
+    if y < 0.0 or y > 1.0:
         return w, w1, 4
     z = x + y - 0.5 - 0.5
-    if abs(z) > eps * 3.:
+    if abs(z) > eps * 3.0:
         return w, w1, 5
-    if x == 0.:
-        return (w, w1, 6) if a == 0. else (rd0, rd1, 0)
-    if y == 0.:
-        return (w, w1, 7) if b == 0. else (rd1, rd0, 0)
-    if a == 0.:
+    if x == 0.0:
+        return (w, w1, 6) if a == 0.0 else (rd0, rd1, 0)
+    if y == 0.0:
+        return (w, w1, 7) if b == 0.0 else (rd1, rd0, 0)
+    if a == 0.0:
         return rd1, rd0, 0
-    if b == 0.:
+    if b == 0.0:
         return rd0, rd1, 0
     eps = max(eps, 1e-15)
-    a_lt_b = (a < b)
-    if (b if a_lt_b else a) < eps * .001:
+    a_lt_b = a < b
+    if (b if a_lt_b else a) < eps * 0.001:
         if log_p:
             if a_lt_b:
                 w = math.log1p(-a / (a + b))
@@ -3482,8 +3998,8 @@ def _bratio(a, b, x, y, log_p):
             w1v = math.exp(w1v)
         return _end(wv, w1v)
 
-    if min(a, b) <= 1.:
-        do_swap = (x > 0.5)
+    if min(a, b) <= 1.0:
+        do_swap = x > 0.5
         if do_swap:
             a0, x0, b0, y0 = b, y, a, x
         else:
@@ -3492,21 +4008,21 @@ def _bratio(a, b, x, y, log_p):
             w = _fpser(a0, b0, x0, eps, log_p)
             w1 = _R_Log1_Exp_toms(w) if log_p else 0.5 - w + 0.5
             return _end(w, w1)
-        if a0 < min(eps, eps * b0) and b0 * x0 <= 1.:
+        if a0 < min(eps, eps * b0) and b0 * x0 <= 1.0:
             w1 = _apser(a0, b0, x0, eps)
             return end_from_w1(w1)
         did_bup = False
         go_bpser_w = go_bpser_w1 = do_L131 = False
         n = 20
-        if max(a0, b0) > 1.:
-            if b0 <= 1.:
+        if max(a0, b0) > 1.0:
+            if b0 <= 1.0:
                 go_bpser_w = True
             elif x0 >= 0.29:
                 go_bpser_w1 = True
             elif x0 < 0.1 and math.pow(x0 * b0, a0) <= 0.7:
                 go_bpser_w = True
-            elif b0 > 15.:
-                w1 = 0.
+            elif b0 > 15.0:
+                w1 = 0.0
                 do_L131 = True
         else:
             if a0 >= min(0.2, b0):
@@ -3547,22 +4063,22 @@ def _bratio(a, b, x, y, log_p):
             lambda_ = _rfma(a + b, y, -b) if a > b else _rfma(-(a + b), x, a)
         else:
             lambda_ = _rfma(a, y, -(b * x))
-        do_swap = (lambda_ < 0.)
+        do_swap = lambda_ < 0.0
         if do_swap:
             lambda_ = -lambda_
             a0, x0, b0, y0 = b, y, a, x
         else:
             a0, x0, b0, y0 = a, x, b, y
         go_bpser_w = go_bfrac = go_L140 = False
-        if b0 < 40.:
-            if b0 * x0 <= 0.7 or (log_p and lambda_ > 650.):
+        if b0 < 40.0:
+            if b0 * x0 <= 0.7 or (log_p and lambda_ > 650.0):
                 go_bpser_w = True
             else:
                 go_L140 = True
         elif a0 > b0:
-            if b0 <= 100. or lambda_ > b0 * 0.03:
+            if b0 <= 100.0 or lambda_ > b0 * 0.03:
                 go_bfrac = True
-        elif a0 <= 100.:
+        elif a0 <= 100.0:
             go_bfrac = True
         elif lambda_ > a0 * 0.03:
             go_bfrac = True
@@ -3571,15 +4087,15 @@ def _bratio(a, b, x, y, log_p):
             w1 = _R_Log1_Exp_toms(w) if log_p else 0.5 - w + 0.5
             return _end(w, w1)
         if go_bfrac:
-            w = _bfrac(a0, b0, x0, y0, lambda_, eps * 15., log_p)
+            w = _bfrac(a0, b0, x0, y0, lambda_, eps * 15.0, log_p)
             w1 = _R_Log1_Exp_toms(w) if log_p else 0.5 - w + 0.5
             return _end(w, w1)
         if go_L140:
             n = int(b0)
             b0 -= n
-            if b0 == 0.:
+            if b0 == 0.0:
                 n -= 1
-                b0 = 1.
+                b0 = 1.0
             w = _bup(b0, a0, y0, x0, n, eps, False)
             if w < _DBL_MIN and log_p:
                 b0 += n
@@ -3589,7 +4105,7 @@ def _bratio(a, b, x, y, log_p):
             if x0 <= 0.7:
                 w += _bpser(a0, b0, x0, eps, False)
                 return end_from_w(w)
-            if a0 <= 15.:
+            if a0 <= 15.0:
                 n = 20
                 w += _bup(a0, b0, x0, y0, n, eps, False)
                 a0 += n
@@ -3598,7 +4114,7 @@ def _bratio(a, b, x, y, log_p):
                 ierr = 10 + ierr1
             return end_from_w(w)
         # basym (L180)
-        w = _basym(a0, b0, lambda_, eps * 100., log_p)
+        w = _basym(a0, b0, lambda_, eps * 100.0, log_p)
         w1 = _R_Log1_Exp_toms(w) if log_p else 0.5 - w + 0.5
         return _end(w, w1)
 
@@ -3672,51 +4188,52 @@ def pt(x, n, lower_tail=True, log_p=False):
         return _dt0(lower_tail, log_p) if x < 0 else _dt1(lower_tail, log_p)
     if not math.isfinite(n):
         return pnorm5(x, 0.0, 1.0, lower_tail, log_p)
-    nx = _rfma(x / n, x, 1.)
+    nx = _rfma(x / n, x, 1.0)
     if nx > 1e100:
-        lval = (_rfma(-0.5 * n, 2 * math.log(abs(x)) - math.log(n),
-                      -lbeta(0.5 * n, 0.5)) - math.log(0.5 * n))
+        lval = _rfma(
+            -0.5 * n, 2 * math.log(abs(x)) - math.log(n), -lbeta(0.5 * n, 0.5)
+        ) - math.log(0.5 * n)
         val = lval if log_p else math.exp(lval)
     else:
-        val = (pbeta(x * x / _rfma(x, x, n), 0.5, n / 2., False, log_p)
-               if n > x * x else
-               pbeta(1. / nx, n / 2., 0.5, True, log_p))
-    if x <= 0.:
+        val = (
+            pbeta(x * x / _rfma(x, x, n), 0.5, n / 2.0, False, log_p)
+            if n > x * x
+            else pbeta(1.0 / nx, n / 2.0, 0.5, True, log_p)
+        )
+    if x <= 0.0:
         lower_tail = not lower_tail
     if log_p:
         if lower_tail:
             return math.log1p(-0.5 * math.exp(val))
         return val - _M_LN2
-    val /= 2.
-    return (0.5 - val + 0.5) if lower_tail else val   # R_D_Cval
+    val /= 2.0
+    return (0.5 - val + 0.5) if lower_tail else val  # R_D_Cval
 
 
 def pf(x, df1, df2, lower_tail=True, log_p=False):
     """R's ``pf(x, df1, df2)`` (nmath/pf.c) — routes through pbeta, bit-exact."""
     if math.isnan(x) or math.isnan(df1) or math.isnan(df2):
         return x + df2 + df1
-    if df1 <= 0. or df2 <= 0.:
+    if df1 <= 0.0 or df2 <= 0.0:
         return _NAN
-    if x <= 0.:
+    if x <= 0.0:
         return _dt0(lower_tail, log_p)
     if x >= _INF:
         return _dt1(lower_tail, log_p)
     if df2 == _INF:
         if df1 == _INF:
-            if x < 1.:
+            if x < 1.0:
                 return _dt0(lower_tail, log_p)
-            if x == 1.:
+            if x == 1.0:
                 return -_M_LN2 if log_p else 0.5
             return _dt1(lower_tail, log_p)
         return pgamma(x * df1, df1 / 2.0, 2.0, lower_tail, log_p)
     if df1 == _INF:
         return pgamma(df2 / x, df2 / 2.0, 2.0, not lower_tail, log_p)
     if df1 * x > df2:
-        x = pbeta(df2 / _rfma(df1, x, df2), df2 / 2., df1 / 2.,
-                  not lower_tail, log_p)
+        x = pbeta(df2 / _rfma(df1, x, df2), df2 / 2.0, df1 / 2.0, not lower_tail, log_p)
     else:
-        x = pbeta(df1 * x / _rfma(df1, x, df2), df1 / 2., df2 / 2.,
-                  lower_tail, log_p)
+        x = pbeta(df1 * x / _rfma(df1, x, df2), df1 / 2.0, df2 / 2.0, lower_tail, log_p)
     return x if not math.isnan(x) else _NAN
 
 
@@ -3724,16 +4241,16 @@ def ppois(x, lambda_, lower_tail=True, log_p=False):
     """R's ``ppois(x, lambda)`` (nmath/ppois.c) = pgamma(lambda, x+1, .., upper)."""
     if math.isnan(x) or math.isnan(lambda_):
         return x + lambda_
-    if lambda_ < 0.:
+    if lambda_ < 0.0:
         return _NAN
     if x < 0:
         return _dt0(lower_tail, log_p)
-    if lambda_ == 0.:
+    if lambda_ == 0.0:
         return _dt1(lower_tail, log_p)
     if not math.isfinite(x):
         return _dt1(lower_tail, log_p)
     x = math.floor(x + 1e-7)
-    return pgamma(lambda_, x + 1, 1., not lower_tail, log_p)
+    return pgamma(lambda_, x + 1, 1.0, not lower_tail, log_p)
 
 
 def pbinom(x, n, p, lower_tail=True, log_p=False):
@@ -3762,25 +4279,123 @@ def pnbinom_mu(x, size, mu, lower_tail=True, log_p=False):
         return _NAN
     if size < 0 or mu < 0:
         return _NAN
-    if size == 0:            # limiting case: point mass at zero
+    if size == 0:  # limiting case: point mass at zero
         return _dt1(lower_tail, log_p) if x >= 0 else _dt0(lower_tail, log_p)
     if x < 0:
         return _dt0(lower_tail, log_p)
     if not math.isfinite(x):
         return _dt1(lower_tail, log_p)
-    if not math.isfinite(size):     # limit case: Poisson
+    if not math.isfinite(size):  # limit case: Poisson
         return ppois(x, mu, lower_tail, log_p)
     x = math.floor(x + 1e-7)
     # bratio on the two separately-computed tail ratios — NOT pbeta's
     # ``0.5 - x + 0.5`` complement (pnbinom.c:83 passes size/(size+mu)
     # AND mu/(size+mu) explicitly; they can differ from 1−pr in ulps).
-    w, wc, _ierr = _bratio(size, x + 1.0, size / (size + mu),
-                           mu / (size + mu), log_p)
+    w, wc, _ierr = _bratio(size, x + 1.0, size / (size + mu), mu / (size + mu), log_p)
     return w if lower_tail else wc
 
 
+def dnbinom(x, size, prob, give_log=False):
+    """R's ``dnbinom(x, size, prob)`` (nmath/dnbinom.c), bit-exact."""
+    if math.isnan(x) or math.isnan(size) or math.isnan(prob):
+        return x + size + prob
+    if prob <= 0 or prob > 1 or size < 0:
+        return _NAN
+    rd0 = _NEGINF if give_log else 0.0
+    if _R_nonint(x):
+        return rd0
+    if x < 0 or not math.isfinite(x):
+        return rd0
+    x = _r_forceint(x)
+    if x == 0:  # limiting case as size -> 0: point mass at 0
+        if size == 0:
+            return 0.0 if give_log else 1.0
+        return (size * math.log(prob)) if give_log else math.pow(prob, size)
+    if not math.isfinite(size):
+        size = _DBL_MAX
+    if x < 1e-10 * size:  # 2 terms of Abramowitz & Stegun (6.1.47)
+        xx2s = (
+            (math.ldexp(x * (x - 1), -1) / size)
+            if x < math.sqrt(_DBL_MAX)
+            else x * (math.ldexp(x, -1) / size)
+        )
+        v = (
+            size * math.log(prob)
+            + x * (math.log(size) + math.log1p(-prob))
+            - _lgamma1p(x)
+            + math.log1p(xx2s)
+        )
+        return v if give_log else math.exp(v)
+    if give_log:
+        p = math.log1p(-x / (size + x)) if x < size else math.log(size / (size + x))
+    else:
+        p = size / (size + x)
+    ans = _dbinom_raw(size, x + size, prob, 1 - prob, give_log)
+    return (p + ans) if give_log else p * ans
+
+
+def dnbinom_mu(x, size, mu, give_log=False):
+    """R's ``dnbinom(x, size, mu=)`` (nmath/dnbinom.c ``dnbinom_mu``), bit-exact."""
+    if math.isnan(x) or math.isnan(size) or math.isnan(mu):
+        return x + size + mu
+    if mu < 0 or size < 0:
+        return _NAN
+    rd0 = _NEGINF if give_log else 0.0
+    if _R_nonint(x):
+        return rd0
+    if x < 0 or not math.isfinite(x):
+        return rd0
+    if x == 0 and size == 0:
+        return 0.0 if give_log else 1.0
+    x = _r_forceint(x)
+    if not math.isfinite(size):  # limit case: Poisson
+        return _dpois_raw(x, mu, give_log)
+    if x == 0:
+        v = size * (
+            math.log(size / (size + mu)) if size < mu else math.log1p(-mu / (size + mu))
+        )
+        return v if give_log else math.exp(v)
+    if x < 1e-10 * size:
+        p = (
+            math.log(size / (1 + size / mu))
+            if size < mu
+            else math.log(mu / (1 + mu / size))
+        )
+        xx2s = (
+            (math.ldexp(x * (x - 1), -1) / size)
+            if x < math.sqrt(_DBL_MAX)
+            else x * (math.ldexp(x, -1) / size)
+        )
+        v = x * p - mu - _lgamma1p(x) + math.log1p(xx2s)
+        return v if give_log else math.exp(v)
+    if give_log:
+        p = math.log1p(-x / (size + x)) if x < size else math.log(size / (size + x))
+    else:
+        p = size / (size + x)
+    ans = _dbinom_raw(size, x + size, size / (size + mu), mu / (size + mu), give_log)
+    return (p + ans) if give_log else p * ans
+
+
+def pnbinom(x, size, prob, lower_tail=True, log_p=False):
+    """R's ``pnbinom(x, size, prob)`` (nmath/pnbinom.c → pbeta), bit-exact."""
+    if math.isnan(x) or math.isnan(size) or math.isnan(prob):
+        return x + size + prob
+    if not math.isfinite(size) or not math.isfinite(prob):
+        return _NAN
+    if size < 0 or prob <= 0 or prob > 1:
+        return _NAN
+    if size == 0:  # limiting case: point mass at zero
+        return _dt1(lower_tail, log_p) if x >= 0 else _dt0(lower_tail, log_p)
+    if x < 0:
+        return _dt0(lower_tail, log_p)
+    if not math.isfinite(x):
+        return _dt1(lower_tail, log_p)
+    x = math.floor(x + 1e-7)
+    return pbeta(prob, size, x + 1.0, lower_tail, log_p)
+
+
 # === qbeta — beta quantile (nmath/qbeta.c, AS 109 + Newton) ==================
-_DBL_very_MIN = 2.2250738585072014e-308 / 4.
+_DBL_very_MIN = 2.2250738585072014e-308 / 4.0
 _DBL_log_v_MIN = _M_LN2 * (-1021 - 2)
 _DBL_1__eps = float.fromhex("0x1.fffffffffffffp-1")
 
@@ -3792,7 +4407,7 @@ def _R_DT_CIv(p, lower_tail, log_p):
 
 
 def _R_pow_di3(x):
-    return x * (x * x)   # R_pow_di(x, 3)
+    return x * (x * x)  # R_pow_di(x, 3)
 
 
 def _clog(x):
@@ -3844,7 +4459,7 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
 
     p_ = _R_DT_qIv(alpha, lower_tail, log_p)
     logbeta = lbeta(p, q)
-    swap_tail = (p_ > 0.5)
+    swap_tail = p_ > 0.5
     log_eps_c = _M_LN2 * (1 - 53)
 
     y = -1.0
@@ -3867,32 +4482,40 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
             la = _R_DT_log(alpha, lower_tail, log_p)
             pp, qq = p, q
         n_maybe_swaps += 1
-        acu = max(acu_min, math.pow(10., -13. - 2.5 / (pp * pp) - 0.5 / (a * a)))
+        acu = max(acu_min, math.pow(10.0, -13.0 - 2.5 / (pp * pp) - 0.5 / (a * a)))
         u0 = (la + math.log(pp) + logbeta) / pp
-        rp = pp * (1. - qq) / (pp + 1.)
+        rp = pp * (1.0 - qq) / (pp + 1.0)
         t = 0.2
-        u0_maybe = (_M_LN2 * (-1021) < u0 < -0.01)
+        u0_maybe = _M_LN2 * (-1021) < u0 < -0.01
         u_n = 1.0
         skip_init = False
-        if (u0_maybe and u0 < _rfma(t, log_eps_c, -_clog(
-                abs(pp * (1. - qq) * (2. - qq) / (2. * (pp + 2.))))) / 2.):
+        if (
+            u0_maybe
+            and u0
+            < _rfma(
+                t,
+                log_eps_c,
+                -_clog(abs(pp * (1.0 - qq) * (2.0 - qq) / (2.0 * (pp + 2.0)))),
+            )
+            / 2.0
+        ):
             rp = rp * math.exp(u0)
-            u = (u0 - math.log1p(rp) / pp) if rp > -1. else u0
+            u = (u0 - math.log1p(rp) / pp) if rp > -1.0 else u0
             tx = xinbta = math.exp(u)
             use_log_x = True
             skip_init = True
 
         if not skip_init:
             r = math.sqrt(-2 * la)
-            y = r - _rfma(const2, r, const1) / _rfma(
-                _rfma(const4, r, const3), r, 1.)
+            y = r - _rfma(const2, r, const1) / _rfma(_rfma(const4, r, const3), r, 1.0)
             if pp > 1 and qq > 1:
-                r = _rfma(y, y, -3.) / 6.
-                s = 1. / (pp + pp - 1.)
-                t = 1. / (qq + qq - 1.)
-                h = 2. / (s + t)
-                w = _rfma(-(t - s), r + 5. / 6. - 2. / (3. * h),
-                          y * math.sqrt(h + r) / h)
+                r = _rfma(y, y, -3.0) / 6.0
+                s = 1.0 / (pp + pp - 1.0)
+                t = 1.0 / (qq + qq - 1.0)
+                h = 2.0 / (s + t)
+                w = _rfma(
+                    -(t - s), r + 5.0 / 6.0 - 2.0 / (3.0 * h), y * math.sqrt(h + r) / h
+                )
                 if w > 300:
                     t = w + w + math.log(qq) - math.log(pp)
                     u = (-math.log1p(math.exp(t))) if t <= 18 else (-t - math.exp(-t))
@@ -3902,32 +4525,35 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
                     u = -math.log1p(qq / pp * math.exp(w + w))
             else:
                 r = qq + qq
-                t = 1. / (3. * math.sqrt(qq))
-                t = r * _R_pow_di3(_rfma(t, -t + y, 1.))
-                s = _rfma(4., pp, r) - 2.
-                if t == 0 or (t < 0. and s >= t):
-                    l1ma = (_R_DT_log(alpha, lower_tail, log_p) if swap_tail
-                            else _R_DT_Clog(alpha, lower_tail, log_p))
+                t = 1.0 / (3.0 * math.sqrt(qq))
+                t = r * _R_pow_di3(_rfma(t, -t + y, 1.0))
+                s = _rfma(4.0, pp, r) - 2.0
+                if t == 0 or (t < 0.0 and s >= t):
+                    l1ma = (
+                        _R_DT_log(alpha, lower_tail, log_p)
+                        if swap_tail
+                        else _R_DT_Clog(alpha, lower_tail, log_p)
+                    )
                     xx = (l1ma + math.log(qq) + logbeta) / qq
-                    if xx <= 0.:
+                    if xx <= 0.0:
                         xinbta = -math.expm1(xx)
                         u = _R_Log1_Exp(xx)
                     else:
                         r_ = rp * math.exp(u0)
-                        u = (u0 - math.log1p(r_) / pp) if r_ > -1. else u0
+                        u = (u0 - math.log1p(r_) / pp) if r_ > -1.0 else u0
                         xinbta = math.exp(u)
                 else:
                     t = s / t
-                    if t <= 1.:
+                    if t <= 1.0:
                         u = u0
                         xinbta = math.exp(u)
                     else:
-                        xinbta = 1. - 2. / (t + 1.)
-                        u = math.log1p(-2. / (t + 1.))
+                        xinbta = 1.0 - 2.0 / (t + 1.0)
+                        u = math.log1p(-2.0 / (t + 1.0))
 
-            if ((swap_tail and u >= -math.exp(log_q_cut))
-                    or ((not swap_tail) and u >= -math.exp(4 * log_q_cut)
-                        and pp / qq < 1000.)):
+            if (swap_tail and u >= -math.exp(log_q_cut)) or (
+                (not swap_tail) and u >= -math.exp(4 * log_q_cut) and pp / qq < 1000.0
+            ):
                 swap_tail = not swap_tail
                 if swap_tail:
                     a = _R_DT_CIv(alpha, lower_tail, log_p)
@@ -3941,7 +4567,7 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
                 xinbta = math.exp(u)
 
             if not use_log_x:
-                use_log_x = (u < log_q_cut)
+                use_log_x = u < log_q_cut
             bad_u = not math.isfinite(u)
             bad_init = bad_u or xinbta > p_hi
             tx = xinbta
@@ -3952,7 +4578,7 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
                         tx = _DBL_very_MIN
                         u_n = _DBL_log_v_MIN
                     else:
-                        tx = 0.
+                        tx = 0.0
                         u_n = _NEGINF
                     use_log_x = bool(log_p)
                     add_N_step = False
@@ -3966,8 +4592,11 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
                     u = _M_LN2 * (-1021)
                     xinbta = DBL_MIN
                 else:
-                    xinbta = (0.5 if xinbta > 1.1
-                              else (math.exp(u) if xinbta < p_lo else p_hi))
+                    xinbta = (
+                        0.5
+                        if xinbta > 1.1
+                        else (math.exp(u) if xinbta < p_lo else p_hi)
+                    )
                     if bad_u:
                         u = math.log(xinbta)
 
@@ -3977,29 +4606,32 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
         # L_Newton
         r = 1 - pp
         t = 1 - qq
-        wprev = 0.
-        prev = 1.
-        adj = 1.
+        wprev = 0.0
+        prev = 1.0
+        adj = 1.0
         jump_swap = False
         if use_log_x:
             for i_pb in range(1000):
                 y = pbeta_raw(xinbta, pp, qq, True, True)
-                w = 0. if y == _NEGINF else \
-                    (y - la) * math.exp(_rfma(t, _R_Log1_Exp(u),
-                                              _rfma(r, u, y - u + logbeta)))
+                w = (
+                    0.0
+                    if y == _NEGINF
+                    else (y - la)
+                    * math.exp(_rfma(t, _R_Log1_Exp(u), _rfma(r, u, y - u + logbeta)))
+                )
                 if not math.isfinite(w):
                     if n_maybe_swaps <= 1:
                         jump_swap = True
                         break
                     return _NAN, _NAN
-                if i_pb >= n_N and w * wprev <= 0.:
+                if i_pb >= n_N and w * wprev <= 0.0:
                     prev = max(abs(adj), fpu)
                 g = 1
                 for _i_inn in range(1000):
                     adj = g * w
                     if abs(adj) < prev:
                         u_n = u - adj
-                        if u_n <= 0.:
+                        if u_n <= 0.0:
                             if prev <= acu or abs(w) <= acu:
                                 converged = True
                             break
@@ -4016,12 +4648,23 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
         else:
             for i_pb in range(1000):
                 y = pbeta_raw(xinbta, pp, qq, True, log_p)
-                w = ((y - la) * math.exp(_rfma(t, math.log1p(-xinbta),
-                                               _rfma(r, math.log(xinbta),
-                                                     y + logbeta))) if log_p
-                     else (y - a) * math.exp(_rfma(t, math.log1p(-xinbta),
-                                                   _rfma(r, math.log(xinbta),
-                                                         logbeta))))
+                w = (
+                    (y - la)
+                    * math.exp(
+                        _rfma(
+                            t,
+                            math.log1p(-xinbta),
+                            _rfma(r, math.log(xinbta), y + logbeta),
+                        )
+                    )
+                    if log_p
+                    else (y - a)
+                    * math.exp(
+                        _rfma(
+                            t, math.log1p(-xinbta), _rfma(r, math.log(xinbta), logbeta)
+                        )
+                    )
+                )
                 if not math.isfinite(w):
                     if n_maybe_swaps <= 2:
                         if (not log_p) and n_maybe_swaps == 2:
@@ -4030,18 +4673,18 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
                             jump_swap = True
                             break
                     return _NAN, _NAN
-                if i_pb >= n_N and w * wprev <= 0.:
+                if i_pb >= n_N and w * wprev <= 0.0:
                     prev = max(abs(adj), fpu)
                 g = 1
                 for _i_inn in range(1000):
                     adj = g * w
                     if i_pb < n_N or abs(adj) < prev:
                         tx = xinbta - adj
-                        if 0. <= tx <= 1.:
+                        if 0.0 <= tx <= 1.0:
                             if prev <= acu or abs(w) <= acu:
                                 converged = True
                                 break
-                            if tx != 0. and tx != 1:
+                            if tx != 0.0 and tx != 1:
                                 break
                     g /= 3
                 if converged:
@@ -4072,15 +4715,22 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
     t = 1 - qq
     if use_log_x:
         if add_N_step:
-            if u_n != 1.:
+            if u_n != 1.0:
                 xinbta = math.exp(u_n)
             y = pbeta_raw(xinbta, pp, qq, True, log_p)
-            w = ((y - la) * math.exp(_rfma(t, math.log1p(-xinbta),
-                                           _rfma(r, math.log(xinbta),
-                                                 y + logbeta))) if log_p
-                 else (y - a) * math.exp(_rfma(t, math.log1p(-xinbta),
-                                               _rfma(r, math.log(xinbta),
-                                                     logbeta))))
+            w = (
+                (y - la)
+                * math.exp(
+                    _rfma(
+                        t, math.log1p(-xinbta), _rfma(r, math.log(xinbta), y + logbeta)
+                    )
+                )
+                if log_p
+                else (y - a)
+                * math.exp(
+                    _rfma(t, math.log1p(-xinbta), _rfma(r, math.log(xinbta), logbeta))
+                )
+            )
             tx = (xinbta - w) if math.isfinite(w) else xinbta
         else:
             if swap_tail:
@@ -4095,7 +4745,7 @@ def qbeta(alpha, p, q, lower_tail=True, log_p=False):
     """R's ``qbeta(alpha, p, q)`` (nmath/qbeta.c), bit-exact."""
     if math.isnan(p) or math.isnan(q) or math.isnan(alpha):
         return p + q + alpha
-    if p < 0. or q < 0.:
+    if p < 0.0 or q < 0.0:
         return _NAN
     return _qbeta_raw(alpha, p, q, lower_tail, log_p)[0]
 
@@ -4111,21 +4761,21 @@ def dt(x, n, give_log=False):
     if not math.isfinite(x):
         return rd0
     if not math.isfinite(n):
-        return dnorm5(x, 0., 1., give_log)
-    t = -_bd0(n / 2., (n + 1) / 2.) + _stirlerr((n + 1) / 2.) - _stirlerr(n / 2.)
+        return dnorm5(x, 0.0, 1.0, give_log)
+    t = -_bd0(n / 2.0, (n + 1) / 2.0) + _stirlerr((n + 1) / 2.0) - _stirlerr(n / 2.0)
     x2n = x * x / n
-    ax = 0.
-    lrg_x2n = (x2n > 1. / _DBL_EPSILON)
+    ax = 0.0
+    lrg_x2n = x2n > 1.0 / _DBL_EPSILON
     if lrg_x2n:
         ax = abs(x)
-        l_x2n = math.log(ax) - math.log(n) / 2.
+        l_x2n = math.log(ax) - math.log(n) / 2.0
         u = n * l_x2n
     elif x2n > 0.2:
-        l_x2n = math.log(1 + x2n) / 2.
+        l_x2n = math.log(1 + x2n) / 2.0
         u = n * l_x2n
     else:
-        l_x2n = math.log1p(x2n) / 2.
-        u = -_bd0(n / 2., _rfma(x, x, n) / 2.) + x * x / 2.
+        l_x2n = math.log1p(x2n) / 2.0
+        u = -_bd0(n / 2.0, _rfma(x, x, n) / 2.0) + x * x / 2.0
     if give_log:
         return t - u - (_M_LN_SQRT_2PI + l_x2n)
     i_sqrt = (math.sqrt(n) / ax) if lrg_x2n else math.exp(-l_x2n)
@@ -4141,19 +4791,19 @@ def tanpi(x):
         return x
     if not math.isfinite(x):
         return _NAN
-    x = math.fmod(x, 1.)
+    x = math.fmod(x, 1.0)
     if x <= -0.5:
         x += 1
     elif x > 0.5:
         x -= 1
-    if x == 0.:
-        return 0.
+    if x == 0.0:
+        return 0.0
     if x == 0.5:
         return _NAN
     if x == 0.25:
-        return 1.
+        return 1.0
     if x == -0.25:
-        return -1.
+        return -1.0
     return math.tan(math.pi * x)
 
 
@@ -4163,7 +4813,7 @@ _M_PI_2 = 1.570796326794896619231321691640
 
 def qt(p, ndf, lower_tail=True, log_p=False):
     """R's ``qt(p, df=ndf)`` (nmath/qt.c) — routes via qnorm/pt/dt, bit-exact."""
-    eps = 1.e-12
+    eps = 1.0e-12
     if math.isnan(p) or math.isnan(ndf):
         return p + ndf
     # R_Q_P01_boundaries(p, -Inf, +Inf)
@@ -4190,11 +4840,11 @@ def qt(p, ndf, lower_tail=True, log_p=False):
         if pv > 1 - _DBL_EPSILON:
             return _INF
         pp = min(1 - _DBL_EPSILON, pv * (1 + Eps))
-        ux = 1.
+        ux = 1.0
         while ux < 1.7976931348623157e308 and pt(ux, ndf, True, False) < pp:
             ux *= 2
         pp = pv * (1 - Eps)
-        lx = -1.
+        lx = -1.0
         while lx > -1.7976931348623157e308 and pt(lx, ndf, True, False) > pp:
             lx *= 2
         it = 0
@@ -4209,24 +4859,30 @@ def qt(p, ndf, lower_tail=True, log_p=False):
             # C99 `(ux-lx)/fabs(nx)` at nx == 0: ±Inf (or NaN for 0/0),
             # never an exception — Python's `/` raises, so spell it out.
             d_ = ux - lx
-            if nx != 0.:
+            if nx != 0.0:
                 rel = d_ / abs(nx)
             else:
-                rel = _NAN if d_ == 0. else math.copysign(_INF, d_)
+                rel = _NAN if d_ == 0.0 else math.copysign(_INF, d_)
             if not (rel > accu and it < 1000):
                 break
         return 0.5 * (lx + ux)
     if ndf > 1e20:
-        return qnorm5(p, 0., 1., lower_tail, log_p)
-    P = math.exp(p) if log_p else p     # R_D_qIv
+        return qnorm5(p, 0.0, 1.0, lower_tail, log_p)
+    P = math.exp(p) if log_p else p  # R_D_qIv
     neg = ((not lower_tail) or P < 0.5) and (lower_tail or P > 0.5)
-    is_neg_lower = (lower_tail == neg)
+    is_neg_lower = lower_tail == neg
     if neg:
-        P = 2 * ((P if lower_tail else -math.expm1(p)) if log_p
-                 else (P if lower_tail else (0.5 - p + 0.5)))   # R_D_Lval
+        P = 2 * (
+            (P if lower_tail else -math.expm1(p))
+            if log_p
+            else (P if lower_tail else (0.5 - p + 0.5))
+        )  # R_D_Lval
     else:
-        P = 2 * ((-math.expm1(p) if lower_tail else P) if log_p
-                 else ((0.5 - p + 0.5) if lower_tail else p))   # R_D_Cval
+        P = 2 * (
+            (-math.expm1(p) if lower_tail else P)
+            if log_p
+            else ((0.5 - p + 0.5) if lower_tail else p)
+        )  # R_D_Cval
     if abs(ndf - 2) < eps:
         if P > _DBL_MIN:
             if 3 * P < _DBL_EPSILON:
@@ -4237,24 +4893,30 @@ def qt(p, ndf, lower_tail=True, log_p=False):
                 q = math.sqrt(2 / (P * (2 - P)) - 2)
         else:
             if log_p:
-                q = (math.exp(-p / 2) / _M_SQRT2) if is_neg_lower \
+                q = (
+                    (math.exp(-p / 2) / _M_SQRT2)
+                    if is_neg_lower
                     else 1 / math.sqrt(-math.expm1(p))
+                )
             else:
                 q = _INF
     elif ndf < 1 + eps:
-        if P == 1.:
-            q = 0.
+        if P == 1.0:
+            q = 0.0
         elif P > 0:
-            q = 1 / tanpi(P / 2.)
+            q = 1 / tanpi(P / 2.0)
         else:
             if log_p:
-                q = (_M_1_PI * math.exp(-p)) if is_neg_lower \
-                    else -1. / (math.pi * math.expm1(p))
+                q = (
+                    (_M_1_PI * math.exp(-p))
+                    if is_neg_lower
+                    else -1.0 / (math.pi * math.expm1(p))
+                )
             else:
                 q = _INF
     else:
-        x = 0.
-        log_P2 = 0.
+        x = 0.0
+        log_P2 = 0.0
         a = 1 / (ndf - 0.5)
         b = 48 / (a * a)
         c = ((20700 * a / b - 98) * a - 16) * a + 96.36
@@ -4263,34 +4925,37 @@ def qt(p, ndf, lower_tail=True, log_p=False):
         P_ok = P_ok1
         if P_ok1:
             y = math.pow(d * P, 2.0 / ndf)
-            P_ok = (y >= _DBL_EPSILON)
+            P_ok = y >= _DBL_EPSILON
         if not P_ok:
-            log_P2 = (_R_D_log(p, log_p) if is_neg_lower
-                      else _R_D_LExp(p, log_p))
+            log_P2 = _R_D_log(p, log_p) if is_neg_lower else _R_D_LExp(p, log_p)
             x = (math.log(d) + _M_LN2 + log_P2) / ndf
             y = math.exp(2 * x)
         if (ndf < 2.1 and P > 0.5) or y > 0.05 + a:
             if P_ok:
-                x = qnorm5(0.5 * P, 0., 1., True, False)
+                x = qnorm5(0.5 * P, 0.0, 1.0, True, False)
             else:
-                x = qnorm5(log_P2, 0., 1., lower_tail, True)
+                x = qnorm5(log_P2, 0.0, 1.0, lower_tail, True)
             y = x * x
             if ndf < 5:
                 c += 0.3 * (ndf - 4.5) * (x + 0.6)
             c = (((0.05 * d * x - 5) * x - 7) * x - 2) * x + b + c
-            y = (((((0.4 * y + 6.3) * y + 36) * y + 94.5) / c
-                  - y - 3) / b + 1) * x
+            y = (((((0.4 * y + 6.3) * y + 36) * y + 94.5) / c - y - 3) / b + 1) * x
             y = math.expm1(a * y * y)
             q = math.sqrt(ndf * y)
         elif (not P_ok) and x < -_M_LN2 * 53:
             q = math.sqrt(ndf) * math.exp(-x)
         else:
-            y = ((1 / (((ndf + 6) / (ndf * y) - 0.089 * d - 0.822)
-                       * (ndf + 2) * 3) + 0.5 / (ndf + 4))
-                 * y - 1) * (ndf + 1) / (ndf + 2) + 1 / y
+            y = (
+                (
+                    1 / (((ndf + 6) / (ndf * y) - 0.089 * d - 0.822) * (ndf + 2) * 3)
+                    + 0.5 / (ndf + 4)
+                )
+                * y
+                - 1
+            ) * (ndf + 1) / (ndf + 2) + 1 / y
             q = math.sqrt(ndf * y)
         if P_ok1:
-            M = abs(math.sqrt(1.7976931348623157e308 / 2.) - ndf)
+            M = abs(math.sqrt(1.7976931348623157e308 / 2.0) - ndf)
             it = 0
             while it < 10:
                 it += 1
@@ -4300,9 +4965,12 @@ def qt(p, ndf, lower_tail=True, log_p=False):
                 x = (pt(q, ndf, False, False) - P / 2) / y
                 if not math.isfinite(x) or not (abs(x) > 1e-14 * abs(q)):
                     break
-                F = (q * (ndf + 1) / (2 * (q * q + ndf))) if abs(q) < M \
+                F = (
+                    (q * (ndf + 1) / (2 * (q * q + ndf)))
+                    if abs(q) < M
                     else ((ndf + 1) / (2 * (q + ndf / q)))
-                del_q = x * (1. + x * F)
+                )
+                del_q = x * (1.0 + x * F)
                 if math.isfinite(del_q) and math.isfinite(q + del_q):
                     q += del_q
                 elif math.isfinite(x) and math.isfinite(q + x):
@@ -4316,7 +4984,7 @@ def qf(p, df1, df2, lower_tail=True, log_p=False):
     """R's ``qf(p, df1, df2)`` (nmath/qf.c) — routes via qbeta/qchisq, bit-exact."""
     if math.isnan(p) or math.isnan(df1) or math.isnan(df2):
         return p + df1 + df2
-    if df1 <= 0. or df2 <= 0.:
+    if df1 <= 0.0 or df2 <= 0.0:
         return _NAN
     # R_Q_P01_boundaries(p, 0, +Inf)
     if log_p:
@@ -4335,11 +5003,11 @@ def qf(p, df1, df2, lower_tail=True, log_p=False):
             return _INF if lower_tail else 0.0
     if df1 <= df2 and df2 > 4e5:
         if not math.isfinite(df1):
-            return 1.
+            return 1.0
         return qgamma(p, df1 / 2.0, 2.0, lower_tail, log_p) / df1
     elif df1 > 4e5:
         return df2 / qgamma(p, df2 / 2.0, 2.0, not lower_tail, log_p)
-    p = (1. / qbeta(p, df2 / 2, df1 / 2, not lower_tail, log_p) - 1.) * (df2 / df1)
+    p = (1.0 / qbeta(p, df2 / 2, df1 / 2, not lower_tail, log_p) - 1.0) * (df2 / df1)
     return p if not math.isnan(p) else _NAN
 
 
@@ -4408,8 +5076,7 @@ def dbeta(x, a, b, give_log=False):
         if b < 1:
             return _INF
     if a <= 2 or b <= 2:
-        lval = _rfma(a - 1, math.log(x),
-                     (b - 1) * math.log1p(-x)) - lbeta(a, b)
+        lval = _rfma(a - 1, math.log(x), (b - 1) * math.log1p(-x)) - lbeta(a, b)
     else:
         lval = math.log(a + b - 1) + _dbinom_raw(a - 1, a + b - 2, x, 1 - x, True)
     return lval if give_log else math.exp(lval)
@@ -4421,20 +5088,19 @@ def _do_search(y, z, p, cdf, incr, lower_tail, log_p, y_max):
     left = (z[0] >= p) if lower_tail else (z[0] < p)
     if left:
         while True:
-            newz = -1.
+            newz = -1.0
             if y > 0:
                 newz = cdf(y - incr, lower_tail, log_p)
             elif y < 0:
                 y = 0
-            if (y == 0 or math.isnan(newz)
-                    or (newz < p if lower_tail else newz >= p)):
+            if y == 0 or math.isnan(newz) or (newz < p if lower_tail else newz >= p):
                 return y
             y = max(0, y - incr)
             z[0] = newz
     else:
         while True:
             prevy = y
-            newz = -1.
+            newz = -1.0
             y += incr
             if y_max is not None:
                 if y < y_max:
@@ -4443,8 +5109,11 @@ def _do_search(y, z, p, cdf, incr, lower_tail, log_p, y_max):
                     y = y_max
             else:
                 newz = cdf(y, lower_tail, log_p)
-            if ((y_max is not None and y == y_max) or math.isnan(newz)
-                    or (newz >= p if lower_tail else newz < p)):
+            if (
+                (y_max is not None and y == y_max)
+                or math.isnan(newz)
+                or (newz >= p if lower_tail else newz < p)
+            ):
                 if incr <= 1:
                     z[0] = newz
                     return y
@@ -4453,18 +5122,18 @@ def _do_search(y, z, p, cdf, incr, lower_tail, log_p, y_max):
 
 
 def _q_discrete(p, lower_tail, log_p, mu, sigma, gamma, cdf, y_max):
-    z = qnorm5(p, 0., 1., lower_tail, log_p)
+    z = qnorm5(p, 0.0, 1.0, lower_tail, log_p)
     y = float(round(mu + sigma * (z + gamma * (z * z - 1) / 6)))
     if y_max is not None:
         if y > y_max:
             y = y_max
         elif y < 0:
-            y = 0.
+            y = 0.0
     elif y < 0:
-        y = 0.
+        y = 0.0
     zc = [cdf(y, lower_tail, log_p)]
-    _pf_n_, _pf_L_, _yLarge_ = 8., 2., 4096.
-    _incF_, _iShrink_, _relTol_, _xf_ = 1. / 64, 8., 1e-15, 4.
+    _pf_n_, _pf_L_, _yLarge_ = 8.0, 2.0, 4096.0
+    _incF_, _iShrink_, _relTol_, _xf_ = 1.0 / 64, 8.0, 1e-15, 4.0
     if log_p:
         e = _pf_L_ * _DBL_EPSILON
         if lower_tail and p > -1.7976931348623157e308:
@@ -4500,9 +5169,9 @@ def qpois(p, lambda_, lower_tail=True, log_p=False):
     if (log_p and p > 0) or ((not log_p) and (p < 0 or p > 1)):
         return _NAN
     if lambda_ == 0:
-        return 0.
+        return 0.0
     if p == _dt0(lower_tail, log_p):
-        return 0.
+        return 0.0
     if p == _dt1(lower_tail, log_p):
         return _INF
     sigma = math.sqrt(lambda_)
@@ -4510,6 +5179,7 @@ def qpois(p, lambda_, lower_tail=True, log_p=False):
 
     def _cdf(y, lt, lg):
         return ppois(y, lambda_, lt, lg)
+
     return _q_discrete(p, lower_tail, log_p, lambda_, sigma, gamma, _cdf, None)
 
 
@@ -4539,9 +5209,9 @@ def qbinom(p, n, pr, lower_tail=True, log_p=False):
             return 0.0 if lower_tail else n
         if p == 1:
             return n if lower_tail else 0.0
-    if pr == 0. or n == 0:
-        return 0.
-    if pr == 1.:
+    if pr == 0.0 or n == 0:
+        return 0.0
+    if pr == 1.0:
         return n
     q = 1 - pr
     mu = n * pr
@@ -4550,18 +5220,19 @@ def qbinom(p, n, pr, lower_tail=True, log_p=False):
 
     def _cdf(y, lt, lg):
         return pbinom(y, n, pr, lt, lg)
+
     return _q_discrete(p, lower_tail, log_p, mu, sigma, gamma, _cdf, n)
 
 
 def qnbinom_mu(p, size, mu, lower_tail=True, log_p=False):
     """R's ``qnbinom(p, size, mu=)`` (nmath/qnbinom_mu.c) — discrete search,
     bit-exact."""
-    if size == _INF:                # limit case: Poisson
+    if size == _INF:  # limit case: Poisson
         return qpois(p, mu, lower_tail, log_p)
     if math.isnan(p) or math.isnan(size) or math.isnan(mu):
         return p + size + mu
     if mu == 0 or size == 0:
-        return 0.
+        return 0.0
     if mu < 0 or size < 0:
         return _NAN
     # R_Q_P01_boundaries(p, 0, ML_POSINF)
@@ -4569,23 +5240,62 @@ def qnbinom_mu(p, size, mu, lower_tail=True, log_p=False):
         if p > 0:
             return _NAN
         if p == 0:
-            return _INF if lower_tail else 0.
+            return _INF if lower_tail else 0.0
         if p == _NEGINF:
-            return 0. if lower_tail else _INF
+            return 0.0 if lower_tail else _INF
     else:
         if p < 0 or p > 1:
             return _NAN
         if p == 0:
-            return 0. if lower_tail else _INF
+            return 0.0 if lower_tail else _INF
         if p == 1:
-            return _INF if lower_tail else 0.
-    Q = 1 + mu / size            # = 1/prob
-    P = mu / size                # = (1-prob)/prob = Q - 1
+            return _INF if lower_tail else 0.0
+    Q = 1 + mu / size  # = 1/prob
+    P = mu / size  # = (1-prob)/prob = Q - 1
     sigma = math.sqrt(size * P * Q)
     gamma = (Q + P) / sigma
 
     def _cdf(y, lt, lg):
         return pnbinom_mu(y, size, mu, lt, lg)
+
+    return _q_discrete(p, lower_tail, log_p, mu, sigma, gamma, _cdf, None)
+
+
+def qnbinom(p, size, prob, lower_tail=True, log_p=False):
+    """R's ``qnbinom(p, size, prob)`` (nmath/qnbinom.c) — discrete search,
+    bit-exact."""
+    if math.isnan(p) or math.isnan(size) or math.isnan(prob):
+        return p + size + prob
+    if prob == 0 and size == 0:  # (mu, size) path: prob = size/(size+mu)
+        return 0.0
+    if prob <= 0 or prob > 1 or size < 0:
+        return _NAN
+    if prob == 1 or size == 0:
+        return 0.0
+    # R_Q_P01_boundaries(p, 0, ML_POSINF)
+    if log_p:
+        if p > 0:
+            return _NAN
+        if p == 0:
+            return _INF if lower_tail else 0.0
+        if p == _NEGINF:
+            return 0.0 if lower_tail else _INF
+    else:
+        if p < 0 or p > 1:
+            return _NAN
+        if p == 0:
+            return 0.0 if lower_tail else _INF
+        if p == 1:
+            return _INF if lower_tail else 0.0
+    Q = 1.0 / prob
+    P = (1.0 - prob) * Q  # = (1-prob)/prob = Q-1
+    mu = size * P
+    sigma = math.sqrt(size * P * Q)
+    gamma = (Q + P) / sigma
+
+    def _cdf(y, lt, lg):
+        return pnbinom(y, size, prob, lt, lg)
+
     return _q_discrete(p, lower_tail, log_p, mu, sigma, gamma, _cdf, None)
 
 
@@ -4593,12 +5303,13 @@ def qnbinom_mu(p, size, mu, lower_tail=True, log_p=False):
 def dexp(x, scale, give_log=False):
     if math.isnan(x) or math.isnan(scale):
         return x + scale
-    if scale <= 0.:
+    if scale <= 0.0:
         return _NAN
-    if x < 0.:
+    if x < 0.0:
         return _NEGINF if give_log else 0.0
-    return ((-x / scale) - math.log(scale)) if give_log \
-        else math.exp(-x / scale) / scale
+    return (
+        ((-x / scale) - math.log(scale)) if give_log else math.exp(-x / scale) / scale
+    )
 
 
 def pexp(x, scale, lower_tail=True, log_p=False):
@@ -4606,7 +5317,7 @@ def pexp(x, scale, lower_tail=True, log_p=False):
         return x + scale
     if scale < 0:
         return _NAN
-    if x <= 0.:
+    if x <= 0.0:
         return _dt0(lower_tail, log_p)
     x = -(x / scale)
     if lower_tail:
@@ -4622,8 +5333,306 @@ def qexp(p, scale, lower_tail=True, log_p=False):
     if (log_p and p > 0) or ((not log_p) and (p < 0 or p > 1)):
         return _NAN
     if p == _dt0(lower_tail, log_p):
-        return 0.
+        return 0.0
     return -scale * _R_DT_Clog(p, lower_tail, log_p)
+
+
+# === cauchy / logistic / log-normal / weibull / geom ========================
+# nmath dcauchy.c/pcauchy.c/qcauchy.c, dlogis.c/plogis.c/qlogis.c,
+# dlnorm.c/plnorm.c/qlnorm.c, dweibull.c/pweibull.c/qweibull.c,
+# dgeom.c/pgeom.c/qgeom.c. Closed-form (no LDOUBLE series) → 0-ulp to R.
+def _R_D_Clog(p, log_p):
+    # R_D_Clog(p) = log_p ? log1p(-p) : (0.5 - p + 0.5)
+    return math.log1p(-p) if log_p else (0.5 - p + 0.5)
+
+
+def _log1pexp(x):
+    # R's log1pexp (plogis.c): overflow-safe log(1 + exp(x))
+    if x <= 18.0:
+        return math.log1p(math.exp(x))
+    if x > 33.3:
+        return x
+    return x + math.exp(-x)
+
+
+def _c_log(x):
+    # C log() semantics (no exception): log(0) = -Inf, log(neg) = NaN.
+    if x > 0:
+        return math.log(x)
+    return _NEGINF if x == 0 else _NAN
+
+
+def _c_div(a, b):
+    # C `/` semantics (no exception): x/0 = +-Inf by the sign rule, 0/0 = NaN.
+    if b != 0.0 or math.isnan(a):
+        return a / b
+    if a == 0.0:
+        return _NAN
+    return math.copysign(_INF, a) * math.copysign(1.0, b)
+
+
+def _q_p01_boundaries(p, lower_tail, log_p, left, right):
+    # R_Q_P01_boundaries(p, left, right): boundary value, or None to continue.
+    if log_p:
+        if p > 0:
+            return _NAN
+        if p == 0.0:
+            return right if lower_tail else left
+        if p == _NEGINF:
+            return left if lower_tail else right
+    else:
+        if p < 0 or p > 1:
+            return _NAN
+        if p == 0.0:
+            return left if lower_tail else right
+        if p == 1.0:
+            return right if lower_tail else left
+    return None
+
+
+def dcauchy(x, location=0.0, scale=1.0, give_log=False):
+    if math.isnan(x) or math.isnan(location) or math.isnan(scale):
+        return x + location + scale
+    if scale <= 0.0:
+        return _NAN
+    y = (x - location) / scale
+    return (
+        (-math.log(math.pi * scale * (1.0 + y * y)))
+        if give_log
+        else 1.0 / (math.pi * scale * (1.0 + y * y))
+    )
+
+
+def pcauchy(x, location=0.0, scale=1.0, lower_tail=True, log_p=False):
+    if math.isnan(x) or math.isnan(location) or math.isnan(scale):
+        return x + location + scale
+    if scale <= 0.0:
+        return _NAN
+    x = (x - location) / scale
+    if math.isnan(x):
+        return _NAN
+    if not math.isfinite(x):
+        return _dt0(lower_tail, log_p) if x < 0 else _dt1(lower_tail, log_p)
+    if not lower_tail:
+        x = -x
+    # Installed R (no HAVE_ATANPI) uses the atan(1/x)/M_PI branch.
+    if abs(x) > 1:
+        y = math.atan(1 / x) / math.pi
+        if x > 0:
+            return _R_D_Clog(y, log_p)
+        return math.log(-y) if log_p else -y
+    v = 0.5 + math.atan(x) / math.pi
+    return math.log(v) if log_p else v
+
+
+def qcauchy(p, location=0.0, scale=1.0, lower_tail=True, log_p=False):
+    if math.isnan(p) or math.isnan(location) or math.isnan(scale):
+        return p + location + scale
+    if (log_p and p > 0) or ((not log_p) and (p < 0 or p > 1)):
+        return _NAN
+    if scale <= 0.0 or not math.isfinite(scale):
+        if scale == 0.0:
+            return location
+        return _NAN
+    my_inf = location + (scale if lower_tail else -scale) * _INF
+    if log_p:
+        if p > -1:
+            if p == 0.0:
+                return my_inf
+            lower_tail = not lower_tail
+            p = -math.expm1(p)
+        else:
+            p = math.exp(p)
+    elif p > 0.5:
+        if p == 1.0:
+            return my_inf
+        p = 1 - p
+        lower_tail = not lower_tail
+    if p == 0.5:
+        return location
+    if p == 0.0:
+        return location + (scale if lower_tail else -scale) * _NEGINF
+    return location + (-scale if lower_tail else scale) / tanpi(p)
+
+
+def dlogis(x, location=0.0, scale=1.0, give_log=False):
+    if math.isnan(x) or math.isnan(location) or math.isnan(scale):
+        return x + location + scale
+    if scale <= 0.0:
+        return _NAN
+    x = abs((x - location) / scale)
+    e = math.exp(-x)
+    f = 1.0 + e
+    return (-(x + math.log(scale * f * f))) if give_log else e / (scale * f * f)
+
+
+def plogis(x, location=0.0, scale=1.0, lower_tail=True, log_p=False):
+    if math.isnan(x) or math.isnan(location) or math.isnan(scale):
+        return x + location + scale
+    if scale <= 0.0:
+        return _NAN
+    x = (x - location) / scale
+    if math.isnan(x):
+        return _NAN
+    if not math.isfinite(x):  # R_P_bounds_Inf_01
+        return _dt1(lower_tail, log_p) if x > 0 else _dt0(lower_tail, log_p)
+    if log_p:
+        return -_log1pexp(-x if lower_tail else x)
+    return 1.0 / (1.0 + math.exp(-x if lower_tail else x))
+
+
+def qlogis(p, location=0.0, scale=1.0, lower_tail=True, log_p=False):
+    if math.isnan(p) or math.isnan(location) or math.isnan(scale):
+        return p + location + scale
+    b = _q_p01_boundaries(p, lower_tail, log_p, _NEGINF, _INF)
+    if b is not None:
+        return b
+    if scale < 0.0:
+        return _NAN
+    if scale == 0.0:
+        return location
+    if log_p:
+        p = (p - _R_Log1_Exp(p)) if lower_tail else (_R_Log1_Exp(p) - p)
+    else:
+        p = math.log((p / (1.0 - p)) if lower_tail else ((1.0 - p) / p))
+    return location + scale * p
+
+
+def dlnorm(x, meanlog=0.0, sdlog=1.0, give_log=False):
+    if math.isnan(x) or math.isnan(meanlog) or math.isnan(sdlog):
+        return x + meanlog + sdlog
+    if sdlog < 0:
+        return _NAN
+    if (not math.isfinite(x)) and _c_log(x) == meanlog:
+        return _NAN  # log(x) - meanlog is NaN
+    rd0 = _NEGINF if give_log else 0.0
+    if sdlog == 0.0:
+        return _INF if _c_log(x) == meanlog else rd0
+    if x <= 0:
+        return rd0
+    y = (math.log(x) - meanlog) / sdlog
+    if give_log:
+        # dlnorm.c:47 `-(M_LN_SQRT_2PI + 0.5*y*y + log(x*sdlog))`: clang fuses
+        # `M_LN_SQRT_2PI + (0.5*y)*y` into one fmadd on arm64 (same shape as
+        # dnorm4 above), so `_rfma` keeps this 0-ulp to R on both arches.
+        return -(_rfma(0.5 * y, y, _M_LN_SQRT_2PI) + math.log(x * sdlog))
+    return _M_1_SQRT_2PI * math.exp(-0.5 * y * y) / (x * sdlog)
+
+
+def plnorm(x, meanlog=0.0, sdlog=1.0, lower_tail=True, log_p=False):
+    if math.isnan(x) or math.isnan(meanlog) or math.isnan(sdlog):
+        return x + meanlog + sdlog
+    if sdlog < 0:
+        return _NAN
+    if x > 0:
+        return pnorm5(math.log(x), meanlog, sdlog, lower_tail, log_p)
+    return _dt0(lower_tail, log_p)
+
+
+def qlnorm(p, meanlog=0.0, sdlog=1.0, lower_tail=True, log_p=False):
+    if math.isnan(p) or math.isnan(meanlog) or math.isnan(sdlog):
+        return p + meanlog + sdlog
+    b = _q_p01_boundaries(p, lower_tail, log_p, 0.0, _INF)
+    if b is not None:
+        return b
+    return math.exp(qnorm5(p, meanlog, sdlog, lower_tail, log_p))
+
+
+def dweibull(x, shape, scale=1.0, give_log=False):
+    if math.isnan(x) or math.isnan(shape) or math.isnan(scale):
+        return x + shape + scale
+    if shape <= 0 or scale <= 0:
+        return _NAN
+    rd0 = _NEGINF if give_log else 0.0
+    if x < 0:
+        return rd0
+    if not math.isfinite(x):
+        return rd0
+    if x == 0 and shape < 1:
+        return _INF
+    tmp1 = math.pow(x / scale, shape - 1)
+    tmp2 = tmp1 * (x / scale)
+    if give_log:
+        return -tmp2 + math.log(shape * tmp1 / scale)
+    return shape * tmp1 * math.exp(-tmp2) / scale
+
+
+def pweibull(x, shape, scale=1.0, lower_tail=True, log_p=False):
+    if math.isnan(x) or math.isnan(shape) or math.isnan(scale):
+        return x + shape + scale
+    if shape <= 0 or scale <= 0:
+        return _NAN
+    if x <= 0:
+        return _dt0(lower_tail, log_p)
+    x = -math.pow(x / scale, shape)
+    if lower_tail:
+        return _R_Log1_Exp(x) if log_p else -math.expm1(x)
+    return x if log_p else math.exp(x)
+
+
+def qweibull(p, shape, scale=1.0, lower_tail=True, log_p=False):
+    if math.isnan(p) or math.isnan(shape) or math.isnan(scale):
+        return p + shape + scale
+    if shape <= 0 or scale <= 0:
+        return _NAN
+    b = _q_p01_boundaries(p, lower_tail, log_p, 0.0, _INF)
+    if b is not None:
+        return b
+    return scale * math.pow(-_R_DT_Clog(p, lower_tail, log_p), 1.0 / shape)
+
+
+def dgeom(x, p, give_log=False):
+    if math.isnan(x) or math.isnan(p):
+        return x + p
+    if p <= 0 or p > 1:
+        return _NAN
+    rd0 = _NEGINF if give_log else 0.0
+    if _R_nonint(x):  # R_D_nonint_check
+        return rd0
+    if x < 0 or not math.isfinite(x) or p == 0:
+        return rd0
+    x = _r_forceint(x)
+    prob = _dbinom_raw(0.0, x, p, 1 - p, give_log)  # (1-p)^x, stable for small p
+    return (math.log(p) + prob) if give_log else p * prob
+
+
+def pgeom(x, p, lower_tail=True, log_p=False):
+    if math.isnan(x) or math.isnan(p):
+        return x + p
+    if p <= 0 or p > 1:
+        return _NAN
+    if x < 0.0:
+        return _dt0(lower_tail, log_p)
+    if not math.isfinite(x):
+        return _dt1(lower_tail, log_p)
+    x = math.floor(x + 1e-7)
+    if p == 1.0:  # we cannot assume IEEE
+        xv = 1.0 if lower_tail else 0.0
+        if log_p:
+            return math.log(xv) if xv > 0 else _NEGINF
+        return xv
+    x = math.log1p(-p) * (x + 1)
+    if log_p:
+        return _R_DT_Clog(x, lower_tail, log_p)
+    return -math.expm1(x) if lower_tail else math.exp(x)
+
+
+def qgeom(p, prob, lower_tail=True, log_p=False):
+    if math.isnan(p) or math.isnan(prob):
+        return p + prob
+    if prob <= 0 or prob > 1:
+        return _NAN
+    if (log_p and p > 0) or ((not log_p) and (p < 0 or p > 1)):  # R_Q_P01_check
+        return _NAN
+    if prob == 1.0:
+        return 0.0
+    b = _q_p01_boundaries(p, lower_tail, log_p, 0.0, _INF)
+    if b is not None:
+        return b
+    # add a fuzz to ensure left continuity, but value must be >= 0
+    return max(
+        0.0, math.ceil(_R_DT_Clog(p, lower_tail, log_p) / math.log1p(-prob) - 1 - 1e-12)
+    )
 
 
 # ============================================================================
@@ -4634,11 +5643,14 @@ def qexp(p, scale, lower_tail=True, log_p=False):
 # (deeply branched + per-element convergence) and keep the scalar loop.
 # ============================================================================
 
+
 def dgamma_vec(x, shape, scale, give_log=False):
     """Vectorised :func:`dgamma` over broadcast (x, shape, scale)."""
     x, shape, scale = np.broadcast_arrays(
-        np.asarray(x, dtype=float), np.asarray(shape, dtype=float),
-        np.asarray(scale, dtype=float))
+        np.asarray(x, dtype=float),
+        np.asarray(shape, dtype=float),
+        np.asarray(scale, dtype=float),
+    )
     rd0 = _NEGINF if give_log else 0.0
     out = np.full(x.shape, np.nan)
     ok = ~((shape < 0) | (scale <= 0))
@@ -4650,8 +5662,13 @@ def dgamma_vec(x, shape, scale, give_log=False):
     xz = ok & (x == 0.0)
     if xz.any():
         sh = shape[xz]
-        out[xz] = np.where(sh < 1, _INF, np.where(
-            sh > 1, rd0, (-np.log(scale[xz])) if give_log else 1.0 / scale[xz]))
+        out[xz] = np.where(
+            sh < 1,
+            _INF,
+            np.where(
+                sh > 1, rd0, (-np.log(scale[xz])) if give_log else 1.0 / scale[xz]
+            ),
+        )
     pos = ok & (x > 0)
     lt1 = pos & (shape < 1)
     ge1 = pos & (shape >= 1)
@@ -4660,9 +5677,11 @@ def dgamma_vec(x, shape, scale, give_log=False):
         pr = _dpois_raw(sh, xm / sc, give_log)
         if give_log:
             sx = sh / xm
-            out[lt1] = pr + np.where(np.isfinite(sx),
-                                     np.log(np.where(np.isfinite(sx), sx, 1.0)),
-                                     np.log(sh) - np.log(xm))
+            out[lt1] = pr + np.where(
+                np.isfinite(sx),
+                np.log(np.where(np.isfinite(sx), sx, 1.0)),
+                np.log(sh) - np.log(xm),
+            )
         else:
             out[lt1] = pr * sh / xm
     if ge1.any():
@@ -4738,12 +5757,17 @@ def _log1pmx_vec(x):
             two = 2.0
             ys, xs, rs = y[small], xr[small], r[small]
             res[small] = rs * _rfma_vec(
-                _rfma_vec(_rfma_vec(_rfma_vec(two / 9, ys, two / 7), ys,
-                                    two / 5), ys, two / 3), ys, -xs)
+                _rfma_vec(
+                    _rfma_vec(_rfma_vec(two / 9, ys, two / 7), ys, two / 5), ys, two / 3
+                ),
+                ys,
+                -xs,
+            )
         big = ~small
         if big.any():
             res[big] = r[big] * _rfma_vec(
-                2 * y[big], _logcf_vec(y[big], 3, 2, 1e-14), -xr[big])
+                2 * y[big], _logcf_vec(y[big], 3, 2, 1e-14), -xr[big]
+            )
         out[near] = res
     return out
 
@@ -4761,13 +5785,14 @@ def _lgamma1p_vec(a):
         lgam = c * _logcf_vec(-am / 2, 42, 1, 1e-14)
         for i in range(39, -1, -1):
             lgam = _rfma_vec(-am, lgam, _LGAMMA1P_COEFFS[i])
-        out[sm] = _rfma_vec(_rfma_vec(am, lgam, -eulers), am,
-                            -_log1pmx_vec(am))
+        out[sm] = _rfma_vec(_rfma_vec(am, lgam, -eulers), am, -_log1pmx_vec(am))
     return out
 
 
 def _dpois_wrap_vec(x_plus_1, lam, give_log):
-    x_plus_1, lam = np.broadcast_arrays(np.asarray(x_plus_1, float), np.asarray(lam, float))
+    x_plus_1, lam = np.broadcast_arrays(
+        np.asarray(x_plus_1, float), np.asarray(lam, float)
+    )
     out = np.empty(x_plus_1.shape)
     notfin = ~np.isfinite(lam)
     out[notfin] = _NEGINF if give_log else 0.0
@@ -4812,10 +5837,13 @@ def _pgamma_smallx_vec(x, alph, lower_tail, log_p):
         rest = ~a_gt1
         if rest.any():
             if log_p:
-                f2[rest] = _rfma_vec(alph[rest], np.log(x[rest]),
-                                     -_lgamma1p_vec(alph[rest]))
+                f2[rest] = _rfma_vec(
+                    alph[rest], np.log(x[rest]), -_lgamma1p_vec(alph[rest])
+                )
             else:
-                f2[rest] = np.power(x[rest], alph[rest]) / np.exp(_lgamma1p_vec(alph[rest]))
+                f2[rest] = np.power(x[rest], alph[rest]) / np.exp(
+                    _lgamma1p_vec(alph[rest])
+                )
         return (f1 + f2) if log_p else (f1 * f2)
     lf2 = _rfma_vec(alph, np.log(x), -_lgamma1p_vec(alph))
     if log_p:
@@ -5007,7 +6035,9 @@ def pgamma_raw_vec(x, alph, lower_tail, log_p):
         sm = _pd_upper_series_vec(xs, al, log_p)
         dd = _dpois_wrap_vec(al, xs, log_p)
         if not lower_tail:
-            out[b_upper] = _R_Log1_Exp_vec(dd + sm) if log_p else _rfma_vec(-dd, sm, 1.)
+            out[b_upper] = (
+                _R_Log1_Exp_vec(dd + sm) if log_p else _rfma_vec(-dd, sm, 1.0)
+            )
         else:
             out[b_upper] = (sm + dd) if log_p else sm * dd
     if b_lower.any():
@@ -5033,20 +6063,26 @@ def pgamma_raw_vec(x, alph, lower_tail, log_p):
         if not lower_tail:
             out[b_lower] = (sm + dd) if log_p else sm * dd
         else:
-            out[b_lower] = _R_Log1_Exp_vec(dd + sm) if log_p else _rfma_vec(-dd, sm, 1.)
+            out[b_lower] = (
+                _R_Log1_Exp_vec(dd + sm) if log_p else _rfma_vec(-dd, sm, 1.0)
+            )
     if b_asymp.any():
-        out[b_asymp] = _ppois_asymp_vec(alph[b_asymp] - 1, x[b_asymp], not lower_tail, log_p)
+        out[b_asymp] = _ppois_asymp_vec(
+            alph[b_asymp] - 1, x[b_asymp], not lower_tail, log_p
+        )
     if not log_p:
         small_res = rest & (out < _DBL_MIN / _DBL_EPSILON)
         if small_res.any():
             out[small_res] = np.exp(
-                pgamma_raw_vec(x[small_res], alph[small_res], lower_tail, True))
+                pgamma_raw_vec(x[small_res], alph[small_res], lower_tail, True)
+            )
     return out
 
 
 def pgamma_vec(x, alph, scale, lower_tail=True, log_p=False):
     x, alph, scale = np.broadcast_arrays(
-        np.asarray(x, float), np.asarray(alph, float), np.asarray(scale, float))
+        np.asarray(x, float), np.asarray(alph, float), np.asarray(scale, float)
+    )
     out = np.empty(x.shape)
     nan = np.isnan(x) | np.isnan(alph) | np.isnan(scale)
     out[nan] = (x + alph + scale)[nan]
@@ -5061,7 +6097,9 @@ def pgamma_vec(x, alph, scale, lower_tail=True, log_p=False):
         res[xnan] = xs[xnan]
         a0 = (~xnan) & (al == 0)
         if a0.any():
-            res[a0] = np.where(xs[a0] <= 0, _dt0(lower_tail, log_p), _dt1(lower_tail, log_p))
+            res[a0] = np.where(
+                xs[a0] <= 0, _dt0(lower_tail, log_p), _dt1(lower_tail, log_p)
+            )
         main = (~xnan) & (al != 0)
         if main.any():
             res[main] = pgamma_raw_vec(xs[main], al[main], lower_tail, log_p)
@@ -5114,8 +6152,10 @@ def _lgammacor_vec(x):
     small = (x >= 10) & (x < _LGC_XBIG)
     if small.any():
         tmp = 10 / x[small]
-        out[small] = _chebyshev_eval_vec(
-            _rfma_vec(tmp * tmp, 2., -1.), _ALGMCS, _NALGM) / x[small]
+        out[small] = (
+            _chebyshev_eval_vec(_rfma_vec(tmp * tmp, 2.0, -1.0), _ALGMCS, _NALGM)
+            / x[small]
+        )
     return out
 
 
@@ -5126,7 +6166,9 @@ def gammafn_vec(x):
     out = np.empty(x.shape)
     neg = ~(x > 0)
     if neg.any():
-        out[neg] = np.array([gammafn(float(v)) for v in np.atleast_1d(x[neg])]).reshape(x[neg].shape)
+        out[neg] = np.array([gammafn(float(v)) for v in np.atleast_1d(x[neg])]).reshape(
+            x[neg].shape
+        )
     pos = x > 0
     if pos.any():
         xs = x[pos]
@@ -5137,8 +6179,7 @@ def gammafn_vec(x):
             n = np.trunc(xl).astype(np.int64)
             frac = xl - n
             n = n - 1
-            r = _chebyshev_eval_vec(_rfma_vec(frac, 2., -1.), _GAMCS,
-                                    _NGAM) + 0.9375
+            r = _chebyshev_eval_vec(_rfma_vec(frac, 2.0, -1.0), _GAMCS, _NGAM) + 0.9375
             npos = n[n > 0]
             maxn = int(npos.max()) if npos.size else 0
             for i in range(1, maxn + 1):
@@ -5173,8 +6214,9 @@ def gammafn_vec(x):
                     ye = ym[els]
                     half = (2 * ye) == np.trunc(2 * ye)
                     corr = np.where(half, _stirlerr(ye), _lgammacor_vec(ye))
-                    vv[els] = np.exp(_rfma_vec(ye - 0.5, np.log(ye), -ye)
-                                     + _M_LN_SQRT_2PI + corr)
+                    vv[els] = np.exp(
+                        _rfma_vec(ye - 0.5, np.log(ye), -ye) + _M_LN_SQRT_2PI + corr
+                    )
                 v[main] = vv
             res[gt10] = v
         out[pos] = res
@@ -5225,7 +6267,8 @@ def lbeta_vec(a, b):
 
 def dbeta_vec(x, a, b, give_log=False):
     x, a, b = np.broadcast_arrays(
-        np.asarray(x, float), np.asarray(a, float), np.asarray(b, float))
+        np.asarray(x, float), np.asarray(a, float), np.asarray(b, float)
+    )
     rd0 = _NEGINF if give_log else 0.0
     out = np.full(x.shape, np.nan)
     nan = np.isnan(x) | np.isnan(a) | np.isnan(b)
@@ -5256,14 +6299,16 @@ def dbeta_vec(x, a, b, give_log=False):
         # the boundary values — silence the (discarded) warnings.
         with np.errstate(divide="ignore", invalid="ignore"):
             if small.any():
-                lval[small] = ((am[small] - 1) * np.log(xm[small])
-                               + (bm[small] - 1) * np.log1p(-xm[small])
-                               - lbeta_vec(am[small], bm[small]))
+                lval[small] = (
+                    (am[small] - 1) * np.log(xm[small])
+                    + (bm[small] - 1) * np.log1p(-xm[small])
+                    - lbeta_vec(am[small], bm[small])
+                )
             big = ~small
             if big.any():
-                lval[big] = (np.log(am[big] + bm[big] - 1)
-                             + _dbinom_raw(am[big] - 1, am[big] + bm[big] - 2,
-                                           xm[big], 1 - xm[big], True))
+                lval[big] = np.log(am[big] + bm[big] - 1) + _dbinom_raw(
+                    am[big] - 1, am[big] + bm[big] - 2, xm[big], 1 - xm[big], True
+                )
             val = lval if give_log else np.exp(lval)
         x0, x1 = xm == 0, xm == 1
         val = np.where(x0 & (am > 1), rd0, val)
@@ -5275,3 +6320,1646 @@ def dbeta_vec(x, a, b, give_log=False):
 
 
 _PY_VEC["dbeta"] = dbeta_vec
+
+
+# === ptukey / qtukey — studentized range (nmath/ptukey.c, nmath/qtukey.c) ====
+# CDF (ptukey) and quantile (qtukey) of the maximum of ``rr`` studentized
+# ranges, each on ``cc`` means with ``df`` error d.f. (Copenhaver & Holland
+# 1988). ``wprob`` is Hartley's range integral by 12-point Gauss-Legendre
+# quadrature; ptukey wraps it in a 16-point outer quadrature over the chi
+# density of the error scale; qtukey inverts ptukey by the secant method with
+# an AS 70 (Odeh-Evans) starting value. All d/p flags follow R's dpq macros.
+
+_PTUKEY_XLEG = (  # wprob: 12-point Gauss-Legendre nodes (upper half)
+    0.981560634246719250690549090149,
+    0.904117256370474856678465866119,
+    0.769902674194304687036893833213,
+    0.587317954286617447296702418941,
+    0.367831498998180193752691536644,
+    0.125233408511468915472441369464,
+)
+_PTUKEY_ALEG = (  # wprob: 12-point Gauss-Legendre weights
+    0.047175336386511827194615961485,
+    0.106939325995318430960254718194,
+    0.160078328543346226334652529543,
+    0.203167426723065921749064455810,
+    0.233492536538354808760849898925,
+    0.249147045813402785000562436043,
+)
+_PTUKEY_XLEGQ = (  # ptukey: 16-point Gauss-Legendre nodes (upper half)
+    0.989400934991649932596154173450,
+    0.944575023073232576077988415535,
+    0.865631202387831743880467897712,
+    0.755404408355003033895101194847,
+    0.617876244402643748446671764049,
+    0.458016777657227386342419442984,
+    0.281603550779258913230460501460,
+    0.950125098376374401853193354250e-1,
+)
+_PTUKEY_ALEGQ = (  # ptukey: 16-point Gauss-Legendre weights
+    0.271524594117540948517805724560e-1,
+    0.622535239386478928628438369944e-1,
+    0.951585116824927848099251076022e-1,
+    0.124628971255533872052476282192,
+    0.149595988816576732081501730547,
+    0.169156519395002538189312079030,
+    0.182603415044923588866763667969,
+    0.189450610455068496285396723208,
+)
+
+# R's ``LDOUBLE`` (== C ``long double``): 80-bit x87 extended on x86-64, plain
+# double on arm64. ``np.longdouble`` tracks the platform identically, so the
+# ``wprob`` quadrature accumulators round bit-for-bit to R on either arch.
+_LD = np.longdouble
+
+
+def _wprob(w: float, rr: float, cc: float) -> float:
+    """Probability integral of Hartley's form of the range (``wprob`` in
+    nmath/ptukey.c). ``w`` range value, ``rr`` groups, ``cc`` means."""
+    nleg = 12
+    ihalf = 6
+    C1 = -30.0
+    C2 = -50.0
+    C3 = 60.0
+    bb = 8.0
+    wlar = 3.0
+    wincr1 = 2.0
+    wincr2 = 3.0
+    xleg = _PTUKEY_XLEG
+    aleg = _PTUKEY_ALEG
+
+    qsqz = w * 0.5
+    # if w >= 16 the integral lower bound is ~1, so return 1.
+    if qsqz >= bb:
+        return 1.0
+
+    # first term in integral of Hartley's form: (f(w/2) - 1) ^ cc
+    pr_w = 2 * pnorm5(qsqz, 0.0, 1.0, True, False) - 1.0
+    if pr_w >= math.exp(C2 / cc):
+        pr_w = math.pow(pr_w, cc)
+    else:
+        pr_w = 0.0
+
+    # fewer intervals when w is large (second component then small)
+    wincr = wincr1 if w > wlar else wincr2
+
+    blb = _LD(qsqz)
+    binc = (bb - qsqz) / wincr
+    bub = blb + binc
+    einsum = _LD(0.0)
+
+    cc1 = cc - 1.0
+    for _ in range(int(wincr)):
+        elsum = _LD(0.0)
+        a = float(0.5 * (bub + blb))  # C casts (double)(0.5*(bub+blb))
+        b = float(0.5 * (bub - blb))
+        for jj in range(1, nleg + 1):
+            if ihalf < jj:
+                j = (nleg - jj) + 1
+                xx = xleg[j - 1]
+            else:
+                j = jj
+                xx = -xleg[j - 1]
+            c = b * xx
+            ac = a + c
+            qexpo = ac * ac
+            if qexpo > C3:
+                break
+            pplus = 2 * pnorm5(ac, 0.0, 1.0, True, False)
+            pminus = 2 * pnorm5(ac, w, 1.0, True, False)
+            rinsum = (pplus * 0.5) - (pminus * 0.5)
+            if rinsum >= math.exp(C1 / cc1):
+                rinsum = (aleg[j - 1] * math.exp(-(0.5 * qexpo))) * math.pow(
+                    rinsum, cc1
+                )
+                elsum += rinsum
+        elsum *= ((2.0 * b) * cc) * _M_1_SQRT_2PI
+        einsum += elsum
+        blb = bub
+        bub += binc
+
+    pr_w = pr_w + float(einsum)
+    if pr_w <= math.exp(C1 / rr):
+        return 0.0
+    pr_w = math.pow(pr_w, rr)
+    if pr_w >= 1.0:
+        return 1.0
+    return pr_w
+
+
+def ptukey(
+    q: float,
+    rr: float,
+    cc: float,
+    df: float,
+    lower_tail: bool = True,
+    log_p: bool = False,
+) -> float:
+    """R's ``ptukey`` — CDF of the maximum studentized range (nmath/ptukey.c).
+
+    Arguments are in the C order: ``q`` studentized-range value, ``rr`` number
+    of groups/rows, ``cc`` number of means/treatments, ``df`` error degrees of
+    freedom. (R's user-level ``ptukey(q, nmeans, df, nranges)`` maps
+    ``nmeans -> cc`` and ``nranges -> rr``.)  Bit-exact to R via the ported
+    ``pnorm5`` / ``lgammafn``.
+    """
+    nlegq = 16
+    ihalfq = 8
+    eps1 = -30.0
+    eps2 = 1.0e-14
+    dhaf = 100.0
+    dquar = 800.0
+    deigh = 5000.0
+    dlarg = 25000.0
+    ulen1 = 1.0
+    ulen2 = 0.5
+    ulen3 = 0.25
+    ulen4 = 0.125
+    xlegq = _PTUKEY_XLEGQ
+    alegq = _PTUKEY_ALEGQ
+
+    if math.isnan(q) or math.isnan(rr) or math.isnan(cc) or math.isnan(df):
+        return q + rr + cc + df
+
+    if q <= 0:
+        return _dt0(lower_tail, log_p)
+
+    # df must be > 1 and there must be at least two values
+    if df < 2 or rr < 1 or cc < 2:
+        return _NAN
+
+    if not math.isfinite(q):
+        return _dt1(lower_tail, log_p)
+
+    if df > dlarg:
+        return _dt_val(_wprob(q, rr, cc), lower_tail, log_p)
+
+    # leading constant.  clang contracts the *leading* multiply of each
+    # `a*b ± c` into an fmadd on arm64, so `_rfma` (= plain `a*b+c` on x86)
+    # is what keeps this whole quadrature 0-ulp to R on both arches.
+    f2 = df * 0.5
+    f2lf = _rfma(f2, math.log(df), -(df * _M_LN2)) - _lgammafn(f2)
+    f21 = f2 - 1.0
+
+    ff4 = df * 0.25
+    if df <= dhaf:
+        ulen = ulen1
+    elif df <= dquar:
+        ulen = ulen2
+    elif df <= deigh:
+        ulen = ulen3
+    else:
+        ulen = ulen4
+
+    f2lf += math.log(ulen)
+    ans = 0.0
+    otsum = 0.0
+
+    for i in range(1, 51):
+        otsum = 0.0
+        twa1 = (2 * i - 1) * ulen
+        for jj in range(1, nlegq + 1):
+            if ihalfq < jj:
+                j = jj - ihalfq - 1
+                xu1 = _rfma(xlegq[j], ulen, twa1)
+                t1 = _rfma(-xu1, ff4, _rfma(f21, math.log(xu1), f2lf))
+            else:
+                j = jj - 1
+                t1 = _rfma(
+                    _rfma(xlegq[j], ulen, -twa1),
+                    ff4,
+                    _rfma(f21, math.log(_rfma(-xlegq[j], ulen, twa1)), f2lf),
+                )
+            # if exp(t1) < 9e-14 it does not contribute to the integral
+            if t1 >= eps1:
+                if ihalfq < jj:
+                    qsqz = q * math.sqrt(_rfma(xlegq[j], ulen, twa1) * 0.5)
+                else:
+                    # `(-(xlegq[j]*ulen)) + twa1`: the negation makes the LHS an
+                    # fneg, not an fmul, so clang leaves this one uncontracted.
+                    qsqz = q * math.sqrt(((-(xlegq[j] * ulen)) + twa1) * 0.5)
+                wprb = _wprob(qsqz, rr, cc)
+                rotsum = (wprb * alegq[j]) * math.exp(t1)
+                otsum += rotsum
+        # stop once converged, but do at least 1/ulen intervals
+        if i * ulen >= 1.0 and otsum <= eps2:
+            break
+        ans += otsum
+
+    if ans > 1.0:
+        ans = 1.0
+    return _dt_val(ans, lower_tail, log_p)
+
+
+def _qtukey_qinv(p: float, c: float, v: float) -> float:
+    """AS 70 (Odeh-Evans) starting estimate for the studentized-range
+    quantile (``qinv`` in nmath/qtukey.c)."""
+    p0 = 0.322232421088
+    q0 = 0.993484626060e-01
+    p1 = -1.0
+    q1 = 0.588581570495
+    p2 = -0.342242088547
+    q2 = 0.531103462366
+    p3 = -0.204231210125
+    q3 = 0.103537752850
+    p4 = -0.453642210148e-04
+    q4 = 0.38560700634e-02
+    c1 = 0.8832
+    c2 = 0.2368
+    c3 = 1.214
+    c4 = 1.208
+    c5 = 1.4142
+    vmax = 120.0
+
+    # Every `a*b + c` below is one fmadd in R's arm64 build (see ptukey above).
+    ps = 0.5 - 0.5 * p
+    yi = math.sqrt(math.log(1.0 / (ps * ps)))
+    t = yi + _rfma(_rfma(_rfma(_rfma(yi, p4, p3), yi, p2), yi, p1), yi, p0) / _rfma(
+        _rfma(_rfma(_rfma(yi, q4, q3), yi, q2), yi, q1), yi, q0
+    )
+    if v < vmax:
+        t += _rfma(t * t, t, t) / v / 4.0
+    q = _rfma(-c2, t, c1)
+    if v < vmax:
+        q += -c3 / v + c4 * t / v
+    return t * _rfma(q, math.log(c - 1.0), c5)
+
+
+def qtukey(
+    p: float,
+    rr: float,
+    cc: float,
+    df: float,
+    lower_tail: bool = True,
+    log_p: bool = False,
+) -> float:
+    """R's ``qtukey`` — quantile of the maximum studentized range
+    (nmath/qtukey.c). Secant iteration on :func:`ptukey`, AS 70 start value.
+    Arguments in the C order (``rr`` groups, ``cc`` means, ``df`` error d.f.)."""
+    eps = 0.0001
+    maxiter = 50
+
+    if math.isnan(p) or math.isnan(rr) or math.isnan(cc) or math.isnan(df):
+        return p + rr + cc + df
+
+    if df < 2 or rr < 1 or cc < 2:
+        return _NAN
+
+    # R_Q_P01_boundaries(p, 0, ML_POSINF)
+    if log_p:
+        if p > 0:
+            return _NAN
+        if p == 0:
+            return _INF if lower_tail else 0.0
+        if p == _NEGINF:
+            return 0.0 if lower_tail else _INF
+    else:
+        if p < 0 or p > 1:
+            return _NAN
+        if p == 0:
+            return 0.0 if lower_tail else _INF
+        if p == 1:
+            return _INF if lower_tail else 0.0
+
+    # p = R_DT_qIv(p): lower-tail, non-log probability
+    if log_p:
+        p = math.exp(p) if lower_tail else -math.expm1(p)
+    else:
+        p = p if lower_tail else (0.5 - p + 0.5)
+
+    x0 = _qtukey_qinv(p, cc, df)
+    valx0 = ptukey(x0, rr, cc, df, True, False) - p
+
+    # second iterate: 1 less than the first if it overshoots, else 1 more
+    if valx0 > 0.0:
+        x1 = max(0.0, x0 - 1.0)
+    else:
+        x1 = x0 + 1.0
+    valx1 = ptukey(x1, rr, cc, df, True, False) - p
+
+    ans = 0.0
+    for _ in range(1, maxiter):
+        # `_c_div`: two equal successive ptukey values make the secant
+        # denominator 0, where C yields Inf/NaN (R then warns and returns NaN)
+        # rather than raising -- e.g. qtukey(0.5, nmeans=20, df=500, nranges=2).
+        ans = x1 - _c_div(valx1 * (x1 - x0), valx1 - valx0)
+        valx0 = valx1
+        x0 = x1
+        if ans < 0.0:  # new iterate must be >= 0
+            ans = 0.0
+            valx1 = -p
+        valx1 = ptukey(ans, rr, cc, df, True, False) - p
+        x1 = ans
+        if abs(x1 - x0) < eps:
+            return ans
+
+    # did not converge in maxiter iterations
+    return ans
+
+
+# === choose / lchoose — binomial coefficients (nmath/choose.c) ===============
+# Faithful port of R's choose/lchoose (generalized binomial: non-integer n,
+# integer k). Used to normalize the exact Wilcoxon rank-sum distribution.
+
+
+def _lfastchoose(n, k):
+    return -math.log(n + 1.0) - lbeta(n - k + 1.0, k + 1.0)
+
+
+def _lgammafn_sign(x):
+    """R's ``lgammafn_sign(x, &sgn)`` — log|Gamma(x)| plus the sign of Gamma(x)."""
+    sgn = 1
+    if x < 0 and (math.floor(-x) % 2.0) == 0:
+        sgn = -1
+    return _lgammafn(x), sgn
+
+
+def _lfastchoose2(n, k):
+    """Mathematically == :func:`_lfastchoose`; stable when n-k+1 < 0. Returns
+    ``(value, sign)`` (the sign of Gamma(n-k+1))."""
+    r, s = _lgammafn_sign(n - k + 1.0)
+    return _lgammafn(n + 1.0) - _lgammafn(k + 1.0) - r, s
+
+
+def lchoose(n, k):
+    """R's ``lchoose(n, k)`` = log|choose(n, k)| (nmath/choose.c), bit-exact."""
+    k = _r_forceint(k)
+    if math.isnan(n) or math.isnan(k):
+        return n + k
+    if k < 2:
+        if k < 0:
+            return _NEGINF
+        if k == 0:
+            return 0.0
+        return math.log(abs(n))  # k == 1
+    if n < 0:
+        return lchoose(-n + k - 1, k)
+    elif not _R_nonint(n):
+        n = _r_forceint(n)
+        if n < k:
+            return _NEGINF
+        if n - k < 2:
+            return lchoose(n, n - k)  # symmetry
+        return _lfastchoose(n, k)
+    # non-integer n >= 0
+    if n < k - 1:
+        v, _s = _lfastchoose2(n, k)
+        return v
+    return _lfastchoose(n, k)
+
+
+_CHOOSE_K_SMALL_MAX = 30
+
+
+def choose(n, k):
+    """R's ``choose(n, k)`` — binomial coefficient (nmath/choose.c), bit-exact."""
+    k = _r_forceint(k)
+    if math.isnan(n) or math.isnan(k):
+        return n + k
+    if k < _CHOOSE_K_SMALL_MAX:
+        if (n - k < k) and n >= 0 and (not _R_nonint(n)):
+            k = _r_forceint(n - k)  # symmetry, keep k integer
+        if k < 0:
+            return 0.0
+        if k == 0:
+            return 1.0
+        r = n
+        j = 2
+        while j <= k:
+            r *= (n - j + 1) / j
+            j += 1
+        return _r_forceint(r) if not _R_nonint(n) else r
+    # k >= k_small_max
+    if n < 0:
+        r = choose(-n + k - 1, k)
+        if k != 2 * math.floor(k / 2.0):  # ODD(k)
+            r = -r
+        return r
+    elif not _R_nonint(n):
+        n = _r_forceint(n)
+        if n < k:
+            return 0.0
+        if n - k < _CHOOSE_K_SMALL_MAX:
+            return choose(n, n - k)  # symmetry
+        return _r_forceint(math.exp(_lfastchoose(n, k)))
+    # non-integer n >= 0
+    if n < k - 1:
+        r, s = _lfastchoose2(n, k)
+        return s * math.exp(r)
+    return math.exp(_lfastchoose(n, k))
+
+
+# === Wilcoxon signed-rank distribution (nmath/signrank.c) ====================
+# csignrank(k, n): number of subsets of {1,...,n} summing to k. The count array
+# w[0..floor(u/2)] (u = n(n+1)/2) is built by the partition recurrence and
+# cached per n (mirrors signrank.c's static w[] with w_init_maybe).
+_SIGNRANK_W: dict[int, list] = {}
+
+
+def _signrank_w(n: int) -> list:
+    w = _SIGNRANK_W.get(n)
+    if w is not None:
+        return w
+    u = n * (n + 1) // 2
+    c = u // 2
+    w = [0.0] * (c + 1)
+    w[0] = 1.0
+    w[1] = 1.0
+    for j in range(2, n + 1):
+        end = min(j * (j + 1) // 2, c)
+        for i in range(end, j - 1, -1):
+            w[i] += w[i - j]
+    _SIGNRANK_W[n] = w
+    return w
+
+
+def _csignrank(k: int, n: int) -> float:
+    u = n * (n + 1) // 2
+    c = u // 2
+    if k < 0 or k > u:
+        return 0.0
+    if k > c:
+        k = u - k
+    if n == 1:
+        return 1.0
+    return _signrank_w(n)[k]
+
+
+def dsignrank(x, n, give_log=False):
+    """R's ``dsignrank`` — density of the Wilcoxon signed-rank statistic."""
+    if math.isnan(x) or math.isnan(n):
+        return x + n
+    n = _r_forceint(n)
+    if n <= 0:
+        return _NAN
+    if _R_nonint(x):
+        return _NEGINF if give_log else 0.0  # R_D__0
+    x = _r_forceint(x)
+    if x < 0 or x > (n * (n + 1) / 2):
+        return _NEGINF if give_log else 0.0
+    nn = int(n)
+    logd = math.log(_csignrank(int(x), nn)) - n * _M_LN2
+    return logd if give_log else math.exp(logd)
+
+
+def psignrank(x, n, lower_tail=True, log_p=False):
+    """R's ``psignrank`` — CDF of the Wilcoxon signed-rank statistic."""
+    if math.isnan(x) or math.isnan(n):
+        return x + n
+    if not math.isfinite(n):
+        return _NAN
+    n = _r_forceint(n)
+    if n <= 0:
+        return _NAN
+    x = math.floor(x + 1e-7)
+    if x < 0.0:
+        return _dt0(lower_tail, log_p)
+    if x >= n * (n + 1) / 2:
+        return _dt1(lower_tail, log_p)
+    nn = int(n)
+    f = math.exp(-n * _M_LN2)
+    p = 0.0
+    if x <= (n * (n + 1) / 4):
+        i = 0
+        while i <= x:
+            p += _csignrank(i, nn) * f
+            i += 1
+    else:
+        x = n * (n + 1) / 2 - x
+        i = 0
+        while i < x:
+            p += _csignrank(i, nn) * f
+            i += 1
+        lower_tail = not lower_tail
+    return _dt_val(p, lower_tail, log_p)
+
+
+def qsignrank(x, n, lower_tail=True, log_p=False):
+    """R's ``qsignrank`` — quantile of the Wilcoxon signed-rank statistic."""
+    if math.isnan(x) or math.isnan(n):
+        return x + n
+    if not math.isfinite(x) or not math.isfinite(n):
+        return _NAN
+    if (log_p and x > 0) or ((not log_p) and (x < 0 or x > 1)):  # R_Q_P01_check
+        return _NAN
+    n = _r_forceint(n)
+    if n <= 0:
+        return _NAN
+    if x == _dt0(lower_tail, log_p):
+        return 0.0
+    if x == _dt1(lower_tail, log_p):
+        return n * (n + 1) / 2
+    if log_p or not lower_tail:
+        x = _dt_qiv(x, lower_tail, log_p)
+    nn = int(n)
+    f = math.exp(-n * _M_LN2)
+    p = 0.0
+    q = 0
+    if x <= 0.5:
+        x = x - 10 * _DBL_EPSILON
+        while True:
+            p += _csignrank(q, nn) * f
+            if p >= x:
+                break
+            q += 1
+    else:
+        x = 1 - x + 10 * _DBL_EPSILON
+        while True:
+            p += _csignrank(q, nn) * f
+            if p > x:
+                q = int(n * (n + 1) / 2 - q)
+                break
+            q += 1
+    return float(q)
+
+
+# === Wilcoxon rank-sum (Mann-Whitney) distribution (nmath/wilcox.c) ==========
+# cwilcox(k, m, n): number of ways to choose the rank-sum statistic value k.
+# Loeffler recurrence with the divisor-sum sigma; w[] and sigma[] are cached per
+# reduced (i, j) = (min(m,n), max(m,n)), filled lazily up to k (w_fill_to_k).
+_WILCOX_CACHE: dict = {}
+
+
+def _cwilcox_sigma(k: int, m: int, n: int) -> int:
+    iter1 = m if m < k else k
+    iter2 = (m + n) if (m + n) < k else k
+    s = 0
+    for d in range(1, iter1 + 1):
+        if k % d == 0:
+            s += d
+    for d in range(n + 1, iter2 + 1):
+        if k % d == 0:
+            s -= d
+    return s
+
+
+def _wilcox_fill_to_k(m: int, n: int, new_k: int, cache: dict) -> None:
+    if new_k < cache["max_k"]:
+        return
+    w = cache["w"]
+    sigma = cache["sigma"]
+    for i in range(cache["max_k"] + 1, new_k + 1):
+        sigma[i] = _cwilcox_sigma(i, m, n)
+    for k in range(cache["max_k"] + 1, new_k + 1):
+        if k == 0:
+            w[0] = 1.0
+        else:
+            s = 0.0
+            for i in range(0, k):
+                s += w[i] * sigma[k - i]
+            w[k] = s / k
+    cache["max_k"] = new_k
+
+
+def _cwilcox(k: int, m: int, n: int) -> float:
+    u = m * n
+    if k < 0 or k > u:
+        return 0.0
+    c = u // 2
+    if k > c:
+        k = u - k
+    if m < n:
+        i, j = m, n
+    else:
+        i, j = n, m  # i <= j
+    if i == 0 or j == 0 or k == 0:
+        return 1.0 if k == 0 else 0.0
+    cache = _WILCOX_CACHE.get((i, j))
+    if cache is None:
+        size = (i * j) // 2 + 1
+        cache = {"w": [0.0] * size, "sigma": [0] * size, "max_k": -1}
+        _WILCOX_CACHE[(i, j)] = cache
+    _wilcox_fill_to_k(i, j, k, cache)
+    return cache["w"][k]
+
+
+def dwilcox(x, m, n, give_log=False):
+    """R's ``dwilcox`` — density of the Wilcoxon rank-sum (Mann-Whitney) stat."""
+    if math.isnan(x) or math.isnan(m) or math.isnan(n):
+        return x + m + n
+    m = _r_forceint(m)
+    n = _r_forceint(n)
+    if m <= 0 or n <= 0:
+        return _NAN
+    if _R_nonint(x):
+        return _NEGINF if give_log else 0.0
+    x = _r_forceint(x)
+    if x < 0 or x > m * n:
+        return _NEGINF if give_log else 0.0
+    mm, nn, xx = int(m), int(n), int(x)
+    if give_log:
+        return math.log(_cwilcox(xx, mm, nn)) - lchoose(m + n, n)
+    return _cwilcox(xx, mm, nn) / choose(m + n, n)
+
+
+def pwilcox(q, m, n, lower_tail=True, log_p=False):
+    """R's ``pwilcox`` — CDF of the Wilcoxon rank-sum (Mann-Whitney) statistic."""
+    if math.isnan(q) or math.isnan(m) or math.isnan(n):
+        return q + m + n
+    if not math.isfinite(m) or not math.isfinite(n):
+        return _NAN
+    m = _r_forceint(m)
+    n = _r_forceint(n)
+    if m <= 0 or n <= 0:
+        return _NAN
+    q = math.floor(q + 1e-7)
+    if q < 0.0:
+        return _dt0(lower_tail, log_p)
+    if q >= m * n:
+        return _dt1(lower_tail, log_p)
+    mm, nn = int(m), int(n)
+    c = choose(m + n, n)
+    p = 0.0
+    if q <= (m * n / 2):
+        i = 0
+        while i <= q:
+            p += _cwilcox(i, mm, nn) / c
+            i += 1
+    else:
+        q = m * n - q
+        i = 0
+        while i < q:
+            p += _cwilcox(i, mm, nn) / c
+            i += 1
+        lower_tail = not lower_tail
+    return _dt_val(p, lower_tail, log_p)
+
+
+def qwilcox(x, m, n, lower_tail=True, log_p=False):
+    """R's ``qwilcox`` — quantile of the Wilcoxon rank-sum (Mann-Whitney) stat."""
+    if math.isnan(x) or math.isnan(m) or math.isnan(n):
+        return x + m + n
+    if not (math.isfinite(x) and math.isfinite(m) and math.isfinite(n)):
+        return _NAN
+    if (log_p and x > 0) or ((not log_p) and (x < 0 or x > 1)):  # R_Q_P01_check
+        return _NAN
+    m = _r_forceint(m)
+    n = _r_forceint(n)
+    if m <= 0 or n <= 0:
+        return _NAN
+    if x == _dt0(lower_tail, log_p):
+        return 0.0
+    if x == _dt1(lower_tail, log_p):
+        return m * n
+    if log_p or not lower_tail:
+        x = _dt_qiv(x, lower_tail, log_p)
+    mm, nn = int(m), int(n)
+    c = choose(m + n, n)
+    p = 0.0
+    q = 0
+    if x <= 0.5:
+        x = x - 10 * _DBL_EPSILON
+        while True:
+            p += _cwilcox(q, mm, nn) / c
+            if p >= x:
+                break
+            q += 1
+    else:
+        x = 1 - x + 10 * _DBL_EPSILON
+        while True:
+            p += _cwilcox(q, mm, nn) / c
+            if p > x:
+                q = int(m * n - q)
+                break
+            q += 1
+    return float(q)
+
+
+# === Noncentral chi-square (nmath/pnchisq.c, dnchisq.c, qnchisq.c) ===========
+# CDF (AS 275, Ding 1992), density (Poisson mixture of central chi-squares) and
+# quantile (bisection on the CDF). The series accumulators are C `long double`;
+# `_LD` (np.longdouble) tracks R's LDOUBLE and np.exp/np.log match expl/logl.
+_DBL_MAX = 1.7976931348623157e308
+_PNCH_DBL_MIN_EXP = _M_LN2 * (-1021)  # = M_LN2 * DBL_MIN_EXP (IEEE double)
+
+
+def _pchisq(x, df, lower_tail, log_p):
+    return pgamma(x, df / 2.0, 2.0, lower_tail, log_p)
+
+
+def _dchisq(x, df, give_log):
+    return dgamma(x, df / 2.0, 2.0, give_log)
+
+
+def _qchisq(p, df, lower_tail, log_p):
+    return qgamma(p, df / 2.0, 2.0, lower_tail, log_p)
+
+
+def _pnchisq_raw(x, f, theta, errmax, reltol, itrmax, lower_tail, log_p):
+    """AS 275 noncentral chi-square CDF core (pnchisq.c ``pnchisq_raw``)."""
+    if x <= 0.0:
+        if x == 0.0 and f == 0.0:  # chi^2_0 has point mass at 0
+            _L = -0.5 * theta
+            if lower_tail:
+                return _L if log_p else math.exp(_L)  # R_D_exp(_L)
+            return _R_Log1_Exp(_L) if log_p else -math.expm1(_L)
+        return _dt0(lower_tail, log_p)
+    if not math.isfinite(x):
+        return _dt1(lower_tail, log_p)
+
+    if theta < 80:
+        if (
+            lower_tail
+            and f > 0.0
+            and math.log(x)
+            < _M_LN2 + 2 / f * (_c_lgamma(f / 2.0 + 1) + _PNCH_DBL_MIN_EXP)
+        ):
+            # everything would underflow: work in log scale
+            lam = 0.5 * theta
+            pr = -lam
+            log_lam = math.log(lam)
+            sum_ = sum2 = _NEGINF
+            i = 0
+            while i < 110:
+                sum2 = _logspace_add(sum2, pr)
+                sum_ = _logspace_add(sum_, pr + _pchisq(x, f + 2 * i, lower_tail, True))
+                if sum2 >= -1e-15:
+                    break
+                i += 1
+                pr += log_lam - math.log(i)
+            ans = sum_ - sum2
+            return ans if log_p else math.exp(ans)
+        lam = _LD(0.5 * theta)
+        sum_ = _LD(0.0)
+        sum2 = _LD(0.0)
+        pr = np.exp(-lam)
+        i = 0
+        while i < 110:
+            sum2 += pr
+            sum_ += pr * _pchisq(x, f + 2 * i, lower_tail, False)
+            if sum2 >= 1 - 1e-15:
+                break
+            i += 1
+            pr *= lam / i
+        ans = sum_ / sum2
+        return float(np.log(ans)) if log_p else float(ans)
+
+    # theta >= 80: AS 275 series
+    lam = 0.5 * theta
+    lamSml = -lam < _PNCH_DBL_MIN_EXP
+    l_lam = -1.0
+    if lamSml:
+        u = _LD(0.0)
+        lu = _LD(-lam)
+        l_lam = math.log(lam)
+    else:
+        u = np.exp(_LD(-lam))
+        lu = _LD(-1.0)
+    v = u
+    x2 = 0.5 * x
+    f2 = 0.5 * f
+    f_x_2n = f - x
+
+    t = _LD(x2 - f2)
+    if f2 * _DBL_EPSILON > 0.125 and np.abs(t) < math.sqrt(_DBL_EPSILON) * f2:
+        lt = (1 - t) * (2 - t / (f2 + 1)) - _M_LN_SQRT_2PI - 0.5 * math.log(f2 + 1)
+    else:
+        lt = _LD(f2 * math.log(x2) - x2 - _lgammafn(f2 + 1))
+
+    l_x = -1.0
+    tSml = lt < _PNCH_DBL_MIN_EXP
+    if tSml:
+        if x > f + theta + 5 * math.sqrt(2 * (f + 2 * theta)):
+            return _dt1(lower_tail, log_p)
+        l_x = math.log(x)
+        ans = _LD(0.0)
+        term = 0.0
+        t = _LD(0.0)
+    else:
+        t = np.exp(lt)
+        term = float(v * t)
+        ans = _LD(term)
+
+    n = 1
+    f_2n = f + 2.0
+    f_x_2n += 2.0
+    while n <= itrmax:
+        if f_x_2n > 0:
+            bound = float(t * x / f_x_2n)
+            if bound <= errmax and term <= reltol * ans:
+                break
+        if lamSml:
+            lu += l_lam - math.log(n)
+            if lu >= _PNCH_DBL_MIN_EXP:
+                u = np.exp(lu)
+                v = u
+                lamSml = False
+        else:
+            u *= lam / n
+            v += u
+        if tSml:
+            lt += l_x - math.log(f_2n)
+            if lt >= _PNCH_DBL_MIN_EXP:
+                t = np.exp(lt)
+                tSml = False
+        else:
+            t *= x / f_2n
+        if (not lamSml) and (not tSml):
+            term = float(v * t)
+            ans += term
+        n += 1
+        f_2n += 2
+        f_x_2n += 2
+
+    dans = float(ans)
+    return _dt_val(dans, lower_tail, log_p)
+
+
+def pnchisq(x, df, ncp, lower_tail=True, log_p=False):
+    """R's ``pnchisq`` — noncentral chi-square CDF (nmath/pnchisq.c)."""
+    if math.isnan(x) or math.isnan(df) or math.isnan(ncp):
+        return x + df + ncp
+    if not math.isfinite(df) or not math.isfinite(ncp):
+        return _NAN
+    if df < 0.0 or ncp < 0.0:
+        return _NAN
+    ans = _pnchisq_raw(x, df, ncp, 1e-12, 8 * _DBL_EPSILON, 1000000, lower_tail, log_p)
+    if x <= 0.0 or x == _INF:
+        return ans
+    if ncp >= 80:
+        if lower_tail:
+            ans = min(ans, 0.0 if log_p else 1.0)  # fmin2(ans, R_D__1)
+        else:
+            if (not log_p) and ans < 0.0:
+                ans = 0.0
+    if (not log_p) or ans < -1e-8:
+        return ans
+    # log_p and ans near 0: recompute via the other tail
+    ans = _pnchisq_raw(
+        x, df, ncp, 1e-12, 8 * _DBL_EPSILON, 1000000, not lower_tail, False
+    )
+    return math.log1p(-ans)
+
+
+def dnchisq(x, df, ncp, give_log=False):
+    """R's ``dnchisq`` — noncentral chi-square density (nmath/dnchisq.c)."""
+    eps = 5e-15
+    if math.isnan(x) or math.isnan(df) or math.isnan(ncp):
+        return x + df + ncp
+    if not math.isfinite(df) or not math.isfinite(ncp) or ncp < 0 or df < 0:
+        return _NAN
+    if x < 0:
+        return _NEGINF if give_log else 0.0
+    if x == 0 and df < 2.0:
+        return _INF
+    if ncp == 0:
+        return _dchisq(x, df, give_log) if df > 0 else (_NEGINF if give_log else 0.0)
+    if x == _INF:
+        return _NEGINF if give_log else 0.0
+
+    ncp2 = 0.5 * ncp
+    imax = math.ceil((-(2 + df) + math.sqrt((2 - df) * (2 - df) + 4 * ncp * x)) / 4)
+    if imax < 0:
+        imax = 0.0
+    imax = float(imax)
+    if math.isfinite(imax):
+        dfmid = df + 2 * imax
+        mid = _dpois_raw(imax, ncp2, False) * _dchisq(x, dfmid, False)
+    else:
+        mid = 0.0
+    if mid == 0:
+        if give_log or ncp > 1000.0:
+            nl = df + ncp
+            ic = nl / (nl + ncp)
+            return _dchisq(x * ic, nl * ic, give_log)
+        return _NEGINF if give_log else 0.0
+
+    sum_ = _LD(mid)
+    # upper tail
+    term = _LD(mid)
+    dfv = dfmid
+    i = imax
+    x2 = x * ncp2
+    while True:
+        i += 1
+        q = x2 / i / dfv
+        dfv += 2
+        term *= q
+        sum_ += term
+        if not (q >= 1 or term * q > (1 - q) * eps or term > 1e-10 * sum_):
+            break
+    # lower tail
+    term = _LD(mid)
+    dfv = dfmid
+    i = imax
+    while i != 0:
+        dfv -= 2
+        q = i * dfv / x2
+        i -= 1
+        term *= q
+        sum_ += term
+        if q < 1 and term * q <= (1 - q) * eps:
+            break
+    dans = float(sum_)
+    return math.log(dans) if give_log else dans
+
+
+def qnchisq(p, df, ncp, lower_tail=True, log_p=False):
+    """R's ``qnchisq`` — noncentral chi-square quantile (nmath/qnchisq.c)."""
+    accu = 1e-13
+    racc = 4 * _DBL_EPSILON
+    Eps = 1e-11
+    rEps = 1e-10
+    if math.isnan(p) or math.isnan(df) or math.isnan(ncp):
+        return p + df + ncp
+    if not math.isfinite(df):
+        return _NAN
+    if df < 0 or ncp < 0:
+        return _NAN
+    # R_Q_P01_boundaries(p, 0, ML_POSINF)
+    if log_p:
+        if p > 0:
+            return _NAN
+        if p == 0:
+            return _INF if lower_tail else 0.0
+        if p == _NEGINF:
+            return 0.0 if lower_tail else _INF
+    else:
+        if p < 0 or p > 1:
+            return _NAN
+        if p == 0:
+            return 0.0 if lower_tail else _INF
+        if p == 1:
+            return _INF if lower_tail else 0.0
+
+    pp = math.exp(p) if log_p else p  # R_D_qIv(p)
+    if pp > 1 - _DBL_EPSILON:
+        return _INF if lower_tail else 0.0
+
+    # Pearson (1959) approximation for the initial bracket
+    b = (ncp * ncp) / (df + 3 * ncp)
+    c = (df + 3 * ncp) / (df + 2 * ncp)
+    ff = (df + 2 * ncp) / (c * c)
+    ux = b + c * _qchisq(p, ff, lower_tail, log_p)
+    if ux <= 0.0:
+        ux = 1.0
+    ux0 = ux
+
+    if (not lower_tail) and ncp >= 80:
+        p = -math.expm1(p) if log_p else (0.5 - p + 0.5)
+        lower_tail = True
+    else:
+        p = pp
+
+    pp = min(1 - _DBL_EPSILON, p * (1 + Eps))
+    if lower_tail:
+        while (
+            ux < _DBL_MAX
+            and _pnchisq_raw(ux, df, ncp, Eps, rEps, 10000, True, False) < pp
+        ):
+            ux *= 2
+        pp = p * (1 - Eps)
+        lx = min(ux0, _DBL_MAX)
+        while (
+            lx > _DBL_MIN
+            and _pnchisq_raw(lx, df, ncp, Eps, rEps, 10000, True, False) > pp
+        ):
+            lx *= 0.5
+    else:
+        while (
+            ux < _DBL_MAX
+            and _pnchisq_raw(ux, df, ncp, Eps, rEps, 10000, False, False) > pp
+        ):
+            ux *= 2
+        pp = p * (1 - Eps)
+        lx = min(ux0, _DBL_MAX)
+        while (
+            lx > _DBL_MIN
+            and _pnchisq_raw(lx, df, ncp, Eps, rEps, 10000, False, False) < pp
+        ):
+            lx *= 0.5
+
+    if lower_tail:
+        while True:
+            nx = 0.5 * (lx + ux)
+            if _pnchisq_raw(nx, df, ncp, accu, racc, 100000, True, False) > p:
+                ux = nx
+            else:
+                lx = nx
+            if not ((ux - lx) / nx > accu):
+                break
+    else:
+        while True:
+            nx = 0.5 * (lx + ux)
+            if _pnchisq_raw(nx, df, ncp, accu, racc, 100000, False, False) < p:
+                ux = nx
+            else:
+                lx = nx
+            if not ((ux - lx) / nx > accu):
+                break
+    return 0.5 * (ux + lx)
+
+
+# === Noncentral t / beta / F (nmath/{pnt,dnt,qnt,pnbeta,dnbeta,qnbeta,
+# pnf,dnf,qnf}.c) =============================================================
+# Noncentral t: Lenth (1989) AS 243 twin-series. Noncentral beta: AS 226/R84
+# incomplete-beta recursion (feeds noncentral F). Densities/quantiles follow.
+# Series accumulators are C `long double` -> `_LD`; the transcendentals here are
+# the plain double libm ones (no `expl`/`logl` macro in these files), so unlike
+# pnchisq these are fully bit-exact.
+_M_SQRT_2dPI = 0.797884560802865355879892119869  # sqrt(2/pi)
+_M_LN_SQRT_PI = 0.572364942924700087071713675677  # log(sqrt(pi)) = log(pi)/2
+
+
+def pnt(t, df, ncp, lower_tail=True, log_p=False):
+    """R's ``pnt`` — noncentral t CDF (nmath/pnt.c, Lenth 1989 AS 243)."""
+    itrmax = 1000
+    errmax = 1e-12
+    if df <= 0.0:
+        return _NAN
+    if ncp == 0.0:
+        return pt(t, df, lower_tail, log_p)
+    if not math.isfinite(t):
+        return _dt0(lower_tail, log_p) if t < 0 else _dt1(lower_tail, log_p)
+    if t >= 0.0:
+        negdel = False
+        tt = t
+        del_ = ncp
+    else:
+        if ncp > 40 and ((not log_p) or (not lower_tail)):
+            return _dt0(lower_tail, log_p)
+        negdel = True
+        tt = -t
+        del_ = -ncp
+
+    if df > 4e5 or del_ * del_ > 2 * _M_LN2 * 1021:  # -(DBL_MIN_EXP)=1021
+        s = 1.0 / (4.0 * df)
+        return pnorm5(
+            tt * (1.0 - s),
+            del_,
+            math.sqrt(1.0 + tt * tt * 2.0 * s),
+            lower_tail != negdel,
+            log_p,
+        )
+
+    x = t * t
+    rxb = df / (x + df)
+    x = x / (x + df)
+    if x > 0.0:
+        lambda_ = del_ * del_
+        p = _LD(0.5 * math.exp(-0.5 * lambda_))
+        if p == 0.0:  # underflow: |ncp| too large
+            return _dt0(lower_tail, log_p)
+        q = _M_SQRT_2dPI * p * del_
+        s = 0.5 - p
+        if s < 1e-7:
+            s = _LD(-0.5 * math.expm1(-0.5 * lambda_))
+        a = 0.5
+        b = 0.5 * df
+        rxb = math.pow(rxb, b)
+        albeta = _M_LN_SQRT_PI + _lgammafn(b) - _lgammafn(0.5 + b)
+        xodd = _LD(pbeta(x, a, b, True, False))
+        godd = _LD(2.0 * rxb * math.exp(a * math.log(x) - albeta))
+        tnc = _LD(b * x)
+        xeven = tnc if tnc < _DBL_EPSILON else _LD(1.0 - rxb)
+        geven = tnc * rxb
+        tnc = p * xodd + q * xeven
+        it = 1
+        while it <= itrmax:
+            a += 1.0
+            xodd -= godd
+            xeven -= geven
+            godd *= x * (a + b - 1.0) / a
+            geven *= x * (a + b - 0.5) / (a + 0.5)
+            p *= lambda_ / (2 * it)
+            q *= lambda_ / (2 * it + 1)
+            tnc += p * xodd + q * xeven
+            s -= p
+            if s < -1e-10:
+                break  # non-convergence -> finis
+            if s <= 0 and it > 1:
+                break  # -> finis
+            errbd = float(2.0 * s * (xodd - godd))
+            if abs(errbd) < errmax:
+                break  # convergence
+            it += 1
+    else:  # x = t = 0
+        tnc = _LD(0.0)
+
+    tnc += pnorm5(-del_, 0.0, 1.0, True, False)
+    lower_tail = lower_tail != negdel
+    return _dt_val(min(float(tnc), 1.0), lower_tail, log_p)
+
+
+def dnt(x, df, ncp, give_log=False):
+    """R's ``dnt`` — noncentral t density (nmath/dnt.c)."""
+    if math.isnan(x) or math.isnan(df):
+        return x + df
+    if df <= 0.0:
+        return _NAN
+    if ncp == 0.0:
+        return dt(x, df, give_log)
+    if not math.isfinite(x):
+        return _NEGINF if give_log else 0.0
+    if not math.isfinite(df) or df > 1e8:
+        return dnorm5(x, ncp, 1.0, give_log)
+    if abs(x) > math.sqrt(df * _DBL_EPSILON):
+        _d = abs(
+            pnt(x * math.sqrt((df + 2) / df), df + 2, ncp, 1, 0) - pnt(x, df, ncp, 1, 0)
+        )
+        # R's dnt.c evaluates log(fabs(.)); C log(0) = -Inf (density 0), while
+        # Python's math.log(0.) raises — guard to preserve the R/C semantics
+        # when the two pnt values coincide (e.g. deep tails in double).
+        u = math.log(df) - math.log(abs(x)) + (_NEGINF if _d == 0.0 else math.log(_d))
+    else:
+        u = (
+            _lgammafn((df + 1) / 2)
+            - _lgammafn(df / 2)
+            - (_M_LN_SQRT_PI + 0.5 * (math.log(df) + ncp * ncp))
+        )
+    return u if give_log else math.exp(u)
+
+
+def qnt(p, df, ncp, lower_tail=True, log_p=False):
+    """R's ``qnt`` — noncentral t quantile (nmath/qnt.c)."""
+    accu = 1e-13
+    Eps = 1e-11
+    if math.isnan(p) or math.isnan(df) or math.isnan(ncp):
+        return p + df + ncp
+    if df <= 0.0:
+        return _NAN
+    if ncp == 0.0 and df >= 1.0:
+        return qt(p, df, lower_tail, log_p)
+    # R_Q_P01_boundaries(p, ML_NEGINF, ML_POSINF)
+    if log_p:
+        if p > 0:
+            return _NAN
+        if p == 0:
+            return _INF if lower_tail else _NEGINF
+        if p == _NEGINF:
+            return _NEGINF if lower_tail else _INF
+    else:
+        if p < 0 or p > 1:
+            return _NAN
+        if p == 0:
+            return _NEGINF if lower_tail else _INF
+        if p == 1:
+            return _INF if lower_tail else _NEGINF
+    if not math.isfinite(df):
+        return qnorm5(p, ncp, 1.0, lower_tail, log_p)
+    p = _dt_qiv(p, lower_tail, log_p)
+    if p > 1 - _DBL_EPSILON:
+        return _INF
+    pp = min(1 - _DBL_EPSILON, p * (1 + Eps))
+    ux = max(1.0, ncp)
+    while ux < _DBL_MAX and pnt(ux, df, ncp, True, False) < pp:
+        ux *= 2
+    pp = p * (1 - Eps)
+    lx = min(-1.0, -ncp)
+    while lx > -_DBL_MAX and pnt(lx, df, ncp, True, False) > pp:
+        lx *= 2
+    while True:
+        nx = 0.5 * (lx + ux)
+        if pnt(nx, df, ncp, True, False) > p:
+            ux = nx
+        else:
+            lx = nx
+        if not ((ux - lx) > accu * max(abs(lx), abs(ux))):
+            break
+    return 0.5 * (lx + ux)
+
+
+def _pnbeta_raw(x, o_x, a, b, ncp):
+    """AS 226/R84 noncentral beta CDF core (pnbeta.c ``pnbeta_raw``); LDOUBLE."""
+    errmax = 1.0e-9
+    itrmax = 10000
+    if ncp < 0.0 or a <= 0.0 or b <= 0.0:
+        return _LD(_NAN)
+    if x < 0.0 or o_x > 1.0 or (x == 0.0 and o_x == 1.0):
+        return _LD(0.0)
+    if x > 1.0 or o_x < 0.0 or (x == 1.0 and o_x == 0.0):
+        return _LD(1.0)
+    c = ncp / 2.0
+    x0 = math.floor(max(c - 7.0 * math.sqrt(c), 0.0))
+    a0 = a + x0
+    lBeta = lbeta(a0, b)
+    temp, _tmp_c, _ierr = _bratio(a0, b, x, o_x, False)
+    gx = _LD(
+        math.exp(
+            a0 * math.log(x)
+            + b * (math.log1p(-x) if x < 0.5 else math.log(o_x))
+            - lBeta
+            - math.log(a0)
+        )
+    )
+    if a0 > a:
+        q = _LD(math.exp(-c + x0 * math.log(c) - _lgammafn(x0 + 1.0)))
+    else:
+        q = _LD(math.exp(-c))
+    sumq = 1.0 - q
+    ans = ax = q * temp
+    j = math.floor(x0)
+    while True:
+        j += 1
+        temp -= float(gx)
+        gx *= x * (a + b + j - 1.0) / (a + j)
+        q *= c / j
+        sumq -= q
+        ax = temp * q
+        ans += ax
+        errbd = float((temp - gx) * sumq)
+        if not (errbd > errmax and j < itrmax + x0):
+            break
+    return ans
+
+
+def _pnbeta2(x, o_x, a, b, ncp, lower_tail, log_p):
+    ans = _pnbeta_raw(x, o_x, a, b, ncp)
+    if lower_tail:
+        return float(np.log(ans)) if log_p else float(ans)
+    if ans > 1.0:
+        ans = _LD(1.0)
+    return float(np.log1p(-ans)) if log_p else float(1.0 - ans)
+
+
+def pnbeta(x, a, b, ncp, lower_tail=True, log_p=False):
+    """R's ``pnbeta`` — noncentral beta CDF (nmath/pnbeta.c)."""
+    if math.isnan(x) or math.isnan(a) or math.isnan(b) or math.isnan(ncp):
+        return x + a + b + ncp
+    if x <= 0.0:  # R_P_bounds_01(x, 0., 1.)
+        return _dt0(lower_tail, log_p)
+    if x >= 1.0:
+        return _dt1(lower_tail, log_p)
+    return _pnbeta2(x, 1 - x, a, b, ncp, lower_tail, log_p)
+
+
+def dnbeta(x, a, b, ncp, give_log=False):
+    """R's ``dnbeta`` — noncentral beta density (nmath/dnbeta.c)."""
+    eps = 1.0e-15
+    if math.isnan(x) or math.isnan(a) or math.isnan(b) or math.isnan(ncp):
+        return x + a + b + ncp
+    if ncp < 0 or a <= 0 or b <= 0:
+        return _NAN
+    if not math.isfinite(a) or not math.isfinite(b) or not math.isfinite(ncp):
+        return _NAN
+    if x < 0 or x > 1:
+        return _NEGINF if give_log else 0.0
+    if ncp == 0:
+        return dbeta(x, a, b, give_log)
+    ncp2 = math.ldexp(ncp, -1)
+    dx2 = ncp2 * x
+    d = math.ldexp(dx2 - a - 1, -1)
+    D = d * d + dx2 * (a + b) - a
+    if D <= 0:
+        kMax = 0
+    else:
+        D = math.ceil(d + math.sqrt(D))
+        kMax = int(D) if D > 0 else 0
+    term = _LD(dbeta(x, a + kMax, b, True))
+    p_k = _LD(_dpois_raw(kMax, ncp2, True))
+    if x == 0.0 or not np.isfinite(term) or not math.isfinite(float(p_k)):
+        v = float(p_k + term)
+        return v if give_log else math.exp(v)  # R_D_exp
+    p_k = p_k + term
+    sum_ = term = _LD(1.0)
+    k = float(kMax)
+    while k > 0 and term > sum_ * eps:
+        k -= 1
+        q = (k + 1) * (k + a) / (k + a + b) / dx2
+        term *= q
+        sum_ += term
+    term = _LD(1.0)
+    k = float(kMax)
+    while True:
+        q = dx2 * (k + a + b) / (k + a) / (k + 1)
+        k += 1
+        term *= q
+        sum_ += term
+        if not (term > sum_ * eps):
+            break
+    v = float(p_k + np.log(sum_))
+    return v if give_log else math.exp(v)  # R_D_exp
+
+
+def qnbeta(p, a, b, ncp, lower_tail=True, log_p=False):
+    """R's ``qnbeta`` — noncentral beta quantile (nmath/qnbeta.c)."""
+    accu = 1e-15
+    Eps = 1e-14
+    if math.isnan(p) or math.isnan(a) or math.isnan(b) or math.isnan(ncp):
+        return p + a + b + ncp
+    if not math.isfinite(a):
+        return _NAN
+    if ncp < 0.0 or a <= 0.0 or b <= 0.0:
+        return _NAN
+    # R_Q_P01_boundaries(p, 0, 1)
+    if log_p:
+        if p > 0:
+            return _NAN
+        if p == 0:
+            return 1.0 if lower_tail else 0.0
+        if p == _NEGINF:
+            return 0.0 if lower_tail else 1.0
+    else:
+        if p < 0 or p > 1:
+            return _NAN
+        if p == 0:
+            return 0.0 if lower_tail else 1.0
+        if p == 1:
+            return 1.0 if lower_tail else 0.0
+    p = _dt_qiv(p, lower_tail, log_p)
+    if p > 1 - _DBL_EPSILON:
+        return 1.0
+    pp = min(1 - _DBL_EPSILON, p * (1 + Eps))
+    ux = 0.5
+    while ux < 1 - _DBL_EPSILON and pnbeta(ux, a, b, ncp, True, False) < pp:
+        ux = 0.5 * (1 + ux)
+    pp = p * (1 - Eps)
+    lx = 0.5
+    while lx > _DBL_MIN and pnbeta(lx, a, b, ncp, True, False) > pp:
+        lx *= 0.5
+    while True:
+        nx = 0.5 * (lx + ux)
+        if pnbeta(nx, a, b, ncp, True, False) > p:
+            ux = nx
+        else:
+            lx = nx
+        if not ((ux - lx) / nx > accu):
+            break
+    return 0.5 * (ux + lx)
+
+
+def pnf(x, df1, df2, ncp, lower_tail=True, log_p=False):
+    """R's ``pnf`` — noncentral F CDF (nmath/pnf.c)."""
+    if math.isnan(x) or math.isnan(df1) or math.isnan(df2) or math.isnan(ncp):
+        return x + df2 + df1 + ncp
+    if df1 <= 0.0 or df2 <= 0.0 or ncp < 0:
+        return _NAN
+    if not math.isfinite(ncp):
+        return _NAN
+    if not math.isfinite(df1) and not math.isfinite(df2):
+        return _NAN
+    if x <= 0.0:  # R_P_bounds_01(x, 0., ML_POSINF)
+        return _dt0(lower_tail, log_p)
+    if x == _INF:
+        return _dt1(lower_tail, log_p)
+    if df2 > 1e8:
+        return pnchisq(x * df1, df1, ncp, lower_tail, log_p)
+    y = (df1 / df2) * x
+    return _pnbeta2(
+        y / (1.0 + y), 1.0 / (1.0 + y), df1 / 2.0, df2 / 2.0, ncp, lower_tail, log_p
+    )
+
+
+def dnf(x, df1, df2, ncp, give_log=False):
+    """R's ``dnf`` — noncentral F density (nmath/dnf.c)."""
+    if math.isnan(x) or math.isnan(df1) or math.isnan(df2) or math.isnan(ncp):
+        return x + df2 + df1 + ncp
+    if df1 <= 0.0 or df2 <= 0.0 or ncp < 0:
+        return _NAN
+    if x < 0.0:
+        return _NEGINF if give_log else 0.0
+    if not math.isfinite(ncp):
+        return _NAN
+    if not math.isfinite(df1) and not math.isfinite(df2):
+        if x == 1.0:
+            return _INF
+        return _NEGINF if give_log else 0.0
+    if not math.isfinite(df2):
+        return df1 * dnchisq(x * df1, df1, ncp, give_log)
+    if df1 > 1e14 and ncp < 1e7:
+        f = 1 + ncp / df1
+        z = dgamma(1.0 / x / f, df2 / 2, 2.0 / df2, give_log)
+        return (z - 2 * math.log(x) - math.log(f)) if give_log else z / (x * x) / f
+    y = (df1 / df2) * x
+    z = dnbeta(y / (1 + y), df1 / 2.0, df2 / 2.0, ncp, give_log)
+    return (
+        (z + math.log(df1) - math.log(df2) - 2 * math.log1p(y))
+        if give_log
+        else z * (df1 / df2) / (1 + y) / (1 + y)
+    )
+
+
+def qnf(p, df1, df2, ncp, lower_tail=True, log_p=False):
+    """R's ``qnf`` — noncentral F quantile (nmath/qnf.c)."""
+    if math.isnan(p) or math.isnan(df1) or math.isnan(df2) or math.isnan(ncp):
+        return p + df1 + df2 + ncp
+    if df1 <= 0.0 or df2 <= 0.0 or ncp < 0:
+        return _NAN
+    if not math.isfinite(ncp):
+        return _NAN
+    if not math.isfinite(df1) and not math.isfinite(df2):
+        return _NAN
+    # R_Q_P01_boundaries(p, 0, ML_POSINF)
+    if log_p:
+        if p > 0:
+            return _NAN
+        if p == 0:
+            return _INF if lower_tail else 0.0
+        if p == _NEGINF:
+            return 0.0 if lower_tail else _INF
+    else:
+        if p < 0 or p > 1:
+            return _NAN
+        if p == 0:
+            return 0.0 if lower_tail else _INF
+        if p == 1:
+            return _INF if lower_tail else 0.0
+    if df2 > 1e8:
+        return qnchisq(p, df1, ncp, lower_tail, log_p) / df1
+    y = qnbeta(p, df1 / 2.0, df2 / 2.0, ncp, lower_tail, log_p)
+    return y / (1 - y) * (df2 / df1)
+
+
+# === Hypergeometric (nmath/dhyper.c, phyper.c) ===============================
+# Sampling n balls from r red + b black; x are red. Feeds fisher.test (2x2).
+
+
+def dhyper(x, r, b, n, give_log=False):
+    """R's ``dhyper`` — hypergeometric density (nmath/dhyper.c)."""
+    if math.isnan(x) or math.isnan(r) or math.isnan(b) or math.isnan(n):
+        return x + r + b + n
+    if (
+        (r < 0 or _R_nonint(r))
+        or (b < 0 or _R_nonint(b))
+        or (n < 0 or _R_nonint(n))
+        or n > r + b
+    ):
+        return _NAN
+    if x < 0:
+        return _NEGINF if give_log else 0.0
+    if _R_nonint(x):  # R_D_nonint_check
+        return _NEGINF if give_log else 0.0
+    x = _r_forceint(x)
+    r = _r_forceint(r)
+    b = _r_forceint(b)
+    n = _r_forceint(n)
+    if n < x or r < x or n - x > b:
+        return _NEGINF if give_log else 0.0
+    if n == 0:
+        return (0.0 if give_log else 1.0) if x == 0 else (_NEGINF if give_log else 0.0)
+    p = n / (r + b)
+    q = (r + b - n) / (r + b)
+    p1 = float(_dbinom_raw(x, r, p, q, give_log))
+    p2 = float(_dbinom_raw(n - x, b, p, q, give_log))
+    p3 = float(_dbinom_raw(n, r + b, p, q, give_log))
+    return (p1 + p2 - p3) if give_log else p1 * p2 / p3
+
+
+def _pdhyper(x, NR, NB, n, log_p):
+    """phyper/dhyper ratio via a converging LDOUBLE series (phyper.c)."""
+    sum_ = _LD(0.0)
+    term = _LD(1.0)
+    while x > 0 and term >= _DBL_EPSILON * sum_:
+        term *= x * (NB - n + x) / (n + 1 - x) / (NR + 1 - x)
+        sum_ += term
+        x -= 1
+    ss = float(sum_)
+    return math.log1p(ss) if log_p else 1 + ss
+
+
+def phyper(x, NR, NB, n, lower_tail=True, log_p=False):
+    """R's ``phyper`` — hypergeometric CDF (nmath/phyper.c)."""
+    if math.isnan(x) or math.isnan(NR) or math.isnan(NB) or math.isnan(n):
+        return x + NR + NB + n
+    x = math.floor(x + 1e-7)
+    NR = _r_forceint(NR)
+    NB = _r_forceint(NB)
+    n = _r_forceint(n)
+    if NR < 0 or NB < 0 or not math.isfinite(NR + NB) or n < 0 or n > NR + NB:
+        return _NAN
+    if x * (NR + NB) > n * NR:  # swap tails
+        NR, NB = NB, NR
+        x = n - x - 1
+        lower_tail = not lower_tail
+    if x < 0 or x < n - NB:
+        return _dt0(lower_tail, log_p)
+    if x >= NR or x >= n:
+        return _dt1(lower_tail, log_p)
+    d = dhyper(x, NR, NB, n, log_p)
+    if (not log_p and d == 0.0) or (log_p and d == _NEGINF):
+        return _dt0(lower_tail, log_p)
+    pd = _pdhyper(x, NR, NB, n, log_p)
+    if log_p:  # R_DT_Log(d + pd)
+        return (d + pd) if lower_tail else _R_Log1_Exp(d + pd)
+    return (d * pd) if lower_tail else (0.5 - d * pd + 0.5)  # R_D_Lval
+
+
+def qhyper(p, NR, NB, n, lower_tail=True, log_p=False):
+    """R's ``qhyper(p, m, n, k)`` (nmath/qhyper.c) — hypergeometric quantile,
+    bit-exact. Native arg order (p, NR=m white, NB=n black, n=k drawn)."""
+    if math.isnan(p) or math.isnan(NR) or math.isnan(NB) or math.isnan(n):
+        return p + NR + NB + n
+    if not (
+        math.isfinite(p)
+        and math.isfinite(NR)
+        and math.isfinite(NB)
+        and math.isfinite(n)
+    ):
+        return _NAN
+    NR = _r_forceint(NR)
+    NB = _r_forceint(NB)
+    N = NR + NB
+    n = _r_forceint(n)
+    if NR < 0 or NB < 0 or n < 0 or n > N:
+        return _NAN
+    xstart = max(0.0, n - NB)
+    xend = min(n, NR)
+    # R_Q_P01_boundaries(p, xstart, xend)
+    if log_p:
+        if p > 0:
+            return _NAN
+        if p == 0:
+            return xend if lower_tail else xstart
+        if p == _NEGINF:
+            return xstart if lower_tail else xend
+    else:
+        if p < 0 or p > 1:
+            return _NAN
+        if p == 0:
+            return xstart if lower_tail else xend
+        if p == 1:
+            return xend if lower_tail else xstart
+    xr = xstart
+    xb = n - xr  # = #{black balls in sample}
+    small_N = N < 1000  # won't underflow in the product below
+    term = _lfastchoose(NR, xr) + _lfastchoose(NB, xb) - _lfastchoose(N, n)
+    if small_N:
+        term = math.exp(term)
+    NR -= xr
+    NB -= xb
+    if (not lower_tail) or log_p:
+        p = _R_DT_qIv(p, lower_tail, log_p)
+    p *= 1 - 1000 * _DBL_EPSILON  # was 64, but failed on FreeBSD sometimes
+    ssum = term if small_N else math.exp(term)
+    while ssum < p and xr < xend:
+        xr += 1
+        NB += 1
+        if small_N:
+            term *= (NR / xr) * (xb / NB)
+        else:
+            term += math.log((NR / xr) * (xb / NB))
+        ssum += term if small_N else math.exp(term)
+        xb -= 1
+        NR -= 1
+    return xr
+
+
+# === Brent root-finder (src/zeroin.c R_zeroin2) — backs uniroot =============
+def _zeroin2(ax, bx, fa, fb, f, tol, maxit):
+    """Port of R's ``R_zeroin2`` (src/zeroin.c) — Brent's method. Returns the
+    root; ``fa``/``fb`` are the pre-computed endpoint values."""
+    a = ax
+    b = bx
+    c = a
+    fc = fa
+    maxit_ = maxit + 1
+    if fa == 0.0:
+        return a
+    if fb == 0.0:
+        return b
+    eps = _DBL_EPSILON
+    while maxit_:
+        maxit_ -= 1
+        prev_step = b - a
+        if abs(fc) < abs(fb):
+            a = b
+            b = c
+            c = a
+            fa = fb
+            fb = fc
+            fc = fa
+        tol_act = 2 * eps * abs(b) + tol / 2
+        new_step = (c - b) / 2
+        if abs(new_step) <= tol_act or fb == 0.0:
+            return b
+        if abs(prev_step) >= tol_act and abs(fa) > abs(fb):
+            cb = c - b
+            if a == c:
+                t1 = fb / fa
+                p = cb * t1
+                q = 1.0 - t1
+            else:
+                q = fa / fc
+                t1 = fb / fc
+                t2 = fb / fa
+                p = t2 * (cb * q * (q - t1) - (b - a) * (t1 - 1.0))
+                q = (q - 1.0) * (t1 - 1.0) * (t2 - 1.0)
+            if p > 0.0:
+                q = -q
+            else:
+                p = -p
+            if p < (0.75 * cb * q - abs(tol_act * q) / 2) and p < abs(
+                prev_step * q / 2
+            ):
+                new_step = p / q
+        if abs(new_step) < tol_act:
+            new_step = tol_act if new_step > 0.0 else -tol_act
+        a = b
+        fa = fb
+        b += new_step
+        fb = f(b)
+        if (fb > 0 and fc > 0) or (fb < 0 and fc < 0):
+            c = a
+            fc = fa
+    return b
+
+
+def uniroot(f, lower, upper, tol=None, maxiter=1000):
+    """R's ``uniroot`` (default ``extendInt="no"``) — Brent root of ``f`` on
+    ``[lower, upper]`` (requires a sign change). ``tol`` defaults to R's
+    ``.Machine$double.eps^0.25``."""
+    if tol is None:
+        tol = _DBL_EPSILON**0.25
+    fl = f(lower)
+    fu = f(upper)
+    return _zeroin2(lower, upper, fl, fu, f, tol, maxiter)

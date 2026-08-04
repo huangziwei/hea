@@ -4,6 +4,7 @@ Living here because ``cat`` is R's stdout printer and ``quote`` produces
 the math-rendered label strings that ``hea.plot`` / ``hea.ggplot`` consume,
 so the two are conceptually a "base R text/output" pair.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -45,12 +46,54 @@ def quote(r_source: str) -> str:
 
 
 _GREEK = {
-    "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta",
-    "theta", "iota", "kappa", "lambda", "mu", "nu", "xi", "omicron",
-    "pi", "rho", "sigma", "tau", "upsilon", "phi", "chi", "psi", "omega",
-    "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta",
-    "Theta", "Iota", "Kappa", "Lambda", "Mu", "Nu", "Xi", "Omicron",
-    "Pi", "Rho", "Sigma", "Tau", "Upsilon", "Phi", "Chi", "Psi", "Omega",
+    "alpha",
+    "beta",
+    "gamma",
+    "delta",
+    "epsilon",
+    "zeta",
+    "eta",
+    "theta",
+    "iota",
+    "kappa",
+    "lambda",
+    "mu",
+    "nu",
+    "xi",
+    "omicron",
+    "pi",
+    "rho",
+    "sigma",
+    "tau",
+    "upsilon",
+    "phi",
+    "chi",
+    "psi",
+    "omega",
+    "Alpha",
+    "Beta",
+    "Gamma",
+    "Delta",
+    "Epsilon",
+    "Zeta",
+    "Eta",
+    "Theta",
+    "Iota",
+    "Kappa",
+    "Lambda",
+    "Mu",
+    "Nu",
+    "Xi",
+    "Omicron",
+    "Pi",
+    "Rho",
+    "Sigma",
+    "Tau",
+    "Upsilon",
+    "Phi",
+    "Chi",
+    "Psi",
+    "Omega",
 }
 
 
@@ -84,8 +127,7 @@ def _plotmath_render(node) -> str:
     if isinstance(node, _R.Subscript):
         base = _plotmath_render(node.target)
         idx = ", ".join(
-            _plotmath_render(a) for a in node.args
-            if not isinstance(a, _R.MissingArg)
+            _plotmath_render(a) for a in node.args if not isinstance(a, _R.MissingArg)
         )
         return f"{base}_{{{idx}}}"
     if isinstance(node, _R.Call):
@@ -141,6 +183,7 @@ def cat(*args, sep=" ", end="", file=None, fill=False, labels=None, append=False
     Vector args are flattened (R's ``cat`` is recursive); polars Series
     and numpy arrays are iterated. NA / None become an empty string.
     """
+
     def _flatten(xs):
         for x in xs:
             if x is None:
@@ -151,11 +194,13 @@ def cat(*args, sep=" ", end="", file=None, fill=False, labels=None, append=False
                 yield from _flatten(x)
             else:
                 yield str(x)
+
     text = sep.join(_flatten(args))
     if end:
         text = text + end
     if file is None:
         import sys
+
         sys.stdout.write(text)
     else:
         # ``file=`` accepts a path (R semantics) or an open file-like object.

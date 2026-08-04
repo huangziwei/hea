@@ -11,6 +11,7 @@ Two layers, mirroring the project idiom:
 
 The R snippet that produced the pins is in :func:`_r_dist` / the docstrings.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -34,7 +35,7 @@ from hea.R.distance import (
 # minkowski is the only metric using ``pow``, and it is 0-ulp to R only when hea
 # reproduces R's ``R_pow`` exactly: that needs the shared platform scalar libm
 # (macOS: Apple libm) for the general path AND the ported integer special-cases
-# (``x*x*x``/``x*x*x*x`` for ``|x|<=11``; see ref/r-base/arithmetic.c). Off macOS
+# (``x*x*x``/``x*x*x*x`` for ``|x|<=11``; per R's arithmetic.c). Off macOS
 # the libm differs, so ``pow`` drifts a few ulp.
 _STRICT = sys.platform == "darwin"
 _RTOL = 1e-14
@@ -60,7 +61,8 @@ def _assert_tol(got, exp):
     use different BLAS builds, so ``solve``/matmul drift ~1 ulp even on one
     machine — not 0-ulp like the pure-arithmetic ``dist`` kernels."""
     np.testing.assert_allclose(
-        np.asarray(got, float), np.asarray(exp, float), rtol=1e-12, equal_nan=True)
+        np.asarray(got, float), np.asarray(exp, float), rtol=1e-12, equal_nan=True
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -75,33 +77,89 @@ _X3 = np.array([[1, 0, 1, 0], [1, 1, 0, 0], [0, 0, 1, 1]], dtype=float)
 
 # as.vector(dist(X1, method=...)) — packed lower triangle, column-major.
 _PINS = {
-    "euclidean": (_X1, "euclidean", 2, [
-        7.0710678118654755, 3.6055512754639891, 1.4142135623730951,
-        10.440306508910551, 7.4833147735478827, 3]),
+    "euclidean": (
+        _X1,
+        "euclidean",
+        2,
+        [
+            7.0710678118654755,
+            3.6055512754639891,
+            1.4142135623730951,
+            10.440306508910551,
+            7.4833147735478827,
+            3,
+        ],
+    ),
     "maximum": (_X1, "maximum", 2, [5, 3, 1, 8, 6, 2]),
     "manhattan": (_X1, "manhattan", 2, [12, 5, 2, 17, 12, 5]),
-    "canberra": (_X1, "canberra", 2, [
-        1.5545454545454547, 2, 0.53333333333333333,
-        2.6000000000000001, 1.4333333333333331, 2.333333333333333]),
-    "binary": (_X1, "binary", 2, [
-        0, 0.66666666666666663, 0, 0.66666666666666663, 0, 0.66666666666666663]),
-    "minkowski_p3": (_X1, "minkowski", 3, [
-        5.9999999999999991, 3.2710663101885897, 1.2599210498948732,
-        9.1057484912345714, 6.6038544977892526, 2.5712815906582351]),
-    "minkowski_p1.5": (_X1, "minkowski", 1.5, [
-        8.4071244231919309, 4.0081889926881784, 1.5874010519681994,
-        12.182384301187385, 8.6692457442272186, 3.5387186276812526]),
-    "NA_euclidean": (_X2, "euclidean", 2, [
-        6.1237243569579451, 2.4494897427831779, 1.7320508075688772,
-        10.440306508910551, 7.745966692414834, 2.7386127875258306]),
+    "canberra": (
+        _X1,
+        "canberra",
+        2,
+        [
+            1.5545454545454547,
+            2,
+            0.53333333333333333,
+            2.6000000000000001,
+            1.4333333333333331,
+            2.333333333333333,
+        ],
+    ),
+    "binary": (
+        _X1,
+        "binary",
+        2,
+        [0, 0.66666666666666663, 0, 0.66666666666666663, 0, 0.66666666666666663],
+    ),
+    "minkowski_p3": (
+        _X1,
+        "minkowski",
+        3,
+        [
+            5.9999999999999991,
+            3.2710663101885897,
+            1.2599210498948732,
+            9.1057484912345714,
+            6.6038544977892526,
+            2.5712815906582351,
+        ],
+    ),
+    "minkowski_p1.5": (
+        _X1,
+        "minkowski",
+        1.5,
+        [
+            8.4071244231919309,
+            4.0081889926881784,
+            1.5874010519681994,
+            12.182384301187385,
+            8.6692457442272186,
+            3.5387186276812526,
+        ],
+    ),
+    "NA_euclidean": (
+        _X2,
+        "euclidean",
+        2,
+        [
+            6.1237243569579451,
+            2.4494897427831779,
+            1.7320508075688772,
+            10.440306508910551,
+            7.745966692414834,
+            2.7386127875258306,
+        ],
+    ),
     "NA_manhattan": (_X2, "manhattan", 2, [10.5, 3, 3, 17, 12, 4.5]),
-    "NA_canberra": (_X2, "canberra", 2, [
-        1.6500000000000001, 1.5, 1, 2.6000000000000001, 1.4000000000000001, 2]),
-    "NA_binary": (_X2, "binary", 2, [
-        0, 0.5, 0, 0.66666666666666663, 0, 0.5]),
+    "NA_canberra": (
+        _X2,
+        "canberra",
+        2,
+        [1.6500000000000001, 1.5, 1, 2.6000000000000001, 1.4000000000000001, 2],
+    ),
+    "NA_binary": (_X2, "binary", 2, [0, 0.5, 0, 0.66666666666666663, 0, 0.5]),
     "NA_maximum": (_X2, "maximum", 2, [4, 2, 1, 8, 6, 2]),
-    "binary3": (_X3, "binary", 2, [
-        0.66666666666666663, 0.66666666666666663, 1]),
+    "binary3": (_X3, "binary", 2, [0.66666666666666663, 0.66666666666666663, 1]),
 }
 
 
@@ -120,10 +178,23 @@ def test_as_dist_pin():
 def test_as_matrix_dist_pin():
     # as.matrix(dist(X1)) flattened column-major.
     expected = [
-        0, 7.0710678118654755, 3.6055512754639891, 1.4142135623730951,
-        7.0710678118654755, 0, 10.440306508910551, 7.4833147735478827,
-        3.6055512754639891, 10.440306508910551, 0, 3,
-        1.4142135623730951, 7.4833147735478827, 3, 0]
+        0,
+        7.0710678118654755,
+        3.6055512754639891,
+        1.4142135623730951,
+        7.0710678118654755,
+        0,
+        10.440306508910551,
+        7.4833147735478827,
+        3.6055512754639891,
+        10.440306508910551,
+        0,
+        3,
+        1.4142135623730951,
+        7.4833147735478827,
+        3,
+        0,
+    ]
     _assert_eq(as_matrix_dist(dist(_X1, "euclidean")).ravel(order="F"), expected)
 
 
@@ -138,27 +209,38 @@ _MCOV = np.array([[2, 0.5], [0.5, 1]], dtype=float)
 
 
 def test_mahalanobis_pin():
-    _assert_tol(mahalanobis(_MX, _MCENTER, _MCOV),
-               [1, 4.1428571428571423, 3.5714285714285712, 1.5714285714285712])
+    _assert_tol(
+        mahalanobis(_MX, _MCENTER, _MCOV),
+        [1, 4.1428571428571423, 3.5714285714285712, 1.5714285714285712],
+    )
 
 
 def test_mahalanobis_inverted_pin():
     # inverted=TRUE: cov is already the precision matrix.
-    _assert_tol(mahalanobis(_MX, _MCENTER, np.linalg.inv(_MCOV), inverted=True),
-               [1, 4.1428571428571423, 3.5714285714285712, 1.5714285714285712])
+    _assert_tol(
+        mahalanobis(_MX, _MCENTER, np.linalg.inv(_MCOV), inverted=True),
+        [1, 4.1428571428571423, 3.5714285714285712, 1.5714285714285712],
+    )
 
 
 def test_mahalanobis_center_false_pin():
     # center=FALSE -> R isFALSE(center): skip centering.
-    _assert_tol(mahalanobis(_MX, False, _MCOV),
-               [2.2857142857142856, 16.571428571428569,
-                13.142857142857142, 1.1428571428571428])
+    _assert_tol(
+        mahalanobis(_MX, False, _MCOV),
+        [
+            2.2857142857142856,
+            16.571428571428569,
+            13.142857142857142,
+            1.1428571428571428,
+        ],
+    )
 
 
 def test_mahalanobis_vector_input():
     # is.vector(x): treated as a single row.
-    _assert_tol(mahalanobis(np.array([4.0, 3.0]), _MCENTER, _MCOV),
-               [1.5714285714285712])
+    _assert_tol(
+        mahalanobis(np.array([4.0, 3.0]), _MCENTER, _MCOV), [1.5714285714285712]
+    )
 
 
 @pytest.mark.skipif(not have_rscript(), reason="Rscript not on PATH (install R)")
@@ -176,8 +258,12 @@ def test_mahalanobis_vs_live_R():
         f'cat(sprintf("%.17g",as.double(mahalanobis(x,ctr,S))),sep="\\n")'
     )
     out = subprocess.run(
-        ["Rscript", "-e", rexpr], stdin=subprocess.DEVNULL, check=True,
-        capture_output=True, text=True, timeout=120,
+        ["Rscript", "-e", rexpr],
+        stdin=subprocess.DEVNULL,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
     ).stdout
     expected = np.array([float(s) for s in out.split()])
     _assert_tol(mahalanobis(x, center, cov), expected)
@@ -191,22 +277,41 @@ def _assert_points_up_to_sign(got, exp, atol=1e-8):
     exp = np.asarray(exp, float)
     assert got.shape == exp.shape, (got.shape, exp.shape)
     for j in range(exp.shape[1]):
-        ok = (np.allclose(got[:, j], exp[:, j], atol=atol)
-              or np.allclose(got[:, j], -exp[:, j], atol=atol))
+        ok = np.allclose(got[:, j], exp[:, j], atol=atol) or np.allclose(
+            got[:, j], -exp[:, j], atol=atol
+        )
         assert ok, f"column {j}: {got[:, j]} vs +/-{exp[:, j]}"
 
 
 # 6-point config the cmdscale oracle is built from (two well-separated clusters).
 _XC = np.array([[0, 0], [1, 0], [0, 1], [5, 5], [6, 5], [5, 6]], dtype=float)
 # cmdscale(dist(X), k=2) on the 6-point config.
-_CMD_PTS = np.array([
-    -4.0069384267237682, -3.2998316455372239, -3.2998316455372234,
-    3.0641293851417086, 3.7712361663282552, 3.7712361663282552,
-    0, 0.7071067811865458, -0.70710678118655224, -1.1591903465957709e-14,
-    0.70710678118654446, -0.70710678118654113]).reshape(6, 2, order="F")
-_CMD_EIG = np.array([
-    75.666666666666686, 1.9999999999999907, 4.2632564145606011e-14,
-    7.9936057773011271e-15, 1.1899071437799712e-15, 5.4161430964655891e-16])
+_CMD_PTS = np.array(
+    [
+        -4.0069384267237682,
+        -3.2998316455372239,
+        -3.2998316455372234,
+        3.0641293851417086,
+        3.7712361663282552,
+        3.7712361663282552,
+        0,
+        0.7071067811865458,
+        -0.70710678118655224,
+        -1.1591903465957709e-14,
+        0.70710678118654446,
+        -0.70710678118654113,
+    ]
+).reshape(6, 2, order="F")
+_CMD_EIG = np.array(
+    [
+        75.666666666666686,
+        1.9999999999999907,
+        4.2632564145606011e-14,
+        7.9936057773011271e-15,
+        1.1899071437799712e-15,
+        5.4161430964655891e-16,
+    ]
+)
 
 
 def test_cmdscale_points_pin():
@@ -252,14 +357,18 @@ def test_cmdscale_vs_live_R():
     res = cmdscale(d, k=3, eig=True)
     elems = ",".join(float(v).hex() for v in d.data)
     rexpr = (
-        f'd<-structure(c({elems}),Size={d.Size}L,Diag=FALSE,Upper=FALSE,'
+        f"d<-structure(c({elems}),Size={d.Size}L,Diag=FALSE,Upper=FALSE,"
         f'method="euclidean",class="dist");r<-cmdscale(d,k=3,eig=TRUE);'
         'cat(sprintf("%.17g",as.vector(r$points)),sep=" ");cat("\\n##\\n");'
         'cat(sprintf("%.17g",r$eig),sep=" ")'
     )
     out = subprocess.run(
-        ["Rscript", "-e", rexpr], stdin=subprocess.DEVNULL, check=True,
-        capture_output=True, text=True, timeout=120,
+        ["Rscript", "-e", rexpr],
+        stdin=subprocess.DEVNULL,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
     ).stdout
     psec, esec = out.split("\n##\n")
     pts = np.array([float(v) for v in psec.split()]).reshape(d.Size, 3, order="F")
@@ -350,15 +459,20 @@ def _r_dist(mat, method, p=2):
         f'dist(x,method="{method}",p={p})))),sep="\\n")'
     )
     out = subprocess.run(
-        ["Rscript", "-e", rexpr], stdin=subprocess.DEVNULL, check=True,
-        capture_output=True, text=True, timeout=120,
+        ["Rscript", "-e", rexpr],
+        stdin=subprocess.DEVNULL,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
     ).stdout
     return np.array([float(s) for s in out.split()]) if out.strip() else np.empty(0)
 
 
 @pytest.mark.skipif(not have_rscript(), reason="Rscript not on PATH (install R)")
 @pytest.mark.parametrize(
-    "method", ["euclidean", "maximum", "manhattan", "canberra", "binary", "minkowski"])
+    "method", ["euclidean", "maximum", "manhattan", "canberra", "binary", "minkowski"]
+)
 @pytest.mark.parametrize("with_na", [False, True])
 def test_dist_vs_live_R(method, with_na):
     rng = np.random.default_rng(20260621)
@@ -384,10 +498,12 @@ def test_minkowski_pow_vs_live_R(p):
     the fallback. Caught nothing before because the only integer-p pin used
     integer-valued inputs (``x*x*x == pow`` exactly there)."""
     rng = np.random.default_rng(0xB16B00B5)
-    x = np.vstack([
-        rng.standard_normal((6, 5)),        # |dev| <= 11  -> naive products
-        rng.standard_normal((3, 5)) * 25.0,  # |dev| >  11  -> libm pow fallback
-    ])
+    x = np.vstack(
+        [
+            rng.standard_normal((6, 5)),  # |dev| <= 11  -> naive products
+            rng.standard_normal((3, 5)) * 25.0,  # |dev| >  11  -> libm pow fallback
+        ]
+    )
     _assert_eq(dist(x, method="minkowski", p=p), _r_dist(x, "minkowski", p))
 
 
@@ -414,13 +530,21 @@ def _ab_inputs():
 
 
 @pytest.mark.skipif(not _HAS_CDIST, reason="hea._rs.cdist not built")
-@pytest.mark.parametrize("mi,method,p", [
-    (0, "euclidean", 2.0), (1, "maximum", 2.0), (2, "manhattan", 2.0),
-    (3, "canberra", 2.0), (5, "minkowski", 1.7), (5, "minkowski", 3.0),
-    (5, "minkowski", 4.0),
-])
+@pytest.mark.parametrize(
+    "mi,method,p",
+    [
+        (0, "euclidean", 2.0),
+        (1, "maximum", 2.0),
+        (2, "manhattan", 2.0),
+        (3, "canberra", 2.0),
+        (5, "minkowski", 1.7),
+        (5, "minkowski", 3.0),
+        (5, "minkowski", 4.0),
+    ],
+)
 def test_rs_cdist_matches_python(mi, method, p):
     from hea.R.distance import _cdist
+
     x, _ = _ab_inputs()
     arr = np.ascontiguousarray(x, dtype=float)
     py = _cdist(arr, mi, p)
@@ -431,6 +555,7 @@ def test_rs_cdist_matches_python(mi, method, p):
 @pytest.mark.skipif(not _HAS_CDIST, reason="hea._rs.cdist not built")
 def test_rs_cdist_binary_matches_python():
     from hea.R.distance import _cdist
+
     _, b = _ab_inputs()
     arr = np.ascontiguousarray(b, dtype=float)
     py = _cdist(arr, 4, 2.0)

@@ -13,6 +13,7 @@ operations that bypass that route (``describe``, ``corr``, ``unstack``,
 (``get_column``, ``__getitem__``, the ``*_horizontal`` family, …) are
 wrapped via the install hooks in :mod:`hea.tidy.series`.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -126,9 +127,7 @@ class DataFrame(pl.DataFrame):
                 keys.append(pl.col(n).fill_nan(None))
             else:
                 keys.append(n)
-        return self._wrap(
-            super().sort(keys, descending=desc_flags, nulls_last=True)
-        )
+        return self._wrap(super().sort(keys, descending=desc_flags, nulls_last=True))
 
     def distinct(self, *cols: str, keep_all: bool = False) -> "DataFrame":
         """Keep unique rows.
@@ -239,7 +238,11 @@ class DataFrame(pl.DataFrame):
             if _by is not None:
                 by_cols = [_by] if isinstance(_by, str) else list(_by)
                 for b in by_cols:
-                    if b in out.columns and b not in keep_originals and b not in new_set:
+                    if (
+                        b in out.columns
+                        and b not in keep_originals
+                        and b not in new_set
+                    ):
                         keep_originals.append(b)
 
             keep_cols = keep_originals + [c for c in new_names if c in out.columns]
@@ -251,7 +254,9 @@ class DataFrame(pl.DataFrame):
             idx = _resolve_anchor(
                 anchor, other, after=_after is not None, verb="mutate"
             )
-            ordered = other[:idx] + [c for c in new_names if c in out.columns] + other[idx:]
+            ordered = (
+                other[:idx] + [c for c in new_names if c in out.columns] + other[idx:]
+            )
             out = out.select(ordered)
 
         return self._wrap(out)
@@ -382,9 +387,7 @@ class DataFrame(pl.DataFrame):
         suffixes (so the first duplicate is ``_2``, not ``_1`` —
         matches janitor).
         """
-        cleaned = _disambiguate_clean_names(
-            [_clean_one_name(c) for c in self.columns]
-        )
+        cleaned = _disambiguate_clean_names([_clean_one_name(c) for c in self.columns])
         return self._wrap(super().rename(dict(zip(self.columns, cleaned))))
 
     def relocate(
@@ -487,18 +490,20 @@ class DataFrame(pl.DataFrame):
 
         df: DataFrame = self
         if derived:
-            df = self.with_columns(*[
-                expr.alias(name) if isinstance(expr, pl.Expr)
-                else pl.lit(expr).alias(name)
-                for name, expr in derived.items()
-            ])
+            df = self.with_columns(
+                *[
+                    expr.alias(name)
+                    if isinstance(expr, pl.Expr)
+                    else pl.lit(expr).alias(name)
+                    for name, expr in derived.items()
+                ]
+            )
             cols = (*cols, *derived.keys())
 
         if not cols:
-            raise ValueError(
-                "group_by(): pass at least one column or derived column."
-            )
+            raise ValueError("group_by(): pass at least one column or derived column.")
         from .groupby import GroupBy
+
         return GroupBy(df, list(cols), pl_kwargs)
 
     def summarize(
@@ -535,9 +540,7 @@ class DataFrame(pl.DataFrame):
                 )
             return super().select(exprs)
         by = [_by] if isinstance(_by, str) else list(_by)
-        result = self._wrap(
-            super().group_by(by, maintain_order=True).agg(exprs)
-        )
+        result = self._wrap(super().group_by(by, maintain_order=True).agg(exprs))
         return _apply_groups(result, by, _groups)
 
     summarise = summarize  # British spelling, like dplyr.
@@ -573,12 +576,17 @@ class DataFrame(pl.DataFrame):
         derived: dict[str, Any] = {}
         for k, v in kwargs.items():
             derived[k] = v
-        agg_expr = pl.col(wt).sum().alias(name) if wt is not None else pl.len().alias(name)
+        agg_expr = (
+            pl.col(wt).sum().alias(name) if wt is not None else pl.len().alias(name)
+        )
         base: pl.DataFrame = self
         if derived:
             base = pl.DataFrame.with_columns(
                 base,
-                [(v if isinstance(v, pl.Expr) else pl.col(v)).alias(k) for k, v in derived.items()],
+                [
+                    (v if isinstance(v, pl.Expr) else pl.col(v)).alias(k)
+                    for k, v in derived.items()
+                ],
             )
             group_cols = [*cols, *derived.keys()]
         else:
@@ -590,10 +598,7 @@ class DataFrame(pl.DataFrame):
                 else pl.DataFrame({name: [self.height]})
             )
             return self._wrap(scalar)
-        out = (
-            pl.DataFrame.group_by(base, group_cols, maintain_order=True)
-            .agg(agg_expr)
-        )
+        out = pl.DataFrame.group_by(base, group_cols, maintain_order=True).agg(agg_expr)
         if sort:
             out = out.sort(name, descending=True)
         return self._wrap(out)
@@ -708,9 +713,7 @@ class DataFrame(pl.DataFrame):
             # they're tied with the cutoff.
             nth = pl.col(col).slice(n - 1, 1).first()
             pos = pl.int_range(0, pl.len())
-            out = sorted_df.filter(
-                (pos < n) | pl.col(col).eq_missing(nth)
-            )
+            out = sorted_df.filter((pos < n) | pl.col(col).eq_missing(nth))
         else:
             out = sorted_df.head(n)
         return self._wrap(out)
@@ -869,7 +872,12 @@ class DataFrame(pl.DataFrame):
     ) -> "DataFrame":
         """Cartesian product — every row of ``self`` paired with every row of ``other``."""
         return self._do_join(
-            other, by=None, how="cross", suffix=suffix, keep=False, na_matches="na",
+            other,
+            by=None,
+            how="cross",
+            suffix=suffix,
+            keep=False,
+            na_matches="na",
         )
 
     # ---- join internals -----------------------------------------------
@@ -888,9 +896,7 @@ class DataFrame(pl.DataFrame):
                 f"na_matches: expected 'na' or 'never', got {na_matches!r}."
             )
         if not isinstance(suffix, tuple) or len(suffix) != 2:
-            raise TypeError(
-                "suffix=: expected a 2-tuple (left_suffix, right_suffix)."
-            )
+            raise TypeError("suffix=: expected a 2-tuple (left_suffix, right_suffix).")
         spec = self._normalize_join_by(by, other, how=how)
         if spec.asof is not None:
             return self._do_asof(other, spec, how, suffix, keep, na_matches)
@@ -898,9 +904,7 @@ class DataFrame(pl.DataFrame):
             return self._do_where(other, spec, how, suffix, keep)
         return self._do_equi(other, spec, how, suffix, keep, na_matches)
 
-    def _normalize_join_by(
-        self, by: Any, other: pl.DataFrame, *, how: str
-    ) -> _JoinBy:
+    def _normalize_join_by(self, by: Any, other: pl.DataFrame, *, how: str) -> _JoinBy:
         """Resolve ``by=`` into a :class:`_JoinBy`."""
         if how == "cross":
             return _JoinBy()  # no keys for cross
@@ -953,7 +957,10 @@ class DataFrame(pl.DataFrame):
 
         if how == "cross":
             out = pl.DataFrame.join(
-                self, other, how="cross", suffix=polars_suffix,
+                self,
+                other,
+                how="cross",
+                suffix=polars_suffix,
             )
             return self._apply_dplyr_suffix(out, suffix, polars_suffix)
 
@@ -972,15 +979,18 @@ class DataFrame(pl.DataFrame):
         ]
         if not diff_name:
             out = pl.DataFrame.join(
-                left_aligned, right_aligned,
-                on=same_name, how=how,
+                left_aligned,
+                right_aligned,
+                on=same_name,
+                how=how,
                 suffix=polars_suffix,
                 nulls_equal=nulls_equal,
                 coalesce=coalesce,
             )
         else:
             out = pl.DataFrame.join(
-                left_aligned, right_aligned,
+                left_aligned,
+                right_aligned,
                 left_on=spec.equi_left,
                 right_on=spec.equi_right,
                 how=how,
@@ -1011,8 +1021,7 @@ class DataFrame(pl.DataFrame):
         # non-colliding names (true for every r4ds ch19 example).
         polars_suffix = "__hea_r__"
         rename_map = {
-            c: f"{c}{polars_suffix}"
-            for c in other.columns if c in self.columns
+            c: f"{c}{polars_suffix}" for c in other.columns if c in self.columns
         }
         right = other.rename(rename_map) if rename_map else other
         preds: list[pl.Expr] = []
@@ -1088,19 +1097,25 @@ class DataFrame(pl.DataFrame):
         match_marker = (
             spec.asof.right
             if right_key_col in out.columns
-            else (right_key_col + polars_suffix
-                  if (right_key_col + polars_suffix) in out.columns
-                  else spec.asof.left)
+            else (
+                right_key_col + polars_suffix
+                if (right_key_col + polars_suffix) in out.columns
+                else spec.asof.left
+            )
         )
         if how == "inner":
             out = out.filter(pl.col(match_marker).is_not_null())
         elif how == "anti":
             # Keep only unmatched left rows; project back to left's columns.
             out = out.filter(pl.col(match_marker).is_null())
-            out = out.select([c for c in out.columns if c in self.columns or c == idx_col])
+            out = out.select(
+                [c for c in out.columns if c in self.columns or c == idx_col]
+            )
         elif how == "semi":
             out = out.filter(pl.col(match_marker).is_not_null())
-            out = out.select([c for c in out.columns if c in self.columns or c == idx_col])
+            out = out.select(
+                [c for c in out.columns if c in self.columns or c == idx_col]
+            )
         # Restore left's original row order and drop the index tag.
         out = out.sort(idx_col).drop(idx_col)
         return self._apply_dplyr_suffix(out, suffix, polars_suffix)
@@ -1300,9 +1315,7 @@ class DataFrame(pl.DataFrame):
         # Step 4: simple (single-name, no .value) case — just rename.
         if len(names_to_list) == 1 and names_to_list[0] != ".value":
             out = (
-                long.rename(
-                    {"__name__": names_to_list[0], "__value__": values_to}
-                )
+                long.rename({"__name__": names_to_list[0], "__value__": values_to})
                 .sort(ROW_IDX)
                 .drop(ROW_IDX)
             )
@@ -1328,9 +1341,7 @@ class DataFrame(pl.DataFrame):
             ).unnest("__parts__")
         else:
             long = long.with_columns(
-                pl.col("__name__")
-                .str.extract_groups(names_pattern)
-                .alias("__parts__")
+                pl.col("__name__").str.extract_groups(names_pattern).alias("__parts__")
             ).unnest("__parts__")
 
         long = long.drop("__name__")
@@ -1357,11 +1368,7 @@ class DataFrame(pl.DataFrame):
             out = out.sort(ROW_IDX).drop(ROW_IDX)
             return self._wrap(out)
 
-        out = (
-            long.rename({"__value__": values_to})
-            .sort(ROW_IDX)
-            .drop(ROW_IDX)
-        )
+        out = long.rename({"__value__": values_to}).sort(ROW_IDX).drop(ROW_IDX)
         return self._wrap(out)
 
     def pivot_wider(
@@ -1425,6 +1432,7 @@ class DataFrame(pl.DataFrame):
             if "expected no or a single value" not in str(e):
                 raise
             import warnings
+
             warnings.warn(
                 "pivot_wider(): values are not uniquely identified; output "
                 "will contain list-columns. Run "
@@ -1446,9 +1454,7 @@ class DataFrame(pl.DataFrame):
             out = out.rename({c: names_prefix + c for c in new_cols})
             new_cols = [names_prefix + c for c in new_cols]
         if values_fill is not None:
-            out = out.with_columns(
-                [pl.col(c).fill_null(values_fill) for c in new_cols]
-            )
+            out = out.with_columns([pl.col(c).fill_null(values_fill) for c in new_cols])
         return self._wrap(out)
 
     def pull(self, col: str | int | None = None) -> pl.Series:
@@ -1501,8 +1507,7 @@ class DataFrame(pl.DataFrame):
         # inference, so user-built ``DataFrame({"time": …, "value": …})``
         # is not affected.
         if getattr(self, "_ts_meta", None) is not None:
-            mapped_x = ("x" in aes_kwargs) or (
-                mapping is not None and "x" in mapping)
+            mapped_x = ("x" in aes_kwargs) or (mapping is not None and "x" in mapping)
             if not mapped_x:
                 aes_kwargs["x"] = "value"
 
@@ -1519,6 +1524,7 @@ class DataFrame(pl.DataFrame):
         round-trip used by ``with_columns``/``sort``/``join``/etc.).
         """
         from .series import LazyFrame
+
         return LazyFrame._from_pyldf(self._df.lazy())
 
     # ---- subclass-preserving overrides --------------------------------
@@ -1589,6 +1595,7 @@ class DataFrame(pl.DataFrame):
             ``(label, value)`` entries programmatically.
         """
         from .summary import Summary, _summary_block, _SummaryBlock
+
         # ts-marked frame: hea.data() and hea.R.ts() set ``_ts_meta`` on
         # frames that R would classify as ``ts``. R's ``summary(Nile)``
         # (via the ts class) summarizes only the values; we mirror that
@@ -1609,8 +1616,9 @@ class DataFrame(pl.DataFrame):
 
     # ---- time series --------------------------------------------------
 
-    def as_ts(self, *, start: float | None = None,
-              frequency: float = 1.0) -> "DataFrame":
+    def as_ts(
+        self, *, start: float | None = None, frequency: float = 1.0
+    ) -> "DataFrame":
         """Mark this frame as a time series (R's ``as.ts()``).
 
         The frame must already be a 2-column ``(time, value)`` shape —
@@ -1685,6 +1693,7 @@ class TsMeta:
     Not propagated through ``_wrap``: subset / filter / select / join
     drop it, mirroring R's "indexing a ts returns a vector".
     """
+
     start: float
     end: float
     frequency: float
@@ -1735,4 +1744,3 @@ def ts(data, start: float = 1.0, frequency: float = 1.0) -> "DataFrame":
     out = DataFrame({"time": time_arr, "value": values_series.rename("value")})
     out._ts_meta = TsMeta(start=float(start), end=end, frequency=float(frequency))
     return out
-

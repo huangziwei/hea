@@ -23,14 +23,16 @@ class GeomPoint(Geom):
     # 21-25, ``None`` falls back to ``colour`` in :meth:`draw_panel`
     # (ggplot2 leaves them transparent — minor visible divergence on
     # filled shapes used without an explicit ``fill`` mapping).
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
-        "size": 1.5,
-        "shape": "o",
-        "alpha": 1.0,
-        "fill": None,
-        "stroke": 0.5,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "black",
+            "size": 1.5,
+            "shape": "o",
+            "alpha": 1.0,
+            "fill": None,
+            "stroke": 0.5,
+        }
+    )
     required_aes: tuple = ("x", "y")
 
     def draw_panel(self, data, ax) -> None:
@@ -46,16 +48,29 @@ class GeomPoint(Geom):
         x = data["x"].to_numpy()
         y = data["y"].to_numpy()
 
-        colour = (data["colour"].to_list() if "colour" in data.columns
-                  else [self.default_aes["colour"]] * n)
-        fill = (data["fill"].to_list() if "fill" in data.columns
-                else colour)  # ggplot2: ``fill`` defaults to ``colour`` for fillable shapes.
-        size_arr = (data["size"].to_numpy() if "size" in data.columns
-                    else np.full(n, self.default_aes["size"]))
-        shape = (data["shape"].to_list() if "shape" in data.columns
-                 else [self.default_aes["shape"]] * n)
-        alpha_arr = (data["alpha"].to_numpy() if "alpha" in data.columns
-                     else np.full(n, self.default_aes["alpha"]))
+        colour = (
+            data["colour"].to_list()
+            if "colour" in data.columns
+            else [self.default_aes["colour"]] * n
+        )
+        fill = (
+            data["fill"].to_list() if "fill" in data.columns else colour
+        )  # ggplot2: ``fill`` defaults to ``colour`` for fillable shapes.
+        size_arr = (
+            data["size"].to_numpy()
+            if "size" in data.columns
+            else np.full(n, self.default_aes["size"])
+        )
+        shape = (
+            data["shape"].to_list()
+            if "shape" in data.columns
+            else [self.default_aes["shape"]] * n
+        )
+        alpha_arr = (
+            data["alpha"].to_numpy()
+            if "alpha" in data.columns
+            else np.full(n, self.default_aes["alpha"])
+        )
 
         s = (size_arr.astype(float) * _PT_PER_MM) ** 2
 
@@ -102,8 +117,17 @@ class GeomPoint(Geom):
             ax.scatter(x[mask], y[mask], **kw)
 
 
-def geom_point(mapping=None, data=None, *, stat="identity", position="identity",
-               na_rm=False, show_legend=True, inherit_aes=True, **kwargs):
+def geom_point(
+    mapping=None,
+    data=None,
+    *,
+    stat="identity",
+    position="identity",
+    na_rm=False,
+    show_legend=True,
+    inherit_aes=True,
+    **kwargs,
+):
     from ..layer import Layer
     from ..positions import resolve_position
     from ..stats import resolve_stat
@@ -124,11 +148,15 @@ def geom_point(mapping=None, data=None, *, stat="identity", position="identity",
     )
 
 
-def geom_jitter(mapping=None, data=None, *, width=None, height=None, seed=None,
-                **kwargs):
+def geom_jitter(
+    mapping=None, data=None, *, width=None, height=None, seed=None, **kwargs
+):
     """``geom_point(position=position_jitter(...))`` — shortcut matching ggplot2."""
     from ..positions.jitter import position_jitter
 
-    return geom_point(mapping=mapping, data=data,
-                      position=position_jitter(width=width, height=height, seed=seed),
-                      **kwargs)
+    return geom_point(
+        mapping=mapping,
+        data=data,
+        position=position_jitter(width=width, height=height, seed=seed),
+        **kwargs,
+    )

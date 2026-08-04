@@ -227,12 +227,14 @@ def test_rescale_theta_rescales_width():
 
 def test_rescale_theta_rescales_xmin_xmax_xend():
     c = coord_polar()
-    df = pl.DataFrame({
-        "x": [0.0, 1.0],
-        "xmin": [0.0, 0.5],
-        "xmax": [1.0, 1.5],
-        "xend": [0.5, 1.0],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [0.0, 1.0],
+            "xmin": [0.0, 0.5],
+            "xmax": [1.0, 1.5],
+            "xend": [0.5, 1.0],
+        }
+    )
     out = c.rescale_theta(df, (0.0, 1.0))
     np.testing.assert_allclose(out["xmax"].to_numpy(), [2 * math.pi, 3 * math.pi])
     np.testing.assert_allclose(out["xend"].to_numpy(), [math.pi, 2 * math.pi])
@@ -255,9 +257,7 @@ def test_coord_polar_bar_chart_renders_wedges_for_each_ordinal_level():
     coord_polar()``. With ``width=1``, each wedge's angular width should
     be the rescaled per-category slot."""
     df = pl.DataFrame({"cat": ["A", "B", "C", "D"] * 5})
-    p = (ggplot(df, aes(x="cat"))
-         + geom_bar(width=1)
-         + coord_polar())
+    p = ggplot(df, aes(x="cat")) + geom_bar(width=1) + coord_polar()
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -281,9 +281,11 @@ def test_coord_polar_continuous_x_keeps_radians_data():
     canonical recipe. Each point's data stays at its angular position."""
     angles = np.linspace(0, 2 * math.pi, 8, endpoint=False)
     df = pl.DataFrame({"theta": angles.tolist(), "r": [1.0] * 8})
-    p = (ggplot(df, aes(x="theta", y="r"))
-         + geom_point()
-         + coord_polar(start=math.pi / 2))
+    p = (
+        ggplot(df, aes(x="theta", y="r"))
+        + geom_point()
+        + coord_polar(start=math.pi / 2)
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -306,7 +308,7 @@ def test_coord_polar_suppresses_axis_titles_by_default():
     ylabel placement at 9 o'clock collides with the 180° tick label.
     Matches ggplot2's coord_polar conventions."""
     df = pl.DataFrame({"clarity": list("ABCDEFGH") * 5})
-    p = (ggplot(df, aes(x="clarity")) + geom_bar() + coord_polar())
+    p = ggplot(df, aes(x="clarity")) + geom_bar() + coord_polar()
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -321,9 +323,12 @@ def test_coord_polar_labs_opts_axis_titles_back_in():
     from hea.ggplot import labs
 
     df = pl.DataFrame({"clarity": list("ABCDEFGH") * 5})
-    p = (ggplot(df, aes(x="clarity"))
-         + geom_bar() + coord_polar()
-         + labs(x="Clarity", y="Count"))
+    p = (
+        ggplot(df, aes(x="clarity"))
+        + geom_bar()
+        + coord_polar()
+        + labs(x="Clarity", y="Count")
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -342,7 +347,7 @@ def test_coord_polar_ordinal_bars_tile_full_circle_without_seam_gap():
     ordinal-on-polar so positions [0..n-1] map cleanly into 2π."""
     n = 8
     df = pl.DataFrame({"cat": [chr(ord("A") + i) for i in range(n)] * 5})
-    p = (ggplot(df, aes(x="cat")) + geom_bar(width=1) + coord_polar())
+    p = ggplot(df, aes(x="cat")) + geom_bar(width=1) + coord_polar()
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -369,9 +374,7 @@ def test_coord_polar_continuous_rose_pins_angular_range_to_two_pi():
     n = 18
     beta = np.linspace(0, 2 * math.pi, n, endpoint=False).tolist()
     df = pl.DataFrame({"theta": beta, "h": [1.0] * n})
-    p = (ggplot(df, aes("theta", "h"))
-         + geom_col(width=2 * math.pi / n)
-         + coord_polar())
+    p = ggplot(df, aes("theta", "h")) + geom_col(width=2 * math.pi / n) + coord_polar()
     fig = p.draw()
     try:
         ax = fig.axes[0]

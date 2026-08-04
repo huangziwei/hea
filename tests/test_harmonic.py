@@ -27,18 +27,21 @@ from hea.R import fitted
 # --- shared deterministic dataset (mirrored exactly in the R reference) ------
 _X = np.arange(36, dtype=float)
 _P = 12.0
-_Y = (5.0 + 3.0 * np.cos(2 * np.pi * _X / _P)
-      - 2.0 * np.sin(2 * np.pi * _X / _P)
-      + 1.5 * np.cos(2 * np.pi * 2 * _X / _P)
-      + 0.5 * np.sin(2 * np.pi * 2 * _X / _P)
-      + 0.3 * _X)
+_Y = (
+    5.0
+    + 3.0 * np.cos(2 * np.pi * _X / _P)
+    - 2.0 * np.sin(2 * np.pi * _X / _P)
+    + 1.5 * np.cos(2 * np.pi * 2 * _X / _P)
+    + 0.5 * np.sin(2 * np.pi * 2 * _X / _P)
+    + 0.3 * _X
+)
 _DF = pl.DataFrame({"x": _X, "y": _Y})
 
 # lm(y ~ cos1 + sin1 + cos2 + sin2), R 4.6.0.
 # coef order: (Intercept), cos1, sin1, cos2, sin2
 _R_COEF = np.array([10.25, 2.7, -3.11961524227, 1.2, -0.01961524227])
 _R_SIGMA = 3.207784437
-_R_PRED_X = [36.0, 42.5, 50.0]            # fresh x, incl. non-integer
+_R_PRED_X = [36.0, 42.5, 50.0]  # fresh x, incl. non-integer
 _R_PRED = [14.15, 9.478838971, 8.281346652]
 
 
@@ -66,8 +69,7 @@ def test_harmonic_coef_labels_carry_suffixes():
     m = lm("y ~ harmonic(x, 2, period=12)", _DF)
     names = list(m.bhat.columns)
     assert names[0] == "(Intercept)"
-    assert [n.rsplit(")", 1)[-1] for n in names[1:]] == \
-        ["cos1", "sin1", "cos2", "sin2"]
+    assert [n.rsplit(")", 1)[-1] for n in names[1:]] == ["cos1", "sin1", "cos2", "sin2"]
 
 
 def test_harmonic_predict_is_stateless_R():
@@ -83,25 +85,24 @@ def test_harmonic_equals_explicit_cos_sin_terms():
     # identical fitted values (the classic cos+sin regression baseline).
     m_h = lm("y ~ harmonic(x, 2, period=12)", _DF)
     m_e = lm(
-        "y ~ cos(2*pi*x/12) + sin(2*pi*x/12)"
-        " + cos(2*pi*2*x/12) + sin(2*pi*2*x/12)",
+        "y ~ cos(2*pi*x/12) + sin(2*pi*x/12) + cos(2*pi*2*x/12) + sin(2*pi*2*x/12)",
         _DF,
     )
     np.testing.assert_allclose(
-        np.asarray(fitted(m_h)), np.asarray(fitted(m_e)), atol=1e-9)
+        np.asarray(fitted(m_h)), np.asarray(fitted(m_e)), atol=1e-9
+    )
 
 
 def test_harmonic_positional_and_keyword_forms_agree():
     # the count keyword accepts both `k` (canonical) and `K`
     # (forecast spelling); all forms give the same fit.
-    a = lm("y ~ harmonic(x, 2, 12)", _DF)               # all positional
+    a = lm("y ~ harmonic(x, 2, 12)", _DF)  # all positional
     for f in (
-        "y ~ harmonic(x, 2, period=12)",                # period keyword
-        "y ~ harmonic(x, k=2, period=12)",              # lowercase k
-        "y ~ harmonic(x, K=2, period=12)",              # capital K
+        "y ~ harmonic(x, 2, period=12)",  # period keyword
+        "y ~ harmonic(x, k=2, period=12)",  # lowercase k
+        "y ~ harmonic(x, K=2, period=12)",  # capital K
     ):
-        np.testing.assert_allclose(
-            np.asarray(lm(f, _DF).coef), np.asarray(a.coef))
+        np.testing.assert_allclose(np.asarray(lm(f, _DF).coef), np.asarray(a.coef))
 
 
 def test_harmonic_period_2pi_angular():
@@ -109,31 +110,36 @@ def test_harmonic_period_2pi_angular():
     # no `ts` involved. Exact 2-harmonic signal -> recovered coefficients.
     th = np.linspace(0.0, 2 * np.pi, 40, endpoint=False)
     yy = 1.0 + 0.8 * np.cos(th) - 0.5 * np.sin(th) + 0.3 * np.cos(2 * th)
-    m = lm("y ~ harmonic(theta, 2, period=2*pi)",
-           pl.DataFrame({"theta": th, "y": yy}))
+    m = lm("y ~ harmonic(theta, 2, period=2*pi)", pl.DataFrame({"theta": th, "y": yy}))
     np.testing.assert_allclose(
-        np.asarray(m.coef), [1.0, 0.8, -0.5, 0.3, 0.0], atol=1e-9)
+        np.asarray(m.coef), [1.0, 0.8, -0.5, 0.3, 0.0], atol=1e-9
+    )
 
 
 def test_harmonic_composes_with_smooth():
     x = np.arange(60, dtype=float)
-    d = pl.DataFrame({
-        "x": x,
-        "z": np.sin(x / 7.0),
-        "y": np.cos(2 * np.pi * x / 12) + 0.5 * x / 60,
-    })
+    d = pl.DataFrame(
+        {
+            "x": x,
+            "z": np.sin(x / 7.0),
+            "y": np.cos(2 * np.pi * x / 12) + 0.5 * x / 60,
+        }
+    )
     m = gam("y ~ harmonic(x, 2, period=12) + s(z)", d, method="REML")
     assert np.isfinite(m.edf_total)
     assert any("cos1" in c for c in m.X.columns)
 
 
-@pytest.mark.parametrize("formula, match", [
-    ("y ~ harmonic(x, 2)", "period"),                          # missing period
-    ("y ~ harmonic(x, 2, period=0)", "must be positive"),      # period <= 0
-    ("y ~ harmonic(x, 2, period=-3)", "must be positive"),
-    ("y ~ harmonic(x, 0, period=12)", "positive integer"),     # K < 1
-    ("y ~ harmonic(x, 2.5, period=12)", "positive integer"),   # non-integer K
-])
+@pytest.mark.parametrize(
+    "formula, match",
+    [
+        ("y ~ harmonic(x, 2)", "period"),  # missing period
+        ("y ~ harmonic(x, 2, period=0)", "must be positive"),  # period <= 0
+        ("y ~ harmonic(x, 2, period=-3)", "must be positive"),
+        ("y ~ harmonic(x, 0, period=12)", "positive integer"),  # K < 1
+        ("y ~ harmonic(x, 2.5, period=12)", "positive integer"),  # non-integer K
+    ],
+)
 def test_harmonic_errors(formula, match):
     with pytest.raises(ValueError, match=match):
         lm(formula, _DF)

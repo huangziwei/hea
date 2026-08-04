@@ -12,6 +12,7 @@ Cholesky (L Lᵀ == A) and **bit-identical across runs** (the property optimized
 BLAS does not promise) — the building block if the BLAS-flake-elimination path is
 ever pursued.
 """
+
 import numpy as np
 import pytest
 

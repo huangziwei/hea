@@ -71,10 +71,12 @@ class StatDensityRidges(Stat):
         xs_all = _to_clean_floats(data["x"])
         if xs_all.size == 0:
             return pl.DataFrame()
-        from_x = (float(self.from_) if self.from_ is not None
-                  else float(xs_all.min()) - 3 * bw)
-        to_x = (float(self.to) if self.to is not None
-                else float(xs_all.max()) + 3 * bw)
+        from_x = (
+            float(self.from_)
+            if self.from_ is not None
+            else float(xs_all.min()) - 3 * bw
+        )
+        to_x = float(self.to) if self.to is not None else float(xs_all.max()) + 3 * bw
         grid = np.linspace(from_x, to_x, self.n)
 
         # Carry per-group identifier columns through to the geom: y is
@@ -141,8 +143,7 @@ class StatDensityRidges(Stat):
             "count": density * len(x),
         }
         for col in preserve:
-            cols[col] = pl.Series([sub[col][0]] * len(grid),
-                                  dtype=sub[col].dtype)
+            cols[col] = pl.Series([sub[col][0]] * len(grid), dtype=sub[col].dtype)
         return pl.DataFrame(cols)
 
 

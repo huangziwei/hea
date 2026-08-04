@@ -7,6 +7,7 @@ Python regex; scalars return scalars. ``str_wrap`` is the wrap-to-width
 helper from stringr (textwrap-based); the rest mirror stringr's regex
 and case-folding surface.
 """
+
 from __future__ import annotations
 
 import textwrap
@@ -16,6 +17,7 @@ import polars as pl
 
 
 # ---- readr parsers --------------------------------------------------
+
 
 def parse_number(x):
     """readr's ``parse_number()`` — pull the first number out of a string column.
@@ -65,6 +67,7 @@ def parse_double(x):
 
 # ---- stringr --------------------------------------------------------
 
+
 def str_wrap(string, width=80, indent=0, exdent=0, whitespace_only=True):
     """stringr's ``str_wrap()`` — wrap text to a fixed line width.
 
@@ -90,6 +93,7 @@ def str_wrap(string, width=80, indent=0, exdent=0, whitespace_only=True):
     whitespace_only : bool, default True
         Only break at whitespace; never split a word or hyphenated token.
     """
+
     def _wrap_one(s):
         if s is None:
             return None
@@ -124,6 +128,7 @@ def str_c(*args, sep="", collapse=None):
             # this with ``.str.concat()`` at evaluation time.
             return e.str.concat(collapse)
         return e
+
     # Eager path: broadcast each arg to the longest length, then join.
     def _as_list(v):
         if isinstance(v, (pl.Series, np.ndarray)):
@@ -131,6 +136,7 @@ def str_c(*args, sep="", collapse=None):
         if isinstance(v, (list, tuple)):
             return list(v)
         return [v]
+
     cols = [_as_list(a) for a in args]
     if not cols:
         return ""
@@ -197,10 +203,7 @@ def str_glue(template, *, sep="", _envir=None):
             pieces.append(p)
 
     if needs_expr:
-        as_exprs = [
-            p if isinstance(p, pl.Expr) else pl.lit(p)
-            for p in pieces
-        ]
+        as_exprs = [p if isinstance(p, pl.Expr) else pl.lit(p) for p in pieces]
         return pl.concat_str(as_exprs, separator="")
     return "".join(str(p) for p in pieces)
 
@@ -245,6 +248,7 @@ def str_sub(x, start=0, end=None):
     to the end of the string). R / stringr's ``str_sub()`` is 1-based
     inclusive; hea follows Python.
     """
+
     # Inputs already use Python's 0-based half-open convention — pass
     # straight through to polars / native slicing.
     def _norm(s, e, length):
@@ -266,12 +270,16 @@ def str_sub(x, start=0, end=None):
             return x.str.slice(start, max(0, end - start))
         # Mixed signs: defer to a length-aware expression.
         len_expr = x.str.len_chars()
-        norm_start = pl.when(pl.lit(start) < 0).then(
-            (len_expr + pl.lit(start)).clip(lower_bound=0)
-        ).otherwise(pl.lit(start))
-        norm_end = pl.when(pl.lit(end) < 0).then(
-            (len_expr + pl.lit(end)).clip(lower_bound=0)
-        ).otherwise(pl.lit(end))
+        norm_start = (
+            pl.when(pl.lit(start) < 0)
+            .then((len_expr + pl.lit(start)).clip(lower_bound=0))
+            .otherwise(pl.lit(start))
+        )
+        norm_end = (
+            pl.when(pl.lit(end) < 0)
+            .then((len_expr + pl.lit(end)).clip(lower_bound=0))
+            .otherwise(pl.lit(end))
+        )
         return x.str.slice(norm_start, (norm_end - norm_start).clip(lower_bound=0))
     if isinstance(x, (pl.Series, list, tuple, np.ndarray)):
         out = []
@@ -280,7 +288,7 @@ def str_sub(x, start=0, end=None):
                 out.append(None)
                 continue
             s, n = _norm(start, end, len(v))
-            out.append(v[s:s + n])
+            out.append(v[s : s + n])
         if isinstance(x, pl.Series):
             return pl.Series(x.name, out)
         return out
@@ -288,7 +296,7 @@ def str_sub(x, start=0, end=None):
     if x is None:
         return None
     s, n = _norm(start, end, len(x))
-    return x[s:s + n]
+    return x[s : s + n]
 
 
 def str_to_upper(x, locale=None):

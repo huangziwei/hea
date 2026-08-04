@@ -27,6 +27,7 @@ from typing import Any
 # Elements
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class element_text:
     family: str | None = None
@@ -56,16 +57,14 @@ class element_text:
         self.angle = kwargs.pop("angle", None)
         self.lineheight = kwargs.pop("lineheight", None)
         if kwargs:
-            raise TypeError(
-                f"element_text(): unexpected kwargs {sorted(kwargs)}"
-            )
+            raise TypeError(f"element_text(): unexpected kwargs {sorted(kwargs)}")
 
 
 @dataclass
 class element_line:
     colour: str | None = None
     size: float | None = None  # in mm; matplotlib pt = mm * 2.8454
-    linetype: Any = None       # R lty int, name, or matplotlib dash tuple
+    linetype: Any = None  # R lty int, name, or matplotlib dash tuple
     lineend: str | None = None
 
     def __init__(self, *, color=None, colour=None, **kwargs):
@@ -80,9 +79,7 @@ class element_line:
         self.linetype = kwargs.pop("linetype", None)
         self.lineend = kwargs.pop("lineend", None)
         if kwargs:
-            raise TypeError(
-                f"element_line(): unexpected kwargs {sorted(kwargs)}"
-            )
+            raise TypeError(f"element_line(): unexpected kwargs {sorted(kwargs)}")
 
 
 @dataclass
@@ -104,9 +101,7 @@ class element_rect:
         self.size = kwargs.pop("size", None)
         self.linetype = kwargs.pop("linetype", None)
         if kwargs:
-            raise TypeError(
-                f"element_rect(): unexpected kwargs {sorted(kwargs)}"
-            )
+            raise TypeError(f"element_rect(): unexpected kwargs {sorted(kwargs)}")
 
 
 @dataclass
@@ -121,6 +116,7 @@ class element_blank:
 # ---------------------------------------------------------------------------
 # Theme
 # ---------------------------------------------------------------------------
+
 
 def _merge_element(base, override):
     """Override's non-None fields win over base's. For non-dataclass values
@@ -146,9 +142,14 @@ def _merge_element(base, override):
 # leave the panel.grid.major ``element_line`` from theme_minimal in
 # place — the user's panel.grid override never wins.
 _THEME_PARENT_TO_CHILDREN: dict = {
-    "panel.grid": ("panel.grid.major", "panel.grid.minor",
-                    "panel.grid.major.x", "panel.grid.major.y",
-                    "panel.grid.minor.x", "panel.grid.minor.y"),
+    "panel.grid": (
+        "panel.grid.major",
+        "panel.grid.minor",
+        "panel.grid.major.x",
+        "panel.grid.major.y",
+        "panel.grid.minor.x",
+        "panel.grid.minor.y",
+    ),
     "panel.grid.major": ("panel.grid.major.x", "panel.grid.major.y"),
     "panel.grid.minor": ("panel.grid.minor.x", "panel.grid.minor.y"),
     "axis.text": ("axis.text.x", "axis.text.y"),
@@ -185,8 +186,11 @@ class Theme:
             for child in _THEME_PARENT_TO_CHILDREN.get(name, ()):
                 merged.pop(child, None)
             existing = merged.get(name)
-            if existing is None or isinstance(value, element_blank) \
-                    or isinstance(existing, element_blank):
+            if (
+                existing is None
+                or isinstance(value, element_blank)
+                or isinstance(existing, element_blank)
+            ):
                 merged[name] = value
             elif type(existing) is type(value):
                 merged[name] = _merge_element(existing, value)
@@ -210,9 +214,7 @@ def theme(*args, **kwargs) -> Theme:
     if len(args) == 1 and isinstance(args[0], dict):
         elements.update(args[0])
     elif args:
-        raise TypeError(
-            "theme() takes optional kwargs and at most one positional dict"
-        )
+        raise TypeError("theme() takes optional kwargs and at most one positional dict")
     for key, value in kwargs.items():
         canonical = key.replace("_", ".")
         elements[canonical] = value
@@ -223,41 +225,45 @@ def theme(*args, **kwargs) -> Theme:
 # Theme presets — values mirror ggplot2/R/theme-defaults.R
 # ---------------------------------------------------------------------------
 
+
 def theme_gray() -> Theme:
     """ggplot2's default — gray panel, white gridlines, no axis spines."""
-    return Theme(elements={
-        "text": element_text(family="", size=11, colour="black"),
-        "axis.text": element_text(size=8.8, colour="grey30"),
-        "axis.title": element_text(size=11, colour="black"),
-        "axis.title.y": element_text(angle=90),
-        "axis.ticks": element_line(colour="grey20", size=0.25),
-        "axis.line": element_blank(),
-        # plot.title size = rel(1.2) × base 11pt = 13.2 (NOT 14).
-        # ggplot2 4.0 dropped face="bold" from plot.title — title is plain.
-        "plot.title": element_text(size=13.2, colour="black", hjust=0, vjust=1),
-        # plot.subtitle inherits base size (11pt), left-aligned, plain.
-        "plot.subtitle": element_text(size=11, colour="black", hjust=0, vjust=1),
-        # plot.caption size = rel(0.8) × 11 = 8.8pt, right-aligned, plain
-        # (NOT italic — that was a hea-specific deviation).
-        "plot.caption": element_text(size=8.8, colour="black", hjust=1, vjust=1),
-        # plot.tag size = rel(1.2) × 11 = 13.2pt, centered.
-        "plot.tag": element_text(size=13.2, colour="black", hjust=0.5, vjust=0.5),
-        "plot.background": element_rect(fill="white"),
-        "panel.background": element_rect(fill="#EBEBEB"),
-        "panel.border": element_blank(),
-        "panel.grid": element_line(colour="white"),
-        "panel.grid.major": element_line(colour="white", size=0.5),
-        "panel.grid.minor": element_line(colour="white", size=0.25),
-        "strip.text": element_text(size=8.8, colour="grey10"),
-        "strip.background": element_rect(fill="grey85"),
-        # Legend defaults — match ggplot2's ``theme_grey`` look:
-        # title left-aligned to the keys, each key glyph on a panel-colour
-        # rectangle (legend.key).
-        "legend.title": element_text(size=11, colour="black", hjust=0),
-        "legend.text": element_text(size=8.8, colour="grey10"),
-        "legend.key": element_rect(fill="#EBEBEB"),
-        "legend.background": element_rect(fill="white"),
-    }, complete=True)
+    return Theme(
+        elements={
+            "text": element_text(family="", size=11, colour="black"),
+            "axis.text": element_text(size=8.8, colour="grey30"),
+            "axis.title": element_text(size=11, colour="black"),
+            "axis.title.y": element_text(angle=90),
+            "axis.ticks": element_line(colour="grey20", size=0.25),
+            "axis.line": element_blank(),
+            # plot.title size = rel(1.2) × base 11pt = 13.2 (NOT 14).
+            # ggplot2 4.0 dropped face="bold" from plot.title — title is plain.
+            "plot.title": element_text(size=13.2, colour="black", hjust=0, vjust=1),
+            # plot.subtitle inherits base size (11pt), left-aligned, plain.
+            "plot.subtitle": element_text(size=11, colour="black", hjust=0, vjust=1),
+            # plot.caption size = rel(0.8) × 11 = 8.8pt, right-aligned, plain
+            # (NOT italic — that was a hea-specific deviation).
+            "plot.caption": element_text(size=8.8, colour="black", hjust=1, vjust=1),
+            # plot.tag size = rel(1.2) × 11 = 13.2pt, centered.
+            "plot.tag": element_text(size=13.2, colour="black", hjust=0.5, vjust=0.5),
+            "plot.background": element_rect(fill="white"),
+            "panel.background": element_rect(fill="#EBEBEB"),
+            "panel.border": element_blank(),
+            "panel.grid": element_line(colour="white"),
+            "panel.grid.major": element_line(colour="white", size=0.5),
+            "panel.grid.minor": element_line(colour="white", size=0.25),
+            "strip.text": element_text(size=8.8, colour="grey10"),
+            "strip.background": element_rect(fill="grey85"),
+            # Legend defaults — match ggplot2's ``theme_grey`` look:
+            # title left-aligned to the keys, each key glyph on a panel-colour
+            # rectangle (legend.key).
+            "legend.title": element_text(size=11, colour="black", hjust=0),
+            "legend.text": element_text(size=8.8, colour="grey10"),
+            "legend.key": element_rect(fill="#EBEBEB"),
+            "legend.background": element_rect(fill="white"),
+        },
+        complete=True,
+    )
 
 
 def _preset_from(base_func, overrides) -> Theme:
@@ -273,67 +279,82 @@ def _preset_from(base_func, overrides) -> Theme:
 
 def theme_bw() -> Theme:
     """White panel with a light gray grid and a black border."""
-    return _preset_from(theme_gray, {
-        "panel.background": element_rect(fill="white", colour="black"),
-        "panel.grid.major": element_line(colour="grey92", size=0.5),
-        "panel.grid.minor": element_line(colour="grey92", size=0.25),
-        "panel.border": element_rect(fill=None, colour="grey20", size=0.5),
-        "strip.background": element_rect(fill="grey85", colour="grey20"),
-    })
+    return _preset_from(
+        theme_gray,
+        {
+            "panel.background": element_rect(fill="white", colour="black"),
+            "panel.grid.major": element_line(colour="grey92", size=0.5),
+            "panel.grid.minor": element_line(colour="grey92", size=0.25),
+            "panel.border": element_rect(fill=None, colour="grey20", size=0.5),
+            "strip.background": element_rect(fill="grey85", colour="grey20"),
+        },
+    )
 
 
 def theme_minimal() -> Theme:
     """White panel, light gray gridlines, no border or axis spines."""
-    return _preset_from(theme_bw, {
-        "panel.background": element_blank(),
-        "plot.background": element_blank(),
-        "axis.line": element_blank(),
-        "axis.ticks": element_blank(),
-        "panel.border": element_blank(),
-    })
+    return _preset_from(
+        theme_bw,
+        {
+            "panel.background": element_blank(),
+            "plot.background": element_blank(),
+            "axis.line": element_blank(),
+            "axis.ticks": element_blank(),
+            "panel.border": element_blank(),
+        },
+    )
 
 
 def theme_classic() -> Theme:
     """White panel, no gridlines, black axis lines (statistics-textbook look)."""
-    return _preset_from(theme_bw, {
-        "panel.grid": element_blank(),
-        "panel.grid.major": element_blank(),
-        "panel.grid.minor": element_blank(),
-        "panel.border": element_blank(),
-        "axis.line": element_line(colour="black", size=0.5),
-        "axis.ticks": element_line(colour="black", size=0.25),
-    })
+    return _preset_from(
+        theme_bw,
+        {
+            "panel.grid": element_blank(),
+            "panel.grid.major": element_blank(),
+            "panel.grid.minor": element_blank(),
+            "panel.border": element_blank(),
+            "axis.line": element_line(colour="black", size=0.5),
+            "axis.ticks": element_line(colour="black", size=0.25),
+        },
+    )
 
 
 def theme_void() -> Theme:
     """Blanks out everything except data layers — useful for maps / collages."""
-    return Theme(elements={
-        "axis.text": element_blank(),
-        "axis.title": element_blank(),
-        "axis.ticks": element_blank(),
-        "axis.line": element_blank(),
-        "panel.background": element_blank(),
-        "panel.grid": element_blank(),
-        "panel.grid.major": element_blank(),
-        "panel.grid.minor": element_blank(),
-        "panel.border": element_blank(),
-        "plot.background": element_blank(),
-        "strip.text": element_blank(),
-        "strip.background": element_blank(),
-        "legend.title": element_blank(),
-        "legend.text": element_blank(),
-        "legend.key": element_blank(),
-        "legend.background": element_blank(),
-    }, complete=True)
+    return Theme(
+        elements={
+            "axis.text": element_blank(),
+            "axis.title": element_blank(),
+            "axis.ticks": element_blank(),
+            "axis.line": element_blank(),
+            "panel.background": element_blank(),
+            "panel.grid": element_blank(),
+            "panel.grid.major": element_blank(),
+            "panel.grid.minor": element_blank(),
+            "panel.border": element_blank(),
+            "plot.background": element_blank(),
+            "strip.text": element_blank(),
+            "strip.background": element_blank(),
+            "legend.title": element_blank(),
+            "legend.text": element_blank(),
+            "legend.key": element_blank(),
+            "legend.background": element_blank(),
+        },
+        complete=True,
+    )
 
 
 def theme_dark() -> Theme:
     """Inverted gray theme — dark panel, light gridlines."""
-    return _preset_from(theme_gray, {
-        "panel.background": element_rect(fill="grey50"),
-        "panel.grid.major": element_line(colour="grey42", size=0.5),
-        "panel.grid.minor": element_line(colour="grey42", size=0.25),
-    })
+    return _preset_from(
+        theme_gray,
+        {
+            "panel.background": element_rect(fill="grey50"),
+            "panel.grid.major": element_line(colour="grey42", size=0.5),
+            "panel.grid.minor": element_line(colour="grey42", size=0.25),
+        },
+    )
 
 
 # Default applied at ``ggplot.__init__`` time.

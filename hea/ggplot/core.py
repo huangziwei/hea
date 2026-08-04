@@ -54,6 +54,7 @@ class _PlotThemeHandle:
 
     def __call__(self, *args, **kwargs):
         from .theme import theme as theme_factory
+
         return self._plot + theme_factory(*args, **kwargs)
 
     def __getattr__(self, name):
@@ -136,6 +137,7 @@ class ggplot:
         if aes_kwargs:
             kwargs_aes = Aes()
             from .aes import _canon
+
             for k, v in aes_kwargs.items():
                 kwargs_aes[_canon(k)] = v
             mapping = (mapping if mapping is not None else Aes()) + kwargs_aes
@@ -155,6 +157,7 @@ class ggplot:
         # an auto-layout grid (R `library(patchwork)` semantics). Layer/Theme/
         # Scale/etc. on the rhs falls through to the singledispatch table.
         from .patchwork import GuideArea, PlotGrid, _grid_combine
+
         if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _grid_combine(self, other)
         return ggplot_add(other, self)
@@ -172,12 +175,14 @@ class ggplot:
     def __or__(self, other):
         """Patchwork horizontal composition."""
         from .patchwork import GuideArea, PlotGrid, _h_combine
+
         if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _h_combine(self, other)
         return NotImplemented
 
     def __ror__(self, other):
         from .patchwork import GuideArea, PlotGrid, _h_combine
+
         if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _h_combine(other, self)
         return NotImplemented
@@ -185,20 +190,30 @@ class ggplot:
     def __truediv__(self, other):
         """Patchwork vertical composition."""
         from .patchwork import GuideArea, PlotGrid, _v_combine
+
         if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _v_combine(self, other)
         return NotImplemented
 
     def __rtruediv__(self, other):
         from .patchwork import GuideArea, PlotGrid, _v_combine
+
         if isinstance(other, (ggplot, PlotGrid, GuideArea)):
             return _v_combine(other, self)
         return NotImplemented
 
     # ---- output ------------------------------------------------------
 
-    def draw(self, ax=None, *, subplotspec=None,
-             width=None, height=None, units="in", figsize=None):
+    def draw(
+        self,
+        ax=None,
+        *,
+        subplotspec=None,
+        width=None,
+        height=None,
+        units="in",
+        figsize=None,
+    ):
         """Build the plot and render it to a matplotlib :class:`Figure`.
 
         ``ax``: optional existing axes to draw into (e.g. one cell from
@@ -228,14 +243,17 @@ class ggplot:
             # gridspec margins (in inches) come out right; matplotlib
             # normalizes ratios against the actual figure size.
             from ._block import (
-                default_figsize_for, measure_block, render_block,
+                default_figsize_for,
+                measure_block,
+                render_block,
             )
             import matplotlib.pyplot as plt
 
             bo = build(self)
             block = measure_block(self, bo)
-            target = _resolve_figsize(width=width, height=height,
-                                       units=units, figsize=figsize)
+            target = _resolve_figsize(
+                width=width, height=height, units=units, figsize=figsize
+            )
             fig_w, fig_h = target if target is not None else default_figsize_for(block)
             fig = plt.figure(figsize=(fig_w, fig_h))
             render_block(self, bo, block, fig=fig)
@@ -248,15 +266,22 @@ class ggplot:
 
     def show(self, *, width=None, height=None, units="in", figsize=None) -> None:
         import matplotlib.pyplot as plt
+
         self.draw(width=width, height=height, units=units, figsize=figsize)
         plt.show()
 
-    def save(self, filename: str, *, width: float | None = None,
-             height: float | None = None, dpi: int = 300, units: str = "in",
-             figsize=None) -> None:
+    def save(
+        self,
+        filename: str,
+        *,
+        width: float | None = None,
+        height: float | None = None,
+        dpi: int = 300,
+        units: str = "in",
+        figsize=None,
+    ) -> None:
         fig = self.draw()
-        _resize_figure(fig, width=width, height=height,
-                       units=units, figsize=figsize)
+        _resize_figure(fig, width=width, height=height, units=units, figsize=figsize)
         fig.savefig(filename, dpi=dpi, bbox_inches="tight")
 
     def _repr_png_(self):
@@ -287,8 +312,7 @@ def _resolve_figsize(*, width, height, units, figsize) -> tuple[float, float] | 
     if figsize is not None:
         if width is not None or height is not None:
             raise TypeError(
-                "ggplot.draw/show/save: pass figsize=(w, h) OR width/height, "
-                "not both"
+                "ggplot.draw/show/save: pass figsize=(w, h) OR width/height, not both"
             )
         if not (isinstance(figsize, (list, tuple)) and len(figsize) == 2):
             raise TypeError(
@@ -313,8 +337,7 @@ def _resize_figure(fig, *, width, height, units, figsize) -> None:
     if figsize is not None:
         if width is not None or height is not None:
             raise TypeError(
-                "ggplot.draw/show/save: pass figsize=(w, h) OR width/height, "
-                "not both"
+                "ggplot.draw/show/save: pass figsize=(w, h) OR width/height, not both"
             )
         if not (isinstance(figsize, (list, tuple)) and len(figsize) == 2):
             raise TypeError(
@@ -331,8 +354,7 @@ def _resize_figure(fig, *, width, height, units, figsize) -> None:
             )
         units_in_inches = _UNIT_TO_INCHES[units]
 
-    fig.set_size_inches(float(width) * units_in_inches,
-                        float(height) * units_in_inches)
+    fig.set_size_inches(float(width) * units_in_inches, float(height) * units_in_inches)
     try:
         fig.tight_layout()
     except Exception:
@@ -410,6 +432,7 @@ def _(thing: Labels, plot):
 # case so this is currently a forward-compatible passthrough.
 from .guides import Guides as _Guides  # noqa: E402
 
+
 @ggplot_add.register
 def _(thing: _Guides, plot):
     from .aes import _canon
@@ -439,29 +462,45 @@ def _(thing: list, plot):
 # Names whose `name(...)` produces a value that's `+`-able into a ggplot.
 # Match by prefix:
 _FLUENT_INSTALL_PREFIXES = (
-    "geom_", "stat_", "scale_", "facet_", "coord_", "theme_",
+    "geom_",
+    "stat_",
+    "scale_",
+    "facet_",
+    "coord_",
+    "theme_",
 )
 # Match by exact name (top-level callables that aren't prefix-matched).
 # Note: ``theme`` is intentionally excluded — it collides with the
 # stored ``_theme`` field on ``ggplot``; the ``theme`` property +
 # :class:`_PlotThemeHandle` covers the fluent ``.theme(...)`` form
 # without needing a class-level method that the dataclass would shadow.
-_FLUENT_INSTALL_EXACT = frozenset({
-    "labs", "ggtitle", "xlab", "ylab", "xlim", "ylim", "lims", "annotate",
-    "guides",
-})
+_FLUENT_INSTALL_EXACT = frozenset(
+    {
+        "labs",
+        "ggtitle",
+        "xlab",
+        "ylab",
+        "xlim",
+        "ylim",
+        "lims",
+        "annotate",
+        "guides",
+    }
+)
 
 # Names that prefix-match but should NOT be installed:
 _FLUENT_SKIP_PREFIXES = (
     "position_",  # kwargs to geoms, not addable on their own
-    "element_",   # theme components, used inside theme(...) not added
-    "after_",     # aes-modifiers (after_stat, after_scale)
+    "element_",  # theme components, used inside theme(...) not added
+    "after_",  # aes-modifiers (after_stat, after_scale)
 )
 # Exact names to skip even if they'd otherwise pattern-match:
-_FLUENT_SKIP_EXACT = frozenset({
-    "aes",        # mapping arg, not addable
-    "ggplot",     # the class itself (also not in __all__-style match anyway)
-})
+_FLUENT_SKIP_EXACT = frozenset(
+    {
+        "aes",  # mapping arg, not addable
+        "ggplot",  # the class itself (also not in __all__-style match anyway)
+    }
+)
 
 
 def _should_install_fluent(name: str) -> bool:

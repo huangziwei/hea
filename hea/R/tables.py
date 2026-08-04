@@ -5,6 +5,7 @@
 Returns polars DataFrames rather than R's "table" S3 object — the first
 column carries the row labels, with one count column per ``y`` level.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -23,24 +24,20 @@ def table(x, y=None, *, dnn=None):
     """
     if y is None:
         s = pl.Series(x).drop_nulls().cast(pl.Utf8)
-        out = (
-            pl.DataFrame({"value": s})
-            .group_by("value").len(name="n")
-            .sort("value")
-        )
+        out = pl.DataFrame({"value": s}).group_by("value").len(name="n").sort("value")
         if dnn is not None:
             out = out.rename({"value": str(dnn[0])})
         return out
 
-    df = pl.DataFrame({
-        "__x__": pl.Series(x).cast(pl.Utf8),
-        "__y__": pl.Series(y).cast(pl.Utf8),
-    }).drop_nulls()
+    df = pl.DataFrame(
+        {
+            "__x__": pl.Series(x).cast(pl.Utf8),
+            "__y__": pl.Series(y).cast(pl.Utf8),
+        }
+    ).drop_nulls()
     counts = df.group_by(["__x__", "__y__"]).len(name="n")
     pivot = (
-        counts.pivot(values="n", index="__x__", on="__y__")
-        .fill_null(0)
-        .sort("__x__")
+        counts.pivot(values="n", index="__x__", on="__y__").fill_null(0).sort("__x__")
     )
     # sort columns alphabetically so output is reproducible (polars'
     # pivot uses encounter order, which depends on group_by ordering)
@@ -69,21 +66,21 @@ def xtabs(formula: str, data: pl.DataFrame):
             return table(data[cols[0]])
         if len(cols) == 2:
             return table(data[cols[0]], data[cols[1]], dnn=(cols[0], cols[1]))
-        raise NotImplementedError(
-            "xtabs(): 3+ way tables not supported"
-        )
+        raise NotImplementedError("xtabs(): 3+ way tables not supported")
     # Weighted form: ``w ~ a (+ b)`` — sum ``w`` per group.
     # Use polars directly (hea's GroupBy is dplyr-shaped).
     base = pl.DataFrame._from_pydf(data._df) if hasattr(data, "_df") else data
     if len(cols) == 1:
         return (
-            base.group_by(cols[0]).agg(pl.col(lhs).sum())
+            base.group_by(cols[0])
+            .agg(pl.col(lhs).sum())
             .sort(cols[0])
             .rename({lhs: "n"})
         )
     if len(cols) == 2:
         wide = (
-            base.group_by(cols).agg(pl.col(lhs).sum().alias("__w__"))
+            base.group_by(cols)
+            .agg(pl.col(lhs).sum().alias("__w__"))
             .pivot(values="__w__", index=cols[0], on=cols[1])
             .fill_null(0)
             .sort(cols[0])
@@ -91,9 +88,7 @@ def xtabs(formula: str, data: pl.DataFrame):
         label_col = cols[0]
         other_cols = sorted(c for c in wide.columns if c != label_col)
         return wide.select([label_col, *other_cols])
-    raise NotImplementedError(
-        "xtabs(): 3+ way weighted tables not supported"
-    )
+    raise NotImplementedError("xtabs(): 3+ way weighted tables not supported")
 
 
 def prop_table(tbl, margin=None):
@@ -117,7 +112,10 @@ def prop_table(tbl, margin=None):
         mat = tbl.select(count_cols).to_numpy().astype(float)
         mat = _apply_margin_proportion(mat, margin)
         return pl.DataFrame(
-            {label_col: tbl[label_col], **{c: mat[:, i] for i, c in enumerate(count_cols)}}
+            {
+                label_col: tbl[label_col],
+                **{c: mat[:, i] for i, c in enumerate(count_cols)},
+            }
         )
     arr = np.asarray(tbl, dtype=float)
     return _apply_margin_proportion(arr, margin)
@@ -155,10 +153,12 @@ def addmargins(tbl, margin=None):
         # 1-way: append a "Sum" row, cast `n` to keep types consistent
         n_total = float(tbl["n"].sum())
         n_cast = tbl["n"].cast(pl.Float64)
-        return pl.concat([
-            tbl.with_columns(n_cast),
-            pl.DataFrame({"value": ["Sum"], "n": [n_total]}),
-        ])
+        return pl.concat(
+            [
+                tbl.with_columns(n_cast),
+                pl.DataFrame({"value": ["Sum"], "n": [n_total]}),
+            ]
+        )
     label_col = tbl.columns[0]
     count_cols = tbl.columns[1:]
     mat = tbl.select(count_cols).to_numpy().astype(float)
@@ -166,9 +166,7 @@ def addmargins(tbl, margin=None):
     # Cast count columns to Float64 so the appended Sum row (float) lines up.
     new_tbl = tbl.with_columns(*(pl.col(c).cast(pl.Float64) for c in count_cols))
     if 2 in margins:
-        new_tbl = new_tbl.with_columns(
-            pl.Series("Sum", mat.sum(axis=1))
-        )
+        new_tbl = new_tbl.with_columns(pl.Series("Sum", mat.sum(axis=1)))
     if 1 in margins:
         sum_row: dict = {label_col: "Sum"}
         col_sums = mat.sum(axis=0)

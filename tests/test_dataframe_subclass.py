@@ -36,11 +36,15 @@ pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
 @pytest.fixture
 def df() -> DataFrame:
-    return tbl(pl.DataFrame({
-        "x": [1, 2, 3, 4],
-        "y": [4.0, 5.0, 6.0, 7.0],
-        "g": ["a", "a", "b", "b"],
-    }))
+    return tbl(
+        pl.DataFrame(
+            {
+                "x": [1, 2, 3, 4],
+                "y": [4.0, 5.0, 6.0, 7.0],
+                "g": ["a", "a", "b", "b"],
+            }
+        )
+    )
 
 
 @pytest.fixture
@@ -83,42 +87,103 @@ DF_NON_DF: set[str] = {
     # Returns LazyFrame — tested separately via the LazyFrame suite below.
     "lazy",
     # Returns Series.
-    "drop_in_place", "fold", "get_column", "hash_rows", "is_duplicated",
-    "is_unique", "max_horizontal", "mean_horizontal", "min_horizontal",
-    "sum_horizontal", "to_series", "to_struct",
+    "drop_in_place",
+    "fold",
+    "get_column",
+    "hash_rows",
+    "is_duplicated",
+    "is_unique",
+    "max_horizontal",
+    "mean_horizontal",
+    "min_horizontal",
+    "sum_horizontal",
+    "to_series",
+    "to_struct",
     # Returns scalar / collection / IO side-effect (not a frame).
-    "equals", "estimated_size", "get_column_index", "glimpse", "is_empty",
-    "item", "iter_columns", "iter_rows", "iter_slices", "n_chunks",
-    "n_unique", "row", "rows", "rows_by_key", "to_arrow", "to_dict",
-    "to_dicts", "to_init_repr", "to_jax", "to_numpy", "to_pandas", "to_torch",
+    "equals",
+    "estimated_size",
+    "get_column_index",
+    "glimpse",
+    "is_empty",
+    "item",
+    "iter_columns",
+    "iter_rows",
+    "iter_slices",
+    "n_chunks",
+    "n_unique",
+    "row",
+    "rows",
+    "rows_by_key",
+    "to_arrow",
+    "to_dict",
+    "to_dicts",
+    "to_init_repr",
+    "to_jax",
+    "to_numpy",
+    "to_pandas",
+    "to_torch",
     # Returns a different polars container.
-    "collect_schema", "get_columns", "group_by", "group_by_dynamic",
-    "partition_by", "rolling",
+    "collect_schema",
+    "get_columns",
+    "group_by",
+    "group_by_dynamic",
+    "partition_by",
+    "rolling",
     # Class methods / serialization / IO writes.
-    "deserialize", "serialize", "show",
-    "write_avro", "write_clipboard", "write_csv", "write_database",
-    "write_delta", "write_excel", "write_iceberg", "write_ipc",
-    "write_ipc_stream", "write_json", "write_ndjson", "write_parquet",
+    "deserialize",
+    "serialize",
+    "show",
+    "write_avro",
+    "write_clipboard",
+    "write_csv",
+    "write_database",
+    "write_delta",
+    "write_excel",
+    "write_iceberg",
+    "write_ipc",
+    "write_ipc_stream",
+    "write_json",
+    "write_ndjson",
+    "write_parquet",
     # Deprecated alias.
-    "melt", "with_row_count",
+    "melt",
+    "with_row_count",
 }
 
 # Public pl.LazyFrame methods whose return is not a LazyFrame.
 LF_NON_DF: set[str] = {
     # Materializing terminal ops (return DataFrame — tested in
     # ``test_lf_materializing_methods_return_hea_dataframe``).
-    "collect", "describe",
+    "collect",
+    "describe",
     # Materializing ops that return non-DataFrame containers.
-    "collect_async", "collect_batches", "execute", "fetch",
+    "collect_async",
+    "collect_batches",
+    "execute",
+    "fetch",
     # Sinks — write to disk, return None or async result.
-    "sink_batches", "sink_csv", "sink_delta", "sink_iceberg", "sink_ipc",
-    "sink_ndjson", "sink_parquet",
+    "sink_batches",
+    "sink_csv",
+    "sink_delta",
+    "sink_iceberg",
+    "sink_ipc",
+    "sink_ndjson",
+    "sink_parquet",
     # Returns scalar / different container / IO.
-    "collect_schema", "explain", "group_by", "group_by_dynamic",
-    "profile", "remote", "rolling", "show", "show_graph",
-    "deserialize", "serialize",
+    "collect_schema",
+    "explain",
+    "group_by",
+    "group_by_dynamic",
+    "profile",
+    "remote",
+    "rolling",
+    "show",
+    "show_graph",
+    "deserialize",
+    "serialize",
     # Deprecated.
-    "melt", "with_row_count",
+    "melt",
+    "with_row_count",
 }
 
 
@@ -128,193 +193,184 @@ LF_NON_DF: set[str] = {
 
 DF_METHODS = {
     # row verbs
-    "filter":            lambda d: d.filter(pl.col("x") > 1),
-    "remove":            lambda d: d.remove(pl.col("x") > 100),
-    "sort":              lambda d: d.sort("x"),
-    "head":              lambda d: d.head(2),
-    "tail":              lambda d: d.tail(2),
-    "limit":             lambda d: d.limit(2),
-    "slice":             lambda d: d.slice(0, 2),
-    "sample":            lambda d: d.sample(n=2, seed=0),
-    "gather":            lambda d: d.gather([0, 2]),
-    "gather_every":      lambda d: d.gather_every(2),
-    "reverse":           lambda d: d.reverse(),
-    "unique":            lambda d: d.unique(),
-    "shift":             lambda d: d.shift(1),
-    "set_sorted":        lambda d: d.set_sorted("x"),
-    "top_k":             lambda d: d.top_k(2, by="x"),
-    "bottom_k":          lambda d: d.bottom_k(2, by="x"),
-
+    "filter": lambda d: d.filter(pl.col("x") > 1),
+    "remove": lambda d: d.remove(pl.col("x") > 100),
+    "sort": lambda d: d.sort("x"),
+    "head": lambda d: d.head(2),
+    "tail": lambda d: d.tail(2),
+    "limit": lambda d: d.limit(2),
+    "slice": lambda d: d.slice(0, 2),
+    "sample": lambda d: d.sample(n=2, seed=0),
+    "gather": lambda d: d.gather([0, 2]),
+    "gather_every": lambda d: d.gather_every(2),
+    "reverse": lambda d: d.reverse(),
+    "unique": lambda d: d.unique(),
+    "shift": lambda d: d.shift(1),
+    "set_sorted": lambda d: d.set_sorted("x"),
+    "top_k": lambda d: d.top_k(2, by="x"),
+    "bottom_k": lambda d: d.bottom_k(2, by="x"),
     # column verbs
-    "with_columns":      lambda d: d.with_columns(z=pl.col("x") * 2),
-    "with_columns_seq":  lambda d: d.with_columns_seq(z=pl.col("x") * 2),
-    "with_row_index":    lambda d: d.with_row_index(),
-    "select":            lambda d: d.select("x"),
-    "select_seq":        lambda d: d.select_seq("x"),
-    "drop":              lambda d: d.drop("y"),
-    "rename":            lambda d: d.rename({"x": "X"}),
-    "cast":              lambda d: d.cast({pl.Int64: pl.Float64}),
-    "to_dummies":        lambda d: d.to_dummies(),
-    "transpose":         lambda d: d.transpose(),
-
+    "with_columns": lambda d: d.with_columns(z=pl.col("x") * 2),
+    "with_columns_seq": lambda d: d.with_columns_seq(z=pl.col("x") * 2),
+    "with_row_index": lambda d: d.with_row_index(),
+    "select": lambda d: d.select("x"),
+    "select_seq": lambda d: d.select_seq("x"),
+    "drop": lambda d: d.drop("y"),
+    "rename": lambda d: d.rename({"x": "X"}),
+    "cast": lambda d: d.cast({pl.Int64: pl.Float64}),
+    "to_dummies": lambda d: d.to_dummies(),
+    "transpose": lambda d: d.transpose(),
     # null handling
-    "drop_nulls":        lambda d: d.drop_nulls(),
-    "drop_nans":         lambda d: d.drop_nans(),
-    "fill_null":         lambda d: d.fill_null(0),
-    "fill_nan":          lambda d: d.fill_nan(0),
-    "interpolate":       lambda d: d.interpolate(),
-
+    "drop_nulls": lambda d: d.drop_nulls(),
+    "drop_nans": lambda d: d.drop_nans(),
+    "fill_null": lambda d: d.fill_null(0),
+    "fill_nan": lambda d: d.fill_nan(0),
+    "interpolate": lambda d: d.interpolate(),
     # joins / set ops
-    "join":              lambda d: d.join(d, on="x"),
-    "join_asof":         lambda d: d.sort("x").join_asof(d.sort("x"), on="x"),
-    "join_where":        lambda d: d.join_where(d, pl.col("x") < pl.col("x_right")),
-    "merge_sorted":      lambda d: d.sort("x").merge_sorted(d.sort("x"), key="x"),
-    "vstack":            lambda d: d.vstack(d),
-    "hstack":            lambda d: d.hstack([pl.Series("z", [10, 20, 30, 40])]),
-    "extend":            lambda d: d.clone().extend(d),
-    "update":            lambda d: d.update(d, on="x"),
-
+    "join": lambda d: d.join(d, on="x"),
+    "join_asof": lambda d: d.sort("x").join_asof(d.sort("x"), on="x"),
+    "join_where": lambda d: d.join_where(d, pl.col("x") < pl.col("x_right")),
+    "merge_sorted": lambda d: d.sort("x").merge_sorted(d.sort("x"), key="x"),
+    "vstack": lambda d: d.vstack(d),
+    "hstack": lambda d: d.hstack([pl.Series("z", [10, 20, 30, 40])]),
+    "extend": lambda d: d.clone().extend(d),
+    "update": lambda d: d.update(d, on="x"),
     # column-mutating in place but returning self
-    "insert_column":     lambda d: d.clone().insert_column(0, pl.Series("z", [10, 20, 30, 40])),
-    "replace_column":    lambda d: d.clone().replace_column(0, pl.Series("x", [10, 20, 30, 40])),
-
+    "insert_column": lambda d: d.clone().insert_column(
+        0, pl.Series("z", [10, 20, 30, 40])
+    ),
+    "replace_column": lambda d: d.clone().replace_column(
+        0, pl.Series("x", [10, 20, 30, 40])
+    ),
     # aggregations that return one-row DataFrame
-    "approx_n_unique":   lambda d: d.approx_n_unique(),
-    "count":             lambda d: d.count(),
-    "max":               lambda d: d.max(),
-    "mean":              lambda d: d.mean(),
-    "median":            lambda d: d.median(),
-    "min":               lambda d: d.min(),
-    "null_count":        lambda d: d.null_count(),
-    "product":           lambda d: d.product(),
-    "quantile":          lambda d: d.quantile(0.5),
-    "std":               lambda d: d.std(),
-    "sum":               lambda d: d.sum(),
-    "var":               lambda d: d.var(),
-
+    "approx_n_unique": lambda d: d.approx_n_unique(),
+    "count": lambda d: d.count(),
+    "max": lambda d: d.max(),
+    "mean": lambda d: d.mean(),
+    "median": lambda d: d.median(),
+    "min": lambda d: d.min(),
+    "null_count": lambda d: d.null_count(),
+    "product": lambda d: d.product(),
+    "quantile": lambda d: d.quantile(0.5),
+    "std": lambda d: d.std(),
+    "sum": lambda d: d.sum(),
+    "var": lambda d: d.var(),
     # storage / identity
-    "clone":             lambda d: d.clone(),
-    "clear":             lambda d: d.clear(),
-    "rechunk":           lambda d: d.rechunk(),
-    "shrink_to_fit":     lambda d: d.shrink_to_fit(),
-
+    "clone": lambda d: d.clone(),
+    "clear": lambda d: d.clear(),
+    "rechunk": lambda d: d.rechunk(),
+    "shrink_to_fit": lambda d: d.shrink_to_fit(),
     # reshape
-    "explode":           lambda d: tbl(pl.DataFrame({"a": [[1, 2]]})).explode("a"),
-    "pivot":             lambda d: d.pivot(on="g", values="y", aggregate_function="first"),
-    "unpivot":           lambda d: d.unpivot(on=["x", "y"], index="g"),
-    "unstack":           lambda d: d.unstack(step=2),
-
+    "explode": lambda d: tbl(pl.DataFrame({"a": [[1, 2]]})).explode("a"),
+    "pivot": lambda d: d.pivot(on="g", values="y", aggregate_function="first"),
+    "unpivot": lambda d: d.unpivot(on=["x", "y"], index="g"),
+    "unstack": lambda d: d.unstack(step=2),
     # bypass-_from_pydf overrides (Phase 3)
-    "describe":          lambda d: d.describe(),
-    "corr":              lambda d: d.select("x", "y").corr(),
-    "sql":               lambda d: d.sql("SELECT * FROM self"),
-    "match_to_schema":   lambda d: d.match_to_schema(d.collect_schema()),
-
+    "describe": lambda d: d.describe(),
+    "corr": lambda d: d.select("x", "y").corr(),
+    "sql": lambda d: d.sql("SELECT * FROM self"),
+    "match_to_schema": lambda d: d.match_to_schema(d.collect_schema()),
     # user functions
-    "pipe":              lambda d: d.pipe(lambda x: x.head(1)),
-    "map_rows":          lambda d: d.map_rows(lambda r: (r[0] * 2,)),
-    "map_columns":       lambda d: d.map_columns("x", lambda s: s * 2),
+    "pipe": lambda d: d.pipe(lambda x: x.head(1)),
+    "map_rows": lambda d: d.map_rows(lambda r: (r[0] * 2,)),
+    "map_columns": lambda d: d.map_columns("x", lambda s: s * 2),
 }
 
 
 LF_METHODS = {
     # row verbs
-    "filter":            lambda lf: lf.filter(pl.col("x") > 1),
-    "remove":            lambda lf: lf.remove(pl.col("x") > 100),
-    "sort":              lambda lf: lf.sort("x"),
-    "head":              lambda lf: lf.head(2),
-    "tail":              lambda lf: lf.tail(2),
-    "first":             lambda lf: lf.first(),
-    "last":              lambda lf: lf.last(),
-    "limit":             lambda lf: lf.limit(2),
-    "slice":             lambda lf: lf.slice(0, 2),
-    "gather":            lambda lf: lf.gather([0, 2]),
-    "gather_every":      lambda lf: lf.gather_every(2),
-    "reverse":           lambda lf: lf.reverse(),
-    "unique":            lambda lf: lf.unique(),
-    "shift":             lambda lf: lf.shift(1),
-    "set_sorted":        lambda lf: lf.set_sorted("x"),
-    "top_k":             lambda lf: lf.top_k(2, by="x"),
-    "bottom_k":          lambda lf: lf.bottom_k(2, by="x"),
-
+    "filter": lambda lf: lf.filter(pl.col("x") > 1),
+    "remove": lambda lf: lf.remove(pl.col("x") > 100),
+    "sort": lambda lf: lf.sort("x"),
+    "head": lambda lf: lf.head(2),
+    "tail": lambda lf: lf.tail(2),
+    "first": lambda lf: lf.first(),
+    "last": lambda lf: lf.last(),
+    "limit": lambda lf: lf.limit(2),
+    "slice": lambda lf: lf.slice(0, 2),
+    "gather": lambda lf: lf.gather([0, 2]),
+    "gather_every": lambda lf: lf.gather_every(2),
+    "reverse": lambda lf: lf.reverse(),
+    "unique": lambda lf: lf.unique(),
+    "shift": lambda lf: lf.shift(1),
+    "set_sorted": lambda lf: lf.set_sorted("x"),
+    "top_k": lambda lf: lf.top_k(2, by="x"),
+    "bottom_k": lambda lf: lf.bottom_k(2, by="x"),
     # column verbs
-    "with_columns":      lambda lf: lf.with_columns(z=pl.col("x") * 2),
-    "with_columns_seq":  lambda lf: lf.with_columns_seq(z=pl.col("x") * 2),
-    "with_row_index":    lambda lf: lf.with_row_index(),
-    "with_context":      lambda lf: lf.with_context(lf),
-    "select":            lambda lf: lf.select("x"),
-    "select_seq":        lambda lf: lf.select_seq("x"),
-    "drop":              lambda lf: lf.drop("y"),
-    "rename":            lambda lf: lf.rename({"x": "X"}),
-    "cast":              lambda lf: lf.cast({pl.Int64: pl.Float64}),
-
+    "with_columns": lambda lf: lf.with_columns(z=pl.col("x") * 2),
+    "with_columns_seq": lambda lf: lf.with_columns_seq(z=pl.col("x") * 2),
+    "with_row_index": lambda lf: lf.with_row_index(),
+    "with_context": lambda lf: lf.with_context(lf),
+    "select": lambda lf: lf.select("x"),
+    "select_seq": lambda lf: lf.select_seq("x"),
+    "drop": lambda lf: lf.drop("y"),
+    "rename": lambda lf: lf.rename({"x": "X"}),
+    "cast": lambda lf: lf.cast({pl.Int64: pl.Float64}),
     # null handling
-    "drop_nulls":        lambda lf: lf.drop_nulls(),
-    "drop_nans":         lambda lf: lf.drop_nans(),
-    "fill_null":         lambda lf: lf.fill_null(0),
-    "fill_nan":          lambda lf: lf.fill_nan(0),
-    "interpolate":       lambda lf: lf.interpolate(),
-
+    "drop_nulls": lambda lf: lf.drop_nulls(),
+    "drop_nans": lambda lf: lf.drop_nans(),
+    "fill_null": lambda lf: lf.fill_null(0),
+    "fill_nan": lambda lf: lf.fill_nan(0),
+    "interpolate": lambda lf: lf.interpolate(),
     # joins / set ops
-    "join":              lambda lf: lf.join(lf, on="x"),
-    "join_asof":         lambda lf: lf.sort("x").join_asof(lf.sort("x"), on="x"),
-    "join_where":        lambda lf: lf.join_where(lf, pl.col("x") < pl.col("x_right")),
-    "merge_sorted":      lambda lf: lf.sort("x").merge_sorted(lf.sort("x"), key="x"),
-    "update":            lambda lf: lf.update(lf, on="x"),
-
+    "join": lambda lf: lf.join(lf, on="x"),
+    "join_asof": lambda lf: lf.sort("x").join_asof(lf.sort("x"), on="x"),
+    "join_where": lambda lf: lf.join_where(lf, pl.col("x") < pl.col("x_right")),
+    "merge_sorted": lambda lf: lf.sort("x").merge_sorted(lf.sort("x"), key="x"),
+    "update": lambda lf: lf.update(lf, on="x"),
     # aggregations
-    "approx_n_unique":   lambda lf: lf.approx_n_unique(),
-    "count":             lambda lf: lf.count(),
-    "max":               lambda lf: lf.max(),
-    "mean":              lambda lf: lf.mean(),
-    "median":            lambda lf: lf.median(),
-    "min":               lambda lf: lf.min(),
-    "null_count":        lambda lf: lf.null_count(),
-    "quantile":          lambda lf: lf.quantile(0.5),
-    "std":               lambda lf: lf.std(),
-    "sum":               lambda lf: lf.sum(),
-    "var":               lambda lf: lf.var(),
-
+    "approx_n_unique": lambda lf: lf.approx_n_unique(),
+    "count": lambda lf: lf.count(),
+    "max": lambda lf: lf.max(),
+    "mean": lambda lf: lf.mean(),
+    "median": lambda lf: lf.median(),
+    "min": lambda lf: lf.min(),
+    "null_count": lambda lf: lf.null_count(),
+    "quantile": lambda lf: lf.quantile(0.5),
+    "std": lambda lf: lf.std(),
+    "sum": lambda lf: lf.sum(),
+    "var": lambda lf: lf.var(),
     # planning / introspection
-    "cache":             lambda lf: lf.cache(),
-    "lazy":              lambda lf: lf.lazy(),
-    "inspect":           lambda lf: lf.inspect(),
-
+    "cache": lambda lf: lf.cache(),
+    "lazy": lambda lf: lf.lazy(),
+    "inspect": lambda lf: lf.inspect(),
     # storage / identity
-    "clone":             lambda lf: lf.clone(),
-    "clear":             lambda lf: lf.clear(),
-
+    "clone": lambda lf: lf.clone(),
+    "clear": lambda lf: lf.clear(),
     # reshape
-    "explode":           lambda lf: tbl(pl.DataFrame({"a": [[1, 2]]})).lazy().explode("a"),
-    "unpivot":           lambda lf: lf.unpivot(on=["x", "y"], index="g"),
-    "unnest":            lambda lf: lf.with_columns(s=pl.struct("x", "y")).select("s").unnest("s"),
-
+    "explode": lambda lf: tbl(pl.DataFrame({"a": [[1, 2]]})).lazy().explode("a"),
+    "unpivot": lambda lf: lf.unpivot(on=["x", "y"], index="g"),
+    "unnest": lambda lf: lf.with_columns(s=pl.struct("x", "y")).select("s").unnest("s"),
     # bypass-_from_pyldf overrides (Phase 3)
-    "match_to_schema":   lambda lf: lf.match_to_schema(lf.collect_schema()),
-    "sql":               lambda lf: lf.sql("SELECT * FROM self"),
-
+    "match_to_schema": lambda lf: lf.match_to_schema(lf.collect_schema()),
+    "sql": lambda lf: lf.sql("SELECT * FROM self"),
     # user functions
-    "pipe":              lambda lf: lf.pipe(lambda x: x.head(1)),
-    "pipe_with_schema":  lambda lf: lf.pipe_with_schema(lambda x, schema: x.head(1)),
-    "map_batches":       lambda lf: lf.map_batches(lambda x: x.head(1)),
+    "pipe": lambda lf: lf.pipe(lambda x: x.head(1)),
+    "pipe_with_schema": lambda lf: lf.pipe_with_schema(lambda x, schema: x.head(1)),
+    "map_batches": lambda lf: lf.map_batches(lambda x: x.head(1)),
 }
 
 
 # DataFrame.unnest needs a struct column; not in the main fixture. Skip in
 # DF_METHODS but acknowledge in coverage by adding to DF_METHODS via a
 # specialised lambda.
-DF_METHODS["unnest"] = lambda d: d.with_columns(
-    s=pl.struct("x", "y")
-).select("s").unnest("s")
+DF_METHODS["unnest"] = lambda d: (
+    d.with_columns(s=pl.struct("x", "y")).select("s").unnest("s")
+)
 
 # upsample needs a temporal index column; build dedicated frame inline.
 DF_METHODS["upsample"] = lambda d: tbl(
-    pl.DataFrame({
-        "t": pl.datetime_range(
-            pl.datetime(2024, 1, 1), pl.datetime(2024, 1, 4), interval="1d", eager=True
-        ),
-        "v": [1, 2, 3, 4],
-    })
+    pl.DataFrame(
+        {
+            "t": pl.datetime_range(
+                pl.datetime(2024, 1, 1),
+                pl.datetime(2024, 1, 4),
+                interval="1d",
+                eager=True,
+            ),
+            "v": [1, 2, 3, 4],
+        }
+    )
 ).upsample("t", every="1d")
 
 
@@ -366,7 +422,9 @@ def test_lf_materializing_methods_return_hea_dataframe(lf: LazyFrame):
     )
 
     # Multi-step lazy chains should also stay in hea-land.
-    out2 = lf.filter(pl.col("x") > 0).with_columns(z=pl.col("x") + pl.col("y")).collect()
+    out2 = (
+        lf.filter(pl.col("x") > 0).with_columns(z=pl.col("x") + pl.col("y")).collect()
+    )
     assert isinstance(out2, DataFrame)
 
     # describe() is on LazyFrame but materializes — must return hea.tidy.DataFrame.
@@ -376,7 +434,8 @@ def test_lf_materializing_methods_return_hea_dataframe(lf: LazyFrame):
 
 def _public_callables(cls) -> set[str]:
     return {
-        name for name in dir(cls)
+        name
+        for name in dir(cls)
         if not name.startswith("_") and callable(getattr(cls, name, None))
     }
 
@@ -401,7 +460,9 @@ def test_df_method_coverage():
             "Add to DF_METHODS (returns DataFrame), DF_NON_DF (doesn't), or DF_ALLOWLIST."
         )
     if stale:
-        msgs.append(f"Categorized methods that no longer exist on pl.DataFrame: {sorted(stale)}")
+        msgs.append(
+            f"Categorized methods that no longer exist on pl.DataFrame: {sorted(stale)}"
+        )
     assert not msgs, "\n".join(msgs)
 
 
@@ -418,7 +479,9 @@ def test_lf_method_coverage():
             "Add to LF_METHODS (returns LazyFrame), LF_NON_DF (doesn't), or LF_ALLOWLIST."
         )
     if stale:
-        msgs.append(f"Categorized methods that no longer exist on pl.LazyFrame: {sorted(stale)}")
+        msgs.append(
+            f"Categorized methods that no longer exist on pl.LazyFrame: {sorted(stale)}"
+        )
     assert not msgs, "\n".join(msgs)
 
 
@@ -436,91 +499,127 @@ def test_lf_method_coverage():
 
 SERIES_METHODS = {
     # already preserved (use self._from_pyseries directly)
-    "head":          lambda s: s.head(2),
-    "tail":          lambda s: s.tail(2),
-    "limit":         lambda s: s.limit(2),
-    "slice":         lambda s: s.slice(0, 2),
-    "filter":        lambda s: s.filter(s > 1),
-    "sort":          lambda s: s.sort(),
-    "cast":          lambda s: s.cast(pl.Float64),
-    "clear":         lambda s: s.clear(),
-    "clone":         lambda s: s.clone(),
-    "rechunk":       lambda s: s.rechunk(),
+    "head": lambda s: s.head(2),
+    "tail": lambda s: s.tail(2),
+    "limit": lambda s: s.limit(2),
+    "slice": lambda s: s.slice(0, 2),
+    "filter": lambda s: s.filter(s > 1),
+    "sort": lambda s: s.sort(),
+    "cast": lambda s: s.cast(pl.Float64),
+    "clear": lambda s: s.clear(),
+    "clone": lambda s: s.clone(),
+    "rechunk": lambda s: s.rechunk(),
     "shrink_to_fit": lambda s: s.shrink_to_fit(),
-    "extend":        lambda s: s.clone().extend(s),
-    "append":        lambda s: s.clone().append(s),
-
+    "extend": lambda s: s.clone().extend(s),
+    "append": lambda s: s.clone().append(s),
     # expression-dispatched — representative sample (auto-wrapped by install)
-    "unique":        lambda s: s.unique(),
-    "reverse":       lambda s: s.reverse(),
-    "drop_nulls":    lambda s: s.drop_nulls(),
-    "fill_null":     lambda s: s.fill_null(0),
-    "shift":         lambda s: s.shift(1),
-    "top_k":         lambda s: s.top_k(2),
-    "bottom_k":      lambda s: s.bottom_k(2),
-    "sample":        lambda s: s.sample(n=2, seed=0),
-    "gather_every":  lambda s: s.gather_every(2),
-    "abs":           lambda s: s.abs(),
-    "sin":           lambda s: s.cast(pl.Float64).sin(),
-    "cum_sum":       lambda s: s.cum_sum(),
-    "rolling_mean":  lambda s: s.rolling_mean(2),
-    "diff":          lambda s: s.diff(),
-    "round":         lambda s: s.cast(pl.Float64).round(),
-    "is_null":       lambda s: s.is_null(),
-    "is_unique":     lambda s: s.is_unique(),
-    "rank":          lambda s: s.rank(),
-
+    "unique": lambda s: s.unique(),
+    "reverse": lambda s: s.reverse(),
+    "drop_nulls": lambda s: s.drop_nulls(),
+    "fill_null": lambda s: s.fill_null(0),
+    "shift": lambda s: s.shift(1),
+    "top_k": lambda s: s.top_k(2),
+    "bottom_k": lambda s: s.bottom_k(2),
+    "sample": lambda s: s.sample(n=2, seed=0),
+    "gather_every": lambda s: s.gather_every(2),
+    "abs": lambda s: s.abs(),
+    "sin": lambda s: s.cast(pl.Float64).sin(),
+    "cum_sum": lambda s: s.cum_sum(),
+    "rolling_mean": lambda s: s.rolling_mean(2),
+    "diff": lambda s: s.diff(),
+    "round": lambda s: s.cast(pl.Float64).round(),
+    "is_null": lambda s: s.is_null(),
+    "is_unique": lambda s: s.is_unique(),
+    "rank": lambda s: s.rank(),
     # explicit ``wrap_s`` sites
-    "set":           lambda s: s.set(pl.Series([True] + [False] * 5), 99),
-    "shrink_dtype":  lambda s: s.shrink_dtype(),
-
+    "set": lambda s: s.set(pl.Series([True] + [False] * 5), 99),
+    "shrink_dtype": lambda s: s.shrink_dtype(),
     # arithmetic + boolean (preserves via self._from_pyseries on operator dispatch)
-    "not_":          lambda s: Series("b", [True, False, True]).not_(),
-
+    "not_": lambda s: Series("b", [True, False, True]).not_(),
     # Comparison methods returning boolean Series.
-    "eq":            lambda s: s.eq(s),
-    "eq_missing":    lambda s: s.eq_missing(s),
-    "ne":            lambda s: s.ne(s),
-    "ne_missing":    lambda s: s.ne_missing(s),
-    "ge":            lambda s: s.ge(2),
-    "gt":            lambda s: s.gt(2),
-    "le":            lambda s: s.le(2),
-    "lt":            lambda s: s.lt(2),
-    "is_close":      lambda s: s.cast(pl.Float64).is_close(2.0),
-    "arg_true":      lambda s: Series("b", [True, False, True]).arg_true(),
-
+    "eq": lambda s: s.eq(s),
+    "eq_missing": lambda s: s.eq_missing(s),
+    "ne": lambda s: s.ne(s),
+    "ne_missing": lambda s: s.ne_missing(s),
+    "ge": lambda s: s.ge(2),
+    "gt": lambda s: s.gt(2),
+    "le": lambda s: s.le(2),
+    "lt": lambda s: s.lt(2),
+    "is_close": lambda s: s.cast(pl.Float64).is_close(2.0),
+    "arg_true": lambda s: Series("b", [True, False, True]).arg_true(),
     # Other element-wise.
-    "pow":           lambda s: s.pow(2),
+    "pow": lambda s: s.pow(2),
     "backward_fill": lambda s: Series("x", [1, None, 3]).backward_fill(),
-    "forward_fill":  lambda s: Series("x", [1, None, 3]).forward_fill(),
-    "set_sorted":    lambda s: s.set_sorted(),
+    "forward_fill": lambda s: Series("x", [1, None, 3]).forward_fill(),
+    "set_sorted": lambda s: s.set_sorted(),
 }
 
 # Series methods that return ``pl.DataFrame``. Tested separately to assert
 # they return ``hea.tidy.DataFrame``.
 SERIES_DF_METHODS = {
-    "to_frame":      lambda s: s.to_frame(),
-    "to_dummies":    lambda s: s.to_dummies(),
-    "value_counts":  lambda s: s.value_counts(),
-    "hist":          lambda s: s.cast(pl.Float64).hist(),
-    "describe":      lambda s: s.describe(),
+    "to_frame": lambda s: s.to_frame(),
+    "to_dummies": lambda s: s.to_dummies(),
+    "value_counts": lambda s: s.value_counts(),
+    "hist": lambda s: s.cast(pl.Float64).hist(),
+    "describe": lambda s: s.describe(),
 }
 
 
 # Methods that don't return Series or DataFrame (scalars, lists, bools, etc.).
 SERIES_NON_S: set[str] = {
     # scalars
-    "all", "any", "approx_n_unique", "arg_max", "arg_min", "bitwise_and",
-    "bitwise_or", "bitwise_xor", "count", "dot", "entropy", "estimated_size",
-    "first", "has_nulls", "has_validity", "index_of", "is_empty", "is_sorted",
-    "item", "kurtosis", "last", "len", "max", "mean", "median", "min",
-    "n_chunks", "n_unique", "nan_max", "nan_min", "null_count", "product",
-    "quantile", "search_sorted", "skew", "std", "sum", "var",
+    "all",
+    "any",
+    "approx_n_unique",
+    "arg_max",
+    "arg_min",
+    "bitwise_and",
+    "bitwise_or",
+    "bitwise_xor",
+    "count",
+    "dot",
+    "entropy",
+    "estimated_size",
+    "first",
+    "has_nulls",
+    "has_validity",
+    "index_of",
+    "is_empty",
+    "is_sorted",
+    "item",
+    "kurtosis",
+    "last",
+    "len",
+    "max",
+    "mean",
+    "median",
+    "min",
+    "n_chunks",
+    "n_unique",
+    "nan_max",
+    "nan_min",
+    "null_count",
+    "product",
+    "quantile",
+    "search_sorted",
+    "skew",
+    "std",
+    "sum",
+    "var",
     # collections / external
-    "chunk_lengths", "equals", "get_chunks", "to_arrow", "to_init_repr",
-    "to_jax", "to_list", "to_numpy", "to_pandas", "to_torch",
+    "chunk_lengths",
+    "equals",
+    "get_chunks",
+    "to_arrow",
+    "to_init_repr",
+    "to_jax",
+    "to_list",
+    "to_numpy",
+    "to_pandas",
+    "to_torch",
     # mutators / display
-    "alias", "rename",
+    "alias",
+    "rename",
     # take user fns and return Series shaped by the fn — preserves through __getitem__
     "map_elements",
     # complicated by-arg signatures / sql; hea.tidy.Series subclass still preserves
@@ -536,7 +635,8 @@ SERIES_NON_S: set[str] = {
     "sql",
     "implode",
     # scalar returns we missed earlier
-    "max_by", "min_by",
+    "max_by",
+    "min_by",
 }
 
 
@@ -548,12 +648,17 @@ def _series_auto_wrapped_methods() -> set[str]:
     that returns ``hea.tidy.Series`` after install.
     """
     from polars.series.utils import _is_empty_method, _undecorated
+
     out: set[str] = set()
     for name in dir(pl.Series):
         if name.startswith("_"):
             continue
         attr = pl.Series.__dict__.get(name)
-        if attr and hasattr(attr, "__wrapped__") and _is_empty_method(_undecorated(attr)):
+        if (
+            attr
+            and hasattr(attr, "__wrapped__")
+            and _is_empty_method(_undecorated(attr))
+        ):
             out.add(name)
     out |= {"set", "shrink_dtype"}  # explicit wrap_s sites
     return out
@@ -597,19 +702,19 @@ def test_df_series_returning_methods_return_hea_series(df: DataFrame):
     ``is_unique``, ``drop_in_place``, ``to_struct`` must return ``hea.tidy.Series``."""
     df_num = df.select("x", "y").cast({pl.Int64: pl.Float64})
     cases = [
-        ("get_column",     lambda: df.get_column("x")),
-        ("to_series",      lambda: df.to_series(0)),
-        ("__getitem__",    lambda: df["x"]),
+        ("get_column", lambda: df.get_column("x")),
+        ("to_series", lambda: df.to_series(0)),
+        ("__getitem__", lambda: df["x"]),
         ("min_horizontal", lambda: df_num.min_horizontal()),
         ("max_horizontal", lambda: df_num.max_horizontal()),
-        ("mean_horizontal",lambda: df_num.mean_horizontal()),
+        ("mean_horizontal", lambda: df_num.mean_horizontal()),
         ("sum_horizontal", lambda: df_num.sum_horizontal()),
-        ("fold",           lambda: df_num.fold(lambda a, b: a + b)),
-        ("hash_rows",      lambda: df.hash_rows()),
-        ("is_duplicated",  lambda: df.is_duplicated()),
-        ("is_unique",      lambda: df.is_unique()),
-        ("drop_in_place",  lambda: df.clone().drop_in_place("y")),
-        ("to_struct",      lambda: df.to_struct()),
+        ("fold", lambda: df_num.fold(lambda a, b: a + b)),
+        ("hash_rows", lambda: df.hash_rows()),
+        ("is_duplicated", lambda: df.is_duplicated()),
+        ("is_unique", lambda: df.is_unique()),
+        ("drop_in_place", lambda: df.clone().drop_in_place("y")),
+        ("to_struct", lambda: df.to_struct()),
     ]
     failures: list[str] = []
     for name, fn in cases:
@@ -622,7 +727,9 @@ def test_df_series_returning_methods_return_hea_series(df: DataFrame):
             failures.append(
                 f"  {name}: returned {type(result).__module__}.{type(result).__name__}"
             )
-    assert not failures, "DataFrame Series-returning methods leaked:\n" + "\n".join(failures)
+    assert not failures, "DataFrame Series-returning methods leaked:\n" + "\n".join(
+        failures
+    )
 
 
 def test_series_chain_round_trip(s: Series):
@@ -642,14 +749,15 @@ def test_series_method_coverage():
     public = _public_callables(pl.Series)
     auto_wrapped = _series_auto_wrapped_methods()
     categorized = (
-        set(SERIES_METHODS)
-        | auto_wrapped
-        | set(SERIES_DF_METHODS)
-        | SERIES_NON_S
+        set(SERIES_METHODS) | auto_wrapped | set(SERIES_DF_METHODS) | SERIES_NON_S
     )
     uncategorized = public - categorized
-    stale = categorized - public - auto_wrapped  # auto_wrapped may include names not in public if polars hides them
-    stale -= set(SERIES_METHODS) & auto_wrapped  # SERIES_METHODS overlaps with auto_wrapped intentionally
+    stale = (
+        categorized - public - auto_wrapped
+    )  # auto_wrapped may include names not in public if polars hides them
+    stale -= (
+        set(SERIES_METHODS) & auto_wrapped
+    )  # SERIES_METHODS overlaps with auto_wrapped intentionally
     msgs = []
     if uncategorized:
         msgs.append(

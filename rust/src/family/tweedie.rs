@@ -272,7 +272,8 @@ fn tweedious_work<'py>(
                 let xx = jf / onep2;
                 let xdig = xx * psigamma_scalar(nja, 0.0);
                 let wp1j0 = (jf * wp_base + xdig) - jf * logy1p2;
-                let wp2j0 = (jf * wp2_base + 2.0 * xdig / onep - psigamma_scalar(nja, 1.0) * xx * xx)
+                let wp2j0 = (jf * wp2_base + 2.0 * xdig / onep
+                    - psigamma_scalar(nja, 1.0) * xx * xx)
                     - 2.0 * jf * logy1p3;
                 let wp2j = wp1j0 * dpth2 + wp2j0 * dpth1 * dpth1;
                 let wp1j = wp1j0 * dpth1;

@@ -13,6 +13,7 @@ into hea's tidyverse-shaped surface.
   shared base, and the lazy GroupBy class at module import so the wrapping
   is invisible to user code.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -90,6 +91,7 @@ class Series(pl.Series):
             return True
         if self.name:
             from ..formula import _ORDERED_COLS_CV
+
             return self.name in _ORDERED_COLS_CV.get()
         return False
 
@@ -145,8 +147,7 @@ class Series(pl.Series):
 
         name = self.name or "value"
         df = DataFrame({name: self.rename(name)})
-        mapped_x = ("x" in aes_kwargs) or (
-            mapping is not None and "x" in mapping)
+        mapped_x = ("x" in aes_kwargs) or (mapping is not None and "x" in mapping)
         if not mapped_x:
             aes_kwargs["x"] = name
 
@@ -325,9 +326,9 @@ def _install_expr_r_aliases() -> None:
     ``col('x').cumsum()`` raises AttributeError on current polars.
     """
     aliases = {
-        "cumsum":  "cum_sum",
-        "cummax":  "cum_max",
-        "cummin":  "cum_min",
+        "cumsum": "cum_sum",
+        "cummax": "cum_max",
+        "cummin": "cum_min",
         "cumprod": "cum_prod",
     }
     for r_name, polars_name in aliases.items():
@@ -422,5 +423,3 @@ def _install_lazy_groupby_overrides() -> None:
 
 
 _install_lazy_groupby_overrides()
-
-

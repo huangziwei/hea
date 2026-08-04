@@ -13,6 +13,7 @@ and ``_anova_gmm`` for the LRT comparison between nested ``gmm`` fits
 *marginality* via ``_drop_scope`` and ``_add_scope`` so interactions
 don't get dropped while main effects remain (and vice versa).
 """
+
 from __future__ import annotations
 
 import inspect
@@ -37,8 +38,12 @@ from ..utils import (
 )
 
 
-def anova(*models, test: str | None = None, freq: bool = False,
-          dispersion: float | None = None):
+def anova(
+    *models,
+    test: str | None = None,
+    freq: bool = False,
+    dispersion: float | None = None,
+):
     """Compare nested fits, or decompose a single fit by Type-I SS.
 
     - One ``lm`` → sequential (Type I) ANOVA table, splitting the model's
@@ -74,9 +79,9 @@ def anova(*models, test: str | None = None, freq: bool = False,
     if len(models) == 0:
         raise TypeError("anova(): need at least one model")
     if (freq or dispersion is not None) and not (
-            len(models) == 1 and isinstance(models[0], gam)):
-        raise TypeError(
-            "anova(): freq=/dispersion= apply to the single-gam form only")
+        len(models) == 1 and isinstance(models[0], gam)
+    ):
+        raise TypeError("anova(): freq=/dispersion= apply to the single-gam form only")
     if len(models) == 1:
         m = models[0]
         if isinstance(m, gam):
@@ -113,9 +118,7 @@ def anova(*models, test: str | None = None, freq: bool = False,
         if test is not None:
             raise TypeError("anova(lm): test= is not accepted (always F)")
         return _anova_lm(*models, labels=labels)
-    raise TypeError(
-        "anova(): all models must be the same type (lm, glm, gam, or gmm)"
-    )
+    raise TypeError("anova(): all models must be the same type (lm, glm, gam, or gmm)")
 
 
 def drop1(model, *, test: str | None = None, k: float = 2.0):
@@ -168,9 +171,7 @@ def drop1(model, *, test: str | None = None, k: float = 2.0):
         return _drop1_glm(model, test=test, k=k)
     if isinstance(model, lm):
         return _drop1_lm(model, test=test, k=k)
-    raise TypeError(
-        f"drop1(): unsupported model type {type(model).__name__}"
-    )
+    raise TypeError(f"drop1(): unsupported model type {type(model).__name__}")
 
 
 def _drop_scope(terms) -> list[int]:
@@ -309,19 +310,31 @@ def add1(model, scope, *, test: str | None = None, k: float = 2.0):
     # upper_model for its terms list and ``_design_data``.
     if isinstance(model, glm):
         upper_model = glm(
-            upper_formula, model.data, family=model.family, weights=None,
+            upper_formula,
+            model.data,
+            family=model.family,
+            weights=None,
         )
         return _add1_glm(
-            model, upper_model._expanded.terms,
-            common_data=upper_model._design_data, test=test, k=k,
+            model,
+            upper_model._expanded.terms,
+            common_data=upper_model._design_data,
+            test=test,
+            k=k,
         )
     if isinstance(model, lm):
         upper_model = lm(
-            upper_formula, model.data, weights=None, method=model.method,
+            upper_formula,
+            model.data,
+            weights=None,
+            method=model.method,
         )
         return _add1_lm(
-            model, upper_model._expanded.terms,
-            common_data=upper_model._design_data, test=test, k=k,
+            model,
+            upper_model._expanded.terms,
+            common_data=upper_model._design_data,
+            test=test,
+            k=k,
         )
     raise TypeError(f"add1(): unsupported model type {type(model).__name__}")
 
@@ -329,9 +342,7 @@ def add1(model, scope, *, test: str | None = None, k: float = 2.0):
 def _add1_lm(m: lm, upper_terms, *, common_data, test: str | None, k: float):
     """Refit-with-each-term-added implementation behind ``add1(lm)``."""
     if test is not None and test.upper() != "F":
-        raise ValueError(
-            f"add1(lm): test must be 'F' or None; got {test!r}"
-        )
+        raise ValueError(f"add1(lm): test must be 'F' or None; got {test!r}")
     use_F = test is not None
 
     cur_terms = m._expanded.terms
@@ -369,14 +380,12 @@ def _add1_lm(m: lm, upper_terms, *, common_data, test: str | None, k: float):
         sub_formula = f"{lhs} ~ {intercept_str} + {sub_rhs}"
         m_aug = lm(sub_formula, common_data, **kw)
         d_df = df_full - m_aug.df_residuals  # positive (params gained)
-        d_rss = rss_full - m_aug.rss          # positive (rss reduction)
+        d_rss = rss_full - m_aug.rss  # positive (rss reduction)
 
         df_col.append(d_df)
         sos_col.append(round(d_rss, 4))
         rss_col.append(round(m_aug.rss, 4))
-        aic_col.append(
-            round(_extract_aic_lm(m_aug.rss, m_aug.df_residuals, n, k), 4)
-        )
+        aic_col.append(round(_extract_aic_lm(m_aug.rss, m_aug.df_residuals, n, k), 4))
         if use_F and d_df > 0:
             # F denom is the *augmented* model's MSE — mirror of drop1's
             # rule (denom is always the bigger model's residual MS).
@@ -392,11 +401,11 @@ def _add1_lm(m: lm, upper_terms, *, common_data, test: str | None, k: float):
             sig_col.append("")
 
     cols: dict[str, list] = {
-        "":          ["<none>"] + [upper_terms[i].label for i in add_indices],
-        "Df":        df_col,
+        "": ["<none>"] + [upper_terms[i].label for i in add_indices],
+        "Df": df_col,
         "Sum of Sq": sos_col,
-        "RSS":       rss_col,
-        "AIC":       aic_col,
+        "RSS": rss_col,
+        "AIC": aic_col,
     }
     if use_F:
         cols["F value"] = f_col
@@ -477,8 +486,8 @@ def _add1_glm(m: glm, upper_terms, *, common_data, test: str | None, k: float):
         sub_rhs = " + ".join(new_labels)
         sub_formula = f"{lhs} ~ {intercept_str} + {sub_rhs}"
         m_aug = glm(sub_formula, common_data, **kw)
-        d_df = df_full - m_aug.df_residual    # positive
-        d_dev = dev_full - m_aug.deviance     # positive
+        d_df = df_full - m_aug.df_residual  # positive
+        d_dev = dev_full - m_aug.deviance  # positive
         d_loglik = _delta_loglik(m_aug.deviance) if d_df > 0 else 0.0
 
         df_col.append(d_df)
@@ -508,10 +517,10 @@ def _add1_glm(m: glm, upper_terms, *, common_data, test: str | None, k: float):
             sig_col.append("")
 
     cols: dict[str, list] = {
-        "":         ["<none>"] + [upper_terms[i].label for i in add_indices],
-        "Df":       df_col,
+        "": ["<none>"] + [upper_terms[i].label for i in add_indices],
+        "Df": df_col,
         "Deviance": dev_col,
-        "AIC":      aic_col,
+        "AIC": aic_col,
     }
     if kind == "F":
         cols["F value"] = stat_col
@@ -625,17 +634,29 @@ def step(
     # set. The weights are reapplied via ``_refit_kwargs`` below.
     if is_glm:
         upper_model = glm(
-            f"{lhs} ~ {upper_rhs}", model.data, family=model.family, weights=None,
+            f"{lhs} ~ {upper_rhs}",
+            model.data,
+            family=model.family,
+            weights=None,
         )
         lower_model = glm(
-            f"{lhs} ~ {lower_rhs}", model.data, family=model.family, weights=None,
+            f"{lhs} ~ {lower_rhs}",
+            model.data,
+            family=model.family,
+            weights=None,
         )
     else:
         upper_model = lm(
-            f"{lhs} ~ {upper_rhs}", model.data, weights=None, method=model.method,
+            f"{lhs} ~ {upper_rhs}",
+            model.data,
+            weights=None,
+            method=model.method,
         )
         lower_model = lm(
-            f"{lhs} ~ {lower_rhs}", model.data, weights=None, method=model.method,
+            f"{lhs} ~ {lower_rhs}",
+            model.data,
+            weights=None,
+            method=model.method,
         )
     upper_terms = upper_model._expanded.terms
     lower_label_set = {t.label for t in lower_model._expanded.terms}
@@ -671,12 +692,11 @@ def step(
                 t = cur_terms[j]
                 if t.label in lower_label_set:
                     continue
-                rest = [
-                    cur_terms[i].label for i in range(len(cur_terms)) if i != j
-                ]
+                rest = [cur_terms[i].label for i in range(len(cur_terms)) if i != j]
                 sub_rhs_str = " + ".join(rest)
                 sub_formula = (
-                    f"{lhs} ~ {intercept_str} + {sub_rhs_str}" if sub_rhs_str
+                    f"{lhs} ~ {intercept_str} + {sub_rhs_str}"
+                    if sub_rhs_str
                     else f"{lhs} ~ {intercept_str}"
                 )
                 sub = _refit(sub_formula)
@@ -726,12 +746,14 @@ def _print_step_trace(current, cur_aic: float, candidates, is_glm: bool):
             df_diff = abs(sub.df_residual - current.df_residual)
             rows.append((label, df_diff, sub.deviance, aic))
         rows.sort(key=lambda r: r[3])
-        df_table = pl.DataFrame({
-            "":         [r[0] for r in rows],
-            "Df":       [r[1] for r in rows],
-            "Deviance": [round(r[2], 4) for r in rows],
-            "AIC":      [round(r[3], 2) for r in rows],
-        })
+        df_table = pl.DataFrame(
+            {
+                "": [r[0] for r in rows],
+                "Df": [r[1] for r in rows],
+                "Deviance": [round(r[2], 4) for r in rows],
+                "AIC": [round(r[3], 2) for r in rows],
+            }
+        )
     else:
         rows.append(("<none>", None, None, current.rss, cur_aic))
         for label, sub, aic in candidates:
@@ -739,13 +761,17 @@ def _print_step_trace(current, cur_aic: float, candidates, is_glm: bool):
             d_rss = abs(sub.rss - current.rss)
             rows.append((label, df_diff, d_rss, sub.rss, aic))
         rows.sort(key=lambda r: r[4])
-        df_table = pl.DataFrame({
-            "":          [r[0] for r in rows],
-            "Df":        [r[1] for r in rows],
-            "Sum of Sq": [round(r[2], 4) if r[2] is not None else None for r in rows],
-            "RSS":       [round(r[3], 4) for r in rows],
-            "AIC":       [round(r[4], 2) for r in rows],
-        })
+        df_table = pl.DataFrame(
+            {
+                "": [r[0] for r in rows],
+                "Df": [r[1] for r in rows],
+                "Sum of Sq": [
+                    round(r[2], 4) if r[2] is not None else None for r in rows
+                ],
+                "RSS": [round(r[3], 4) for r in rows],
+                "AIC": [round(r[4], 2) for r in rows],
+            }
+        )
     print()
     print(format_df(df_table))
 
@@ -767,9 +793,7 @@ def _extract_aic_lm(rss: float, df_residuals: int, n: int, k: float) -> float:
 def _drop1_lm(m: lm, *, test: str | None, k: float):
     """Refit-without-each-term implementation behind ``drop1(lm)``."""
     if test is not None and test.upper() != "F":
-        raise ValueError(
-            f"drop1(lm): test must be 'F' or None; got {test!r}"
-        )
+        raise ValueError(f"drop1(lm): test must be 'F' or None; got {test!r}")
     use_F = test is not None
 
     terms = m._expanded.terms
@@ -803,7 +827,8 @@ def _drop1_lm(m: lm, *, test: str | None, k: float):
         rest = [terms[i].label for i in range(len(terms)) if i != j]
         sub_rhs = " + ".join(rest) if rest else ""
         sub_formula = (
-            f"{lhs} ~ {intercept_str} + {sub_rhs}" if sub_rhs
+            f"{lhs} ~ {intercept_str} + {sub_rhs}"
+            if sub_rhs
             else f"{lhs} ~ {intercept_str}"
         )
         m_sub = lm(sub_formula, common_data, **kw)
@@ -826,11 +851,11 @@ def _drop1_lm(m: lm, *, test: str | None, k: float):
             sig_col.append("")
 
     cols: dict[str, list] = {
-        "":          ["<none>"] + [terms[j].label for j in scope],
-        "Df":        df_col,
+        "": ["<none>"] + [terms[j].label for j in scope],
+        "Df": df_col,
         "Sum of Sq": sos_col,
-        "RSS":       rss_col,
-        "AIC":       aic_col,
+        "RSS": rss_col,
+        "AIC": aic_col,
     }
     if use_F:
         cols["F value"] = f_col
@@ -911,7 +936,8 @@ def _drop1_glm(m: glm, *, test: str | None, k: float):
         rest = [terms[i].label for i in range(len(terms)) if i != j]
         sub_rhs = " + ".join(rest) if rest else ""
         sub_formula = (
-            f"{lhs} ~ {intercept_str} + {sub_rhs}" if sub_rhs
+            f"{lhs} ~ {intercept_str} + {sub_rhs}"
+            if sub_rhs
             else f"{lhs} ~ {intercept_str}"
         )
         m_sub = glm(sub_formula, common_data, **kw)
@@ -955,10 +981,10 @@ def _drop1_glm(m: glm, *, test: str | None, k: float):
             sig_col.append("")
 
     cols: dict[str, list] = {
-        "":         ["<none>"] + [terms[j].label for j in scope],
-        "Df":       df_col,
+        "": ["<none>"] + [terms[j].label for j in scope],
+        "Df": df_col,
         "Deviance": dev_col,
-        "AIC":      aic_col,
+        "AIC": aic_col,
     }
     if kind == "F":
         cols["F value"] = stat_col
@@ -1004,9 +1030,7 @@ def _drop1_gmm(model, *, test, k):
 
     terms = m._expanded.terms
     if not terms:
-        raise TypeError(
-            "drop1(gmm): need at least one fixed-effect term to drop"
-        )
+        raise TypeError("drop1(gmm): need at least one fixed-effect term to drop")
     lhs = m.formula.split("~", 1)[0].strip()
     intercept_str = "1" if m._expanded.intercept else "0"
     # Preserve the random-effect bars and any offset() exactly (deparse → the
@@ -1070,11 +1094,12 @@ def _drop1_gmm(model, *, test, k):
 def _anova_lm(*models, labels: list[str]):
     """F-test ANOVA table comparing nested ``lm`` fits."""
     # Sort ascending by npar (= descending by df_residuals, matching R).
-    order = sorted(range(len(models)), key=lambda i: models[i].df_residuals,
-                   reverse=True)
+    order = sorted(
+        range(len(models)), key=lambda i: models[i].df_residuals, reverse=True
+    )
 
-    dfs  = [models[i].df_residuals for i in order]
-    rss  = [models[i].rss           for i in order]
+    dfs = [models[i].df_residuals for i in order]
+    rss = [models[i].rss for i in order]
     # R uses the largest (least-constrained) model's MSE as the F denom.
     mse_full = rss[-1] / dfs[-1]
 
@@ -1105,16 +1130,18 @@ def _anova_lm(*models, labels: list[str]):
     for i, m in enumerate(models):
         docstring += f"{labels[i]}: {m.formula}\n"
 
-    df_ = pl.DataFrame({
-        "":          [labels[i] for i in order],
-        "Res.Df":    dfs,
-        "RSS":       [round(r, 3) for r in rss],
-        "Df":        df_col,
-        "Sum of Sq": sos_col,
-        "F":         f_col,
-        "Pr(>F)":    p_col,
-        " ":         sig_col,
-    })
+    df_ = pl.DataFrame(
+        {
+            "": [labels[i] for i in order],
+            "Res.Df": dfs,
+            "RSS": [round(r, 3) for r in rss],
+            "Df": df_col,
+            "Sum of Sq": sos_col,
+            "F": f_col,
+            "Pr(>F)": p_col,
+            " ": sig_col,
+        }
+    )
 
     print(docstring)
     print(format_df(df_))
@@ -1125,7 +1152,7 @@ def _anova_lm(*models, labels: list[str]):
 def _anova_lm_single(m: lm):
     """Sequential (Type I) ANOVA — R's ``anova.lm(m)`` for a single fit.
 
-    Mechanical port of ``stats:::anova.lm`` (``ref/r-stats/lm.R``): the
+    Mechanical port of ``stats:::anova.lm`` (``stats/R/lm.R``): the
     per-term sum of squares is ``split(effects[1:rank]^2, assign[pivot][1:rank])``
     — read off the fit's QR in **one** decomposition, no refits. R drops
     aliased columns to the right of the pivot; hea drops them from the design
@@ -1144,8 +1171,11 @@ def _anova_lm_single(m: lm):
 
     # R: ssr <- sum(w * residuals^2); dfr <- df.residual(object)
     e = np.asarray(m._residuals_arr, dtype=float)
-    w = np.asarray(m._w, dtype=float) if getattr(m, "_w", None) is not None \
+    w = (
+        np.asarray(m._w, dtype=float)
+        if getattr(m, "_w", None) is not None
         else np.ones_like(e)
+    )
     ssr = float(np.sum(w * e * e))
     dfr = m.df_residuals
     mse_full = ssr / dfr
@@ -1193,15 +1223,17 @@ def _anova_lm_single(m: lm):
     docstring = "Analysis of Variance Table\n\n"
     docstring += f"Response: {lhs}\n"
 
-    df_ = pl.DataFrame({
-        "":         labels,
-        "Df":       df_col,
-        "Sum Sq":   sos_col,
-        "Mean Sq":  ms_col,
-        "F value":  f_col,
-        "Pr(>F)":   p_col,
-        " ":        sig_col,
-    })
+    df_ = pl.DataFrame(
+        {
+            "": labels,
+            "Df": df_col,
+            "Sum Sq": sos_col,
+            "Mean Sq": ms_col,
+            "F value": f_col,
+            "Pr(>F)": p_col,
+            " ": sig_col,
+        }
+    )
 
     print(docstring)
     print(format_df(df_))
@@ -1209,8 +1241,7 @@ def _anova_lm_single(m: lm):
     print("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1")
 
 
-def _anova_gam_single(m: gam, freq: bool = False,
-                      dispersion: float | None = None):
+def _anova_gam_single(m: gam, freq: bool = False, dispersion: float | None = None):
     """``anova.gam``-style single-model output: parametric Terms table
     plus the smooth significance table. Mirrors mgcv's ``anova.gam`` for
     a single fit (which omits the lm-coefficient details that
@@ -1240,23 +1271,24 @@ def _anova_gam_single(m: gam, freq: bool = False,
     if rows:
         stat_col = "F" if est_disp else "Chi.sq"
         sig = significance_code([r[3] for r in rows])
-        tbl = pl.DataFrame({
-            "":        [r[0] for r in rows],
-            "df":      [r[1] for r in rows],
-            stat_col:  format_signif([r[2] for r in rows], digits=digits),
-            "p-value": format_pval([r[3] for r in rows],
-                                   digits=_dig_tst(digits)),
-            " ":       sig,
-        })
-        out.append("Parametric Terms:")
-        out.append(format_df(
-            tbl,
-            align={c: "right" for c in ("df", stat_col, "p-value")},
-        ))
-        out.append("---")
-        out.append(
-            "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
+        tbl = pl.DataFrame(
+            {
+                "": [r[0] for r in rows],
+                "df": [r[1] for r in rows],
+                stat_col: format_signif([r[2] for r in rows], digits=digits),
+                "p-value": format_pval([r[3] for r in rows], digits=_dig_tst(digits)),
+                " ": sig,
+            }
         )
+        out.append("Parametric Terms:")
+        out.append(
+            format_df(
+                tbl,
+                align={c: "right" for c in ("df", stat_col, "p-value")},
+            )
+        )
+        out.append("---")
+        out.append("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1")
         out.append("")
 
     # ---- Smooth significance table ---------------------------------------
@@ -1268,24 +1300,27 @@ def _anova_gam_single(m: gam, freq: bool = False,
         sm_rows = m._smooth_significance_rows(dispersion=dispersion)
         sig_smooth = significance_code([r[4] for r in sm_rows])
         stat_col = "F" if est_disp else "Chi.sq"
-        sm_tbl = pl.DataFrame({
-            "":        [r[0] for r in sm_rows],
-            "edf":     format_signif([r[1] for r in sm_rows], digits=digits),
-            "Ref.df":  format_signif([r[2] for r in sm_rows], digits=digits),
-            stat_col:  format_signif([r[3] for r in sm_rows], digits=digits),
-            "p-value": format_pval([r[4] for r in sm_rows],
-                                   digits=_dig_tst(digits)),
-            " ":       sig_smooth,
-        })
-        out.append("Approximate significance of smooth terms:")
-        out.append(format_df(
-            sm_tbl,
-            align={c: "right" for c in ("edf", "Ref.df", stat_col, "p-value")},
-        ))
-        out.append("---")
-        out.append(
-            "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1"
+        sm_tbl = pl.DataFrame(
+            {
+                "": [r[0] for r in sm_rows],
+                "edf": format_signif([r[1] for r in sm_rows], digits=digits),
+                "Ref.df": format_signif([r[2] for r in sm_rows], digits=digits),
+                stat_col: format_signif([r[3] for r in sm_rows], digits=digits),
+                "p-value": format_pval(
+                    [r[4] for r in sm_rows], digits=_dig_tst(digits)
+                ),
+                " ": sig_smooth,
+            }
         )
+        out.append("Approximate significance of smooth terms:")
+        out.append(
+            format_df(
+                sm_tbl,
+                align={c: "right" for c in ("edf", "Ref.df", stat_col, "p-value")},
+            )
+        )
+        out.append("---")
+        out.append("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1")
 
     print("\n".join(out))
 
@@ -1341,8 +1376,10 @@ def _anova_gam_table(*models: gam, labels: list[str], test: str | None = None):
     Returns ``(df, docstring)``. See ``_anova_gam`` for semantics.
     """
     fam0 = models[0].family
-    if not all(type(m.family) is type(fam0) and
-               m.family.link.name == fam0.link.name for m in models):
+    if not all(
+        type(m.family) is type(fam0) and m.family.link.name == fam0.link.name
+        for m in models
+    ):
         raise ValueError("anova(): all gam fits must share family and link")
 
     if test is None:
@@ -1409,11 +1446,11 @@ def _anova_gam_table(*models: gam, labels: list[str], test: str | None = None):
         docstring += f"{labels[i]}: {m.formula}\n"
 
     cols: dict[str, list] = {
-        "":           [labels[i] for i in order],
-        "Resid. Df":  [round(r, 4) for r in rdfs_sorted],
+        "": [labels[i] for i in order],
+        "Resid. Df": [round(r, 4) for r in rdfs_sorted],
         "Resid. Dev": [round(d, 4) for d in devs_sorted],
-        "Df":         df_col,
-        "Deviance":   dev_col,
+        "Df": df_col,
+        "Deviance": dev_col,
     }
     if test == "F":
         cols["F"] = stat_col
@@ -1460,8 +1497,10 @@ def _anova_glm_table(*models, labels: list[str], test: str | None = None):
     for the semantics of ``test=``.
     """
     fam0 = models[0].family
-    if not all(type(m.family) is type(fam0) and
-               m.family.link.name == fam0.link.name for m in models):
+    if not all(
+        type(m.family) is type(fam0) and m.family.link.name == fam0.link.name
+        for m in models
+    ):
         raise ValueError("anova(): all glm fits must share family and link")
 
     if test is None:
@@ -1485,8 +1524,9 @@ def _anova_glm_table(*models, labels: list[str], test: str | None = None):
             )
 
     # Sort ascending by npar (= descending by df_residuals), matching R.
-    order = sorted(range(len(models)), key=lambda i: models[i].df_residuals,
-                   reverse=True)
+    order = sorted(
+        range(len(models)), key=lambda i: models[i].df_residuals, reverse=True
+    )
     dfs = [models[i].df_residual for i in order]
     devs = [models[i].deviance for i in order]
     full = models[order[-1]]
@@ -1532,16 +1572,18 @@ def _anova_glm_table(*models, labels: list[str], test: str | None = None):
     stat_lbl = "F" if test == "F" else "Deviance"
     p_lbl = "Pr(>F)" if test == "F" else "Pr(>Chi)"
 
-    df_ = pl.DataFrame({
-        "":           [labels[i] for i in order],
-        "Resid. Df":  dfs,
-        "Resid. Dev": [round(d, 4) for d in devs],
-        "Df":         df_col,
-        "Deviance":   dev_col,
-        stat_lbl:     stat_col,
-        p_lbl:        p_col,
-        " ":          sig_col,
-    })
+    df_ = pl.DataFrame(
+        {
+            "": [labels[i] for i in order],
+            "Resid. Df": dfs,
+            "Resid. Dev": [round(d, 4) for d in devs],
+            "Df": df_col,
+            "Deviance": dev_col,
+            stat_lbl: stat_col,
+            p_lbl: p_col,
+            " ": sig_col,
+        }
+    )
     return df_, docstring
 
 
@@ -1572,10 +1614,15 @@ def _anova_gmm_single(model):
         ss_col.append(ss)
         ms_col.append(ss / df)
         f_col.append((ss / df) / sigma2)
-    return pl.DataFrame({
-        "": rows, "npar": npar, "Sum Sq": ss_col,
-        "Mean Sq": ms_col, "F value": f_col,
-    })
+    return pl.DataFrame(
+        {
+            "": rows,
+            "npar": npar,
+            "Sum Sq": ss_col,
+            "Mean Sq": ms_col,
+            "F value": f_col,
+        }
+    )
 
 
 def _anova_gmm(*models, labels: list[str]):
@@ -1626,7 +1673,11 @@ def _anova_gmm(*models, labels: list[str]):
         # spurious negative χ². Clamping makes p=1 for those rows.
         chisq = max(0.0, prev_dev - dev_val)
         d_df = m.npar - prev.npar
-        p = float(_dist.pchisq(chisq, d_df, lower_tail=False)) if d_df > 0 else float("nan")
+        p = (
+            float(_dist.pchisq(chisq, d_df, lower_tail=False))
+            if d_df > 0
+            else float("nan")
+        )
         chi_col.append(round(chisq, 4))
         dfc_col.append(d_df)
         p_col.append(float(f"{p:.4g}"))
@@ -1636,18 +1687,20 @@ def _anova_gmm(*models, labels: list[str]):
     for i, m in enumerate(models):
         docstring += f"{labels[i]}: {m.formula}\n"
 
-    df_ = pl.DataFrame({
-        "":           [labels[i] for i in order],
-        "npar":       npar_col,
-        "AIC":        aic_col,
-        "BIC":        bic_col,
-        "logLik":     ll_col,
-        "-2*log(L)":  dev_col,
-        "Chisq":      chi_col,
-        "Df":         dfc_col,
-        "Pr(>Chisq)": p_col,
-        " ":          sig_col,
-    })
+    df_ = pl.DataFrame(
+        {
+            "": [labels[i] for i in order],
+            "npar": npar_col,
+            "AIC": aic_col,
+            "BIC": bic_col,
+            "logLik": ll_col,
+            "-2*log(L)": dev_col,
+            "Chisq": chi_col,
+            "Df": dfc_col,
+            "Pr(>Chisq)": p_col,
+            " ": sig_col,
+        }
+    )
 
     print(docstring)
     print(format_df(df_))

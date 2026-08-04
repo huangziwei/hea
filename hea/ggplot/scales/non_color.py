@@ -32,35 +32,60 @@ from .scale import _NAME_MISSING
 # Size — continuous (default), area-proportional, manual, discrete
 # ---------------------------------------------------------------------------
 
-def scale_size_continuous(*, range=(1.0, 6.0), name=_NAME_MISSING, breaks="default",
-                         labels="default", limits=None):
+
+def scale_size_continuous(
+    *,
+    range=(1.0, 6.0),
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     return ScaleContinuousColor(
-        aesthetics=("size",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=rescale_pal(range_=range),
+        aesthetics=("size",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=rescale_pal(range_=range),
     )
 
 
-def scale_size_area(*, max_size=6.0, name=_NAME_MISSING, breaks="default",
-                   labels="default", limits=None):
+def scale_size_area(
+    *, max_size=6.0, name=_NAME_MISSING, breaks="default", labels="default", limits=None
+):
     """Area-proportional size: marker visual *area* tracks the data (not
     radius). ggplot2's recommended default for quantitative size mapping
     when zero is a meaningful baseline."""
     return ScaleContinuousColor(
-        aesthetics=("size",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=area_pal(range_=(0.0, max_size)),
+        aesthetics=("size",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=area_pal(range_=(0.0, max_size)),
     )
 
 
-def scale_size_manual(*, values, name=_NAME_MISSING, breaks="default",
-                     labels="default", limits=None):
+def scale_size_manual(
+    *, values, name=_NAME_MISSING, breaks="default", labels="default", limits=None
+):
     if isinstance(values, dict):
         return ScaleDiscreteColor(
-            aesthetics=("size",), name=name, breaks=breaks, labels=labels,
-            limits=limits, values=dict(values),
+            aesthetics=("size",),
+            name=name,
+            breaks=breaks,
+            labels=labels,
+            limits=limits,
+            values=dict(values),
         )
     return ScaleDiscreteColor(
-        aesthetics=("size",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=manual_pal(values),
+        aesthetics=("size",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=manual_pal(values),
     )
 
 
@@ -68,15 +93,25 @@ def scale_size_manual(*, values, name=_NAME_MISSING, breaks="default",
 scale_size = scale_size_continuous
 
 
-def scale_radius(*, range=(1.0, 6.0), name=_NAME_MISSING, breaks="default",
-                 labels="default", limits=None):
+def scale_radius(
+    *,
+    range=(1.0, 6.0),
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     """Linear-radius size scale. Unlike :func:`scale_size_area` (area ∝
     value), the *radius* tracks the value linearly. Most useful inside
     ``coord_polar`` for radial geoms, but applies anywhere ``size`` is
     mapped."""
     return ScaleContinuousColor(
-        aesthetics=("size",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=rescale_pal(range_=range),
+        aesthetics=("size",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=rescale_pal(range_=range),
     )
 
 
@@ -84,24 +119,44 @@ def scale_radius(*, range=(1.0, 6.0), name=_NAME_MISSING, breaks="default",
 # Alpha — continuous (default), manual
 # ---------------------------------------------------------------------------
 
-def scale_alpha_continuous(*, range=(0.1, 1.0), name=_NAME_MISSING, breaks="default",
-                          labels="default", limits=None):
+
+def scale_alpha_continuous(
+    *,
+    range=(0.1, 1.0),
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     return ScaleContinuousColor(
-        aesthetics=("alpha",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=alpha_pal(range_=range),
+        aesthetics=("alpha",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=alpha_pal(range_=range),
     )
 
 
-def scale_alpha_manual(*, values, name=_NAME_MISSING, breaks="default",
-                      labels="default", limits=None):
+def scale_alpha_manual(
+    *, values, name=_NAME_MISSING, breaks="default", labels="default", limits=None
+):
     if isinstance(values, dict):
         return ScaleDiscreteColor(
-            aesthetics=("alpha",), name=name, breaks=breaks, labels=labels,
-            limits=limits, values=dict(values),
+            aesthetics=("alpha",),
+            name=name,
+            breaks=breaks,
+            labels=labels,
+            limits=limits,
+            values=dict(values),
         )
     return ScaleDiscreteColor(
-        aesthetics=("alpha",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=manual_pal(values),
+        aesthetics=("alpha",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=manual_pal(values),
     )
 
 
@@ -112,23 +167,37 @@ scale_alpha = scale_alpha_continuous
 # Shape — discrete only (continuous shape doesn't make sense)
 # ---------------------------------------------------------------------------
 
+
 def scale_shape(*, name=_NAME_MISSING, breaks="default", labels="default", limits=None):
     return ScaleDiscreteColor(
-        aesthetics=("shape",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=shape_pal(),
+        aesthetics=("shape",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=shape_pal(),
     )
 
 
-def scale_shape_manual(*, values, name=_NAME_MISSING, breaks="default",
-                      labels="default", limits=None):
+def scale_shape_manual(
+    *, values, name=_NAME_MISSING, breaks="default", labels="default", limits=None
+):
     if isinstance(values, dict):
         return ScaleDiscreteColor(
-            aesthetics=("shape",), name=name, breaks=breaks, labels=labels,
-            limits=limits, values=dict(values),
+            aesthetics=("shape",),
+            name=name,
+            breaks=breaks,
+            labels=labels,
+            limits=limits,
+            values=dict(values),
         )
     return ScaleDiscreteColor(
-        aesthetics=("shape",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=manual_pal(values),
+        aesthetics=("shape",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=manual_pal(values),
     )
 
 
@@ -136,21 +205,37 @@ def scale_shape_manual(*, values, name=_NAME_MISSING, breaks="default",
 # Linetype — discrete only
 # ---------------------------------------------------------------------------
 
-def scale_linetype(*, name=_NAME_MISSING, breaks="default", labels="default", limits=None):
+
+def scale_linetype(
+    *, name=_NAME_MISSING, breaks="default", labels="default", limits=None
+):
     return ScaleDiscreteColor(
-        aesthetics=("linetype",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=linetype_pal(),
+        aesthetics=("linetype",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=linetype_pal(),
     )
 
 
-def scale_linetype_manual(*, values, name=_NAME_MISSING, breaks="default",
-                         labels="default", limits=None):
+def scale_linetype_manual(
+    *, values, name=_NAME_MISSING, breaks="default", labels="default", limits=None
+):
     if isinstance(values, dict):
         return ScaleDiscreteColor(
-            aesthetics=("linetype",), name=name, breaks=breaks, labels=labels,
-            limits=limits, values=dict(values),
+            aesthetics=("linetype",),
+            name=name,
+            breaks=breaks,
+            labels=labels,
+            limits=limits,
+            values=dict(values),
         )
     return ScaleDiscreteColor(
-        aesthetics=("linetype",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=manual_pal(values),
+        aesthetics=("linetype",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=manual_pal(values),
     )

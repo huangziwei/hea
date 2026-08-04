@@ -8,8 +8,11 @@ def test_flake8_fatal():
     """Catch syntax errors, undefined names, and f-string issues."""
     result = subprocess.run(
         [
-            sys.executable, "-m", "flake8",
-            "hea/", "tests/",
+            sys.executable,
+            "-m",
+            "flake8",
+            "hea/",
+            "tests/",
             "--jobs=1",
             "--select=E9,F63,F7,F82",
             "--count",

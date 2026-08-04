@@ -28,9 +28,9 @@ def _plot_emmeans_table(df: pl.DataFrame, *, comparisons=False, adjust=None, **_
     accepted for R parity; the comparison-arrows overlay is v1-deferred.
     """
     import hea  # local to avoid import-time cycles
+
     factor_col = next(
-        c for c in df.columns
-        if c not in {"emmean", "SE", "df", "lower.CL", "upper.CL"}
+        c for c in df.columns if c not in {"emmean", "SE", "df", "lower.CL", "upper.CL"}
     )
     # Rename CL columns for the hea aes mapping (dot-in-name kwargs are
     # awkward; the ymin/ymax aesthetics just need numeric columns).
@@ -61,8 +61,9 @@ def _frame_env(frame) -> dict:
     return {**frame.f_globals, **frame.f_locals}
 
 
-def plot(*args, data: pl.DataFrame | None = None, env: dict | None = None,
-         ax=None, **kwargs):
+def plot(
+    *args, data: pl.DataFrame | None = None, env: dict | None = None, ax=None, **kwargs
+):
     """Polars/matplotlib port of R's ``plot()`` dispatch.
 
     Forms:
@@ -112,8 +113,9 @@ def plot(*args, data: pl.DataFrame | None = None, env: dict | None = None,
             data = args[1]
         # Capture caller frame here while it's still on the stack at a known depth
         caller_env = _frame_env(inspect.currentframe().f_back)
-        return _plot_formula(a0, data=data, caller_env=caller_env, env=env,
-                             ax=ax, **kwargs)
+        return _plot_formula(
+            a0, data=data, caller_env=caller_env, env=env, ax=ax, **kwargs
+        )
 
     # Form: plot(x, y) — two vectors
     if len(args) == 2:
@@ -130,15 +132,24 @@ def plot(*args, data: pl.DataFrame | None = None, env: dict | None = None,
     )
 
 
-def _plot_formula(formula_str: str, *, data: pl.DataFrame | None,
-                  caller_env: dict, env: dict | None, ax, **kwargs):
+def _plot_formula(
+    formula_str: str,
+    *,
+    data: pl.DataFrame | None,
+    caller_env: dict,
+    env: dict | None,
+    ax,
+    **kwargs,
+):
     """Parse + evaluate a formula string, dispatch on RHS dtype."""
     if data is None:
         raise ValueError("plot(formula): `data=` is required for formula dispatch")
 
     f = parse(formula_str)
     if f.lhs is None:
-        raise ValueError("plot(formula): one-sided formula not supported (need LHS ~ RHS)")
+        raise ValueError(
+            "plot(formula): one-sided formula not supported (need LHS ~ RHS)"
+        )
 
     full_env = {**caller_env, **(env or {})}
 
@@ -151,6 +162,7 @@ def _plot_formula(formula_str: str, *, data: pl.DataFrame | None,
                 "plot(multi-RHS formula): pass each term separately when supplying ax="
             )
         import matplotlib.pyplot as plt
+
         fig, axarr = plt.subplots(1, n_panels, figsize=(4 * n_panels, 3))
         axes = list(axarr) if n_panels > 1 else [axarr]
         for i, term in enumerate(rhs_terms):
@@ -164,13 +176,16 @@ def _plot_formula(formula_str: str, *, data: pl.DataFrame | None,
 def _split_plus(node):
     """Top-level additive split — each ``+``-separated subexpression is one panel."""
     from ..formula import BinOp
+
     out = []
+
     def walk(n):
         if isinstance(n, BinOp) and n.op == "+":
             walk(n.left)
             walk(n.right)
         else:
             out.append(n)
+
     walk(node)
     return out
 

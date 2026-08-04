@@ -119,12 +119,15 @@ pub(crate) fn log1pmx(x: f64) -> f64 {
     let y = r * r;
     if x.abs() < 1e-2 {
         let two = 2.0;
-        return r
-            * rfma(
-                rfma(rfma(rfma(two / 9.0, y, two / 7.0), y, two / 5.0), y, two / 3.0),
+        return r * rfma(
+            rfma(
+                rfma(rfma(two / 9.0, y, two / 7.0), y, two / 5.0),
                 y,
-                -x,
-            );
+                two / 3.0,
+            ),
+            y,
+            -x,
+        );
     }
     let tol_logcf = 1e-14;
     r * rfma(2.0 * y, logcf(y, 3.0, 2.0, tol_logcf), -x)
@@ -481,11 +484,12 @@ pub fn dgamma_scalar(x: f64, shape: f64, scale: f64, give_log: bool) -> f64 {
         let pr = dpois_raw(shape, x / scale, give_log);
         if give_log {
             let sx = shape / x;
-            return pr + if sx.is_finite() {
-                sx.ln()
-            } else {
-                shape.ln() - x.ln()
-            };
+            return pr
+                + if sx.is_finite() {
+                    sx.ln()
+                } else {
+                    shape.ln() - x.ln()
+                };
         }
         return pr * shape / x;
     }
@@ -533,8 +537,7 @@ fn qchisq_appr(p: f64, nu: f64, g: f64, lower_tail: bool, log_p: bool, tol: f64)
             let q = ch;
             let p1c = 1.0 / rfma(ch, c7 + ch, 1.0);
             let p2 = ch * rfma(ch, c8 + ch, c9);
-            let t = rfma(rfma(2.0, ch, c7), p1c, -0.5)
-                - rfma(ch, rfma(3.0, ch, c10), c9) / p2;
+            let t = rfma(rfma(2.0, ch, c7), p1c, -0.5) - rfma(ch, rfma(3.0, ch, c10), c9) / p2;
             ch -= rfma(-(rfma(0.5, ch, a).exp() * p2), p1c, 1.0) / t;
             if !((q - ch).abs() > tol * ch.abs()) {
                 break;
@@ -624,7 +627,11 @@ pub fn qgamma_scalar(mut p: f64, alpha: f64, scale: f64, lower_tail: bool, mut l
                 rfma(a, rfma(a, rfma(a, rfma(60.0, a, 70.0), 84.0), 105.0), 140.0),
                 210.0,
             ) * i420;
-            let s2 = rfma(a, rfma(a, rfma(a, rfma(1278.0, a, 1141.0), 966.0), 735.0), 420.0) * i2520;
+            let s2 = rfma(
+                a,
+                rfma(a, rfma(a, rfma(1278.0, a, 1141.0), 966.0), 735.0),
+                420.0,
+            ) * i2520;
             let s3 = rfma(a, rfma(a, rfma(932.0, a, 707.0), 462.0), 210.0) * i2520;
             let s4 = rfma(
                 c,

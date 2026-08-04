@@ -106,20 +106,26 @@ class StatBoxplot(Stat):
         # ``Enum(['Fair','Good',...])`` x to plain Utf8 — which would
         # then sort alphabetically downstream and undo a deliberate
         # ``fct_reorder``. We cast back after concat below.
-        preserve_dtypes = {col: data[col].dtype for col in groupby_cols
-                           if col in data.columns}
+        preserve_dtypes = {
+            col: data[col].dtype for col in groupby_cols if col in data.columns
+        }
 
         if not groupby_cols:
-            row = self._row(data, keys=None, groupby_cols=(),
-                            x_is_discrete=x_is_discrete)
+            row = self._row(
+                data, keys=None, groupby_cols=(), x_is_discrete=x_is_discrete
+            )
             if row is None:
                 return pl.DataFrame()
             out = row
         else:
             rows = []
             for keys, sub in data.group_by(groupby_cols, maintain_order=True):
-                row = self._row(sub, keys=keys, groupby_cols=tuple(groupby_cols),
-                                x_is_discrete=x_is_discrete)
+                row = self._row(
+                    sub,
+                    keys=keys,
+                    groupby_cols=tuple(groupby_cols),
+                    x_is_discrete=x_is_discrete,
+                )
                 if row is not None:
                     rows.append(row)
             if not rows:
@@ -161,14 +167,16 @@ class StatBoxplot(Stat):
             # cross-axis position. Renaming (rather than passing a flag
             # through) lets the X scale auto-train on ``xmin``/``xmax``/…
             # via the existing ``_X_POSITIONAL_AES`` plumbing.
-            out = out.rename({
-                "x": "y",
-                "ymin": "xmin",
-                "lower": "xlower",
-                "middle": "xmiddle",
-                "upper": "xupper",
-                "ymax": "xmax",
-            })
+            out = out.rename(
+                {
+                    "x": "y",
+                    "ymin": "xmin",
+                    "lower": "xlower",
+                    "middle": "xmiddle",
+                    "upper": "xupper",
+                    "ymax": "xmax",
+                }
+            )
             out = out.with_columns(flipped_aes=pl.lit(True))
         return out
 
@@ -210,19 +218,22 @@ class StatBoxplot(Stat):
                 if col == "x":
                     continue
                 cols[col] = [key_val]
-        cols.update({
-            "ymin": [ymin],
-            "lower": [float(q[1])],
-            "middle": [float(q[2])],
-            "upper": [float(q[3])],
-            "ymax": [ymax],
-        })
+        cols.update(
+            {
+                "ymin": [ymin],
+                "lower": [float(q[1])],
+                "middle": [float(q[2])],
+                "upper": [float(q[3])],
+                "ymax": [ymax],
+            }
+        )
         df = pl.DataFrame(cols)
         # Polars list column needs explicit typing when the inner list is
         # numeric and might be empty.
         df = df.with_columns(
-            outliers=pl.Series("outliers", [outliers.tolist()],
-                               dtype=pl.List(pl.Float64)),
+            outliers=pl.Series(
+                "outliers", [outliers.tolist()], dtype=pl.List(pl.Float64)
+            ),
         )
         return df
 

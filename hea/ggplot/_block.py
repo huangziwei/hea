@@ -321,7 +321,9 @@ def _measure_legend_size(plot, build_output) -> tuple[float, float]:
         # the reserved height proportionally.
         cell_sizes = [
             M.legend_cell_size_horizontal_in(
-                g.title, g.labels, nrow=_user_nrow(g),
+                g.title,
+                g.labels,
+                nrow=_user_nrow(g),
             )
             for g in groups
         ]
@@ -357,8 +359,7 @@ def _predict_axis_tick_reserve_in(build_output, axis: str) -> float:
     if not labels:
         return _DEFAULT_YTICK_RESERVE_IN
     return (
-        M.max_label_width_in(labels, fontsize=M.AXIS_TEXT_SIZE_PT)
-        + _TICK_MARK_PAD_IN
+        M.max_label_width_in(labels, fontsize=M.AXIS_TEXT_SIZE_PT) + _TICK_MARK_PAD_IN
     )
 
 
@@ -405,9 +406,7 @@ def _predict_axis_tick_labels(build_output, axis: str) -> list[str] | None:
             return None
         # Log/log-like scales delegate to matplotlib's locator at render
         # time — we don't have an axes here to query, so bail.
-        if scale.breaks == "default" and not isinstance(
-            scale.transform, IdentityTrans
-        ):
+        if scale.breaks == "default" and not isinstance(scale.transform, IdentityTrans):
             return None
         if scale.breaks is None:
             return []
@@ -602,8 +601,7 @@ def render_block(
                 # ignores sharex/sharey for non-Cartesian projections
                 # anyway, and passing them produces warnings).
                 share_kw = (
-                    {} if is_polar
-                    else {"sharex": share_x_with, "sharey": share_y_with}
+                    {} if is_polar else {"sharex": share_x_with, "sharey": share_y_with}
                 )
                 ax = fig.add_subplot(
                     sub_gs[r, c],
@@ -701,7 +699,10 @@ def _render_single_into(
 
     if is_polar:
         _polar_apply_scales(
-            ax, x_scale, _panel_scale(build_output, 1, "y"), x_range,
+            ax,
+            x_scale,
+            _panel_scale(build_output, 1, "y"),
+            x_range,
         )
     else:
         for axis in ("x", "y"):
@@ -2174,10 +2175,7 @@ def _render_leaf_cell(
             for sc in range(sub_ncol):
                 share_x = _share_anchor(sharex, sr, sc, axes, row_axes, axis="x")
                 share_y = _share_anchor(sharey, sr, sc, axes, row_axes, axis="y")
-                share_kw = (
-                    {} if is_polar
-                    else {"sharex": share_x, "sharey": share_y}
-                )
+                share_kw = {} if is_polar else {"sharex": share_x, "sharey": share_y}
                 ax = fig.add_subplot(
                     sub_gs[sr, sc],
                     **share_kw,
@@ -2240,8 +2238,9 @@ def _render_leaf_cell(
             )
 
 
-def _allocate_legend_host_axes(fig, gs, panel_row_idx, right_col_idx, leaf, bo,
-                                block=None) -> list:
+def _allocate_legend_host_axes(
+    fig, gs, panel_row_idx, right_col_idx, leaf, bo, block=None
+) -> list:
     """Carve a host ``Axes`` per discrete legend group inside the
     margin cell on the side dictated by ``legend.position``.
 
@@ -2305,7 +2304,11 @@ def _allocate_legend_host_axes(fig, gs, panel_row_idx, right_col_idx, leaf, bo,
             legend_size = block.legend_h_in
             cbar_size = block.colorbar_h_in
         else:
-            total = block.margin_right_in if pos in (None, "right") else block.margin_left_in
+            total = (
+                block.margin_right_in
+                if pos in (None, "right")
+                else block.margin_left_in
+            )
             legend_size = block.legend_w_in
             cbar_size = block.colorbar_w_in
         decoration_size = max(total - legend_size - cbar_size, 0.0)
@@ -2335,12 +2338,17 @@ def _allocate_legend_host_axes(fig, gs, panel_row_idx, right_col_idx, leaf, bo,
             ]
             legend_row = 0
         outer = GridSpecFromSubplotSpec(
-            2, 1, subplot_spec=cell,
-            height_ratios=outer_ratios, hspace=0.0,
+            2,
+            1,
+            subplot_spec=cell,
+            height_ratios=outer_ratios,
+            hspace=0.0,
         )
         # Within the legend slice, lay out groups horizontally.
         inner = GridSpecFromSubplotSpec(
-            1, len(groups), subplot_spec=outer[legend_row, 0],
+            1,
+            len(groups),
+            subplot_spec=outer[legend_row, 0],
             wspace=0.0,
         )
         hosts = []
@@ -2357,11 +2365,13 @@ def _allocate_legend_host_axes(fig, gs, panel_row_idx, right_col_idx, leaf, bo,
     if pos == "left":
         outer_ratios = [
             max(decoration_size, 1e-6),  # ylabel/yticks closer to panel = right
-            max(legend_size, 1e-6),       # legend on outer = left
+            max(legend_size, 1e-6),  # legend on outer = left
         ]
         # legend slice is column 0 (leftmost = outer)
         outer = GridSpecFromSubplotSpec(
-            1, 2, subplot_spec=cell,
+            1,
+            2,
+            subplot_spec=cell,
             width_ratios=[outer_ratios[1], outer_ratios[0]],  # legend, then decoration
             wspace=0.0,
         )
@@ -2371,7 +2381,8 @@ def _allocate_legend_host_axes(fig, gs, panel_row_idx, right_col_idx, leaf, bo,
         legend_subspec = cell
 
     sub = GridSpecFromSubplotSpec(
-        len(groups), 1,
+        len(groups),
+        1,
         subplot_spec=legend_subspec,
         wspace=0.0,
         hspace=0.1 if len(groups) > 1 else 0.0,

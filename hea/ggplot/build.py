@@ -58,10 +58,26 @@ _NON_POSITIONAL_AES = ("colour", "fill", "size", "alpha", "shape", "linetype")
 # without ``lower``/``upper`` ``geom_boxplot`` would have no ``y`` column
 # to train on at all; without ``outliers`` (a list column) boxplot ticks
 # would max out at the upper whisker and miss outlier points drawn beyond.
-_X_POSITIONAL_AES = ("x", "xmin", "xmax", "xend", "xintercept",
-                     "xlower", "xmiddle", "xupper")
-_Y_POSITIONAL_AES = ("y", "ymin", "ymax", "yend", "yintercept",
-                     "lower", "middle", "upper")
+_X_POSITIONAL_AES = (
+    "x",
+    "xmin",
+    "xmax",
+    "xend",
+    "xintercept",
+    "xlower",
+    "xmiddle",
+    "xupper",
+)
+_Y_POSITIONAL_AES = (
+    "y",
+    "ymin",
+    "ymax",
+    "yend",
+    "yintercept",
+    "lower",
+    "middle",
+    "upper",
+)
 # ``outliers`` is a list column produced by stat_boxplot. It belongs on
 # the *distribution* axis, which is normally y but flips to x when the
 # layer's data carries ``flipped_aes=True``. Train it dynamically.
@@ -165,9 +181,8 @@ def _train_panel_scales(plot, scales, layers_data, layout) -> dict:
                 # outliers: same flipped/non-flipped routing as the global
                 # training step above. Only consider rows in this panel.
                 if _OUTLIERS_COLUMN in sub.columns:
-                    flipped = (
-                        "flipped_aes" in sub.columns
-                        and bool(sub["flipped_aes"].any())
+                    flipped = "flipped_aes" in sub.columns and bool(
+                        sub["flipped_aes"].any()
                     )
                     target = scale_x if flipped else scale_y
                     if target is not None:
@@ -227,7 +242,9 @@ def build(plot) -> BuildOutput:
         ld = _layer_data(layer, plot)
         mapping = _resolve_mapping(layer, plot)
         mapping, layer_eff_params = _promote_string_aes_params(
-            mapping, layer.aes_params, ld,
+            mapping,
+            layer.aes_params,
+            ld,
         )
         resolved.append((layer, ld, mapping, layer_eff_params))
 
@@ -303,9 +320,12 @@ def build(plot) -> BuildOutput:
     for df in pre_position:
         for axis in ("x", "y"):
             sibling_for_dtype = next(
-                (df[c] for c in _positional_aes_for(axis)
-                 if c in df.columns
-                 and not isinstance(df[c].dtype, _pl_for_dtype.List)),
+                (
+                    df[c]
+                    for c in _positional_aes_for(axis)
+                    if c in df.columns
+                    and not isinstance(df[c].dtype, _pl_for_dtype.List)
+                ),
                 None,
             )
             if sibling_for_dtype is not None:
@@ -363,20 +383,14 @@ def build(plot) -> BuildOutput:
         # ``flipped_aes`` is the per-row flag stat_boxplot tags onto its
         # output when the distribution lives on x; outliers (and any
         # other distribution-axis-only column) follow.
-        flipped = (
-            "flipped_aes" in df.columns
-            and bool(df["flipped_aes"].any())
-        )
+        flipped = "flipped_aes" in df.columns and bool(df["flipped_aes"].any())
         outliers_axis = "x" if flipped else "y"
         for aes_name, scale in list(scales.items()):
             if aes_name in ("x", "y"):
                 for col in _positional_aes_for(aes_name):
                     if col in df.columns:
                         _train_series(scale, df[col])
-                if (
-                    aes_name == outliers_axis
-                    and _OUTLIERS_COLUMN in df.columns
-                ):
+                if aes_name == outliers_axis and _OUTLIERS_COLUMN in df.columns:
                     _train_series(scale, df[_OUTLIERS_COLUMN])
             elif aes_name in df.columns:
                 scale.train(df[aes_name])
@@ -416,14 +430,17 @@ def build(plot) -> BuildOutput:
         df = _apply_default_aes(df, layer.geom)
         layers_data[i] = df
 
-    layer_mappings = [dict(m) if m is not None else {}
-                      for _, _, m, _ in resolved]
-    layer_aes_params_out = [dict(p) if p is not None else {}
-                            for _, _, _, p in resolved]
+    layer_mappings = [dict(m) if m is not None else {} for _, _, m, _ in resolved]
+    layer_aes_params_out = [dict(p) if p is not None else {} for _, _, _, p in resolved]
     return BuildOutput(
-        data=layers_data, scales=scales, layout=layout, aes_source=aes_source,
-        layer_mappings=layer_mappings, layer_aes_params=layer_aes_params_out,
-        panel_scales=panel_scales, coord=plot.coordinates,
+        data=layers_data,
+        scales=scales,
+        layout=layout,
+        aes_source=aes_source,
+        layer_mappings=layer_mappings,
+        layer_aes_params=layer_aes_params_out,
+        panel_scales=panel_scales,
+        coord=plot.coordinates,
     )
 
 
@@ -461,14 +478,18 @@ def _apply_deferred(df: pl.DataFrame, deferred: dict, env: dict) -> pl.DataFrame
     return df
 
 
-def _attach_facet_columns(df: pl.DataFrame, source: pl.DataFrame,
-                          facet_vars: list[str]) -> pl.DataFrame:
+def _attach_facet_columns(
+    df: pl.DataFrame, source: pl.DataFrame, facet_vars: list[str]
+) -> pl.DataFrame:
     """Inject facet variable columns from ``source`` into ``df`` so map_data
     can assign panels later. Only valid before stat (when row counts match)."""
     if not facet_vars or len(df) == 0 or len(df) != len(source):
         return df
-    cols = [source[v].alias(v) for v in facet_vars
-            if v in source.columns and v not in df.columns]
+    cols = [
+        source[v].alias(v)
+        for v in facet_vars
+        if v in source.columns and v not in df.columns
+    ]
     return df.with_columns(cols) if cols else df
 
 
@@ -504,9 +525,11 @@ def _drop_out_of_scale_limits(df: pl.DataFrame, scales) -> pl.DataFrame:
         if isinstance(sc, ScaleOrdinal):
             continue
         lo, hi = lim
+
         # Treat None/NaN as open bound on that side.
         def _is_open(b):
             return b is None or (isinstance(b, float) and _math.isnan(b))
+
         if _is_open(lo) and _is_open(hi):
             continue
         for sibling in _positional_aes_for(axis):
@@ -521,9 +544,7 @@ def _drop_out_of_scale_limits(df: pl.DataFrame, scales) -> pl.DataFrame:
             # numeric values throughout.
             s = df[sibling]
             if not s.dtype.is_numeric() and s.dtype != pl.Boolean:
-                df = df.with_columns(
-                    pl.Series(sibling, to_numeric_aes(s))
-                )
+                df = df.with_columns(pl.Series(sibling, to_numeric_aes(s)))
             col = pl.col(sibling)
             mask = pl.lit(True)
             if not _is_open(lo):
@@ -568,7 +589,9 @@ def _apply_scale_transforms_pre_stat(df: pl.DataFrame, scales) -> pl.DataFrame:
 
 
 def _apply_scale_transforms_post_stat(
-    df: pl.DataFrame, scales, pre_stat_cols: set[str],
+    df: pl.DataFrame,
+    scales,
+    pre_stat_cols: set[str],
 ) -> pl.DataFrame:
     """Apply positional scale transforms to columns the stat **generated**
     (e.g. ``geom_bar``'s ``y = count`` from ``stat_count``).
@@ -697,8 +720,7 @@ def _drop_na(df: pl.DataFrame, layer) -> pl.DataFrame:
 
         geom_name = _geom_factory_name(layer.geom)
         warnings.warn(
-            f"Removed {n_dropped} rows containing missing values "
-            f"(`{geom_name}()`).",
+            f"Removed {n_dropped} rows containing missing values (`{geom_name}()`).",
             UserWarning,
             stacklevel=4,
         )
@@ -732,7 +754,8 @@ def _add_group(df: pl.DataFrame) -> pl.DataFrame:
     # Only colour/fill drive auto-grouping in ggplot2 — adding size/alpha/etc.
     # would over-fragment groups (e.g. ``aes(size=mpg)`` would split each row).
     discrete_cols = [
-        col for col in df.columns
+        col
+        for col in df.columns
         if col in ("colour", "fill", "shape", "linetype")
         and df[col].dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean)
     ]
@@ -821,6 +844,7 @@ def _apply_aes_params(df: pl.DataFrame, layer, aes_params=None) -> pl.DataFrame:
         aes_params = layer.aes_params
     for k, v in aes_params.items():
         from .aes import _canon
+
         col = _canon(k)
         if n == 0:
             continue

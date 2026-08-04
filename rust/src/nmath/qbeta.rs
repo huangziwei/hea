@@ -280,8 +280,7 @@ pub(crate) fn qbeta_raw(alpha: f64, p: f64, q: f64, lower_tail: bool, log_p: boo
                 let w = if y == f64::NEG_INFINITY {
                     0.0
                 } else {
-                    (y - la)
-                        * rfma(t, r_log1_exp(u), rfma(r, u, y - u + logbeta)).exp()
+                    (y - la) * rfma(t, r_log1_exp(u), rfma(r, u, y - u + logbeta)).exp()
                 };
                 if !w.is_finite() {
                     if n_maybe_swaps <= 1 {
@@ -323,8 +322,7 @@ pub(crate) fn qbeta_raw(alpha: f64, p: f64, q: f64, lower_tail: bool, log_p: boo
             for i_pb in 0..1000 {
                 y = pbeta_raw(xinbta, pp, qq, true, log_p);
                 let w = if log_p {
-                    (y - la)
-                        * rfma(t, (-xinbta).ln_1p(), rfma(r, xinbta.ln(), y + logbeta)).exp()
+                    (y - la) * rfma(t, (-xinbta).ln_1p(), rfma(r, xinbta.ln(), y + logbeta)).exp()
                 } else {
                     (y - a) * rfma(t, (-xinbta).ln_1p(), rfma(r, xinbta.ln(), logbeta)).exp()
                 };

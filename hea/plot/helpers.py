@@ -74,9 +74,7 @@ def halfnorm(
     else:
         labels = [str(s) for s in labs]
     if len(labels) != n:
-        raise ValueError(
-            f"halfnorm(): labs has {len(labels)} entries but x has {n}"
-        )
+        raise ValueError(f"halfnorm(): labs has {len(labels)} entries but x has {n}")
 
     sort_idx = np.argsort(abs_x)
     sorted_vals = abs_x[sort_idx]
@@ -275,6 +273,7 @@ def pairs(
             return (lo - 1.0, hi + 1.0) if np.isfinite(lo) else (-1.0, 1.0)
         pad = frac * (hi - lo)
         return lo - pad, hi + pad
+
     ranges = {c: _padded(arrs[c]) for c in cols}
 
     for i in range(n):
@@ -286,8 +285,15 @@ def pairs(
                 if diag == "hist":
                     ax.hist(x_arr, color="lightgray", edgecolor="black")
                 elif diag == "label":
-                    ax.text(0.5, 0.5, labels[i], ha="center", va="center",
-                            transform=ax.transAxes, fontsize=12)
+                    ax.text(
+                        0.5,
+                        0.5,
+                        labels[i],
+                        ha="center",
+                        va="center",
+                        transform=ax.transAxes,
+                        fontsize=12,
+                    )
             else:
                 draw_points(ax, x_arr, y_arr, pch=pch, cex=cex, col=col)
 
@@ -296,20 +302,24 @@ def pairs(
                 ax.set_ylim(*ranges[cols[i]])
 
             # R's pairs.default perimeter tick rule (0-indexed):
-            top_lab = (i == 0 and j % 2 == 1)
-            bot_lab = (i == n - 1 and j % 2 == 0)
-            left_lab = (j == 0 and i % 2 == 1)
-            right_lab = (j == n - 1 and i % 2 == 0)
+            top_lab = i == 0 and j % 2 == 1
+            bot_lab = i == n - 1 and j % 2 == 0
+            left_lab = j == 0 and i % 2 == 1
+            right_lab = j == n - 1 and i % 2 == 0
             # diag="hist" puts counts on y, so a perimeter y-label here
             # would mislead — strip it for diagonal hist cells only.
             if i == j and diag == "hist":
                 left_lab = right_lab = False
 
             ax.tick_params(
-                top=top_lab, bottom=bot_lab,
-                left=left_lab, right=right_lab,
-                labeltop=top_lab, labelbottom=bot_lab,
-                labelleft=left_lab, labelright=right_lab,
+                top=top_lab,
+                bottom=bot_lab,
+                left=left_lab,
+                right=right_lab,
+                labeltop=top_lab,
+                labelbottom=bot_lab,
+                labelleft=left_lab,
+                labelright=right_lab,
             )
 
     if main is not None:
@@ -385,7 +395,9 @@ def interaction_plot(
     cells = np.full((len(t_levels), len(x_levels)), np.nan)
     for ti, tl in enumerate(t_levels):
         for xi, xl in enumerate(x_levels):
-            ys = df.filter((pl.col(x_name) == xl) & (pl.col(t_name) == tl))[y_name].to_numpy()
+            ys = df.filter((pl.col(x_name) == xl) & (pl.col(t_name) == tl))[
+                y_name
+            ].to_numpy()
             if ys.size:
                 cells[ti, xi] = float(fun(ys))
 
@@ -400,8 +412,9 @@ def interaction_plot(
     for ti, tl in enumerate(t_levels):
         ls = r_lty(((ti % 6) + 1)) if show_line else "None"
         marker = "o" if show_pts else None
-        ax.plot(x_pos, cells[ti], color="black",
-                linestyle=ls, marker=marker, label=str(tl))
+        ax.plot(
+            x_pos, cells[ti], color="black", linestyle=ls, marker=marker, label=str(tl)
+        )
 
     ax.set_xticks(x_pos)
     ax.set_xticklabels([str(xl) for xl in x_levels])
@@ -412,6 +425,8 @@ def interaction_plot(
     if legend:
         ax.legend(
             title=trace_label if trace_label is not None else t_name,
-            loc="best", frameon=False, fontsize="small",
+            loc="best",
+            frameon=False,
+            fontsize="small",
         )
     return ax

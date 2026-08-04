@@ -19,8 +19,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from scipy.linalg import qr, solve_triangular
-from scipy.stats import t as student_t
 
+from ..R import distributions as _dist
 from ..R import nmath as _nmath
 
 from ..family import (
@@ -53,21 +53,31 @@ __all__ = ["glm"]
 class _IRLSResult:
     """Converged Fisher-IRLS state. Same shape downstream code consumes for
     the main fit and the null-deviance fit."""
-    __slots__ = ("beta", "eta", "mu", "w", "deviance", "iter", "converged",
-                 "R", "rank", "X_used")
 
-    def __init__(self, *, beta, eta, mu, w, deviance, iter, converged,
-                 R, rank, X_used):
+    __slots__ = (
+        "beta",
+        "eta",
+        "mu",
+        "w",
+        "deviance",
+        "iter",
+        "converged",
+        "R",
+        "rank",
+        "X_used",
+    )
+
+    def __init__(self, *, beta, eta, mu, w, deviance, iter, converged, R, rank, X_used):
         self.beta = beta
-        self.eta = eta              # η = Xβ + offset
+        self.eta = eta  # η = Xβ + offset
         self.mu = mu
-        self.w = w                  # IRLS weights at convergence
+        self.w = w  # IRLS weights at convergence
         self.deviance = deviance
         self.iter = iter
         self.converged = converged
-        self.R = R                  # upper-triangular R of QR(√w · X)
+        self.R = R  # upper-triangular R of QR(√w · X)
         self.rank = rank
-        self.X_used = X_used        # X with rank-deficient columns dropped
+        self.X_used = X_used  # X with rank-deficient columns dropped
 
 
 def _fit_irls(
@@ -98,9 +108,12 @@ def _fit_irls(
     link: Link = family.link
     n, p = X.shape
 
-    mu = (family.initialize(y, prior_w, n=binom_n)
-          if binom_n is not None else family.initialize(y, prior_w))
-    eta = link.link(mu) - offset           # η excludes offset; offset added on use
+    mu = (
+        family.initialize(y, prior_w, n=binom_n)
+        if binom_n is not None
+        else family.initialize(y, prior_w)
+    )
+    eta = link.link(mu) - offset  # η excludes offset; offset added on use
     beta = np.zeros(p)
 
     # If mustart pushed μ to the boundary, do mgcv's startup nudge so the
@@ -131,7 +144,7 @@ def _fit_irls(
         # `w` uses ``sqrt(prior.weights * (mu.eta.val)^2 / variance(mu))``
         # in the QR step; we square that here and drop the sqrt back in
         # before QR.
-        w = prior_w * mu_eta_v ** 2 / V
+        w = prior_w * mu_eta_v**2 / V
         # working response z_i: η_i + (y_i − μ_i)/(dμ/dη)_i, in the
         # offset-stripped η so the LS solve recovers β directly.
         z = eta + (y - mu) / mu_eta_v
@@ -224,11 +237,19 @@ def _fit_irls(
     eta_full = eta + offset
     mu_eta_v = link.mu_eta(eta_full)
     V = family.variance(mu)
-    w_final = prior_w * mu_eta_v ** 2 / V
+    w_final = prior_w * mu_eta_v**2 / V
 
     return _IRLSResult(
-        beta=beta, eta=eta_full, mu=mu, w=w_final, deviance=dev,
-        iter=last_iter, converged=converged, R=R, rank=rank, X_used=X_used,
+        beta=beta,
+        eta=eta_full,
+        mu=mu,
+        w=w_final,
+        deviance=dev,
+        iter=last_iter,
+        converged=converged,
+        R=R,
+        rank=rank,
+        X_used=X_used,
     )
 
 
@@ -318,9 +339,11 @@ class glm:
         # pipeline runs unchanged. This must happen before prepare_design,
         # which doesn't accept Call() on the LHS.
         f_parsed = parse(formula)
-        _cbind = (isinstance(f_parsed.lhs, Call)
-                  and f_parsed.lhs.fn == "cbind"
-                  and len(f_parsed.lhs.args) == 2)
+        _cbind = (
+            isinstance(f_parsed.lhs, Call)
+            and f_parsed.lhs.fn == "cbind"
+            and len(f_parsed.lhs.args) == 2
+        )
         if _cbind:
             if not isinstance(self.family, (Binomial, QuasiBinomial)):
                 raise ValueError(
@@ -334,11 +357,12 @@ class glm:
             f = f_blk.values.flatten().astype(float)
             if np.any(s < 0) or np.any(f < 0):
                 raise ValueError("negative counts in cbind() response")
-            if (np.any(np.abs(s - np.rint(s)) > 0.001)
-                    or np.any(np.abs(f - np.rint(f)) > 0.001)):
+            if np.any(np.abs(s - np.rint(s)) > 0.001) or np.any(
+                np.abs(f - np.rint(f)) > 0.001
+            ):
                 import warnings
-                warnings.warn("non-integer counts in a binomial glm!",
-                              stacklevel=2)
+
+                warnings.warn("non-integer counts in a binomial glm!", stacklevel=2)
             tot = s + f
             with np.errstate(divide="ignore", invalid="ignore"):
                 p = np.where(tot > 0, s / tot, 0.0)
@@ -359,8 +383,8 @@ class glm:
         d = prepare_design(formula, data, basis_state=self._basis_state)
         self._expanded = d.expanded
         self._design_data = d.data
-        self.X = d.X                                  # pl.DataFrame
-        self.y = d.y                                  # pl.Series
+        self.X = d.X  # pl.DataFrame
+        self.y = d.y  # pl.Series
 
         # Reuse the design's F-order numpy buffer (the same one ``self.X`` views)
         # directly — IRLS reads X read-only (it row-scales / column-subsets into
@@ -378,12 +402,13 @@ class glm:
         self._y_numeric = y
         n, p = X.shape
 
-        prior_w = (np.ones(n) if weights is None
-                   else np.asarray(weights, dtype=float).flatten())
+        prior_w = (
+            np.ones(n)
+            if weights is None
+            else np.asarray(weights, dtype=float).flatten()
+        )
         if prior_w.shape != (n,):
-            raise ValueError(
-                f"weights must have length {n}, got {prior_w.shape}"
-            )
+            raise ValueError(f"weights must have length {n}, got {prior_w.shape}")
         if np.any(prior_w < 0):
             raise ValueError("negative weights not allowed")
         # cbind responses: weights ← weights·n (R binomial initialize's
@@ -397,8 +422,9 @@ class glm:
             prior_w = prior_w * self._binom_n
         self._prior_w = prior_w
 
-        off = (np.zeros(n) if offset is None
-               else np.asarray(offset, dtype=float).flatten())
+        off = (
+            np.zeros(n) if offset is None else np.asarray(offset, dtype=float).flatten()
+        )
         if off.shape != (n,):
             raise ValueError(f"offset must have length {n}, got {off.shape}")
         # Add any `offset(...)` terms parsed from the formula. R's glm()
@@ -425,8 +451,13 @@ class glm:
 
         # ---- main IRLS fit ------------------------------------------------
         fit = _fit_irls(
-            X, y, family=self.family, prior_w=prior_w, offset=off,
-            epsilon=ctl["epsilon"], maxit=ctl["maxit"],
+            X,
+            y,
+            family=self.family,
+            prior_w=prior_w,
+            offset=off,
+            epsilon=ctl["epsilon"],
+            maxit=ctl["maxit"],
             binom_n=self._binom_n,
         )
         self._fit = fit
@@ -434,18 +465,19 @@ class glm:
         self.converged = fit.converged
         self.rank = fit.rank
         self.df_residual = n - fit.rank
-        self.df_residuals = self.df_residual            # lm-style alias
+        self.df_residuals = self.df_residual  # lm-style alias
 
         self._bhat_arr = fit.beta.copy()
         self.bhat = _row_frame(self._bhat_arr, self.column_names)
         from ..R import NamedVector
+
         self.coef = NamedVector(self.column_names, self._bhat_arr)
         self.coefficients = self.coef
 
         # μ̂, η̂ (η̂ includes offset).
         self.fitted_values = fit.mu
         self.linear_predictors = fit.eta
-        self.yhat = pl.DataFrame({"fit": fit.mu})       # lm-style
+        self.yhat = pl.DataFrame({"fit": fit.mu})  # lm-style
         self.fitted = self.fitted_values
 
         # Deviance.
@@ -453,12 +485,12 @@ class glm:
 
         # ---- dispersion + vcov + SE --------------------------------------
         self.dispersion = self._compute_dispersion(fit, prior_w, y)
-        self.scale = self.dispersion                    # gam-style alias
-        self.sigma_squared = self.dispersion            # lm-style alias
+        self.scale = self.dispersion  # gam-style alias
+        self.sigma_squared = self.dispersion  # lm-style alias
         self.sigma = float(np.sqrt(self.dispersion))
 
         self.vcov, self._XtWXinv = self._compute_vcov(fit)
-        self.V_bhat = self.vcov                         # lm-style alias
+        self.V_bhat = self.vcov  # lm-style alias
         se = np.sqrt(np.diag(self.vcov))
         self._se_bhat_arr = se
         self.se_bhat = _row_frame(se, self.column_names)
@@ -474,9 +506,8 @@ class glm:
             self.leverage = (HXk * Xk).sum(axis=1) * fit.w
         else:
             self.leverage = np.zeros(n)
-        denom = (
-            np.sqrt(self.dispersion)
-            * np.sqrt(np.clip(1.0 - self.leverage, 1e-12, None))
+        denom = np.sqrt(self.dispersion) * np.sqrt(
+            np.clip(1.0 - self.leverage, 1e-12, None)
         )
         self.std_dev_residuals = self.residuals_of("deviance") / denom
         self.std_pearson_residuals = self.residuals_of("pearson") / denom
@@ -487,14 +518,12 @@ class glm:
             stat = self._bhat_arr / self._se_bhat_arr
         self._stat_arr = stat
         self.t_values = _row_frame(stat, self.column_names)
-        self.z_values = self.t_values                   # alias for known-scale
+        self.z_values = self.t_values  # alias for known-scale
         self.p_values = _row_frame(self._wald_p(stat), self.column_names)
         self.ci_bhat = self._compute_ci(0.05)
 
         # ---- null deviance, AIC, BIC, logLik -----------------------------
-        self.null_deviance, self.df_null = self._compute_null_deviance(
-            y, prior_w, off
-        )
+        self.null_deviance, self.df_null = self._compute_null_deviance(y, prior_w, off)
         # Mirror R's stats:::logLik.glm exactly:
         #   p <- rank + (family %in% c("gaussian","Gamma","inverse.gaussian"))
         #   loglik <- p - aic/2;   df <- p
@@ -515,8 +544,9 @@ class glm:
 
     # ----- helpers ---------------------------------------------------------
 
-    def _compute_dispersion(self, fit: _IRLSResult,
-                            prior_w: np.ndarray, y: np.ndarray) -> float:
+    def _compute_dispersion(
+        self, fit: _IRLSResult, prior_w: np.ndarray, y: np.ndarray
+    ) -> float:
         if self.family.scale_known:
             return 1.0
         if self.df_residual <= 0:
@@ -550,7 +580,7 @@ class glm:
         with np.errstate(invalid="ignore"):
             if self._test_kind == "z":
                 return 2.0 * _nmath.pnorm5_vec(np.abs(stat), lower_tail=False)
-            return 2.0 * student_t.sf(np.abs(stat), self.df_residual)
+            return 2.0 * _dist.pt(np.abs(stat), self.df_residual, lower_tail=False)
 
     def _compute_ci(self, alpha: float) -> pl.DataFrame:
         # R's confint.default — used as the default `confint` for glm
@@ -563,11 +593,13 @@ class glm:
         se = self._se_bhat_arr
         lo = bhat - q * se
         hi = bhat + q * se
-        return pl.DataFrame({
-            "coef": self.column_names,
-            f"CI[{alpha/2*100}%]": lo,
-            f"CI[{100-alpha/2*100}]%": hi,
-        })
+        return pl.DataFrame(
+            {
+                "coef": self.column_names,
+                f"CI[{alpha / 2 * 100}%]": lo,
+                f"CI[{100 - alpha / 2 * 100}]%": hi,
+            }
+        )
 
     def _compute_null_deviance(self, y, prior_w, offset):
         """Intercept-only fit deviance.
@@ -596,7 +628,11 @@ class glm:
         X1 = np.ones((self.n, 1))
         try:
             null_fit = _fit_irls(
-                X1, y, family=self.family, prior_w=prior_w, offset=offset,
+                X1,
+                y,
+                family=self.family,
+                prior_w=prior_w,
+                offset=offset,
                 binom_n=self._binom_n,
             )
             null_dev = null_fit.deviance
@@ -618,9 +654,15 @@ class glm:
         # the caller's prior weight — distinct from the merged wt=pw·n);
         # otherwise R passes nobs.
         n_aic = self._binom_n if self._binom_n is not None else self.n
-        family_aic = float(self.family.aic(
-            y, mu, self.deviance, prior_w, n_aic,
-        ))
+        family_aic = float(
+            self.family.aic(
+                y,
+                mu,
+                self.deviance,
+                prior_w,
+                n_aic,
+            )
+        )
         return family_aic + 2.0 * k_for_aic
 
     # ----- residuals_of ---------------------------------------------------
@@ -683,7 +725,11 @@ class glm:
             # the fit-time offset so η̂ matches what was actually fit.
             default_off = self._offset
         else:
-            X_new = materialize(self._expanded, new, basis_state=self._basis_state).to_numpy().astype(float)
+            X_new = (
+                materialize(self._expanded, new, basis_state=self._basis_state)
+                .to_numpy()
+                .astype(float)
+            )
             n_new = X_new.shape[0]
             # Re-evaluate any formula offset(...) atoms against newdata
             # — predict.glm does the same. Caller's offset= still overrides.
@@ -691,8 +737,9 @@ class glm:
             for off_node in self._expanded.offsets:
                 blk = _eval_atom(off_node, new)
                 default_off = default_off + blk.values.flatten().astype(float)
-        off_new = (default_off if offset is None
-                   else np.asarray(offset, dtype=float).flatten())
+        off_new = (
+            default_off if offset is None else np.asarray(offset, dtype=float).flatten()
+        )
         if off_new.shape != (n_new,):
             raise ValueError(f"offset must have length {n_new}")
 
@@ -707,7 +754,9 @@ class glm:
         elif type == "response":
             fit = self.family.link.linkinv(eta)
         else:
-            raise ValueError(f"unknown predict type {type!r}; expected 'response' or 'link'")
+            raise ValueError(
+                f"unknown predict type {type!r}; expected 'response' or 'link'"
+            )
 
         if not se_fit:
             return pl.DataFrame({"fit": fit})
@@ -750,26 +799,31 @@ class glm:
         # columns join a separate group so the smaller-magnitude bounds
         # don't force extra decimals on Estimate/SE.
         est_s, se_s = format_signif_jointly(
-            [self._bhat_arr, self._se_bhat_arr], digits=digits,
+            [self._bhat_arr, self._se_bhat_arr],
+            digits=digits,
         )
         cilo_s, cihi_s = format_signif_jointly(
-            [ci_low_arr, ci_hi_arr], digits=digits,
+            [ci_low_arr, ci_hi_arr],
+            digits=digits,
         )
 
-        coef_df = pl.DataFrame({
-            "":            self.column_names,
-            "Estimate":    est_s,
-            "Std. Error":  se_s,
-            ci_low_col:    cilo_s,
-            ci_hi_col:     cihi_s,
-            stat_lbl:      format_signif(self._stat_arr, digits=digits),
-            p_lbl:         format_pval(p_arr, digits=_dig_tst(digits)),
-            " ":           sig,
-        })
+        coef_df = pl.DataFrame(
+            {
+                "": self.column_names,
+                "Estimate": est_s,
+                "Std. Error": se_s,
+                ci_low_col: cilo_s,
+                ci_hi_col: cihi_s,
+                stat_lbl: format_signif(self._stat_arr, digits=digits),
+                p_lbl: format_pval(p_arr, digits=_dig_tst(digits)),
+                " ": sig,
+            }
+        )
 
-        num_align = {c: "right" for c in
-                     ("Estimate", "Std. Error", ci_low_col, ci_hi_col,
-                      stat_lbl, p_lbl)}
+        num_align = {
+            c: "right"
+            for c in ("Estimate", "Std. Error", ci_low_col, ci_hi_col, stat_lbl, p_lbl)
+        }
         out = f"Call:\nglm(formula = {self.formula}, family = {self.family})\n\n"
         out += "Coefficients:\n"
         out += format_df(coef_df, align=num_align)
@@ -800,8 +854,12 @@ class glm:
     #   Cook's-distance contours scaled by rank(X) not p.
 
     def plot_observed_fitted(
-        self, ax=None, figsize=None,
-        facecolor="none", edgecolor="black", label_n=3,
+        self,
+        ax=None,
+        figsize=None,
+        facecolor="none",
+        edgecolor="black",
+        label_n=3,
     ):
         if ax is None:
             _fig, ax = plt.subplots(figsize=figsize)
@@ -818,9 +876,13 @@ class glm:
         return ax
 
     def plot_residuals(
-        self, ax=None, figsize=None,
-        facecolor="none", edgecolor="black",
-        smooth=True, label_n=3,
+        self,
+        ax=None,
+        figsize=None,
+        facecolor="none",
+        edgecolor="black",
+        smooth=True,
+        label_n=3,
     ):
         if ax is None:
             _fig, ax = plt.subplots(figsize=figsize)
@@ -841,15 +903,21 @@ class glm:
         if ax is None:
             _fig, ax = plt.subplots(figsize=figsize)
         _qq_plot(
-            ax, self.std_dev_residuals, label_n=label_n,
+            ax,
+            self.std_dev_residuals,
+            label_n=label_n,
             ylabel="Std. deviance resid.",
         )
         return ax
 
     def plot_scale_location(
-        self, ax=None, figsize=None,
-        facecolor="none", edgecolor="black",
-        smooth=True, label_n=3,
+        self,
+        ax=None,
+        figsize=None,
+        facecolor="none",
+        edgecolor="black",
+        smooth=True,
+        label_n=3,
     ):
         if ax is None:
             _fig, ax = plt.subplots(figsize=figsize)
@@ -866,10 +934,14 @@ class glm:
         return ax
 
     def plot_leverage(
-        self, ax=None, figsize=None,
-        facecolor="none", edgecolor="black",
+        self,
+        ax=None,
+        figsize=None,
+        facecolor="none",
+        edgecolor="black",
         cook_levels=(0.5, 1.0),
-        smooth=True, label_n=3,
+        smooth=True,
+        label_n=3,
     ):
         if ax is None:
             _fig, ax = plt.subplots(figsize=figsize)
@@ -890,7 +962,7 @@ class glm:
             ax.plot(h_grid, rline, color="red", linestyle="--", linewidth=0.8)
             ax.plot(h_grid, -rline, color="red", linestyle="--", linewidth=0.8)
         ax.set_ylim(ymin, ymax)
-        cook = (r ** 2 / self.rank) * h / np.clip(1 - h, 1e-12, None)
+        cook = (r**2 / self.rank) * h / np.clip(1 - h, 1e-12, None)
         _label_top_n(ax, h, r, scores=cook, n=label_n)
         ax.set_xlabel("Leverage")
         ax.set_ylabel("Std. Pearson resid.")

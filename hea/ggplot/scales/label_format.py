@@ -87,8 +87,16 @@ def _format_number(x, accuracy, big_mark, decimal_mark):
     return s
 
 
-def label_number(*, accuracy=None, scale=1, prefix="", suffix="",
-                 big_mark=" ", decimal_mark=".", largest_with_cents=1e5):
+def label_number(
+    *,
+    accuracy=None,
+    scale=1,
+    prefix="",
+    suffix="",
+    big_mark=" ",
+    decimal_mark=".",
+    largest_with_cents=1e5,
+):
     """scales::label_number — generic numeric formatter.
 
     Parameters
@@ -109,10 +117,15 @@ def label_number(*, accuracy=None, scale=1, prefix="", suffix="",
     largest_with_cents : float, default 1e5
         Auto-accuracy threshold — values at or above this skip decimals.
     """
+
     def fmt(values):
         vs = _coerce_to_list(values)
         scaled = [v * scale if v is not None else None for v in vs]
-        acc = accuracy if accuracy is not None else _auto_accuracy(scaled, largest_with_cents)
+        acc = (
+            accuracy
+            if accuracy is not None
+            else _auto_accuracy(scaled, largest_with_cents)
+        )
         out = []
         for v in scaled:
             if v is None:
@@ -123,22 +136,43 @@ def label_number(*, accuracy=None, scale=1, prefix="", suffix="",
             sign = "-" if negative else ""
             out.append(f"{sign}{prefix}{base}{suffix}")
         return out
+
     return fmt
 
 
-def label_comma(*, accuracy=None, scale=1, prefix="", suffix="",
-                big_mark=",", decimal_mark=".", largest_with_cents=1e5):
+def label_comma(
+    *,
+    accuracy=None,
+    scale=1,
+    prefix="",
+    suffix="",
+    big_mark=",",
+    decimal_mark=".",
+    largest_with_cents=1e5,
+):
     """scales::label_comma — like :func:`label_number` with comma thousand
     separators by default."""
-    return label_number(accuracy=accuracy, scale=scale, prefix=prefix,
-                        suffix=suffix, big_mark=big_mark,
-                        decimal_mark=decimal_mark,
-                        largest_with_cents=largest_with_cents)
+    return label_number(
+        accuracy=accuracy,
+        scale=scale,
+        prefix=prefix,
+        suffix=suffix,
+        big_mark=big_mark,
+        decimal_mark=decimal_mark,
+        largest_with_cents=largest_with_cents,
+    )
 
 
-def label_dollar(*, accuracy=None, scale=1, prefix="$", suffix="",
-                 big_mark=",", decimal_mark=".",
-                 largest_with_cents=1e5):
+def label_dollar(
+    *,
+    accuracy=None,
+    scale=1,
+    prefix="$",
+    suffix="",
+    big_mark=",",
+    decimal_mark=".",
+    largest_with_cents=1e5,
+):
     """scales::label_dollar — currency formatter.
 
     Despite the name (kept for parity with R's ``scales`` package), this
@@ -161,32 +195,55 @@ def label_dollar(*, accuracy=None, scale=1, prefix="$", suffix="",
     >>> label_dollar(prefix="", suffix="€")([1234.5])
     ['1,234.50€']
     """
-    return label_number(accuracy=accuracy, scale=scale, prefix=prefix,
-                        suffix=suffix, big_mark=big_mark,
-                        decimal_mark=decimal_mark,
-                        largest_with_cents=largest_with_cents)
+    return label_number(
+        accuracy=accuracy,
+        scale=scale,
+        prefix=prefix,
+        suffix=suffix,
+        big_mark=big_mark,
+        decimal_mark=decimal_mark,
+        largest_with_cents=largest_with_cents,
+    )
 
 
-def label_currency(*, accuracy=None, scale=1, prefix="", suffix="",
-                   big_mark=",", decimal_mark=".",
-                   largest_with_cents=1e5):
+def label_currency(
+    *,
+    accuracy=None,
+    scale=1,
+    prefix="",
+    suffix="",
+    big_mark=",",
+    decimal_mark=".",
+    largest_with_cents=1e5,
+):
     """scales::label_currency — :func:`label_dollar` with no default prefix.
 
     Use when you want to be explicit about the currency symbol via
     ``prefix=`` / ``suffix=``."""
-    return label_number(accuracy=accuracy, scale=scale, prefix=prefix,
-                        suffix=suffix, big_mark=big_mark,
-                        decimal_mark=decimal_mark,
-                        largest_with_cents=largest_with_cents)
+    return label_number(
+        accuracy=accuracy,
+        scale=scale,
+        prefix=prefix,
+        suffix=suffix,
+        big_mark=big_mark,
+        decimal_mark=decimal_mark,
+        largest_with_cents=largest_with_cents,
+    )
 
 
-def label_percent(*, accuracy=None, scale=100, prefix="", suffix="%",
-                  big_mark="", decimal_mark="."):
+def label_percent(
+    *, accuracy=None, scale=100, prefix="", suffix="%", big_mark="", decimal_mark="."
+):
     """scales::label_percent — value × 100 with ``%`` suffix.
 
     Default ``scale=100`` matches R: pass values in [0, 1] and get
     ``"5%"`` etc. Pass ``scale=1`` if your inputs are already in percent.
     """
-    return label_number(accuracy=accuracy, scale=scale, prefix=prefix,
-                        suffix=suffix, big_mark=big_mark,
-                        decimal_mark=decimal_mark)
+    return label_number(
+        accuracy=accuracy,
+        scale=scale,
+        prefix=prefix,
+        suffix=suffix,
+        big_mark=big_mark,
+        decimal_mark=decimal_mark,
+    )

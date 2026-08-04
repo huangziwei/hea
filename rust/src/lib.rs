@@ -52,6 +52,7 @@ use pyo3::prelude::*;
 mod cluster;
 mod discrete;
 mod family;
+mod fexact;
 mod linalg;
 mod loess;
 mod nmath;
@@ -71,5 +72,6 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     family::register(m)?;
     discrete::register(m)?;
     optimize::register(m)?;
+    fexact::register(m)?;
     Ok(())
 }

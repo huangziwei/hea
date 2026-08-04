@@ -47,7 +47,9 @@ class CoordFixed(CoordCartesian):
         # natural). When the user pins limits via ``xlim=``/``ylim=``, switch
         # to ``box`` so the axes box resizes — otherwise matplotlib silently
         # ignores the limits to fulfil the aspect.
-        adjustable = "box" if (self.xlim is not None or self.ylim is not None) else "datalim"
+        adjustable = (
+            "box" if (self.xlim is not None or self.ylim is not None) else "datalim"
+        )
         ax.set_aspect(float(self.ratio), adjustable=adjustable)
         super().apply_to_axes(ax)
 

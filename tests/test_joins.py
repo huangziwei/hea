@@ -171,7 +171,9 @@ def test_natural_join_auto_casts_numeric_keys(capsys):
     """i64 + f64 on the same key name → both cast to f64 (matches
     dplyr's implicit numeric coercion; polars alone would SchemaError)."""
     left = DataFrame({"k": pl.Series([1, 2, 3], dtype=pl.Int64), "x": ["a", "b", "c"]})
-    right = DataFrame({"k": pl.Series([1.0, 2.0, 4.0], dtype=pl.Float64), "y": ["p", "q", "r"]})
+    right = DataFrame(
+        {"k": pl.Series([1.0, 2.0, 4.0], dtype=pl.Float64), "y": ["p", "q", "r"]}
+    )
     out = left.left_join(right)
     assert out["x"].to_list() == ["a", "b", "c"]
     assert out["y"].to_list() == ["p", "q", None]
@@ -388,9 +390,7 @@ def test_closest_forward_rolling_join():
 def test_closest_with_equi_grouping():
     """closest() + equi key partitions the asof per group."""
     left = DataFrame({"g": ["a", "a", "b"], "t": [1, 4, 1]})
-    right = DataFrame(
-        {"g": ["a", "a", "b"], "u": [0, 3, 2], "lab": ["x", "y", "z"]}
-    )
+    right = DataFrame({"g": ["a", "a", "b"], "u": [0, 3, 2], "lab": ["x", "y", "z"]})
     out = left.left_join(right, join_by("g", closest(col("t") >= col("u"))))
     assert out["lab"].to_list() == ["x", "y", None]
 
@@ -431,9 +431,7 @@ def test_overlaps_helper_finds_overlapping_intervals():
             "b_hi": [_dt.date(2022, 4, 30), _dt.date(2022, 12, 31)],
         }
     )
-    out = left.inner_join(
-        right, join_by(overlaps("a_lo", "a_hi", "b_lo", "b_hi"))
-    )
+    out = left.inner_join(right, join_by(overlaps("a_lo", "a_hi", "b_lo", "b_hi")))
     assert sorted(zip(out["a"].to_list(), out["b"].to_list())) == [
         ("A", "x"),
         ("B", "y"),
@@ -441,17 +439,11 @@ def test_overlaps_helper_finds_overlapping_intervals():
 
 
 def test_within_helper_finds_contained_intervals():
-    left = DataFrame(
-        {"a": ["A", "B"], "a_lo": [10, 20], "a_hi": [12, 50]}
-    )
-    right = DataFrame(
-        {"b": ["x", "y"], "b_lo": [0, 0], "b_hi": [15, 100]}
-    )
+    left = DataFrame({"a": ["A", "B"], "a_lo": [10, 20], "a_hi": [12, 50]})
+    right = DataFrame({"b": ["x", "y"], "b_lo": [0, 0], "b_hi": [15, 100]})
     # A's [10, 12] is within both [0, 15] and [0, 100]; B's [20, 50] is
     # within [0, 100] but NOT [0, 15].
-    out = left.inner_join(
-        right, join_by(within("a_lo", "a_hi", "b_lo", "b_hi"))
-    )
+    out = left.inner_join(right, join_by(within("a_lo", "a_hi", "b_lo", "b_hi")))
     assert sorted(zip(out["a"].to_list(), out["b"].to_list())) == [
         ("A", "x"),
         ("A", "y"),

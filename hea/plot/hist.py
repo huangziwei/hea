@@ -96,7 +96,11 @@ def hist(
         ylab_default = "Frequency"
     else:
         total = float(counts.sum())
-        heights = (counts / (total * widths)) if total > 0 else np.zeros_like(counts, dtype=float)
+        heights = (
+            (counts / (total * widths))
+            if total > 0
+            else np.zeros_like(counts, dtype=float)
+        )
         ylab_default = "Density"
 
     bar_kwargs = {

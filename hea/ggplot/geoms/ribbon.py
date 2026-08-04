@@ -21,13 +21,15 @@ class GeomRibbon(Geom):
     # ``fill = col_mix(ink, paper, 0.2)`` ≈ ``"grey20"`` and ``alpha = NA``
     # (= 1.0). ``geom_smooth`` defaults to grey60 + alpha 0.4 — that's a
     # different geom; don't conflate them here.
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": None,
-        "fill": "grey20",
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": None,
+            "fill": "grey20",
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+        }
+    )
     required_aes: tuple = ("x", "ymin", "ymax")
     key_glyph: str = "polygon"
 
@@ -52,8 +54,9 @@ class GeomRibbon(Geom):
         edge = r_color(edge_raw) if edge_raw is not None else "none"
         alpha = float(_first(sub, "alpha", 0.4))
 
-        poly = ax.fill_between(x, ymin, ymax, facecolor=fill, edgecolor=edge,
-                               alpha=alpha, linewidth=0)
+        poly = ax.fill_between(
+            x, ymin, ymax, facecolor=fill, edgecolor=edge, alpha=alpha, linewidth=0
+        )
         polar_arc_interp(ax, poly)
 
 
@@ -64,7 +67,9 @@ def _first(df, col, default):
     return default if val is None else val
 
 
-def geom_ribbon(mapping=None, data=None, *, stat="identity", position="identity", **kwargs):
+def geom_ribbon(
+    mapping=None, data=None, *, stat="identity", position="identity", **kwargs
+):
     from ..layer import Layer
     from ..positions import resolve_position
     from ..stats import resolve_stat
@@ -86,6 +91,7 @@ def geom_ribbon(mapping=None, data=None, *, stat="identity", position="identity"
 # ---------------------------------------------------------------------------
 # geom_area = ribbon with ymin=0 injected
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class GeomArea(GeomRibbon):

@@ -23,6 +23,7 @@ def _function_data_callable(fun, n, xlim, args):
     the layer runs so the function curve can pick up whatever x range the
     rest of the plot already implies. Override with explicit ``xlim=``.
     """
+
     def make(main):
         if xlim is not None:
             lo, hi = float(xlim[0]), float(xlim[1])
@@ -34,11 +35,13 @@ def _function_data_callable(fun, n, xlim, args):
         xs = np.linspace(lo, hi, int(n))
         ys = np.asarray(fun(xs, *args)) if args else np.asarray(fun(xs))
         return pl.DataFrame({"x": xs, "y": ys})
+
     return make
 
 
-def stat_function(*, fun, n=101, xlim=None, args=(), geom="line",
-                  mapping=None, **kwargs):
+def stat_function(
+    *, fun, n=101, xlim=None, args=(), geom="line", mapping=None, **kwargs
+):
     """Plot ``y = fun(x)`` over ``xlim`` (or the plot's x range)."""
     from ..aes import Aes
     from ..geoms.path import GeomPath
@@ -51,7 +54,9 @@ def stat_function(*, fun, n=101, xlim=None, args=(), geom="line",
     elif geom == "point":
         g = GeomPoint()
     else:
-        raise ValueError(f"stat_function: unknown geom {geom!r}; expected 'line' or 'point'")
+        raise ValueError(
+            f"stat_function: unknown geom {geom!r}; expected 'line' or 'point'"
+        )
 
     aes_params, geom_params = split_layer_kwargs(kwargs)
 
@@ -73,5 +78,6 @@ def stat_function(*, fun, n=101, xlim=None, args=(), geom="line",
 
 def geom_function(*, fun, n=101, xlim=None, args=(), mapping=None, **kwargs):
     """Alias for :func:`stat_function` with the line geom — matches ggplot2."""
-    return stat_function(fun=fun, n=n, xlim=xlim, args=args, geom="line",
-                         mapping=mapping, **kwargs)
+    return stat_function(
+        fun=fun, n=n, xlim=xlim, args=args, geom="line", mapping=mapping, **kwargs
+    )

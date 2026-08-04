@@ -97,9 +97,9 @@ def _fits_anova_binomial_menarche():
 
 
 ANOVA_CASES = {
-    "anova_poisson_quine":     _fits_anova_poisson_quine,
-    "anova_gamma_trees":       _fits_anova_gamma_trees,
-    "anova_gaussian_iris":     _fits_anova_gaussian_iris,
+    "anova_poisson_quine": _fits_anova_poisson_quine,
+    "anova_gamma_trees": _fits_anova_gamma_trees,
+    "anova_gaussian_iris": _fits_anova_gaussian_iris,
     "anova_binomial_menarche": _fits_anova_binomial_menarche,
 }
 
@@ -140,23 +140,36 @@ def test_anova_glm(oid: str):
         df_R, dev_R = o["df"][i], o["deviance"][i]
         stat_R, p_R = o["stat"][i], o["pvalue"][i]
         if df_R is None:
-            assert df_hea[i] is None and dev_hea[i] is None, \
+            assert df_hea[i] is None and dev_hea[i] is None, (
                 f"row {i}: expected None for first row"
+            )
             assert stat_hea[i] is None and p_hea[i] is None
             continue
-        assert df_hea[i] == df_R, \
-            f"row {i}: Df hea={df_hea[i]} R={df_R}"
-        np.testing.assert_allclose(dev_hea[i], dev_R, atol=5e-3,
-            err_msg=f"row {i}: Deviance hea={dev_hea[i]} R={dev_R}")
-        np.testing.assert_allclose(stat_hea[i], stat_R, atol=5e-3,
-            err_msg=f"row {i}: {stat_col} hea={stat_hea[i]} R={stat_R}")
+        assert df_hea[i] == df_R, f"row {i}: Df hea={df_hea[i]} R={df_R}"
+        np.testing.assert_allclose(
+            dev_hea[i],
+            dev_R,
+            atol=5e-3,
+            err_msg=f"row {i}: Deviance hea={dev_hea[i]} R={dev_R}",
+        )
+        np.testing.assert_allclose(
+            stat_hea[i],
+            stat_R,
+            atol=5e-3,
+            err_msg=f"row {i}: {stat_col} hea={stat_hea[i]} R={stat_R}",
+        )
         # p-value: meaningful values to 5e-3; tiny values just need to be tiny.
         if p_R > 1e-10:
-            np.testing.assert_allclose(p_hea[i], p_R, atol=5e-3,
-                err_msg=f"row {i}: {p_col} hea={p_hea[i]} R={p_R}")
+            np.testing.assert_allclose(
+                p_hea[i],
+                p_R,
+                atol=5e-3,
+                err_msg=f"row {i}: {p_col} hea={p_hea[i]} R={p_R}",
+            )
         else:
-            assert p_hea[i] < 1e-6, \
+            assert p_hea[i] < 1e-6, (
                 f"row {i}: {p_col} hea={p_hea[i]} should be tiny like R={p_R}"
+            )
 
 
 def test_anova_rejects_mixed_types():
@@ -178,16 +191,18 @@ def test_anova_rejects_mixed_families():
 def test_anova_glm_test_argument():
     """`test=` switches the statistic — pinned to R's anova.glm output on
     Wood's heart data (cbind(ha, ok) ~ ck via the proportion + weights form)."""
-    heart = pl.DataFrame({
-        "ck": [20, 60, 100, 140, 180, 220, 260, 300, 340, 380, 420, 460],
-        "ha": [2, 13, 30, 30, 21, 19, 18, 13, 19, 15, 7, 8],
-        "ok": [88, 26, 8, 5, 0, 1, 1, 1, 1, 0, 0, 0],
-    }).with_columns(
+    heart = pl.DataFrame(
+        {
+            "ck": [20, 60, 100, 140, 180, 220, 260, 300, 340, 380, 420, 460],
+            "ha": [2, 13, 30, 30, 21, 19, 18, 13, 19, 15, 7, 8],
+            "ok": [88, 26, 8, 5, 0, 1, 1, 1, 1, 0, 0, 0],
+        }
+    ).with_columns(
         n=pl.col("ha") + pl.col("ok"),
         p=pl.col("ha") / (pl.col("ha") + pl.col("ok")),
     )
     n = heart["n"].to_numpy()
-    m0 = glm("p ~ 1",  data=heart, family=Binomial(link="logit"), weights=n)
+    m0 = glm("p ~ 1", data=heart, family=Binomial(link="logit"), weights=n)
     m1 = glm("p ~ ck", data=heart, family=Binomial(link="logit"), weights=n)
 
     # Default + explicit Chisq + LRT alias all give the same table
@@ -276,7 +291,7 @@ def test_anova_glm_F_explicit_matches_auto_on_unknown_scale():
     m0 = glm("Volume ~ log(Girth)", d, family=fam)
     m1 = glm("Volume ~ log(Height) + log(Girth)", d, family=fam)
     df_auto, _ = _anova_glm_table(m0, m1, labels=["m0", "m1"], test=None)
-    df_F, _    = _anova_glm_table(m0, m1, labels=["m0", "m1"], test="F")
+    df_F, _ = _anova_glm_table(m0, m1, labels=["m0", "m1"], test="F")
     assert df_auto.columns == df_F.columns
     for col in ["Resid. Df", "Resid. Dev", "Df", "Deviance", "F", "Pr(>F)"]:
         a, b = df_auto[col].to_list(), df_F[col].to_list()
@@ -337,12 +352,14 @@ def test_anova_gam_single_pins_to_mgcv_on_trees():
     output: parametric Terms F-table + smooth significance table."""
     trees = load_dataset("mgcv", "trees").with_columns(
         Hclass=((pl.col("Height") / 10).floor() - 5)
-            .cast(pl.Int64)
-            .replace_strict([1, 2, 3], ["small", "medium", "large"],
-                            return_dtype=pl.Enum(["small", "medium", "large"])),
+        .cast(pl.Int64)
+        .replace_strict(
+            [1, 2, 3],
+            ["small", "medium", "large"],
+            return_dtype=pl.Enum(["small", "medium", "large"]),
+        ),
     )
-    ct7 = gam("Volume ~ Hclass + s(Girth)",
-              family=Gamma(link="log"), data=trees)
+    ct7 = gam("Volume ~ Hclass + s(Girth)", family=Gamma(link="log"), data=trees)
     out = _capture(anova, ct7)
     # Header
     assert "Family: Gamma" in out
@@ -374,10 +391,10 @@ def test_anova_gam_two_model_F_pins_to_mgcv_on_trees():
     df, _ = _anova_gam_table(g1, g2, labels=["g1", "g2"], test=None)
     assert "F" in df.columns and "Pr(>F)" in df.columns
     # mgcv: Resid Df = 26.6424, 25.9560 (edf1-based, not n - sum(edf)).
-    np.testing.assert_allclose(df["Resid. Df"].to_numpy(),
-                               [26.6424, 25.9560], atol=5e-4)
-    np.testing.assert_allclose(df["Resid. Dev"].to_numpy(),
-                               [0.3787, 0.1842], atol=5e-4)
+    np.testing.assert_allclose(
+        df["Resid. Df"].to_numpy(), [26.6424, 25.9560], atol=5e-4
+    )
+    np.testing.assert_allclose(df["Resid. Dev"].to_numpy(), [0.3787, 0.1842], atol=5e-4)
     # Δdf and ΔDeviance — non-integer because edf1 is fractional.
     np.testing.assert_allclose(df["Df"][1], 0.6864, atol=5e-4)
     np.testing.assert_allclose(df["Deviance"][1], 0.1945, atol=5e-4)
@@ -395,10 +412,10 @@ def test_anova_gam_three_model_F_walk_pins_to_mgcv_on_trees():
     g0 = gam("Volume ~ 1", data=trees, family=fam)
     g1 = gam("Volume ~ s(Girth)", data=trees, family=fam)
     g2 = gam("Volume ~ s(Girth) + s(Height)", data=trees, family=fam)
-    df, _ = _anova_gam_table(g0, g1, g2,
-                             labels=["g0", "g1", "g2"], test="F")
-    np.testing.assert_allclose(df["Resid. Df"].to_numpy(),
-                               [30.0, 26.6424, 25.9560], atol=5e-4)
+    df, _ = _anova_gam_table(g0, g1, g2, labels=["g0", "g1", "g2"], test="F")
+    np.testing.assert_allclose(
+        df["Resid. Df"].to_numpy(), [30.0, 26.6424, 25.9560], atol=5e-4
+    )
     # Row 1 (g1 vs g0): F = 342.71 in mgcv.
     np.testing.assert_allclose(df["Df"][1], 3.3576, atol=5e-4)
     np.testing.assert_allclose(df["Deviance"][1], 7.9385, atol=5e-4)
@@ -435,8 +452,7 @@ def test_anova_gam_residual_df_uses_edf1_not_edf():
     edf1 is the 1-step effective df designed for hypothesis testing.
     """
     trees = load_dataset("R", "trees")
-    g = gam("Volume ~ s(Girth)",
-            data=trees, family=Gamma(link="log"))
+    g = gam("Volume ~ s(Girth)", data=trees, family=Gamma(link="log"))
     rdf_anova = _anova_gam_rdf(g)
     rdf_naive = g.n - float(np.sum(g.edf))
     rdf_edf1 = g.n - float(np.sum(g.edf1))
@@ -452,8 +468,7 @@ def test_anova_gam_rejects_mixed_with_glm_or_lm():
     guard, not silently fall into the glm or lm branches.
     """
     trees = load_dataset("R", "trees")
-    g = gam("Volume ~ s(Girth)",
-            data=trees, family=Gamma(link="log"))
+    g = gam("Volume ~ s(Girth)", data=trees, family=Gamma(link="log"))
     g_glm = glm("Volume ~ log(Girth)", trees, family=Gamma(link="log"))
     g_lm = lm("Volume ~ Girth", trees)
     with pytest.raises(TypeError, match="same type"):
@@ -465,10 +480,8 @@ def test_anova_gam_rejects_mixed_with_glm_or_lm():
 def test_anova_gam_rejects_mixed_families():
     """All gam fits in a multi-model anova must share family/link."""
     trees = load_dataset("R", "trees")
-    g_log = gam("Volume ~ s(Girth)",
-                data=trees, family=Gamma(link="log"))
-    g_inv = gam("Volume ~ s(Girth)",
-                data=trees, family=Gamma(link="inverse"))
+    g_log = gam("Volume ~ s(Girth)", data=trees, family=Gamma(link="log"))
+    g_inv = gam("Volume ~ s(Girth)", data=trees, family=Gamma(link="inverse"))
     with pytest.raises(ValueError, match="family and link"):
         anova(g_log, g_inv)
 
@@ -483,8 +496,8 @@ def test_anova_gam_test_argument_validation():
 
     # LRT is an alias for Chisq — both should produce the same Pr(>Chi)
     # column (and not crash).
-    df_chi, _ = _anova_gam_table(g1, g2, labels=["g1","g2"], test="Chisq")
-    df_lrt, _ = _anova_gam_table(g1, g2, labels=["g1","g2"], test="LRT")
+    df_chi, _ = _anova_gam_table(g1, g2, labels=["g1", "g2"], test="Chisq")
+    df_lrt, _ = _anova_gam_table(g1, g2, labels=["g1", "g2"], test="LRT")
     assert df_chi.columns == df_lrt.columns
     np.testing.assert_allclose(
         df_chi["Pr(>Chi)"].to_list()[1:],
@@ -511,12 +524,8 @@ def test_aic_bic_dispatch_on_glm():
     fits = _fits_anova_gaussian_iris()
     aic_table = AIC(*fits)
     bic_table = BIC(*fits)
-    assert aic_table["AIC"].to_list() == pytest.approx(
-        [m.AIC for m in fits]
-    )
-    assert bic_table["BIC"].to_list() == pytest.approx(
-        [m.BIC for m in fits]
-    )
+    assert aic_table["AIC"].to_list() == pytest.approx([m.AIC for m in fits])
+    assert bic_table["BIC"].to_list() == pytest.approx([m.BIC for m in fits])
 
 
 # =============================================================================
@@ -547,6 +556,7 @@ def test_drop1_lm_F_test_pins_to_R_on_iris():
     Pins the Mallows-style AIC column (extractAIC) and the F + p values.
     """
     from hea.R import _drop1_lm
+
     iris = load_dataset("R", "iris")
     m = lm("Sepal.Length ~ Petal.Length + Species", iris)
     out = _capture(_drop1_lm, m, test="F", k=2.0)
@@ -651,8 +661,7 @@ def test_drop1_glm_Chisq_gamma_pins_to_R_on_trees():
     """Gamma (unknown-scale) Chisq: stat = Δdev/dispersion_full,
     column labeled "scaled dev." Pinned to R."""
     trees = load_dataset("R", "trees")
-    g = glm("Volume ~ log(Girth) + log(Height)", trees,
-            family=Gamma(link="inverse"))
+    g = glm("Volume ~ log(Girth) + log(Height)", trees, family=Gamma(link="inverse"))
     out = _capture(drop1, g, test="Chisq")
     assert "scaled dev." in out
     # R: log(Girth) scaled dev.=152.67825, log(Height)=2.21882.
@@ -668,8 +677,7 @@ def test_drop1_glm_F_gamma_uses_residual_mean_deviance_denom():
     not Pearson dispersion. The two values would give F=152.68 vs the
     correct R-matching F=142.12 — easy to distinguish."""
     trees = load_dataset("R", "trees")
-    g = glm("Volume ~ log(Girth) + log(Height)", trees,
-            family=Gamma(link="inverse"))
+    g = glm("Volume ~ log(Girth) + log(Height)", trees, family=Gamma(link="inverse"))
     out = _capture(drop1, g, test="F")
     # R's value: F=142.12252 for log(Girth). Pearson denom would give 152.68.
     assert "142.1225" in out
@@ -684,8 +692,7 @@ def test_drop1_glm_AIC_for_Gamma_holds_dispersion_fixed():
     (R's drop1) vs 240.26 (standalone refit AIC).
     """
     trees = load_dataset("R", "trees")
-    g = glm("Volume ~ log(Girth) + log(Height)", trees,
-            family=Gamma(link="inverse"))
+    g = glm("Volume ~ log(Girth) + log(Height)", trees, family=Gamma(link="inverse"))
     g_dropped = glm("Volume ~ log(Height)", trees, family=Gamma(link="inverse"))
     # Standalone refit AIC differs from drop1's recalibrated AIC.
     np.testing.assert_allclose(g_dropped.AIC, 240.2625, atol=5e-3)
@@ -764,6 +771,7 @@ def test_drop1_respects_marginality_on_gavote():
     alone, because they're "marginal to" the interaction.
     """
     from hea import data
+
     g = data("gavote", package="faraway")
     g = g.mutate(usage=pl.col("rural")).select(pl.exclude("rural"))
     g = g.mutate(
@@ -784,8 +792,9 @@ def test_drop1_respects_marginality_on_gavote():
     # own rows. Anchor on the leading whitespace+name to avoid matching
     # them inside the "cpergore:usage" label.
     lines = out.splitlines()
-    drop_rows = [ln for ln in lines if ln.startswith(("cperAA", "equip",
-                                                      "cpergore", "usage"))]
+    drop_rows = [
+        ln for ln in lines if ln.startswith(("cperAA", "equip", "cpergore", "usage"))
+    ]
     # Each dropped term is one row; cpergore:usage is the only one
     # starting with "cpergore". No bare "cpergore " or "usage " row.
     starts = {ln.split()[0] for ln in drop_rows}
@@ -801,8 +810,7 @@ def test_drop1_gam_not_implemented():
     mgcv's drop1.gam has smoothing-parameter semantics we haven't
     ported."""
     trees = load_dataset("R", "trees")
-    g = gam("Volume ~ s(Girth)",
-            data=trees, family=Gamma(link="log"))
+    g = gam("Volume ~ s(Girth)", data=trees, family=Gamma(link="log"))
     with pytest.raises(NotImplementedError, match="gam"):
         drop1(g)
 
@@ -847,8 +855,7 @@ def test_add1_glm_Chisq_gaussian_uses_n_log_dev_ratio():
     """
     iris = load_dataset("R", "iris")
     g0 = glm("Sepal.Length ~ Petal.Length", iris, family=Gaussian())
-    out = _capture(add1, g0, "Petal.Length + Petal.Width + Species",
-                   test="Chisq")
+    out = _capture(add1, g0, "Petal.Length + Petal.Width + Species", test="Chisq")
     assert "scaled dev." in out
     # R's value: 3.9936 (Petal.Width), 57.8077 (Species).
     assert "3.9936" in out
@@ -926,8 +933,7 @@ def test_add1_raises_on_empty_scope():
 def test_add1_gam_not_implemented():
     """add1(gam) raises — same boundary as drop1(gam)."""
     trees = load_dataset("R", "trees")
-    g = gam("Volume ~ s(Girth)",
-            data=trees, family=Gamma(link="log"))
+    g = gam("Volume ~ s(Girth)", data=trees, family=Gamma(link="log"))
     with pytest.raises(NotImplementedError, match="gam"):
         add1(g, "s(Girth) + s(Height)")
 
@@ -950,6 +956,7 @@ def test_step_backward_on_gavote_matches_R():
     output has ``equip:perAA`` not ``econ:perAA``).
     """
     from hea import data
+
     g = data("gavote", package="faraway")
     g = g.mutate(usage=pl.col("rural")).select(pl.exclude("rural"))
     g = g.mutate(
@@ -965,8 +972,13 @@ def test_step_backward_on_gavote_matches_R():
     # R produces: equip + econ + usage + perAA + equip:econ + equip:perAA + usage:perAA
     final_terms = {t.label for t in smallm._expanded.terms}
     assert final_terms == {
-        "equip", "econ", "usage", "perAA",
-        "equip:econ", "equip:perAA", "usage:perAA",
+        "equip",
+        "econ",
+        "usage",
+        "perAA",
+        "equip:econ",
+        "equip:perAA",
+        "usage:perAA",
     }
     # atlanta and pergore have been eliminated entirely.
     assert "atlanta" not in final_terms
@@ -979,8 +991,12 @@ def test_step_forward_from_intercept_on_iris():
     over Petal.Length isn't enough to enter."""
     iris = load_dataset("R", "iris")
     m0 = lm("Sepal.Length ~ 1", iris)
-    m_final = step(m0, scope="Petal.Length + Petal.Width + Species",
-                   direction="forward", trace=False)
+    m_final = step(
+        m0,
+        scope="Petal.Length + Petal.Width + Species",
+        direction="forward",
+        trace=False,
+    )
     final_terms = {t.label for t in m_final._expanded.terms}
     assert final_terms == {"Petal.Length", "Species"}
 
@@ -1049,10 +1065,11 @@ def test_step_dict_scope_with_lower_bound():
     iris = load_dataset("R", "iris")
     m_full = lm("Sepal.Length ~ Petal.Length + Petal.Width + Species", iris)
     # Force Petal.Width to stay in (it would otherwise be dropped).
-    m_kept = step(m_full,
-                  scope={"lower": "Petal.Width",
-                         "upper": "Petal.Length + Petal.Width + Species"},
-                  trace=False)
+    m_kept = step(
+        m_full,
+        scope={"lower": "Petal.Width", "upper": "Petal.Length + Petal.Width + Species"},
+        trace=False,
+    )
     final_terms = {t.label for t in m_kept._expanded.terms}
     assert "Petal.Width" in final_terms
 
@@ -1068,8 +1085,7 @@ def test_step_rejects_invalid_direction():
 def test_step_unsupported_model_type():
     """step(gam) and step(gmm) intentionally raise NotImplementedError."""
     trees = load_dataset("R", "trees")
-    g = gam("Volume ~ s(Girth)",
-            data=trees, family=Gamma(link="log"))
+    g = gam("Volume ~ s(Girth)", data=trees, family=Gamma(link="log"))
     with pytest.raises(NotImplementedError, match="gam"):
         step(g)
 
@@ -1084,17 +1100,18 @@ def test_step_handles_NAs_in_predictors():
     """
     np.random.seed(42)
     n = 500
-    df = pl.DataFrame({
-        "y": np.random.binomial(1, 0.3, n).astype(float),
-        "a": np.random.randn(n),
-        "b": np.random.randn(n),
-        "c": np.random.randn(n),
-        "d": np.random.randn(n),
-        # NAs only in 'e' — dropping 'e' from the formula would
-        # otherwise let those rows back in.
-        "e": [None if i % 30 == 0 else float(np.random.randn())
-              for i in range(n)],
-    })
+    df = pl.DataFrame(
+        {
+            "y": np.random.binomial(1, 0.3, n).astype(float),
+            "a": np.random.randn(n),
+            "b": np.random.randn(n),
+            "c": np.random.randn(n),
+            "d": np.random.randn(n),
+            # NAs only in 'e' — dropping 'e' from the formula would
+            # otherwise let those rows back in.
+            "e": [None if i % 30 == 0 else float(np.random.randn()) for i in range(n)],
+        }
+    )
     m = glm("y ~ a + b + c + d + e", data=df, family=Binomial())
     # Original fit drops the 17 rows where e is null.
     assert m.n == 483
@@ -1118,5 +1135,6 @@ def test_step_already_minimal_returns_input():
     # and nothing to add since scope=None means upper=current.
     m = lm("Sepal.Length ~ Petal.Length", iris)
     m_out = step(m, trace=False)
-    assert {t.label for t in m_out._expanded.terms} == \
-           {t.label for t in m._expanded.terms}
+    assert {t.label for t in m_out._expanded.terms} == {
+        t.label for t in m._expanded.terms
+    }

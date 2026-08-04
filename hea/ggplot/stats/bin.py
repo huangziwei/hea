@@ -31,9 +31,15 @@ class StatBin(Stat):
         x = data["x"].to_numpy().astype(float)
         x = x[~np.isnan(x)]
         if len(x) == 0:
-            return pl.DataFrame({
-                "x": [], "y": [], "width": [], "count": [], "density": [],
-            })
+            return pl.DataFrame(
+                {
+                    "x": [],
+                    "y": [],
+                    "width": [],
+                    "count": [],
+                    "density": [],
+                }
+            )
 
         breaks = self._compute_breaks(x)
         counts = _count_per_bin(x, breaks, self.closed)
@@ -47,7 +53,9 @@ class StatBin(Stat):
             # TRUE)``). Without padding the line would terminate at the
             # outermost data bin's height, which reads as a step rather
             # than a closed shape.
-            mids = np.concatenate(([mids[0] - widths[0]], mids, [mids[-1] + widths[-1]]))
+            mids = np.concatenate(
+                ([mids[0] - widths[0]], mids, [mids[-1] + widths[-1]])
+            )
             widths = np.concatenate(([widths[0]], widths, [widths[-1]]))
             counts = np.concatenate(([0], counts, [0]))
 
@@ -62,15 +70,17 @@ class StatBin(Stat):
         ncount = counts / max_count if max_count > 0 else counts.astype(float)
         ndensity = densities / max_density if max_density > 0 else densities
 
-        return pl.DataFrame({
-            "x": mids,
-            "y": counts.astype(float),
-            "width": widths,
-            "count": counts.astype(float),
-            "density": densities,
-            "ncount": ncount.astype(float),
-            "ndensity": ndensity.astype(float),
-        })
+        return pl.DataFrame(
+            {
+                "x": mids,
+                "y": counts.astype(float),
+                "width": widths,
+                "count": counts.astype(float),
+                "density": densities,
+                "ncount": ncount.astype(float),
+                "ndensity": ndensity.astype(float),
+            }
+        )
 
     def _compute_breaks(self, x):
         x_min, x_max = float(x.min()), float(x.max())
@@ -138,7 +148,14 @@ def _count_per_bin(x, breaks, closed: str) -> np.ndarray:
     return counts.astype(int)
 
 
-def stat_bin(*, bins=None, binwidth=None, boundary=None, center=None,
-             closed="right", pad=False):
-    return StatBin(bins=bins, binwidth=binwidth, boundary=boundary,
-                   center=center, closed=closed, pad=pad)
+def stat_bin(
+    *, bins=None, binwidth=None, boundary=None, center=None, closed="right", pad=False
+):
+    return StatBin(
+        bins=bins,
+        binwidth=binwidth,
+        boundary=boundary,
+        center=center,
+        closed=closed,
+        pad=pad,
+    )

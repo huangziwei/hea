@@ -2,6 +2,7 @@
 ``is.numeric``. (``is.factor`` lives in :mod:`hea.R.factor` alongside
 ``factor`` / ``ordered`` / ``levels``.)
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -20,9 +21,7 @@ def is_na(x):
     if arr.dtype.kind in "fc":
         return np.isnan(arr)
     if arr.dtype == object:
-        return np.array(
-            [v is None for v in arr.flat]
-        ).reshape(arr.shape)
+        return np.array([v is None for v in arr.flat]).reshape(arr.shape)
     return np.zeros(arr.shape, dtype=bool)
 
 

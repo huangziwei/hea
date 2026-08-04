@@ -17,37 +17,124 @@ import pytest
 from conftest import load_dataset
 
 from hea.tidy import (
-    fct_infreq, fct_relevel, fct_rev, fct_reorder, fct_reorder2,
+    fct_infreq,
+    fct_relevel,
+    fct_rev,
+    fct_reorder,
+    fct_reorder2,
 )
 from hea.ggplot import (
-    PlotGrid, aes, after_stat, annotate, annotation_custom,
-    coord_cartesian, coord_fixed,
-    coord_flip, coord_polar, coord_trans, expansion,
-    element_blank, element_rect,
-    plot_annotation, plot_layout, wrap_plots,
-    element_text, facet_grid, facet_wrap, geom_abline, geom_area, geom_bar, geom_blank,
-    geom_boxplot, geom_col, geom_contour, geom_contour_filled, geom_count,
-    geom_crossbar, geom_curve, geom_density, geom_dotplot, geom_errorbar, geom_errorbarh,
-    geom_hex, geom_histogram, geom_hline, geom_jitter,
-    geom_label, geom_line, geom_linerange, geom_path, geom_point,
-    geom_pointrange, geom_polygon, geom_qq, geom_raster,
-    geom_rect, geom_ribbon, geom_segment, geom_smooth,
-    geom_step, geom_text, geom_tile, geom_violin, geom_vline, ggplot, ggtitle,
-    labs, lims,
-    guide_axis, guide_legend, guides,
-    position_dodge, position_fill, position_jitter, position_nudge,
-    position_stack, scale_color_hue, stat_ecdf, stat_function,
-    stat_qq, stat_qq_line, stat_summary, stat_unique, geom_function,
-    scale_color_brewer, scale_color_gradient,
-    scale_color_gradient2, scale_color_gradientn, scale_color_identity,
-    scale_color_manual, scale_color_viridis_c, scale_color_viridis_d,
-    scale_fill_identity, scale_radius, scale_shape_manual,
-    scale_size_area, scale_size_continuous, scale_x_continuous, scale_x_date, scale_x_datetime, scale_x_discrete,
+    PlotGrid,
+    aes,
+    after_stat,
+    annotate,
+    annotation_custom,
+    coord_cartesian,
+    coord_fixed,
+    coord_flip,
+    coord_polar,
+    coord_trans,
+    expansion,
+    element_blank,
+    element_rect,
+    plot_annotation,
+    plot_layout,
+    wrap_plots,
+    element_text,
+    facet_grid,
+    facet_wrap,
+    geom_abline,
+    geom_area,
+    geom_bar,
+    geom_blank,
+    geom_boxplot,
+    geom_col,
+    geom_contour,
+    geom_contour_filled,
+    geom_count,
+    geom_crossbar,
+    geom_curve,
+    geom_density,
+    geom_dotplot,
+    geom_errorbar,
+    geom_errorbarh,
+    geom_hex,
+    geom_histogram,
+    geom_hline,
+    geom_jitter,
+    geom_label,
+    geom_line,
+    geom_linerange,
+    geom_path,
+    geom_point,
+    geom_pointrange,
+    geom_polygon,
+    geom_qq,
+    geom_raster,
+    geom_rect,
+    geom_ribbon,
+    geom_segment,
+    geom_smooth,
+    geom_step,
+    geom_text,
+    geom_tile,
+    geom_violin,
+    geom_vline,
+    ggplot,
+    ggtitle,
+    labs,
+    lims,
+    guide_axis,
+    guide_legend,
+    guides,
+    position_dodge,
+    position_fill,
+    position_jitter,
+    position_nudge,
+    position_stack,
+    scale_color_hue,
+    stat_ecdf,
+    stat_function,
+    stat_qq,
+    stat_qq_line,
+    stat_summary,
+    stat_unique,
+    geom_function,
+    scale_color_brewer,
+    scale_color_gradient,
+    scale_color_gradient2,
+    scale_color_gradientn,
+    scale_color_identity,
+    scale_color_manual,
+    scale_color_viridis_c,
+    scale_color_viridis_d,
+    scale_fill_identity,
+    scale_radius,
+    scale_shape_manual,
+    scale_size_area,
+    scale_size_continuous,
+    scale_x_continuous,
+    scale_x_date,
+    scale_x_datetime,
+    scale_x_discrete,
     scale_x_log10,
-    scale_x_ordinal, scale_x_reverse, scale_x_sqrt,
-    scale_y_continuous, scale_y_log10, scale_y_percent, scale_y_sqrt,
-    theme, theme_bw, theme_classic, theme_gray,
-    theme_minimal, theme_void, xlab, xlim, ylab, ylim,
+    scale_x_ordinal,
+    scale_x_reverse,
+    scale_x_sqrt,
+    scale_y_continuous,
+    scale_y_log10,
+    scale_y_percent,
+    scale_y_sqrt,
+    theme,
+    theme_bw,
+    theme_classic,
+    theme_gray,
+    theme_minimal,
+    theme_void,
+    xlab,
+    xlim,
+    ylab,
+    ylim,
 )
 
 
@@ -71,12 +158,15 @@ def test_gg_c1_minimal_scatter_renders():
         assert len(axes) == 1, f"expected one axes, got {len(axes)}"
         ax = axes[0]
 
-        scatters = [c for c in ax.collections if c.__class__.__name__ == "PathCollection"]
+        scatters = [
+            c for c in ax.collections if c.__class__.__name__ == "PathCollection"
+        ]
         assert len(scatters) == 1, f"expected one scatter, got {len(scatters)}"
 
         offsets = scatters[0].get_offsets()
-        assert offsets.shape == (len(mtcars), 2), \
+        assert offsets.shape == (len(mtcars), 2), (
             f"expected {len(mtcars)} points, got {offsets.shape[0]}"
+        )
 
         x_vals = mtcars["wt"].to_numpy()
         y_vals = mtcars["mpg"].to_numpy()
@@ -163,8 +253,7 @@ def test_aes_callable_value():
     import numpy as np
 
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes(x=lambda d: d["wt"] * 2, y="mpg"))
-         + geom_point())
+    p = ggplot(mtcars, aes(x=lambda d: d["wt"] * 2, y="mpg")) + geom_point()
     fig = p.draw()
     try:
         offsets = fig.axes[0].collections[0].get_offsets()
@@ -182,8 +271,11 @@ def test_aes_callable_value():
 def test_scale_x_continuous_limits_override_autoscale():
     """``scale_x_continuous(limits=(0, 10))`` should clamp xlim regardless of data."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + scale_x_continuous(limits=(0, 10)))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + scale_x_continuous(limits=(0, 10))
+    )
     fig = p.draw()
     try:
         assert fig.axes[0].get_xlim() == (0, 10)
@@ -193,8 +285,11 @@ def test_scale_x_continuous_limits_override_autoscale():
 
 def test_scale_x_continuous_explicit_breaks_and_labels():
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + scale_x_continuous(breaks=[2, 3, 4], labels=["light", "mid", "heavy"]))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + scale_x_continuous(breaks=[2, 3, 4], labels=["light", "mid", "heavy"])
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -208,8 +303,11 @@ def test_scale_x_continuous_explicit_breaks_and_labels():
 
 def test_scale_y_continuous_breaks_none_hides_ticks():
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + scale_y_continuous(breaks=None))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + scale_y_continuous(breaks=None)
+    )
     fig = p.draw()
     try:
         assert len(fig.axes[0].get_yticks()) == 0
@@ -226,6 +324,7 @@ def test_scale_default_auto_registered_when_user_omits():
     p = ggplot(mtcars, aes("wt", "mpg")) + geom_point()
 
     from hea.ggplot.build import build
+
     bo = build(p)
     assert isinstance(bo.scales.get("x"), ScaleContinuous)
     assert isinstance(bo.scales.get("y"), ScaleContinuous)
@@ -235,8 +334,7 @@ def test_repeated_draw_produces_identical_ticks():
     """build() copies the ScalesList so repeated draws are deterministic — no
     accumulating range_ state, no break drift."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + scale_x_continuous())
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + scale_x_continuous()
 
     fig1 = p.draw()
     ticks1 = list(fig1.axes[0].get_xticks())
@@ -271,8 +369,7 @@ def test_gg_c6_scale_x_log10():
     import numpy as np
 
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("disp", "mpg")) + geom_point()
-         + scale_x_log10())
+    p = ggplot(mtcars, aes("disp", "mpg")) + geom_point() + scale_x_log10()
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -297,8 +394,7 @@ def test_scale_y_log10():
     coordinates the geom plotted live in log10 space."""
 
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + scale_y_log10())
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + scale_y_log10()
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -322,8 +418,7 @@ def test_scale_x_sqrt():
     is linear (data is sqrt'd before reaching the geom). ``coord_trans``
     is the API that touches the matplotlib axis scale instead."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("disp", "mpg")) + geom_point()
-         + scale_x_sqrt())
+    p = ggplot(mtcars, aes("disp", "mpg")) + geom_point() + scale_x_sqrt()
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -343,7 +438,7 @@ def test_scale_y_sqrt_transforms_stat_generated_y():
     was skipped and the bars rendered at raw counts while ticks were
     placed at sqrt-positions (visually misaligned)."""
     df = pl.DataFrame({"x": list("AAABBBBCCCCCCCCCCCCCCCCDDDDDDDDDDDDDDDDD")})
-    p = (ggplot(df, aes("x")) + geom_bar() + scale_y_sqrt())
+    p = ggplot(df, aes("x")) + geom_bar() + scale_y_sqrt()
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -351,6 +446,7 @@ def test_scale_y_sqrt_transforms_stat_generated_y():
         heights = sorted(round(p.get_height(), 4) for p in ax.patches)
         # counts: A=3, B=4, C=16, D=17 → sqrt: ~1.73, 2.00, 4.00, ~4.12
         import math
+
         assert heights[0] == pytest.approx(math.sqrt(3), abs=1e-4)
         assert heights[-1] == pytest.approx(math.sqrt(17), abs=1e-4)
         # Tick labels should read in raw count units.
@@ -365,9 +461,8 @@ def test_scale_y_sqrt_tick_labels_in_raw_units_for_geom_col():
     showing the *sqrt-space* values (``"10", "20", ...``) instead of the
     *raw* values (``"100", "400", ...``). ``SqrtTrans.tick_positions_and_labels``
     now inverse-maps to raw units before formatting."""
-    df = pl.DataFrame({"x": ["A", "B", "C", "D"],
-                       "y": [100.0, 400.0, 900.0, 1600.0]})
-    p = (ggplot(df, aes("x", "y")) + geom_col() + scale_y_sqrt())
+    df = pl.DataFrame({"x": ["A", "B", "C", "D"], "y": [100.0, 400.0, 900.0, 1600.0]})
+    p = ggplot(df, aes("x", "y")) + geom_col() + scale_y_sqrt()
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -375,9 +470,11 @@ def test_scale_y_sqrt_tick_labels_in_raw_units_for_geom_col():
         # The labels should be in raw units (hundreds), not sqrt-units
         # (tens). Bar tops at sqrt(1600)=40; if labels were "10..40" we'd
         # be back in the bug. Look for at least one >= 100.
-        large_labels = [lbl for lbl in labels
-                        if lbl.replace(".", "").replace("-", "").isdigit()
-                        and float(lbl) >= 100]
+        large_labels = [
+            lbl
+            for lbl in labels
+            if lbl.replace(".", "").replace("-", "").isdigit() and float(lbl) >= 100
+        ]
         assert large_labels, f"Expected raw-unit labels (>=100), got {labels}"
     finally:
         plt.close(fig)
@@ -386,8 +483,7 @@ def test_scale_y_sqrt_tick_labels_in_raw_units_for_geom_col():
 def test_scale_x_reverse():
     """Reversed axis: matplotlib treats ``lo > hi`` xlim as inverted."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + scale_x_reverse())
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + scale_x_reverse()
     fig = p.draw()
     try:
         lo, hi = fig.axes[0].get_xlim()
@@ -406,8 +502,11 @@ def test_log10_with_explicit_breaks():
     import numpy as np
 
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("disp", "mpg")) + geom_point()
-         + scale_x_log10(breaks=[100, 200, 400], labels=["100", "200", "400"]))
+    p = (
+        ggplot(mtcars, aes("disp", "mpg"))
+        + geom_point()
+        + scale_x_log10(breaks=[100, 200, 400], labels=["100", "200", "400"])
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -431,6 +530,7 @@ def test_log10_with_explicit_breaks():
 
 def test_extended_breaks_unit_interval():
     from hea.ggplot.scales._breaks import extended_breaks
+
     bk = extended_breaks(0.0, 1.0, m=5)
     assert list(bk) == [0.0, 0.25, 0.5, 0.75, 1.0]
 
@@ -438,6 +538,7 @@ def test_extended_breaks_unit_interval():
 def test_extended_breaks_zero_centered():
     """Algorithm prefers grids that pass through zero (simplicity bonus)."""
     from hea.ggplot.scales._breaks import extended_breaks
+
     bk = extended_breaks(-50.0, 50.0, m=5)
     assert list(bk) == [-50.0, -25.0, 0.0, 25.0, 50.0]
 
@@ -445,6 +546,7 @@ def test_extended_breaks_zero_centered():
 def test_extended_breaks_mtcars_disp():
     """mtcars$disp range (71–472) → [100, 200, 300, 400, 500]."""
     from hea.ggplot.scales._breaks import extended_breaks
+
     bk = extended_breaks(71.0, 472.0, m=5)
     assert list(bk) == [100.0, 200.0, 300.0, 400.0, 500.0]
 
@@ -452,12 +554,14 @@ def test_extended_breaks_mtcars_disp():
 def test_extended_breaks_mtcars_wt():
     """mtcars$wt range (1.42–5.43) → [1, 2, 3, 4, 5]."""
     from hea.ggplot.scales._breaks import extended_breaks
+
     bk = extended_breaks(1.42, 5.43, m=5)
     assert list(bk) == [1.0, 2.0, 3.0, 4.0, 5.0]
 
 
 def test_extended_breaks_degenerate_range_returns_single_tick():
     from hea.ggplot.scales._breaks import extended_breaks
+
     bk = extended_breaks(3.14, 3.14, m=5)
     assert len(bk) == 1
     assert bk[0] == 3.14
@@ -553,13 +657,15 @@ def test_position_jitter_spreads_points():
 
     mtcars = load_dataset("datasets", "mtcars")
     # cyl has 3 unique values; raw scatter would have only 3 distinct x's.
-    p = (ggplot(mtcars, aes("cyl", "mpg"))
-         + geom_point(position=position_jitter(seed=42)))
+    p = ggplot(mtcars, aes("cyl", "mpg")) + geom_point(
+        position=position_jitter(seed=42)
+    )
     fig = p.draw()
     try:
         offsets = fig.axes[0].collections[0].get_offsets()
-        assert len(np.unique(offsets[:, 0])) > 3, \
+        assert len(np.unique(offsets[:, 0])) > 3, (
             "jitter should produce more unique x positions than raw cyl"
+        )
     finally:
         plt.close(fig)
 
@@ -569,10 +675,12 @@ def test_position_jitter_seed_is_deterministic():
     import numpy as np
 
     mtcars = load_dataset("datasets", "mtcars")
-    fig1 = (ggplot(mtcars, aes("cyl", "mpg"))
-            + geom_point(position=position_jitter(seed=7))).draw()
-    fig2 = (ggplot(mtcars, aes("cyl", "mpg"))
-            + geom_point(position=position_jitter(seed=7))).draw()
+    fig1 = (
+        ggplot(mtcars, aes("cyl", "mpg")) + geom_point(position=position_jitter(seed=7))
+    ).draw()
+    fig2 = (
+        ggplot(mtcars, aes("cyl", "mpg")) + geom_point(position=position_jitter(seed=7))
+    ).draw()
     try:
         np.testing.assert_array_equal(
             fig1.axes[0].collections[0].get_offsets(),
@@ -587,8 +695,9 @@ def test_position_nudge_shifts_by_constants():
     import numpy as np
 
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg"))
-         + geom_point(position=position_nudge(x=1.0, y=2.0)))
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point(
+        position=position_nudge(x=1.0, y=2.0)
+    )
     fig = p.draw()
     try:
         offsets = np.asarray(fig.axes[0].collections[0].get_offsets())
@@ -603,8 +712,7 @@ def test_position_nudge_shifts_by_constants():
 def test_position_dodge_splits_bars_per_group():
     """With aes(group=am), 3 cyl values × 2 groups → 6 bars at distinct x's."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes(x="cyl", group="am"))
-         + geom_bar(position=position_dodge()))
+    p = ggplot(mtcars, aes(x="cyl", group="am")) + geom_bar(position=position_dodge())
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -624,8 +732,7 @@ def test_position_dodge_splits_bars_per_group():
 def test_position_stack_stacks_bars_vertically():
     """With group, second-group bars sit on top of first-group bars."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes(x="cyl", group="am"))
-         + geom_bar(position=position_stack()))
+    p = ggplot(mtcars, aes(x="cyl", group="am")) + geom_bar(position=position_stack())
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -659,13 +766,13 @@ def test_geom_bar_facet_wrap_bars_start_at_zero():
 def test_position_fill_normalises_stacks_to_one():
     """`position_fill` makes every column reach exactly y=1."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes(x="cyl", group="am"))
-         + geom_bar(position=position_fill()))
+    p = ggplot(mtcars, aes(x="cyl", group="am")) + geom_bar(position=position_fill())
     fig = p.draw()
     try:
         ax = fig.axes[0]
         # For each unique x, the topmost bar's (y + height) should be 1.0.
         from collections import defaultdict
+
         tops = defaultdict(float)
         for b in ax.patches:
             x = round(b.get_x() + b.get_width() / 2, 6)
@@ -682,6 +789,7 @@ def test_position_string_resolves_to_class():
     # Determinism not asserted (no seed plumbing through string form),
     # just confirm the dispatch and that points spread.
     import numpy as np
+
     p = ggplot(mtcars, aes("cyl", "mpg")) + geom_point(position="jitter")
     fig = p.draw()
     try:
@@ -708,11 +816,13 @@ def test_geom_ribbon_draws_filled_band():
     import polars as pl
     from matplotlib.collections import PolyCollection
 
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0],
-        "lo": [0.0, 0.5, 1.0, 1.5],
-        "hi": [1.0, 1.5, 2.0, 2.5],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "lo": [0.0, 0.5, 1.0, 1.5],
+            "hi": [1.0, 1.5, 2.0, 2.5],
+        }
+    )
     p = ggplot(df, aes(x="x", ymin="lo", ymax="hi")) + geom_ribbon()
     fig = p.draw()
     try:
@@ -743,8 +853,7 @@ def test_geom_area_treats_y_as_ymax_with_zero_floor():
 def test_gg_c2_geom_smooth_lm_with_ci_ribbon():
     """GG-C2: ``geom_smooth(method="lm")`` produces a fit line + CI band."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + geom_smooth(method="lm"))
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + geom_smooth(method="lm")
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -797,6 +906,7 @@ def test_geom_smooth_lm_fit_matches_hea_lm():
     on the same data — no surprise drift."""
     import polars as pl
     from hea.models import lm
+
     mtcars = load_dataset("datasets", "mtcars")
     p = ggplot(mtcars, aes("wt", "mpg")) + geom_smooth(method="lm")
     fig = p.draw()
@@ -808,6 +918,7 @@ def test_geom_smooth_lm_fit_matches_hea_lm():
         new = pl.DataFrame({"wt": line_x})
         expected = m.predict(newdata=new)["fit"].to_numpy()
         import numpy as np
+
         np.testing.assert_allclose(line_y, expected, atol=1e-9)
     finally:
         plt.close(fig)
@@ -844,9 +955,11 @@ def test_stat_smooth_gam_with_per_panel_facets():
     import warnings as _w
 
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg"))
-         + geom_smooth(method="gam", formula="y ~ s(x, k=4)")
-         + facet_wrap("cyl"))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_smooth(method="gam", formula="y ~ s(x, k=4)")
+        + facet_wrap("cyl")
+    )
     with _w.catch_warnings():
         _w.simplefilter("ignore")
         fig = p.draw()
@@ -924,6 +1037,7 @@ def test_stat_smooth_glm_family_string_form():
 
 def test_stat_smooth_glm_unknown_family_errors():
     import polars as pl
+
     df = pl.DataFrame({"x": [1.0, 2, 3], "y": [1.0, 2, 3]})
     p = ggplot(df, aes("x", "y")) + geom_smooth(method="glm", family="weibull")
     with pytest.raises(ValueError, match="unknown family"):
@@ -972,10 +1086,12 @@ def test_geom_boxplot_per_box_colour():
     bug that applied a single edge/fill to every box in the call)."""
     import matplotlib.colors as mcolors
 
-    df = pl.DataFrame({
-        "g": ["a"] * 6 + ["b"] * 6 + ["c"] * 6,
-        "y": [1.0, 2, 3, 4, 5, 6] * 3,
-    })
+    df = pl.DataFrame(
+        {
+            "g": ["a"] * 6 + ["b"] * 6 + ["c"] * 6,
+            "y": [1.0, 2, 3, 4, 5, 6] * 3,
+        }
+    )
     p = ggplot(df, aes(x="g", y="y", colour="g")) + geom_boxplot()
     fig = p.draw()
     try:
@@ -983,8 +1099,10 @@ def test_geom_boxplot_per_box_colour():
         # should all differ.
         patches = fig.axes[0].patches
         assert len(patches) == 3
-        edges = [tuple(round(c, 4) for c in mcolors.to_rgba(p.get_edgecolor()))
-                 for p in patches]
+        edges = [
+            tuple(round(c, 4) for c in mcolors.to_rgba(p.get_edgecolor()))
+            for p in patches
+        ]
         assert len(set(edges)) == 3, (
             f"all box edges came back identical ({edges[0]}), so "
             f"per-box colour is broken"
@@ -1032,10 +1150,14 @@ def test_stat_ydensity_violinwidth_normalised_to_one():
     from hea.ggplot.stats.ydensity import StatYdensity
 
     rng = np.random.default_rng(1)
-    df = pl.DataFrame({
-        "x": [0] * 100 + [1] * 100,
-        "y": np.concatenate([rng.standard_normal(100), rng.standard_normal(100) + 5]),
-    })
+    df = pl.DataFrame(
+        {
+            "x": [0] * 100 + [1] * 100,
+            "y": np.concatenate(
+                [rng.standard_normal(100), rng.standard_normal(100) + 5]
+            ),
+        }
+    )
     out = StatYdensity().compute_panel(df, {})
     for x_val in (0, 1):
         sub = out.filter(pl.col("x") == x_val)
@@ -1056,8 +1178,7 @@ def test_stat_ydensity_violinwidth_normalised_to_one():
 def test_gg_c3_aes_color_factor_cyl_assigns_distinct_colors():
     """GG-C3: ``aes(color = factor(cyl))`` paints points by group."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
-         + geom_point())
+    p = ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)")) + geom_point()
     fig = p.draw()
     try:
         fc = fig.axes[0].collections[0].get_facecolors()
@@ -1097,10 +1218,12 @@ def test_discrete_color_levels_sorted_alphabetically():
     from matplotlib.colors import to_rgb
 
     penguins = _hea_data("penguins", package="palmerpenguins")
-    p = (ggplot(penguins, aes("flipper_length_mm", "body_mass_g",
-                              colour="species"))
-         + geom_point())
+    p = (
+        ggplot(penguins, aes("flipper_length_mm", "body_mass_g", colour="species"))
+        + geom_point()
+    )
     import warnings as _w
+
     with _w.catch_warnings():
         _w.simplefilter("ignore", UserWarning)  # NA-removal warning
         fig = p.draw()
@@ -1127,10 +1250,12 @@ def test_user_penguins_string_color_works_end_to_end():
     """The bug report: ``aes(color="species")`` on string column → 3 colours,
     no matplotlib RGBA error. Penguins has 2 NA rows so a warning is expected."""
     from hea import data as _hea_data
+
     penguins = _hea_data("penguins", package="palmerpenguins")
-    p = (ggplot(penguins, aes(x="flipper_length_mm", y="body_mass_g",
-                              color="species"))
-         + geom_point())
+    p = (
+        ggplot(penguins, aes(x="flipper_length_mm", y="body_mass_g", color="species"))
+        + geom_point()
+    )
     with pytest.warns(UserWarning, match=r"Removed 2 rows .*`geom_point\(\)`"):
         fig = p.draw()
     try:
@@ -1147,9 +1272,11 @@ def test_scale_color_manual_applies_user_palette():
     from matplotlib.colors import to_rgba
 
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
-         + geom_point()
-         + scale_color_manual(values=["#FF0000", "#00FF00", "#0000FF"]))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
+        + geom_point()
+        + scale_color_manual(values=["#FF0000", "#00FF00", "#0000FF"])
+    )
     fig = p.draw()
     try:
         fc = fig.axes[0].collections[0].get_facecolors()
@@ -1165,11 +1292,15 @@ def test_scale_color_manual_dict_form():
     from matplotlib.colors import to_rgba
     import polars as pl
 
-    df = pl.DataFrame({"x": [1.0, 2, 3, 4], "y": [1.0, 2, 3, 4],
-                       "g": ["a", "b", "a", "b"]})
+    df = pl.DataFrame(
+        {"x": [1.0, 2, 3, 4], "y": [1.0, 2, 3, 4], "g": ["a", "b", "a", "b"]}
+    )
     palette = {"a": "#AA0000", "b": "#00AA00"}
-    p = (ggplot(df, aes("x", "y", colour="g")) + geom_point()
-         + scale_color_manual(values=palette))
+    p = (
+        ggplot(df, aes("x", "y", colour="g"))
+        + geom_point()
+        + scale_color_manual(values=palette)
+    )
     fig = p.draw()
     try:
         fc = fig.axes[0].collections[0].get_facecolors()
@@ -1184,13 +1315,14 @@ def test_scale_color_identity_passes_hex_through():
     from matplotlib.colors import to_rgba
     import polars as pl
 
-    df = pl.DataFrame({
-        "x": [1.0, 2, 3],
-        "y": [1.0, 2, 3],
-        "c": ["#FF0000", "#00FF00", "#0000FF"],
-    })
-    p = (ggplot(df, aes("x", "y", colour="c")) + geom_point()
-         + scale_color_identity())
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2, 3],
+            "y": [1.0, 2, 3],
+            "c": ["#FF0000", "#00FF00", "#0000FF"],
+        }
+    )
+    p = ggplot(df, aes("x", "y", colour="c")) + geom_point() + scale_color_identity()
     fig = p.draw()
     try:
         fc = fig.axes[0].collections[0].get_facecolors()
@@ -1207,11 +1339,13 @@ def test_add_group_auto_creates_group_from_discrete_aesthetic():
 
     from hea.ggplot.build import _add_group
 
-    df = pl.DataFrame({
-        "x": [1, 2, 3, 4, 5, 6],
-        "y": [1, 2, 3, 4, 5, 6],
-        "colour": ["a", "a", "b", "b", "c", "c"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1, 2, 3, 4, 5, 6],
+            "y": [1, 2, 3, 4, 5, 6],
+            "colour": ["a", "a", "b", "b", "c", "c"],
+        }
+    )
     out = _add_group(df)
     assert "group" in out.columns
     # 3 unique levels → 3 distinct group ids
@@ -1244,8 +1378,11 @@ def test_scale_color_gradient_endpoints_match_data_extrema():
     from matplotlib.colors import to_rgba
 
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg", colour="hp")) + geom_point()
-         + scale_color_gradient(low="red", high="blue"))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg", colour="hp"))
+        + geom_point()
+        + scale_color_gradient(low="red", high="blue")
+    )
     fig = p.draw()
     try:
         fc = fig.axes[0].collections[0].get_facecolors()
@@ -1262,12 +1399,19 @@ def test_scale_color_gradient2_midpoint_is_mid_colour():
     import polars as pl
     from matplotlib.colors import to_rgba
 
-    df = pl.DataFrame({
-        "x": [1.0, 2, 3], "y": [1.0, 2, 3], "z": [-1.0, 0.0, 1.0],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2, 3],
+            "y": [1.0, 2, 3],
+            "z": [-1.0, 0.0, 1.0],
+        }
+    )
     # Data range is [-1, 1], midpoint of palette at 0.5 maps to data midpoint 0.
-    p = (ggplot(df, aes("x", "y", colour="z")) + geom_point()
-         + scale_color_gradient2(low="red", mid="green", high="blue", midpoint=0.5))
+    p = (
+        ggplot(df, aes("x", "y", colour="z"))
+        + geom_point()
+        + scale_color_gradient2(low="red", mid="green", high="blue", midpoint=0.5)
+    )
     fig = p.draw()
     try:
         fc = fig.axes[0].collections[0].get_facecolors()
@@ -1283,11 +1427,18 @@ def test_scale_color_gradientn_n_stop_palette():
     import polars as pl
     from matplotlib.colors import to_rgba
 
-    df = pl.DataFrame({
-        "x": [1.0, 2, 3, 4, 5], "y": [1.0, 2, 3, 4, 5], "z": [0.0, 0.25, 0.5, 0.75, 1.0],
-    })
-    p = (ggplot(df, aes("x", "y", colour="z")) + geom_point()
-         + scale_color_gradientn(colours=["red", "yellow", "blue"]))
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2, 3, 4, 5],
+            "y": [1.0, 2, 3, 4, 5],
+            "z": [0.0, 0.25, 0.5, 0.75, 1.0],
+        }
+    )
+    p = (
+        ggplot(df, aes("x", "y", colour="z"))
+        + geom_point()
+        + scale_color_gradientn(colours=["red", "yellow", "blue"])
+    )
     fig = p.draw()
     try:
         fc = fig.axes[0].collections[0].get_facecolors()
@@ -1300,8 +1451,11 @@ def test_scale_color_gradientn_n_stop_palette():
 
 def test_scale_color_viridis_c_continuous():
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg", colour="hp")) + geom_point()
-         + scale_color_viridis_c())
+    p = (
+        ggplot(mtcars, aes("wt", "mpg", colour="hp"))
+        + geom_point()
+        + scale_color_viridis_c()
+    )
     fig = p.draw()
     try:
         fc = fig.axes[0].collections[0].get_facecolors()
@@ -1315,8 +1469,11 @@ def test_scale_color_viridis_c_continuous():
 
 def test_scale_color_viridis_d_discrete():
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
-         + geom_point() + scale_color_viridis_d())
+    p = (
+        ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
+        + geom_point()
+        + scale_color_viridis_d()
+    )
     fig = p.draw()
     try:
         fc = fig.axes[0].collections[0].get_facecolors()
@@ -1328,10 +1485,16 @@ def test_scale_color_viridis_d_discrete():
 def test_scale_color_viridis_d_direction_reverses_ordering():
     """``direction=-1`` flips the palette across the level order."""
     mtcars = load_dataset("datasets", "mtcars")
-    p_fwd = (ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
-             + geom_point() + scale_color_viridis_d(direction=1))
-    p_rev = (ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
-             + geom_point() + scale_color_viridis_d(direction=-1))
+    p_fwd = (
+        ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
+        + geom_point()
+        + scale_color_viridis_d(direction=1)
+    )
+    p_rev = (
+        ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
+        + geom_point()
+        + scale_color_viridis_d(direction=-1)
+    )
     f1 = p_fwd.draw()
     f2 = p_rev.draw()
     try:
@@ -1352,14 +1515,17 @@ def test_scale_color_brewer_set1():
     import matplotlib
 
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
-         + geom_point() + scale_color_brewer(palette="Set1"))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
+        + geom_point()
+        + scale_color_brewer(palette="Set1")
+    )
     fig = p.draw()
     try:
         fc = fig.axes[0].collections[0].get_facecolors()
         from matplotlib.colors import to_rgba
-        expected = {to_rgba(to_hex(c))
-                    for c in matplotlib.colormaps["Set1"].colors[:3]}
+
+        expected = {to_rgba(to_hex(c)) for c in matplotlib.colormaps["Set1"].colors[:3]}
         observed = {tuple(c) for c in fc}
         assert observed == expected
     finally:
@@ -1392,8 +1558,11 @@ def test_gg_c4_aes_size_continuous_qsec():
 
 def test_scale_size_continuous_custom_range():
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg", size="qsec")) + geom_point()
-         + scale_size_continuous(range=(2, 4)))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg", size="qsec"))
+        + geom_point()
+        + scale_size_continuous(range=(2, 4))
+    )
     fig = p.draw()
     try:
         sizes = fig.axes[0].collections[0].get_sizes()
@@ -1421,8 +1590,7 @@ def test_aes_alpha_continuous():
 def test_aes_shape_discrete_factor_cyl():
     """``aes(shape=factor(cyl))`` → 3 scatter calls (one per marker shape)."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg", shape="factor(cyl)"))
-         + geom_point())
+    p = ggplot(mtcars, aes("wt", "mpg", shape="factor(cyl)")) + geom_point()
     fig = p.draw()
     try:
         # matplotlib scatter takes a single marker per call; one collection
@@ -1436,16 +1604,20 @@ def test_aes_shape_continuous_raises():
     """ggplot2 message: 'A continuous variable cannot be mapped to `shape`'."""
     mtcars = load_dataset("datasets", "mtcars")
     p = ggplot(mtcars, aes("wt", "mpg", shape="qsec")) + geom_point()
-    with pytest.raises(ValueError, match="continuous variable cannot be mapped to `shape`"):
+    with pytest.raises(
+        ValueError, match="continuous variable cannot be mapped to `shape`"
+    ):
         p.draw()
 
 
 def test_scale_shape_manual_explicit_markers():
     """User-supplied marker codes are honoured per level."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg", shape="factor(cyl)"))
-         + geom_point()
-         + scale_shape_manual(values=["o", "X", "D"]))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg", shape="factor(cyl)"))
+        + geom_point()
+        + scale_shape_manual(values=["o", "X", "D"])
+    )
     fig = p.draw()
     try:
         # 3 collections each with a distinct marker glyph → just count
@@ -1458,8 +1630,7 @@ def test_scale_shape_manual_explicit_markers():
 def test_aes_linetype_discrete_on_geom_line():
     """``aes(linetype=factor(cyl))`` on geom_line → distinct linestyles per group."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg", linetype="factor(cyl)"))
-         + geom_line())
+    p = ggplot(mtcars, aes("wt", "mpg", linetype="factor(cyl)")) + geom_line()
     fig = p.draw()
     try:
         # 3 cyl groups → 3 lines; each with its own linestyle.
@@ -1474,7 +1645,9 @@ def test_aes_linetype_discrete_on_geom_line():
 def test_aes_linetype_continuous_raises():
     mtcars = load_dataset("datasets", "mtcars")
     p = ggplot(mtcars, aes("wt", "mpg", linetype="qsec")) + geom_line()
-    with pytest.raises(ValueError, match="continuous variable cannot be mapped to `linetype`"):
+    with pytest.raises(
+        ValueError, match="continuous variable cannot be mapped to `linetype`"
+    ):
         p.draw()
 
 
@@ -1486,8 +1659,7 @@ def test_aes_linetype_continuous_raises():
 def test_gg_c5_facet_wrap_by_cyl():
     """GG-C5: ``facet_wrap("cyl")`` produces 3 panels, one per unique cyl."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + facet_wrap("cyl"))
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + facet_wrap("cyl")
     fig = p.draw()
     try:
         # 3 panels in a 2x2 grid → 4 axes total, last hidden.
@@ -1519,8 +1691,7 @@ def test_facet_wrap_tilde_string_syntax():
 def test_facet_wrap_multi_variable():
     """`facet_wrap(["cyl", "am"])` panels by Cartesian product."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + facet_wrap(["cyl", "am"]))
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + facet_wrap(["cyl", "am"])
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
@@ -1536,8 +1707,11 @@ def test_facet_wrap_multi_variable():
 def test_facet_wrap_scales_fixed_shares_axes():
     """``scales="fixed"`` (default): all panels share the same xlim/ylim."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + facet_wrap("cyl", scales="fixed"))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + facet_wrap("cyl", scales="fixed")
+    )
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
@@ -1551,8 +1725,11 @@ def test_facet_wrap_scales_fixed_shares_axes():
 
 def test_facet_wrap_scales_free_independent_axes():
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + facet_wrap("cyl", scales="free"))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + facet_wrap("cyl", scales="free")
+    )
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
@@ -1566,8 +1743,7 @@ def test_facet_wrap_scales_free_independent_axes():
 def test_facet_wrap_ncol_explicit():
     """User-specified `ncol=3` puts all panels on one row."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + facet_wrap("cyl", ncol=3))
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + facet_wrap("cyl", ncol=3)
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
@@ -1588,8 +1764,12 @@ def test_facet_wrap_with_geom_smooth_per_panel_fits():
     """`facet_wrap` runs the stat per panel, so each panel gets its own fit."""
 
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point() + geom_smooth(method="lm")
-         + facet_wrap("cyl"))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + geom_smooth(method="lm")
+        + facet_wrap("cyl")
+    )
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
@@ -1612,19 +1792,23 @@ def test_facet_wrap_with_geom_smooth_per_panel_fits():
 def test_facet_wrap_preserves_colour_mapping_per_panel():
     """Per-panel discrete colour mapping survives the facet split."""
     from hea import data as _hea_data
+
     penguins = _hea_data("penguins", package="palmerpenguins")
-    p = (ggplot(penguins, aes("flipper_length_mm", "body_mass_g",
-                              colour="species"))
-         + geom_point()
-         + facet_wrap("island"))
+    p = (
+        ggplot(penguins, aes("flipper_length_mm", "body_mass_g", colour="species"))
+        + geom_point()
+        + facet_wrap("island")
+    )
     import warnings as _w
+
     with _w.catch_warnings():
         _w.simplefilter("ignore", UserWarning)  # NA-removal warning
         fig = p.draw()
     try:
         # Only count panel axes (filter legend host / colorbar cax).
         visible = [
-            a for a in fig.axes
+            a
+            for a in fig.axes
             if a.get_visible() and a.get_label() not in ("<legend>", "<colorbar>")
         ]
         # 3 islands.
@@ -1649,8 +1833,7 @@ def test_facet_wrap_preserves_colour_mapping_per_panel():
 def test_facet_grid_formula_basic():
     """`facet_grid("am ~ cyl")` produces a 2×3 grid of panels."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + facet_grid("am ~ cyl"))
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + facet_grid("am ~ cyl")
     fig = p.draw()
     try:
         # 2 am × 3 cyl = 6 panels.
@@ -1668,10 +1851,12 @@ def test_facet_grid_formula_basic():
 def test_facet_grid_kwargs_form():
     """`facet_grid(rows="am", cols="cyl")` matches the formula form."""
     mtcars = load_dataset("datasets", "mtcars")
-    p1 = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-          + facet_grid("am ~ cyl"))
-    p2 = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-          + facet_grid(rows="am", cols="cyl"))
+    p1 = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + facet_grid("am ~ cyl")
+    p2 = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + facet_grid(rows="am", cols="cyl")
+    )
     fig1 = p1.draw()
     fig2 = p2.draw()
     try:
@@ -1686,8 +1871,7 @@ def test_facet_grid_kwargs_form():
 def test_facet_grid_row_only():
     """`facet_grid("am ~ .")` → single column, 2 rows."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + facet_grid("am ~ ."))
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + facet_grid("am ~ .")
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
@@ -1701,8 +1885,7 @@ def test_facet_grid_row_only():
 def test_facet_grid_col_only():
     """`facet_grid(". ~ cyl")` → single row, 3 columns."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + facet_grid(". ~ cyl"))
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + facet_grid(". ~ cyl")
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
@@ -1716,8 +1899,7 @@ def test_facet_grid_col_only():
 def test_facet_grid_strip_labels_top_and_right():
     """Top strip on row 0 (col values); right strip on last col (row values)."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + facet_grid("am ~ cyl"))
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + facet_grid("am ~ cyl")
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
@@ -1735,9 +1917,11 @@ def test_facet_grid_strip_labels_top_and_right():
         # (rendered via ax.text with transform=transAxes).
         for a in visible:
             col = a.get_subplotspec().colspan.start
-            right_texts = [t for t in a.texts
-                           if t.get_transform() == a.transAxes
-                           and t.get_position()[0] > 1.0]
+            right_texts = [
+                t
+                for t in a.texts
+                if t.get_transform() == a.transAxes and t.get_position()[0] > 1.0
+            ]
             if col == 2:  # last column
                 assert len(right_texts) == 1
                 assert right_texts[0].get_text() in {"0", "1"}
@@ -1750,8 +1934,7 @@ def test_facet_grid_strip_labels_top_and_right():
 def test_facet_grid_scales_fixed_shares_all():
     """``scales="fixed"`` (default): every panel shares xlim and ylim."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + facet_grid("am ~ cyl"))
+    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + facet_grid("am ~ cyl")
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
@@ -1766,8 +1949,11 @@ def test_facet_grid_scales_fixed_shares_all():
 def test_facet_grid_scales_free_x_shares_within_column():
     """``scales="free_x"``: x varies between columns, shared within."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + facet_grid("am ~ cyl", scales="free_x"))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + facet_grid("am ~ cyl", scales="free_x")
+    )
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
@@ -1794,8 +1980,11 @@ def test_facet_grid_scales_free_x_shares_within_column():
 def test_facet_grid_scales_free_y_shares_within_row():
     """``scales="free_y"``: y varies between rows, shared within."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + facet_grid("am ~ cyl", scales="free_y"))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + facet_grid("am ~ cyl", scales="free_y")
+    )
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
@@ -1819,8 +2008,12 @@ def test_facet_grid_per_panel_stat_fit():
     has a 2-row cell which lm can't fit (df_residual = 0).
     """
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point() + geom_smooth(method="lm")
-         + facet_grid("vs ~ am"))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + geom_smooth(method="lm")
+        + facet_grid("vs ~ am")
+    )
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
@@ -1843,8 +2036,11 @@ def test_facet_grid_per_panel_stat_fit():
 def test_facet_grid_multi_var_rows():
     """`facet_grid(rows=["am", "vs"], cols="cyl")` — two-var row grouping."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + facet_grid(rows=["am", "vs"], cols="cyl"))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + facet_grid(rows=["am", "vs"], cols="cyl")
+    )
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
@@ -1886,14 +2082,14 @@ def test_facet_grid_with_enum_facet_var():
     didn't match the layout's original Enum dtype and matplotlib's draw
     failed with a polars SchemaError on join.
     """
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-        "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-        "g": pl.Series(["a", "a", "a", "b", "b", "b"],
-                       dtype=pl.Enum(["a", "b"])),
-    })
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + facet_grid("~ g"))
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "g": pl.Series(["a", "a", "a", "b", "b", "b"], dtype=pl.Enum(["a", "b"])),
+        }
+    )
+    p = ggplot(df, aes("x", "y")) + geom_point() + facet_grid("~ g")
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
@@ -1911,10 +2107,14 @@ def test_facet_grid_with_enum_facet_var():
 
 def test_geom_rect_two_rectangles():
     """`geom_rect` with two non-overlapping rectangles."""
-    df = pl.DataFrame({
-        "xmin": [0.0, 2.0], "xmax": [1.0, 3.0],
-        "ymin": [0.0, 2.0], "ymax": [1.0, 3.0],
-    })
+    df = pl.DataFrame(
+        {
+            "xmin": [0.0, 2.0],
+            "xmax": [1.0, 3.0],
+            "ymin": [0.0, 2.0],
+            "ymax": [1.0, 3.0],
+        }
+    )
     p = ggplot(df) + geom_rect(
         aes(xmin="xmin", xmax="xmax", ymin="ymin", ymax="ymax"),
         fill="red",
@@ -1937,14 +2137,22 @@ def test_geom_rect_two_rectangles():
 
 def test_geom_rect_per_row_fills():
     """Distinct fill column → per-row colours."""
-    df = pl.DataFrame({
-        "xmin": [0.0, 2.0], "xmax": [1.0, 3.0],
-        "ymin": [0.0, 0.0], "ymax": [1.0, 1.0],
-        "fill": ["#ff0000", "#00ff00"],
-    })
-    p = ggplot(df) + geom_rect(
-        aes(xmin="xmin", xmax="xmax", ymin="ymin", ymax="ymax", fill="fill"),
-    ) + scale_fill_identity()
+    df = pl.DataFrame(
+        {
+            "xmin": [0.0, 2.0],
+            "xmax": [1.0, 3.0],
+            "ymin": [0.0, 0.0],
+            "ymax": [1.0, 1.0],
+            "fill": ["#ff0000", "#00ff00"],
+        }
+    )
+    p = (
+        ggplot(df)
+        + geom_rect(
+            aes(xmin="xmin", xmax="xmax", ymin="ymin", ymax="ymax", fill="fill"),
+        )
+        + scale_fill_identity()
+    )
     fig = p.draw()
     try:
         coll = fig.axes[0].collections[0]
@@ -1970,6 +2178,7 @@ def test_geom_tile_centres_with_default_unit_size():
         # First tile: vertices in [-0.5, 0.5] x [-0.5, 0.5].
         verts = coll.get_paths()[0].vertices
         import numpy as np
+
         assert np.isclose(verts[:, 0].min(), -0.5)
         assert np.isclose(verts[:, 0].max(), 0.5)
     finally:
@@ -1978,15 +2187,16 @@ def test_geom_tile_centres_with_default_unit_size():
 
 def test_geom_tile_with_explicit_width_height():
     """`width`/`height` aesthetics override the unit default."""
-    df = pl.DataFrame({"x": [0.0], "y": [0.0],
-                       "width": [4.0], "height": [2.0]})
-    p = ggplot(df) + geom_tile(aes(x="x", y="y", width="width", height="height"),
-                                fill="red")
+    df = pl.DataFrame({"x": [0.0], "y": [0.0], "width": [4.0], "height": [2.0]})
+    p = ggplot(df) + geom_tile(
+        aes(x="x", y="y", width="width", height="height"), fill="red"
+    )
     fig = p.draw()
     try:
         coll = fig.axes[0].collections[0]
         verts = coll.get_paths()[0].vertices
         import numpy as np
+
         # Tile spans [-2, 2] in x, [-1, 1] in y.
         assert np.isclose(verts[:, 0].min(), -2.0)
         assert np.isclose(verts[:, 0].max(), 2.0)
@@ -1999,12 +2209,15 @@ def test_geom_tile_with_explicit_width_height():
 def test_geom_raster_uses_imshow_on_regular_grid():
     """A regular x/y grid renders via ax.imshow rather than per-cell patches."""
     import numpy as np
+
     xs, ys = np.meshgrid(range(4), range(3))
-    df = pl.DataFrame({
-        "x": xs.ravel(),
-        "y": ys.ravel(),
-        "fill": ["#" + format(i * 100, "06x") for i in range(12)],
-    })
+    df = pl.DataFrame(
+        {
+            "x": xs.ravel(),
+            "y": ys.ravel(),
+            "fill": ["#" + format(i * 100, "06x") for i in range(12)],
+        }
+    )
     p = ggplot(df) + geom_raster(aes(x="x", y="y", fill="fill")) + scale_fill_identity()
     fig = p.draw()
     try:
@@ -2021,11 +2234,13 @@ def test_geom_raster_uses_imshow_on_regular_grid():
 
 def test_geom_raster_falls_back_to_tile_on_irregular():
     """Non-regular grid → fall back to the tile (PatchCollection) path."""
-    df = pl.DataFrame({
-        "x": [0.0, 1.0, 3.0],  # gap at x=2 → not uniform
-        "y": [0.0, 0.0, 0.0],
-        "fill": ["#ff0000", "#00ff00", "#0000ff"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [0.0, 1.0, 3.0],  # gap at x=2 → not uniform
+            "y": [0.0, 0.0, 0.0],
+            "fill": ["#ff0000", "#00ff00", "#0000ff"],
+        }
+    )
     p = ggplot(df) + geom_raster(aes(x="x", y="y", fill="fill")) + scale_fill_identity()
     fig = p.draw()
     try:
@@ -2050,6 +2265,7 @@ def test_geom_polygon_basic_triangle():
         # Closed polygon: 4 vertices listed (last = first).
         verts = coll.get_paths()[0].vertices
         import numpy as np
+
         assert verts.shape[0] == 4
         assert np.allclose(verts[0], verts[-1])
     finally:
@@ -2058,11 +2274,13 @@ def test_geom_polygon_basic_triangle():
 
 def test_geom_polygon_multi_group():
     """Two groups → two distinct polygons in one collection."""
-    df = pl.DataFrame({
-        "x": [0.0, 1.0, 0.5,  3.0, 4.0, 3.5],
-        "y": [0.0, 0.0, 1.0,  0.0, 0.0, 1.0],
-        "group": [1, 1, 1, 2, 2, 2],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [0.0, 1.0, 0.5, 3.0, 4.0, 3.5],
+            "y": [0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            "group": [1, 1, 1, 2, 2, 2],
+        }
+    )
     p = ggplot(df) + geom_polygon(aes(x="x", y="y", group="group"), fill="green")
     fig = p.draw()
     try:
@@ -2074,11 +2292,13 @@ def test_geom_polygon_multi_group():
 
 def test_geom_polygon_skips_groups_with_under_three_vertices():
     """A 2-vertex group can't form a polygon; it gets skipped silently."""
-    df = pl.DataFrame({
-        "x": [0.0, 1.0,  3.0, 4.0, 3.5],  # group 1: 2 vertices, group 2: 3 vertices
-        "y": [0.0, 0.0,  0.0, 0.0, 1.0],
-        "group": [1, 1, 2, 2, 2],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [0.0, 1.0, 3.0, 4.0, 3.5],  # group 1: 2 vertices, group 2: 3 vertices
+            "y": [0.0, 0.0, 0.0, 0.0, 1.0],
+            "group": [1, 1, 2, 2, 2],
+        }
+    )
     p = ggplot(df) + geom_polygon(aes(x="x", y="y", group="group"), fill="red")
     fig = p.draw()
     try:
@@ -2095,12 +2315,14 @@ def test_geom_polygon_skips_groups_with_under_three_vertices():
 
 
 def _df_xy_range():
-    return pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [5.0, 6.0, 7.0],
-        "ymin": [4.5, 5.5, 6.5],
-        "ymax": [5.5, 6.5, 7.5],
-    })
+    return pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [5.0, 6.0, 7.0],
+            "ymin": [4.5, 5.5, 6.5],
+            "ymax": [5.5, 6.5, 7.5],
+        }
+    )
 
 
 def test_geom_linerange_three_lines_no_caps():
@@ -2148,6 +2370,7 @@ def test_geom_errorbar_width_controls_cap_span():
         seg = cap_coll.get_segments()[0]
         # seg is a 2-row array (start, end).
         import numpy as np
+
         span = abs(seg[1][0] - seg[0][0])
         assert np.isclose(span, 0.2)
     finally:
@@ -2156,11 +2379,13 @@ def test_geom_errorbar_width_controls_cap_span():
 
 def test_geom_errorbarh_horizontal_form():
     """`geom_errorbarh` swaps axes: line is horizontal, caps vertical."""
-    df = pl.DataFrame({
-        "y": [1.0, 2.0, 3.0],
-        "xmin": [1.0, 2.0, 3.0],
-        "xmax": [2.0, 3.0, 4.0],
-    })
+    df = pl.DataFrame(
+        {
+            "y": [1.0, 2.0, 3.0],
+            "xmin": [1.0, 2.0, 3.0],
+            "xmax": [2.0, 3.0, 4.0],
+        }
+    )
     p = ggplot(df) + geom_errorbarh(aes(y="y", xmin="xmin", xmax="xmax"))
     fig = p.draw()
     try:
@@ -2200,6 +2425,7 @@ def test_geom_crossbar_box_plus_median():
         median_lw = ax.collections[4].get_linewidth()[0]
         edge_lw = ax.collections[0].get_linewidth()[0]
         import numpy as np
+
         assert np.isclose(median_lw, edge_lw * 2)
     finally:
         plt.close(fig)
@@ -2212,12 +2438,14 @@ def test_geom_crossbar_box_plus_median():
 
 def test_geom_segment_three_segments():
     """`geom_segment` packs all rows into a single LineCollection."""
-    df = pl.DataFrame({
-        "x": [0.0, 1.0, 2.0],
-        "y": [0.0, 0.0, 0.0],
-        "xend": [1.0, 2.0, 3.0],
-        "yend": [1.0, 1.0, 1.0],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [0.0, 1.0, 2.0],
+            "y": [0.0, 0.0, 0.0],
+            "xend": [1.0, 2.0, 3.0],
+            "yend": [1.0, 1.0, 1.0],
+        }
+    )
     p = ggplot(df) + geom_segment(aes(x="x", y="y", xend="xend", yend="yend"))
     fig = p.draw()
     try:
@@ -2227,6 +2455,7 @@ def test_geom_segment_three_segments():
         assert len(segs) == 3
         # First segment endpoints.
         import numpy as np
+
         assert np.allclose(segs[0], [[0.0, 0.0], [1.0, 1.0]])
     finally:
         plt.close(fig)
@@ -2234,16 +2463,20 @@ def test_geom_segment_three_segments():
 
 def test_geom_segment_per_row_colours():
     """Mapping ``colour=`` to a discrete column produces per-row colours."""
-    df = pl.DataFrame({
-        "x": [0.0, 1.0],
-        "y": [0.0, 0.0],
-        "xend": [1.0, 2.0],
-        "yend": [1.0, 1.0],
-        "g": ["a", "b"],
-    })
-    p = (ggplot(df)
-         + geom_segment(aes(x="x", y="y", xend="xend", yend="yend", colour="g"))
-         + scale_color_manual(values=["#ff0000", "#00ff00"]))
+    df = pl.DataFrame(
+        {
+            "x": [0.0, 1.0],
+            "y": [0.0, 0.0],
+            "xend": [1.0, 2.0],
+            "yend": [1.0, 1.0],
+            "g": ["a", "b"],
+        }
+    )
+    p = (
+        ggplot(df)
+        + geom_segment(aes(x="x", y="y", xend="xend", yend="yend", colour="g"))
+        + scale_color_manual(values=["#ff0000", "#00ff00"])
+    )
     fig = p.draw()
     try:
         coll = fig.axes[0].collections[0]
@@ -2251,6 +2484,7 @@ def test_geom_segment_per_row_colours():
         assert len(colours) == 2
         # Different RGBA per segment.
         import numpy as np
+
         assert not np.allclose(colours[0], colours[1])
     finally:
         plt.close(fig)
@@ -2258,18 +2492,21 @@ def test_geom_segment_per_row_colours():
 
 def test_geom_curve_basic():
     """`geom_curve` renders one FancyArrowPatch per row."""
-    df = pl.DataFrame({
-        "x": [0.0, 1.0],
-        "y": [0.0, 0.0],
-        "xend": [1.0, 2.0],
-        "yend": [1.0, 1.0],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [0.0, 1.0],
+            "y": [0.0, 0.0],
+            "xend": [1.0, 2.0],
+            "yend": [1.0, 1.0],
+        }
+    )
     p = ggplot(df) + geom_curve(aes(x="x", y="y", xend="xend", yend="yend"))
     fig = p.draw()
     try:
         ax = fig.axes[0]
         # Two FancyArrowPatch instances, one per row.
         from matplotlib.patches import FancyArrowPatch
+
         curve_patches = [p for p in ax.patches if isinstance(p, FancyArrowPatch)]
         assert len(curve_patches) == 2
     finally:
@@ -2278,14 +2515,21 @@ def test_geom_curve_basic():
 
 def test_geom_curve_curvature_kwarg_controls_arc():
     """``curvature`` kwarg flows through to the connectionstyle."""
-    df = pl.DataFrame({
-        "x": [0.0], "y": [0.0], "xend": [1.0], "yend": [1.0],
-    })
-    p = ggplot(df) + geom_curve(aes(x="x", y="y", xend="xend", yend="yend"),
-                                curvature=0.8)
+    df = pl.DataFrame(
+        {
+            "x": [0.0],
+            "y": [0.0],
+            "xend": [1.0],
+            "yend": [1.0],
+        }
+    )
+    p = ggplot(df) + geom_curve(
+        aes(x="x", y="y", xend="xend", yend="yend"), curvature=0.8
+    )
     fig = p.draw()
     try:
         from matplotlib.patches import FancyArrowPatch
+
         patch = next(p for p in fig.axes[0].patches if isinstance(p, FancyArrowPatch))
         # connectionstyle keeps the rad parameter we passed.
         cs = patch.get_connectionstyle()
@@ -2300,10 +2544,12 @@ def test_geom_curve_curvature_kwarg_controls_arc():
 
 
 def _summary_test_df():
-    return pl.DataFrame({
-        "x": [1, 1, 1, 2, 2, 2, 3, 3, 3],
-        "y": [10.0, 12.0, 11.0, 15.0, 16.0, 14.0, 20.0, 22.0, 21.0],
-    })
+    return pl.DataFrame(
+        {
+            "x": [1, 1, 1, 2, 2, 2, 3, 3, 3],
+            "y": [10.0, 12.0, 11.0, 15.0, 16.0, 14.0, 20.0, 22.0, 21.0],
+        }
+    )
 
 
 def test_stat_summary_default_is_mean_se_pointrange():
@@ -2318,6 +2564,7 @@ def test_stat_summary_default_is_mean_se_pointrange():
         # The point centres are the means: x=1 → 11, x=2 → 15, x=3 → 21.
         offsets = ax.collections[1].get_offsets()
         import numpy as np
+
         np.testing.assert_array_almost_equal(
             sorted(offsets.tolist()), [[1.0, 11.0], [2.0, 15.0], [3.0, 21.0]]
         )
@@ -2329,8 +2576,9 @@ def test_stat_summary_mean_cl_normal_errorbar():
     """``fun_data='mean_cl_normal'`` produces normal-CI bounds; geom='errorbar'
     renders the line + caps."""
     df = _summary_test_df()
-    p = (ggplot(df, aes("x", "y"))
-         + stat_summary(fun_data="mean_cl_normal", geom="errorbar"))
+    p = ggplot(df, aes("x", "y")) + stat_summary(
+        fun_data="mean_cl_normal", geom="errorbar"
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -2343,14 +2591,16 @@ def test_stat_summary_mean_cl_normal_errorbar():
 def test_stat_summary_componentwise_min_max_median():
     """Componentwise ``fun=median, fun_min=min, fun_max=max`` works."""
     df = _summary_test_df()
-    p = (ggplot(df, aes("x", "y"))
-         + stat_summary(fun="median", fun_min="min", fun_max="max"))
+    p = ggplot(df, aes("x", "y")) + stat_summary(
+        fun="median", fun_min="min", fun_max="max"
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
         # pointrange
         offsets = ax.collections[1].get_offsets()
         import numpy as np
+
         # x=1: median=11, min=10, max=12; same shape across x.
         np.testing.assert_array_almost_equal(
             sorted(offsets.tolist()), [[1.0, 11.0], [2.0, 15.0], [3.0, 21.0]]
@@ -2360,10 +2610,13 @@ def test_stat_summary_componentwise_min_max_median():
         # Sort by x for deterministic order.
         segs_sorted = sorted(segs, key=lambda s: s[0][0])
         import numpy as np
+
         np.testing.assert_array_almost_equal(segs_sorted[0], [[1.0, 10.0], [1.0, 12.0]])
         import numpy as np
+
         np.testing.assert_array_almost_equal(segs_sorted[1], [[2.0, 14.0], [2.0, 16.0]])
         import numpy as np
+
         np.testing.assert_array_almost_equal(segs_sorted[2], [[3.0, 20.0], [3.0, 22.0]])
     finally:
         plt.close(fig)
@@ -2388,11 +2641,14 @@ def test_stat_summary_median_hilow():
 def test_stat_summary_bootstrap_with_seed_is_deterministic():
     """Bootstrap CI with explicit seed is reproducible across runs."""
     import numpy as np
+
     df = _summary_test_df()
-    p1 = (ggplot(df, aes("x", "y"))
-          + stat_summary(fun_data="mean_cl_boot", fun_args={"seed": 7}))
-    p2 = (ggplot(df, aes("x", "y"))
-          + stat_summary(fun_data="mean_cl_boot", fun_args={"seed": 7}))
+    p1 = ggplot(df, aes("x", "y")) + stat_summary(
+        fun_data="mean_cl_boot", fun_args={"seed": 7}
+    )
+    p2 = ggplot(df, aes("x", "y")) + stat_summary(
+        fun_data="mean_cl_boot", fun_args={"seed": 7}
+    )
     fig1 = p1.draw()
     fig2 = p2.draw()
     try:
@@ -2422,18 +2678,24 @@ def test_stat_summary_unknown_geom_errors():
 # Phase 2.7b — ggplot2 parity: geom registry + orientation
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("geom_name", [
-    "line", "path", "step",            # path-family (need y only)
-    "area", "ribbon",                  # ribbon-family (need ymin/ymax)
-    "smooth",                          # ribbon + path combo
-])
+
+@pytest.mark.parametrize(
+    "geom_name",
+    [
+        "line",
+        "path",
+        "step",  # path-family (need y only)
+        "area",
+        "ribbon",  # ribbon-family (need ymin/ymax)
+        "smooth",  # ribbon + path combo
+    ],
+)
 def test_stat_summary_geom_registry_covers_path_and_ribbon_family(geom_name):
     """ggplot2 parity: stat_summary should accept the path-family and
     ribbon-family geoms in addition to the interval geoms it shipped with.
     """
     df = _summary_test_df()
-    p = (ggplot(df, aes("x", "y"))
-         + stat_summary(geom=geom_name, fun="mean", group=1))
+    p = ggplot(df, aes("x", "y")) + stat_summary(geom=geom_name, fun="mean", group=1)
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -2447,8 +2709,7 @@ def test_stat_summary_line_replaces_two_layer_means_recipe():
     """``stat_summary(geom="line", fun="mean")`` — the one-call form
     that matches dplyr/ggplot2 for an over-points-mean line."""
     df = _summary_test_df()
-    p = (ggplot(df, aes("x", "y"))
-         + stat_summary(geom="line", fun="mean", group=1))
+    p = ggplot(df, aes("x", "y")) + stat_summary(geom="line", fun="mean", group=1)
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -2457,8 +2718,10 @@ def test_stat_summary_line_replaces_two_layer_means_recipe():
         assert len(lines) == 1
         xs, ys = lines[0].get_data()
         import numpy as np
+
         np.testing.assert_array_almost_equal(xs, [1, 2, 3])
         import numpy as np
+
         np.testing.assert_array_almost_equal(ys, [11.0, 15.0, 21.0])
     finally:
         plt.close(fig)
@@ -2468,12 +2731,13 @@ def test_stat_summary_auto_orientation_picks_y_for_discrete_y():
     """When y is discrete (enum/categorical/utf8) and x isn't, the stat
     transposes — groups by y, summarizes x, and emits ``(y, x, xmin,
     xmax)``. Matches ggplot2's ``orientation="auto"``."""
-    df = pl.DataFrame({
-        "x": [10.0, 12.0, 11.0, 20.0, 22.0, 21.0],
-        "y": pl.Series(["a", "a", "a", "b", "b", "b"], dtype=pl.Enum(["a", "b"])),
-    })
-    p = (ggplot(df, aes("x", "y"))
-         + stat_summary(geom="line", fun="mean", group=1))
+    df = pl.DataFrame(
+        {
+            "x": [10.0, 12.0, 11.0, 20.0, 22.0, 21.0],
+            "y": pl.Series(["a", "a", "a", "b", "b", "b"], dtype=pl.Enum(["a", "b"])),
+        }
+    )
+    p = ggplot(df, aes("x", "y")) + stat_summary(geom="line", fun="mean", group=1)
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -2481,6 +2745,7 @@ def test_stat_summary_auto_orientation_picks_y_for_discrete_y():
         # Two means: x=mean of a-group, then x=mean of b-group. y stays
         # categorical, rendered at categorical positions 0 and 1.
         import numpy as np
+
         np.testing.assert_array_almost_equal(xs, [11.0, 21.0])
     finally:
         plt.close(fig)
@@ -2489,14 +2754,17 @@ def test_stat_summary_auto_orientation_picks_y_for_discrete_y():
 def test_stat_summary_explicit_orientation_overrides_auto():
     """``orientation="x"`` forces the historic behavior even when y is
     discrete (caller knows best)."""
-    df = pl.DataFrame({
-        "x": [1, 1, 2, 2],
-        "y": pl.Series(["a", "b", "a", "b"], dtype=pl.Enum(["a", "b"])),
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1, 1, 2, 2],
+            "y": pl.Series(["a", "b", "a", "b"], dtype=pl.Enum(["a", "b"])),
+        }
+    )
     # With orientation="x" we'd be asked to take mean of an Enum series
     # for each x group — that's nonsensical, so the stat should explode.
-    p = (ggplot(df, aes("x", "y"))
-         + stat_summary(geom="line", fun="mean", orientation="x", group=1))
+    p = ggplot(df, aes("x", "y")) + stat_summary(
+        geom="line", fun="mean", orientation="x", group=1
+    )
     with pytest.raises(Exception):  # numpy can't average enum codes
         p.draw()
 
@@ -2514,9 +2782,9 @@ def test_stat_summary_accepts_a_geom_instance_directly():
     from hea.ggplot.geoms.path import GeomPath
 
     df = _summary_test_df()
-    p = (ggplot(df, aes("x", "y"))
-         + stat_summary(geom=GeomPath(sort_by_x=True),
-                        fun="mean", group=1))
+    p = ggplot(df, aes("x", "y")) + stat_summary(
+        geom=GeomPath(sort_by_x=True), fun="mean", group=1
+    )
     fig = p.draw()
     try:
         assert len(fig.axes[0].lines) == 1
@@ -2533,6 +2801,7 @@ def test_stat_qq_against_normal_quantiles():
     """`stat_qq()` produces sorted (theoretical, sample) pairs against the
     standard normal."""
     import numpy as np
+
     rng = np.random.default_rng(0)
     df = pl.DataFrame({"v": rng.normal(size=200)})
     p = ggplot(df, aes(sample="v")) + stat_qq()
@@ -2552,6 +2821,7 @@ def test_stat_qq_against_normal_quantiles():
 def test_stat_qq_line_two_endpoints():
     """`stat_qq_line()` returns a single line drawn over the theoretical x range."""
     import numpy as np
+
     rng = np.random.default_rng(1)
     df = pl.DataFrame({"v": rng.normal(size=100)})
     p = ggplot(df, aes(sample="v")) + stat_qq() + stat_qq_line()
@@ -2571,6 +2841,7 @@ def test_stat_qq_line_two_endpoints():
 def test_geom_qq_alias_matches_stat_qq():
     """`geom_qq()` is just `stat_qq()` — same output."""
     import numpy as np
+
     rng = np.random.default_rng(2)
     df = pl.DataFrame({"v": rng.normal(size=50)})
     p1 = ggplot(df, aes(sample="v")) + stat_qq()
@@ -2589,6 +2860,7 @@ def test_geom_qq_alias_matches_stat_qq():
 def test_stat_ecdf_basic_step_to_one():
     """`stat_ecdf()` produces a step function from 0 to 1."""
     import numpy as np
+
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0]})
     p = ggplot(df, aes("x")) + stat_ecdf()
     fig = p.draw()
@@ -2606,10 +2878,12 @@ def test_stat_ecdf_basic_step_to_one():
 
 def test_stat_unique_drops_duplicates():
     """`stat_unique()` collapses repeated rows before geom_point."""
-    df = pl.DataFrame({
-        "x": [1.0, 1.0, 1.0, 2.0, 2.0, 3.0],
-        "y": [1.0, 1.0, 1.0, 2.0, 2.0, 3.0],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 1.0, 1.0, 2.0, 2.0, 3.0],
+            "y": [1.0, 1.0, 1.0, 2.0, 2.0, 3.0],
+        }
+    )
     p = ggplot(df, aes("x", "y")) + stat_unique()
     fig = p.draw()
     try:
@@ -2622,10 +2896,12 @@ def test_stat_unique_drops_duplicates():
 
 def test_geom_count_size_scales_with_multiplicity():
     """`geom_count()` sizes points by `(x, y)` multiplicity."""
-    df = pl.DataFrame({
-        "x": [1, 1, 1, 2, 2, 3],
-        "y": [1, 1, 1, 2, 2, 3],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1, 1, 1, 2, 2, 3],
+            "y": [1, 1, 1, 2, 2, 3],
+        }
+    )
     p = ggplot(df, aes("x", "y")) + geom_count()
     fig = p.draw()
     try:
@@ -2642,6 +2918,7 @@ def test_geom_count_size_scales_with_multiplicity():
 def test_geom_contour_on_regular_grid():
     """`geom_contour` produces iso-lines on a 2D Gaussian grid."""
     import numpy as np
+
     xs, ys = np.meshgrid(np.linspace(-3, 3, 20), np.linspace(-3, 3, 20))
     zs = np.exp(-(xs**2 + ys**2) / 2)
     df = pl.DataFrame({"x": xs.ravel(), "y": ys.ravel(), "z": zs.ravel()})
@@ -2658,6 +2935,7 @@ def test_geom_contour_on_regular_grid():
 def test_geom_contour_filled_on_regular_grid():
     """`geom_contour_filled` produces filled bands."""
     import numpy as np
+
     xs, ys = np.meshgrid(np.linspace(-3, 3, 20), np.linspace(-3, 3, 20))
     zs = np.exp(-(xs**2 + ys**2) / 2)
     df = pl.DataFrame({"x": xs.ravel(), "y": ys.ravel(), "z": zs.ravel()})
@@ -2673,11 +2951,13 @@ def test_geom_contour_filled_on_regular_grid():
 def test_geom_contour_irregular_grid_errors():
     """A grid with missing cells (count mismatch) is rejected."""
     # 3 unique x × 2 unique y = 6 cells, but only 5 rows present.
-    df = pl.DataFrame({
-        "x": [0.0, 1.0, 2.0, 0.0, 1.0],
-        "y": [0.0, 0.0, 0.0, 1.0, 1.0],
-        "z": [1.0, 2.0, 3.0, 4.0, 5.0],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [0.0, 1.0, 2.0, 0.0, 1.0],
+            "y": [0.0, 0.0, 0.0, 1.0, 1.0],
+            "z": [1.0, 2.0, 3.0, 4.0, 5.0],
+        }
+    )
     with pytest.raises(ValueError, match="regular .x, y. grid"):
         ggplot(df).__add__(geom_contour(aes(x="x", y="y", z="z"))).draw()
 
@@ -2685,6 +2965,7 @@ def test_geom_contour_irregular_grid_errors():
 def test_geom_hex_renders_polycollection():
     """`geom_hex()` adds a hexbin polycollection to the axes."""
     import numpy as np
+
     rng = np.random.default_rng(0)
     df = pl.DataFrame({"x": rng.normal(size=300), "y": rng.normal(size=300)})
     p = ggplot(df, aes("x", "y")) + geom_hex(bins=15)
@@ -2693,6 +2974,7 @@ def test_geom_hex_renders_polycollection():
         ax = fig.axes[0]
         # hexbin produces a PolyCollection.
         from matplotlib.collections import PolyCollection
+
         assert any(isinstance(c, PolyCollection) for c in ax.collections)
     finally:
         plt.close(fig)
@@ -2745,12 +3027,14 @@ def _all_legends(host):
 
 
 def _df_two_groups():
-    return pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 1.5, 2.5, 3.5],
-        "y": [1.0, 2.0, 3.0, 1.5, 2.5, 3.5],
-        "g": ["a", "a", "a", "b", "b", "b"],
-        "h": ["x", "x", "x", "y", "y", "y"],
-    })
+    return pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 1.5, 2.5, 3.5],
+            "y": [1.0, 2.0, 3.0, 1.5, 2.5, 3.5],
+            "g": ["a", "a", "a", "b", "b", "b"],
+            "h": ["x", "x", "x", "y", "y", "y"],
+        }
+    )
 
 
 def test_legend_auto_built_for_discrete_shape():
@@ -2827,8 +3111,11 @@ def test_legend_two_groups_when_sources_differ():
 def test_legend_position_none_hides_legends():
     """`theme(legend_position='none')` skips legend rendering entirely."""
     df = _df_two_groups()
-    p = (ggplot(df, aes("x", "y", shape="g")) + geom_point()
-         + theme(legend_position="none"))
+    p = (
+        ggplot(df, aes("x", "y", shape="g"))
+        + geom_point()
+        + theme(legend_position="none")
+    )
     fig = p.draw()
     try:
         assert _all_legends(fig) == []
@@ -2840,8 +3127,11 @@ def test_legend_position_top_horizontal():
     """`theme(legend_position='top', legend_direction='horizontal')` lays
     handles out in a single row above the axes."""
     df = _df_two_groups()
-    p = (ggplot(df, aes("x", "y", shape="g")) + geom_point()
-         + theme(legend_position="top", legend_direction="horizontal"))
+    p = (
+        ggplot(df, aes("x", "y", shape="g"))
+        + geom_point()
+        + theme(legend_position="top", legend_direction="horizontal")
+    )
     fig = p.draw()
     try:
         leg = _all_legends(fig)[0]
@@ -2856,8 +3146,7 @@ def test_legend_position_top_horizontal():
 def test_legend_title_from_labs_overrides_aes():
     """`labs(colour='Group')` sets the legend title."""
     df = _df_two_groups()
-    p = (ggplot(df, aes("x", "y", colour="g")) + geom_point()
-         + labs(colour="Group"))
+    p = ggplot(df, aes("x", "y", colour="g")) + geom_point() + labs(colour="Group")
     fig = p.draw()
     try:
         leg = _all_legends(fig)[0]
@@ -2881,13 +3170,14 @@ def test_legend_constant_aes_param_does_not_create_legend():
 def test_legend_scale_identity_skips_legend():
     """`scale_color_identity()` says the data already holds drawable values
     → no legend."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [1.0, 2.0, 3.0],
-        "c": ["#ff0000", "#00ff00", "#0000ff"],
-    })
-    p = (ggplot(df, aes("x", "y", colour="c")) + geom_point()
-         + scale_color_identity())
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [1.0, 2.0, 3.0],
+            "c": ["#ff0000", "#00ff00", "#0000ff"],
+        }
+    )
+    p = ggplot(df, aes("x", "y", colour="c")) + geom_point() + scale_color_identity()
     fig = p.draw()
     try:
         assert _all_legends(fig) == []
@@ -2905,8 +3195,11 @@ def test_guide_legend_factory_returns_struct():
 def test_guides_addition_to_plot_stores_overrides():
     """`+ guides(colour=guide_legend(...))` stores into ``guide_overrides``."""
     df = _df_two_groups()
-    p = (ggplot(df, aes("x", "y", colour="g")) + geom_point()
-         + guides(colour=guide_legend(title="Group")))
+    p = (
+        ggplot(df, aes("x", "y", colour="g"))
+        + geom_point()
+        + guides(colour=guide_legend(title="Group"))
+    )
     assert getattr(p, "guide_overrides", {}).get("colour") is not None
 
 
@@ -2916,17 +3209,20 @@ def test_guides_addition_to_plot_stores_overrides():
 
 
 def _df_continuous_colour():
-    return pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0, 5.0],
-        "y": [1.0, 2.0, 3.0, 4.0, 5.0],
-        "z": [10.0, 20.0, 30.0, 40.0, 50.0],
-    })
+    return pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "y": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "z": [10.0, 20.0, 30.0, 40.0, 50.0],
+        }
+    )
 
 
 def test_continuous_colour_renders_colorbar():
     """`aes(colour=numeric_col)` produces a fig.colorbar (extra child axes
     with `_colorbar` label)."""
     import warnings
+
     df = _df_continuous_colour()
     p = ggplot(df, aes("x", "y", colour="z")) + geom_point()
     with warnings.catch_warnings():
@@ -2947,6 +3243,7 @@ def test_continuous_colour_renders_colorbar():
 def test_colorbar_range_matches_data():
     """Colorbar limits track the data range."""
     import warnings
+
     df = _df_continuous_colour()
     p = ggplot(df, aes("x", "y", colour="z")) + geom_point()
     with warnings.catch_warnings():
@@ -2965,9 +3262,13 @@ def test_colorbar_range_matches_data():
 def test_colorbar_position_top_horizontal():
     """`theme(legend_position='top')` makes the colorbar horizontal."""
     import warnings
+
     df = _df_continuous_colour()
-    p = (ggplot(df, aes("x", "y", colour="z")) + geom_point()
-         + theme(legend_position="top"))
+    p = (
+        ggplot(df, aes("x", "y", colour="z"))
+        + geom_point()
+        + theme(legend_position="top")
+    )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         fig = p.draw()
@@ -2986,9 +3287,9 @@ def test_colorbar_title_from_labs_overrides_aes():
     """`labs(colour='Z value')` overrides the colorbar title (placed
     above the bar via cb.ax.set_title — R/ggplot2 default)."""
     import warnings
+
     df = _df_continuous_colour()
-    p = (ggplot(df, aes("x", "y", colour="z")) + geom_point()
-         + labs(colour="Z value"))
+    p = ggplot(df, aes("x", "y", colour="z")) + geom_point() + labs(colour="Z value")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         fig = p.draw()
@@ -3002,12 +3303,15 @@ def test_colorbar_title_from_labs_overrides_aes():
 def test_colorbar_and_legend_can_coexist():
     """Continuous colour + discrete shape → one colorbar + one legend."""
     import warnings
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0],
-        "y": [1.0, 2.0, 3.0, 4.0],
-        "z": [10.0, 20.0, 30.0, 40.0],
-        "g": ["a", "a", "b", "b"],
-    })
+
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y": [1.0, 2.0, 3.0, 4.0],
+            "z": [10.0, 20.0, 30.0, 40.0],
+            "g": ["a", "a", "b", "b"],
+        }
+    )
     p = ggplot(df, aes("x", "y", colour="z", shape="g")) + geom_point()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
@@ -3025,9 +3329,13 @@ def test_colorbar_and_legend_can_coexist():
 def test_colorbar_position_none_hides():
     """`theme(legend_position='none')` hides the colorbar too."""
     import warnings
+
     df = _df_continuous_colour()
-    p = (ggplot(df, aes("x", "y", colour="z")) + geom_point()
-         + theme(legend_position="none"))
+    p = (
+        ggplot(df, aes("x", "y", colour="z"))
+        + geom_point()
+        + theme(legend_position="none")
+    )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         fig = p.draw()
@@ -3046,12 +3354,10 @@ def test_colorbar_position_none_hides():
 def test_guide_axis_rotation_via_guides():
     """`guides(x=guide_axis(angle=45))` rotates x tick labels."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [1.0, 2.0, 3.0, 4.0]})
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + guides(x=guide_axis(angle=45)))
+    p = ggplot(df, aes("x", "y")) + geom_point() + guides(x=guide_axis(angle=45))
     fig = p.draw()
     try:
-        rotations = {t.get_rotation()
-                     for t in fig.axes[0].xaxis.get_majorticklabels()}
+        rotations = {t.get_rotation() for t in fig.axes[0].xaxis.get_majorticklabels()}
         assert rotations == {45.0}
     finally:
         plt.close(fig)
@@ -3060,12 +3366,10 @@ def test_guide_axis_rotation_via_guides():
 def test_guide_axis_rotation_y_axis():
     """`guides(y=guide_axis(angle=...))` rotates the y axis."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + guides(y=guide_axis(angle=15)))
+    p = ggplot(df, aes("x", "y")) + geom_point() + guides(y=guide_axis(angle=15))
     fig = p.draw()
     try:
-        rotations = {t.get_rotation()
-                     for t in fig.axes[0].yaxis.get_majorticklabels()}
+        rotations = {t.get_rotation() for t in fig.axes[0].yaxis.get_majorticklabels()}
         assert rotations == {15.0}
     finally:
         plt.close(fig)
@@ -3074,12 +3378,14 @@ def test_guide_axis_rotation_y_axis():
 def test_axis_rotation_via_theme_element_text_angle():
     """`theme(axis_text_x=element_text(angle=30))` also rotates x labels."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + theme(axis_text_x=element_text(angle=30)))
+    p = (
+        ggplot(df, aes("x", "y"))
+        + geom_point()
+        + theme(axis_text_x=element_text(angle=30))
+    )
     fig = p.draw()
     try:
-        rotations = {t.get_rotation()
-                     for t in fig.axes[0].xaxis.get_majorticklabels()}
+        rotations = {t.get_rotation() for t in fig.axes[0].xaxis.get_majorticklabels()}
         assert rotations == {30.0}
     finally:
         plt.close(fig)
@@ -3106,9 +3412,8 @@ def test_default_fill_palette_dispatches_on_dtype_ordered_vs_not():
     try:
         # Extract fill colors per panel
         def fills(fig):
-            return tuple(
-                p.get_facecolor()[:3] for p in fig.axes[0].patches[:3]
-            )
+            return tuple(p.get_facecolor()[:3] for p in fig.axes[0].patches[:3])
+
         c_ord = fills(fig_ord)
         c_un = fills(fig_un)
         # Viridis "a" is dark purple ~ (0.27, 0.005, 0.33); hue "a" is
@@ -3131,9 +3436,12 @@ def test_theme_panel_grid_blank_overrides_earlier_set_children():
     and ``_apply_grid`` reads the child first — gridlines kept drawing
     despite the user's blank override."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + theme_minimal()
-         + theme(panel_grid=element_blank()))
+    p = (
+        ggplot(df, aes("x", "y"))
+        + geom_point()
+        + theme_minimal()
+        + theme(panel_grid=element_blank())
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -3150,8 +3458,7 @@ def test_theme_panel_border_blank_hides_polar_outer_ring():
     ``theme_minimal()`` (which sets ``panel.border=element_blank()``)
     left the matplotlib default ring visible."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 1.0, 1.0]})
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + theme_minimal() + coord_polar())
+    p = ggplot(df, aes("x", "y")) + geom_point() + theme_minimal() + coord_polar()
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -3167,8 +3474,7 @@ def test_axis_text_y_element_blank_hides_only_y_labels():
     only `axis.text` (axis-agnostic) so the axis-specific theme element
     was silently ignored."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + theme(axis_text_y=element_blank()))
+    p = ggplot(df, aes("x", "y")) + geom_point() + theme(axis_text_y=element_blank())
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -3182,8 +3488,7 @@ def test_axis_text_y_element_blank_hides_only_y_labels():
 
 def test_axis_text_x_element_blank_hides_only_x_labels():
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + theme(axis_text_x=element_blank()))
+    p = ggplot(df, aes("x", "y")) + geom_point() + theme(axis_text_x=element_blank())
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -3198,13 +3503,15 @@ def test_axis_text_x_element_blank_hides_only_x_labels():
 def test_guide_axis_overrides_theme():
     """When both are set, ``guides(x=guide_axis(angle=...))`` wins."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + theme(axis_text_x=element_text(angle=10))
-         + guides(x=guide_axis(angle=60)))
+    p = (
+        ggplot(df, aes("x", "y"))
+        + geom_point()
+        + theme(axis_text_x=element_text(angle=10))
+        + guides(x=guide_axis(angle=60))
+    )
     fig = p.draw()
     try:
-        rotations = {t.get_rotation()
-                     for t in fig.axes[0].xaxis.get_majorticklabels()}
+        rotations = {t.get_rotation() for t in fig.axes[0].xaxis.get_majorticklabels()}
         assert rotations == {60.0}
     finally:
         plt.close(fig)
@@ -3228,12 +3535,17 @@ def test_scale_x_date_uses_concise_formatter():
     Mirrors ggplot2's ``scales::label_date_short()``."""
     import datetime
     import matplotlib.dates as mdates
-    df = pl.DataFrame({
-        "x": [datetime.date(2020, 1, 1),
-              datetime.date(2020, 6, 1),
-              datetime.date(2020, 12, 1)],
-        "y": [1.0, 2.0, 3.0],
-    })
+
+    df = pl.DataFrame(
+        {
+            "x": [
+                datetime.date(2020, 1, 1),
+                datetime.date(2020, 6, 1),
+                datetime.date(2020, 12, 1),
+            ],
+            "y": [1.0, 2.0, 3.0],
+        }
+    )
     p = ggplot(df, aes("x", "y")) + geom_point() + scale_x_date()
     fig = p.draw()
     try:
@@ -3246,23 +3558,43 @@ def test_scale_x_date_uses_concise_formatter():
 def test_scale_x_date_custom_format():
     """`date_format='%b %Y'` overrides the formatter."""
     import datetime
-    df = pl.DataFrame({
-        "x": [datetime.date(2020, 1, 1),
-              datetime.date(2020, 6, 1),
-              datetime.date(2020, 12, 1)],
-        "y": [1.0, 2.0, 3.0],
-    })
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + scale_x_date(date_format="%b %Y"))
+
+    df = pl.DataFrame(
+        {
+            "x": [
+                datetime.date(2020, 1, 1),
+                datetime.date(2020, 6, 1),
+                datetime.date(2020, 12, 1),
+            ],
+            "y": [1.0, 2.0, 3.0],
+        }
+    )
+    p = ggplot(df, aes("x", "y")) + geom_point() + scale_x_date(date_format="%b %Y")
     fig = p.draw()
     try:
         labels = [t.get_text() for t in fig.axes[0].xaxis.get_majorticklabels()]
         nonempty = [lbl for lbl in labels if lbl]
         # "Jan 2020" / "Feb 2020" — month abbreviation + year.
-        assert all(any(m in lbl for m in
-                       ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])
-                   for lbl in nonempty)
+        assert all(
+            any(
+                m in lbl
+                for m in [
+                    "Jan",
+                    "Feb",
+                    "Mar",
+                    "Apr",
+                    "May",
+                    "Jun",
+                    "Jul",
+                    "Aug",
+                    "Sep",
+                    "Oct",
+                    "Nov",
+                    "Dec",
+                ]
+            )
+            for lbl in nonempty
+        )
     finally:
         plt.close(fig)
 
@@ -3270,12 +3602,17 @@ def test_scale_x_date_custom_format():
 def test_scale_x_datetime_includes_time():
     """`scale_x_datetime()` formatter shows the time portion by default."""
     import datetime
-    df = pl.DataFrame({
-        "x": [datetime.datetime(2020, 1, 1, 12, 30),
-              datetime.datetime(2020, 1, 1, 13, 30),
-              datetime.datetime(2020, 1, 1, 14, 30)],
-        "y": [1.0, 2.0, 3.0],
-    })
+
+    df = pl.DataFrame(
+        {
+            "x": [
+                datetime.datetime(2020, 1, 1, 12, 30),
+                datetime.datetime(2020, 1, 1, 13, 30),
+                datetime.datetime(2020, 1, 1, 14, 30),
+            ],
+            "y": [1.0, 2.0, 3.0],
+        }
+    )
     p = ggplot(df, aes("x", "y")) + geom_point() + scale_x_datetime()
     fig = p.draw()
     try:
@@ -3289,10 +3626,12 @@ def test_scale_x_datetime_includes_time():
 
 def test_scale_y_percent_formats_as_percent():
     """`scale_y_percent()` formats numeric ticks as ``50%`` etc."""
-    df = pl.DataFrame({
-        "x": [1, 2, 3, 4],
-        "y": [0.1, 0.5, 0.75, 0.95],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1, 2, 3, 4],
+            "y": [0.1, 0.5, 0.75, 0.95],
+        }
+    )
     p = ggplot(df, aes("x", "y")) + geom_point() + scale_y_percent()
     fig = p.draw()
     try:
@@ -3306,8 +3645,7 @@ def test_scale_y_percent_formats_as_percent():
 def test_scale_y_percent_xmax_100():
     """`xmax=100` lets the data already be in 0-100 range."""
     df = pl.DataFrame({"x": [1, 2, 3], "y": [10.0, 50.0, 90.0]})
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + scale_y_percent(xmax=100))
+    p = ggplot(df, aes("x", "y")) + geom_point() + scale_y_percent(xmax=100)
     fig = p.draw()
     try:
         labels = [t.get_text() for t in fig.axes[0].yaxis.get_majorticklabels()]
@@ -3326,10 +3664,12 @@ def test_scale_x_ordinal_sorts_plain_strings_alphabetically():
     ``factor()`` cast on the data or
     ``scale_x_discrete(limits=["low","medium","high"])``.
     """
-    df = pl.DataFrame({
-        "x": ["low", "medium", "high"],
-        "y": [1.0, 2.0, 3.0],
-    })
+    df = pl.DataFrame(
+        {
+            "x": ["low", "medium", "high"],
+            "y": [1.0, 2.0, 3.0],
+        }
+    )
     p = ggplot(df, aes("x", "y")) + geom_point() + scale_x_ordinal()
     fig = p.draw()
     try:
@@ -3342,21 +3682,32 @@ def test_scale_x_ordinal_sorts_plain_strings_alphabetically():
 def test_scale_x_discrete_limits_overrides_order():
     """``limits=`` on a discrete scale dictates the axis category order
     and the bar/point positions, regardless of data row order."""
-    df = pl.DataFrame({
-        "x": ["banana", "apple", "cherry", "apple", "banana", "cherry", "cherry"],
-    })
-    p = ggplot(df, aes(x="x")) + geom_bar() + scale_x_discrete(
-        limits=["cherry", "banana", "apple"],
+    df = pl.DataFrame(
+        {
+            "x": ["banana", "apple", "cherry", "apple", "banana", "cherry", "cherry"],
+        }
+    )
+    p = (
+        ggplot(df, aes(x="x"))
+        + geom_bar()
+        + scale_x_discrete(
+            limits=["cherry", "banana", "apple"],
+        )
     )
     fig = p.draw()
     try:
         ax = fig.axes[0]
         assert [t.get_text() for t in ax.get_xticklabels()] == [
-            "cherry", "banana", "apple",
+            "cherry",
+            "banana",
+            "apple",
         ]
         bars = sorted(
-            ((b.get_x() + b.get_width() / 2, b.get_height())
-             for b in ax.patches if b.get_height() > 0),
+            (
+                (b.get_x() + b.get_width() / 2, b.get_height())
+                for b in ax.patches
+                if b.get_height() > 0
+            ),
             key=lambda t: t[0],
         )
         assert [round(x, 1) for x, _ in bars] == [0.0, 1.0, 2.0]
@@ -3384,8 +3735,12 @@ def test_scale_x_discrete_limits_callable():
     """``limits=callable`` is applied to the trained levels — matches
     ggplot2's ``scale_x_discrete(limits=rev)`` pattern."""
     df = pl.DataFrame({"x": ["a", "b", "c", "a", "b", "c"]})
-    p = ggplot(df, aes(x="x")) + geom_bar() + scale_x_discrete(
-        limits=lambda x: list(reversed(x)),
+    p = (
+        ggplot(df, aes(x="x"))
+        + geom_bar()
+        + scale_x_discrete(
+            limits=lambda x: list(reversed(x)),
+        )
     )
     fig = p.draw()
     try:
@@ -3399,10 +3754,12 @@ def test_fct_reorder_orders_levels_by_aggregate():
     """``aes(x=fct_reorder("g", "v", "median"))`` orders the boxplot
     groups by per-group median of v, ascending — the canonical R idiom
     for ``ggplot(...) + geom_boxplot()``."""
-    df = pl.DataFrame({
-        "g": ["B", "B", "A", "A", "C", "C"],
-        "v": [1.0, 2.0, 10.0, 11.0, 5.0, 6.0],
-    })
+    df = pl.DataFrame(
+        {
+            "g": ["B", "B", "A", "A", "C", "C"],
+            "v": [1.0, 2.0, 10.0, 11.0, 5.0, 6.0],
+        }
+    )
     p = ggplot(df, aes(x=fct_reorder("g", "v", "median"), y="v")) + geom_boxplot()
     fig = p.draw()
     try:
@@ -3419,11 +3776,13 @@ def test_geom_tile_discrete_axes_render():
     ``failed to determine supertype of enum and f64`` because
     ``_tile_to_rect`` did ``x ± width/2`` straight on the Enum series.
     Same numeric-position conversion the dodge / jitter positions use."""
-    df = pl.DataFrame({
-        "x": pl.Series(["a", "b", "c"], dtype=pl.Enum(["a", "b", "c"])),
-        "y": pl.Series(["A", "B", "C"], dtype=pl.Enum(["A", "B", "C"])),
-        "n": [1, 2, 3],
-    })
+    df = pl.DataFrame(
+        {
+            "x": pl.Series(["a", "b", "c"], dtype=pl.Enum(["a", "b", "c"])),
+            "y": pl.Series(["A", "B", "C"], dtype=pl.Enum(["A", "B", "C"])),
+            "n": [1, 2, 3],
+        }
+    )
     p = ggplot(df, aes("x", "y")) + geom_tile(fill="n")
     fig = p.draw()
     try:
@@ -3443,11 +3802,13 @@ def test_geom_tile_polars_expr_kwarg_evaluates_against_data():
     promoted into the mapping and evaluated against the layer data —
     same machinery as a bare column name. Previously it slipped through
     to ``to_series`` unevaluated and crashed on ``np.asarray(<Expr>)``."""
-    df = pl.DataFrame({
-        "x": pl.Series(["a", "b"], dtype=pl.Enum(["a", "b"])),
-        "y": pl.Series(["A", "B"], dtype=pl.Enum(["A", "B"])),
-        "n": [10, 20],
-    })
+    df = pl.DataFrame(
+        {
+            "x": pl.Series(["a", "b"], dtype=pl.Enum(["a", "b"])),
+            "y": pl.Series(["A", "B"], dtype=pl.Enum(["A", "B"])),
+            "n": [10, 20],
+        }
+    )
     p = ggplot(df, aes("x", "y")) + geom_tile(fill=pl.col("n"))
     fig = p.draw()
     try:
@@ -3467,11 +3828,13 @@ def test_aggregating_polars_expr_broadcasts_to_data_length():
     ``pl.col("n").mean()``) broadcast to the data length — they're
     "constants computed from data", same as ``pl.lit(...)``. Without
     broadcast we'd get ``length mismatch: 1 vs N``."""
-    df = pl.DataFrame({
-        "x": pl.Series(["a", "b"], dtype=pl.Enum(["a", "b"])),
-        "y": pl.Series(["A", "B"], dtype=pl.Enum(["A", "B"])),
-        "n": [10, 20],
-    })
+    df = pl.DataFrame(
+        {
+            "x": pl.Series(["a", "b"], dtype=pl.Enum(["a", "b"])),
+            "y": pl.Series(["A", "B"], dtype=pl.Enum(["A", "B"])),
+            "n": [10, 20],
+        }
+    )
     # pl.len() returns the row count of the layer data — broadcast to
     # every tile, every cell ends up the same fill colour (uniform 2.0).
     p = ggplot(df, aes("x", "y")) + geom_tile(fill=pl.len())
@@ -3491,21 +3854,29 @@ def test_guide_axis_check_overlap_drops_overlapping_labels():
     """``guide_axis(check_overlap=True)`` greedily drops labels whose
     bbox would intersect a previously kept one — first-fit walk in
     spatial axis order. Mirrors ggplot2's ``check.overlap``."""
-    df = pl.DataFrame({
-        # Many long category names crammed into a short axis → overlap.
-        "g": [f"longcategoryname_{i:02d}" for i in range(20)],
-        "v": list(range(20)),
-    })
+    df = pl.DataFrame(
+        {
+            # Many long category names crammed into a short axis → overlap.
+            "g": [f"longcategoryname_{i:02d}" for i in range(20)],
+            "v": list(range(20)),
+        }
+    )
     p_off = ggplot(df, aes("g", "v")) + geom_point()
     p_on = p_off + guides(x=guide_axis(check_overlap=True))
     fig_off = p_off.draw()
     fig_on = p_on.draw()
     try:
         # Same axes set up identically — count visible labels in each.
-        n_off = sum(1 for lbl in fig_off.axes[0].xaxis.get_majorticklabels()
-                    if lbl.get_visible() and lbl.get_text())
-        n_on = sum(1 for lbl in fig_on.axes[0].xaxis.get_majorticklabels()
-                   if lbl.get_visible() and lbl.get_text())
+        n_off = sum(
+            1
+            for lbl in fig_off.axes[0].xaxis.get_majorticklabels()
+            if lbl.get_visible() and lbl.get_text()
+        )
+        n_on = sum(
+            1
+            for lbl in fig_on.axes[0].xaxis.get_majorticklabels()
+            if lbl.get_visible() and lbl.get_text()
+        )
         # check_overlap should hide at least some labels at this density.
         assert n_on < n_off, f"check_overlap kept all {n_on} of {n_off} labels"
         assert n_on >= 1, "first label should always survive"
@@ -3518,8 +3889,7 @@ def test_guide_axis_n_dodge_alternates_rows():
     """``guide_axis(n_dodge=2)`` increases per-tick pad in rows so
     every other label sits one line lower (or further out, on y)."""
     df = pl.DataFrame({"g": ["a", "b", "c", "d"], "v": [1, 2, 3, 4]})
-    p = (ggplot(df, aes("g", "v")) + geom_point()
-         + guides(x=guide_axis(n_dodge=2)))
+    p = ggplot(df, aes("g", "v")) + geom_point() + guides(x=guide_axis(n_dodge=2))
     fig = p.draw()
     try:
         ticks = fig.axes[0].xaxis.get_major_ticks()
@@ -3538,12 +3908,13 @@ def test_fct_reorder_horizontal_boxplot():
     boxplot orientation — boxes are horizontal, the y axis carries the
     factor levels in reorder order. Mirrors ggplot2's ``has_flipped_aes``
     auto-orient logic for ``geom_boxplot``."""
-    df = pl.DataFrame({
-        "g": ["A", "A", "B", "B", "C", "C"],
-        "v": [10.0, 11.0, 1.0, 2.0, 5.0, 6.0],
-    })
-    p = (ggplot(df, aes(x="v", y=fct_reorder("g", "v", "median")))
-         + geom_boxplot())
+    df = pl.DataFrame(
+        {
+            "g": ["A", "A", "B", "B", "C", "C"],
+            "v": [10.0, 11.0, 1.0, 2.0, 5.0, 6.0],
+        }
+    )
+    p = ggplot(df, aes(x="v", y=fct_reorder("g", "v", "median"))) + geom_boxplot()
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -3559,12 +3930,16 @@ def test_fct_reorder_horizontal_boxplot():
 
 
 def test_fct_reorder_desc_reverses_order():
-    df = pl.DataFrame({
-        "g": ["A", "A", "B", "B", "C", "C"],
-        "v": [1.0, 2.0, 10.0, 11.0, 5.0, 6.0],
-    })
-    p = (ggplot(df, aes(x=fct_reorder("g", "v", "median", desc=True), y="v"))
-         + geom_boxplot())
+    df = pl.DataFrame(
+        {
+            "g": ["A", "A", "B", "B", "C", "C"],
+            "v": [1.0, 2.0, 10.0, 11.0, 5.0, 6.0],
+        }
+    )
+    p = (
+        ggplot(df, aes(x=fct_reorder("g", "v", "median", desc=True), y="v"))
+        + geom_boxplot()
+    )
     fig = p.draw()
     try:
         labels = [t.get_text() for t in fig.axes[0].get_xticklabels()]
@@ -3576,12 +3951,16 @@ def test_fct_reorder_desc_reverses_order():
 def test_fct_reorder_accepts_callable_aggregator():
     """``fn=`` may be any ``Series -> scalar`` callable; here a 90th-pct
     reducer puts B (peak=11) above C (peak=6) above A (peak=2)."""
-    df = pl.DataFrame({
-        "g": ["A", "A", "B", "B", "C", "C"],
-        "v": [1.0, 2.0, 10.0, 11.0, 5.0, 6.0],
-    })
-    p = (ggplot(df, aes(x=fct_reorder("g", "v", lambda s: s.max()), y="v"))
-         + geom_boxplot())
+    df = pl.DataFrame(
+        {
+            "g": ["A", "A", "B", "B", "C", "C"],
+            "v": [1.0, 2.0, 10.0, 11.0, 5.0, 6.0],
+        }
+    )
+    p = (
+        ggplot(df, aes(x=fct_reorder("g", "v", lambda s: s.max()), y="v"))
+        + geom_boxplot()
+    )
     fig = p.draw()
     try:
         labels = [t.get_text() for t in fig.axes[0].get_xticklabels()]
@@ -3592,13 +3971,15 @@ def test_fct_reorder_accepts_callable_aggregator():
 
 def test_fct_rev_reverses_enum_order():
     """``fct_rev`` on an Enum preserves the existing levels but reversed."""
-    df = pl.DataFrame({
-        "g": pl.Series(
-            ["low", "med", "hi"] * 2,
-            dtype=pl.Enum(["low", "med", "hi"]),
-        ),
-        "v": [1.0, 2.0, 3.0, 1.5, 2.5, 3.5],
-    })
+    df = pl.DataFrame(
+        {
+            "g": pl.Series(
+                ["low", "med", "hi"] * 2,
+                dtype=pl.Enum(["low", "med", "hi"]),
+            ),
+            "v": [1.0, 2.0, 3.0, 1.5, 2.5, 3.5],
+        }
+    )
     p = ggplot(df, aes(x=fct_rev("g"), y="v")) + geom_point()
     fig = p.draw()
     try:
@@ -3644,6 +4025,7 @@ def test_fct_reorder_works_inside_mutate():
     Series to the kwarg name.
     """
     import hea
+
     df = hea.tidy.DataFrame({"g": ["a", "b", "c"], "v": [3.0, 1.0, 2.0]})
     out = df.mutate(g=fct_reorder("g", "v"))
     assert isinstance(out.schema["g"], pl.Enum)
@@ -3671,11 +4053,13 @@ def test_fct_reorder2_orders_by_y_at_max_x():
     ``desc=True`` is the forcats default. Worked example: at x=3,
     a=30, c=28, b=25 → expected level order ``["a", "c", "b"]``.
     """
-    df = pl.DataFrame({
-        "f": ["a", "a", "a", "b", "b", "b", "c", "c", "c"],
-        "x": [1, 2, 3, 1, 2, 3, 1, 2, 3],
-        "y": [10, 20, 30, 5, 15, 25, 8, 18, 28],
-    })
+    df = pl.DataFrame(
+        {
+            "f": ["a", "a", "a", "b", "b", "b", "c", "c", "c"],
+            "x": [1, 2, 3, 1, 2, 3, 1, 2, 3],
+            "y": [10, 20, 30, 5, 15, 25, 8, 18, 28],
+        }
+    )
     out = fct_reorder2("f", "x", "y")(df)
     assert out.dtype.categories.to_list() == ["a", "c", "b"]
 
@@ -3700,7 +4084,10 @@ def test_groupby_ggplot_passthrough():
     ``.ungroup()`` — grouping has no plot-side meaning.
     """
     import hea
-    df = hea.tidy.DataFrame({"g": ["a", "a", "b", "b"], "x": [1, 2, 1, 2], "y": [1, 2, 3, 4]})
+
+    df = hea.tidy.DataFrame(
+        {"g": ["a", "a", "b", "b"], "x": [1, 2, 1, 2], "y": [1, 2, 3, 4]}
+    )
     gb = df.group_by("g").mutate(yy=hea.tidy.col("y") * 2)
     assert type(gb).__name__ == "GroupBy"
     p = gb.ggplot(x="x", y="yy", color="g") + geom_line()
@@ -3728,6 +4115,7 @@ def test_fct_recode_renames_levels_preserving_order():
     keep their original name and position. ``**{}`` lets keys with
     spaces / punctuation work (the r4ds partyid case)."""
     import hea
+
     df = hea.tidy.DataFrame({"g": ["a", "b", "c", "d"]})
     out = df.mutate(g=hea.tidy.fct_recode("g", A="a", B="b"))
     assert out["g"].cat.get_categories().to_list() == ["A", "B", "c", "d"]
@@ -3754,6 +4142,7 @@ def test_fct_collapse_merges_levels_with_optional_other():
     """``fct_collapse`` merges many old → one new. Without ``other_level``
     unmentioned levels stay; with it they're swept into the bucket."""
     import hea
+
     df = hea.tidy.DataFrame({"g": ["a", "b", "c", "d"]})
 
     # Partial: unmentioned c, d keep their names.
@@ -3774,8 +4163,11 @@ def test_fct_lump_n_keeps_top_n_by_count():
     merge into ``other_level`` (creating one if absent, or absorbing if
     that level already exists in the data)."""
     import hea
+
     # 6 levels, n=2 keeps top 2 — bottom 4 lump into "Other".
-    df = hea.tidy.DataFrame({"g": ["a"]*10 + ["b"]*6 + ["c"]*4 + ["d"]*3 + ["e"]*2 + ["f"]*1})
+    df = hea.tidy.DataFrame(
+        {"g": ["a"] * 10 + ["b"] * 6 + ["c"] * 4 + ["d"] * 3 + ["e"] * 2 + ["f"] * 1}
+    )
     out = df.mutate(g=hea.tidy.fct_lump_n("g", n=2))
     cats = out["g"].cat.get_categories().to_list()
     assert cats == ["a", "b", "Other"]
@@ -3786,7 +4178,7 @@ def test_fct_lump_n_keeps_top_n_by_count():
     # Existing "Other" level absorbs the lumped values. Use an Enum with
     # explicit level order so the test isn't sensitive to Python's
     # Unicode sort differing from R's locale-aware default.
-    s = pl.Series("g", ["a"]*10 + ["Other"]*5 + ["b"]*3 + ["c"]*1).cast(
+    s = pl.Series("g", ["a"] * 10 + ["Other"] * 5 + ["b"] * 3 + ["c"] * 1).cast(
         pl.Enum(["a", "b", "c", "Other"])
     )
     df2 = hea.tidy.DataFrame({"g": s})
@@ -3802,13 +4194,16 @@ def test_fct_lump_lowfreq_matches_forcats_in_smallest_rule():
     of all smaller-count levels. Worked example: a=10, b=6, c=4, d=3,
     e=2, f=1 — only f gets lumped (when we reach e=2, left=1, 2>1)."""
     import hea
-    df = hea.tidy.DataFrame({"g": ["a"]*10 + ["b"]*6 + ["c"]*4 + ["d"]*3 + ["e"]*2 + ["f"]*1})
+
+    df = hea.tidy.DataFrame(
+        {"g": ["a"] * 10 + ["b"] * 6 + ["c"] * 4 + ["d"] * 3 + ["e"] * 2 + ["f"] * 1}
+    )
     out = df.mutate(g=hea.tidy.fct_lump_lowfreq("g"))
     assert out["g"].cat.get_categories().to_list() == ["a", "b", "c", "d", "e", "Other"]
     assert (out["g"] == "Other").sum() == 1
 
     # Dominant level case: a=100, others tiny → only a kept.
-    df2 = hea.tidy.DataFrame({"g": ["a"]*100 + ["b"]*5 + ["c"]*3 + ["d"]*2})
+    df2 = hea.tidy.DataFrame({"g": ["a"] * 100 + ["b"] * 5 + ["c"] * 3 + ["d"] * 2})
     out2 = df2.mutate(g=hea.tidy.fct_lump_lowfreq("g"))
     assert out2["g"].cat.get_categories().to_list() == ["a", "Other"]
 
@@ -3817,8 +4212,11 @@ def test_scale_radius_is_continuous_size_alias():
     """`scale_radius()` produces the same continuous size mapping as
     `scale_size_continuous()` (both use linear rescale_pal)."""
     df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3], "z": [1.0, 5.0, 10.0]})
-    p = (ggplot(df, aes("x", "y", size="z")) + geom_point()
-         + scale_radius(range=(2.0, 8.0)))
+    p = (
+        ggplot(df, aes("x", "y", size="z"))
+        + geom_point()
+        + scale_radius(range=(2.0, 8.0))
+    )
     fig = p.draw()
     try:
         # Just checking it draws without errors and produces a scatter.
@@ -3835,8 +4233,11 @@ def test_scale_radius_is_continuous_size_alias():
 def test_annotate_text_at_data_position():
     """`annotate('text', x=, y=, label=)` adds one matplotlib text artist."""
     df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 4, 9]})
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + annotate("text", x=2, y=5, label="midpoint"))
+    p = (
+        ggplot(df, aes("x", "y"))
+        + geom_point()
+        + annotate("text", x=2, y=5, label="midpoint")
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -3849,14 +4250,17 @@ def test_annotate_text_at_data_position():
 def test_annotate_rect_with_fill_alpha():
     """`annotate('rect', xmin=, xmax=, ymin=, ymax=, fill=, alpha=)`."""
     df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 4, 9]})
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + annotate("rect", xmin=1.5, xmax=2.5, ymin=2, ymax=6,
-                    fill="red", alpha=0.3))
+    p = (
+        ggplot(df, aes("x", "y"))
+        + geom_point()
+        + annotate("rect", xmin=1.5, xmax=2.5, ymin=2, ymax=6, fill="red", alpha=0.3)
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
         # Rect produces a PatchCollection.
         from matplotlib.collections import PatchCollection
+
         assert any(isinstance(c, PatchCollection) for c in ax.collections)
     finally:
         plt.close(fig)
@@ -3865,13 +4269,17 @@ def test_annotate_rect_with_fill_alpha():
 def test_annotate_segment_constants():
     """`annotate('segment', x, y, xend, yend)` draws one line segment."""
     df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 4, 9]})
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + annotate("segment", x=1, y=1, xend=3, yend=9, colour="blue"))
+    p = (
+        ggplot(df, aes("x", "y"))
+        + geom_point()
+        + annotate("segment", x=1, y=1, xend=3, yend=9, colour="blue")
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
         # Segment uses LineCollection.
         from matplotlib.collections import LineCollection
+
         assert any(isinstance(c, LineCollection) for c in ax.collections)
     finally:
         plt.close(fig)
@@ -3880,8 +4288,11 @@ def test_annotate_segment_constants():
 def test_annotate_broadcast_iterables_with_scalars():
     """Three annotation rows from a 3-element x list and scalar y."""
     df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + annotate("text", x=[1, 2, 3], y=2, label=["a", "b", "c"]))
+    p = (
+        ggplot(df, aes("x", "y"))
+        + geom_point()
+        + annotate("text", x=[1, 2, 3], y=2, label=["a", "b", "c"])
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -3893,14 +4304,19 @@ def test_annotate_broadcast_iterables_with_scalars():
 
 def test_annotate_renders_on_every_facet_panel():
     """Annotation broadcasts to every panel (matches ggplot2 behaviour)."""
-    df = pl.DataFrame({
-        "x": [1, 2, 3, 4, 5, 6, 7, 8],
-        "y": [1, 2, 3, 4, 5, 6, 7, 8],
-        "g": ["a", "a", "a", "a", "b", "b", "b", "b"],
-    })
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + facet_wrap("g")
-         + annotate("text", x=3, y=7, label="ANN"))
+    df = pl.DataFrame(
+        {
+            "x": [1, 2, 3, 4, 5, 6, 7, 8],
+            "y": [1, 2, 3, 4, 5, 6, 7, 8],
+            "g": ["a", "a", "a", "a", "b", "b", "b", "b"],
+        }
+    )
+    p = (
+        ggplot(df, aes("x", "y"))
+        + geom_point()
+        + facet_wrap("g")
+        + annotate("text", x=3, y=7, label="ANN")
+    )
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
@@ -3934,7 +4350,7 @@ def test_annotate_inconsistent_lengths_error():
 def test_coord_flip_swaps_axis_labels():
     """`coord_flip()` swaps which aes ends up on which axis."""
     df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [10.0, 5.0, 15.0]})
-    p = (ggplot(df, aes("cat", "val")) + geom_col() + coord_flip())
+    p = ggplot(df, aes("cat", "val")) + geom_col() + coord_flip()
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -3948,7 +4364,7 @@ def test_coord_flip_swaps_axis_labels():
 def test_coord_flip_renders_horizontal_bars():
     """`geom_col() + coord_flip()` produces bars extending along the x-axis."""
     df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [10.0, 5.0, 15.0]})
-    p = (ggplot(df, aes("cat", "val")) + geom_col() + coord_flip())
+    p = ggplot(df, aes("cat", "val")) + geom_col() + coord_flip()
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -3966,9 +4382,12 @@ def test_coord_flip_swaps_scale_application():
     integer index) — after flip, that constraint shows up on the y-axis.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + scale_x_continuous(limits=(0, 5))
-         + coord_flip())
+    p = (
+        ggplot(df, aes("x", "y"))
+        + geom_point()
+        + scale_x_continuous(limits=(0, 5))
+        + coord_flip()
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -3981,12 +4400,13 @@ def test_coord_flip_swaps_scale_application():
 
 def test_coord_trans_y_log10_sets_matplotlib_scale():
     """`coord_trans(y='log10')` sets the y axis to a log scale at render."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0],
-        "y": [10.0, 100.0, 1000.0, 10000.0],
-    })
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + coord_trans(y="log10"))
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y": [10.0, 100.0, 1000.0, 10000.0],
+        }
+    )
+    p = ggplot(df, aes("x", "y")) + geom_point() + coord_trans(y="log10")
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -3997,12 +4417,13 @@ def test_coord_trans_y_log10_sets_matplotlib_scale():
 
 def test_coord_trans_x_sqrt_uses_function_scale():
     """`coord_trans(x='sqrt')` registers a function scale on the x axis."""
-    df = pl.DataFrame({
-        "x": [1.0, 4.0, 9.0, 16.0],
-        "y": [1.0, 2.0, 3.0, 4.0],
-    })
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + coord_trans(x="sqrt"))
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 4.0, 9.0, 16.0],
+            "y": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    p = ggplot(df, aes("x", "y")) + geom_point() + coord_trans(x="sqrt")
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -4013,8 +4434,7 @@ def test_coord_trans_x_sqrt_uses_function_scale():
 
 def test_coord_trans_unknown_name_errors():
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + coord_trans(x="bogus"))
+    p = ggplot(df, aes("x", "y")) + geom_point() + coord_trans(x="bogus")
     with pytest.raises(ValueError, match="unknown transform"):
         p.draw()
 
@@ -4031,8 +4451,11 @@ def test_annotation_custom_places_artist_at_bounds():
 
     df = pl.DataFrame({"x": [0.0, 10.0], "y": [0.0, 10.0]})
     rect = Rectangle((0, 0), 1, 1, color="red", alpha=0.3)
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + annotation_custom(rect, xmin=2, xmax=4, ymin=2, ymax=4))
+    p = (
+        ggplot(df, aes("x", "y"))
+        + geom_point()
+        + annotation_custom(rect, xmin=2, xmax=4, ymin=2, ymax=4)
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -4040,10 +4463,17 @@ def test_annotation_custom_places_artist_at_bounds():
         rects = [p for p in ax.patches if isinstance(p, Rectangle)]
         assert len(rects) >= 1
         # Find one whose bounds match what we asked for.
-        match = next((p for p in rects
-                      if abs(p.get_x() - 2) < 1e-6 and abs(p.get_y() - 2) < 1e-6
-                      and abs(p.get_width() - 2) < 1e-6 and abs(p.get_height() - 2) < 1e-6),
-                     None)
+        match = next(
+            (
+                p
+                for p in rects
+                if abs(p.get_x() - 2) < 1e-6
+                and abs(p.get_y() - 2) < 1e-6
+                and abs(p.get_width() - 2) < 1e-6
+                and abs(p.get_height() - 2) < 1e-6
+            ),
+            None,
+        )
         assert match is not None
     finally:
         plt.close(fig)
@@ -4063,15 +4493,20 @@ def test_annotation_custom_renders_on_each_facet_panel():
     """Like `annotate`, the custom artist broadcasts to every panel."""
     from matplotlib.patches import Rectangle
 
-    df = pl.DataFrame({
-        "x": [0.0, 5.0, 0.0, 5.0],
-        "y": [0.0, 5.0, 0.0, 5.0],
-        "g": ["a", "a", "b", "b"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [0.0, 5.0, 0.0, 5.0],
+            "y": [0.0, 5.0, 0.0, 5.0],
+            "g": ["a", "a", "b", "b"],
+        }
+    )
     rect = Rectangle((0, 0), 1, 1, color="green", alpha=0.2)
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + facet_wrap("g")
-         + annotation_custom(rect, xmin=1, xmax=3, ymin=1, ymax=3))
+    p = (
+        ggplot(df, aes("x", "y"))
+        + geom_point()
+        + facet_wrap("g")
+        + annotation_custom(rect, xmin=1, xmax=3, ymin=1, ymax=3)
+    )
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
@@ -4109,8 +4544,11 @@ def test_expansion_invalid_form_errors():
 def test_expansion_mult_widens_axis_via_margins():
     """`scale_x_continuous(expand=expansion(mult=0.5))` widens xlim by 50%."""
     df = pl.DataFrame({"x": [0.0, 10.0], "y": [0.0, 10.0]})
-    p = (ggplot(df, aes("x", "y")) + geom_point()
-         + scale_x_continuous(expand=expansion(mult=0.5)))
+    p = (
+        ggplot(df, aes("x", "y"))
+        + geom_point()
+        + scale_x_continuous(expand=expansion(mult=0.5))
+    )
     fig = p.draw()
     try:
         xlim = fig.axes[0].get_xlim()
@@ -4153,8 +4591,7 @@ def test_draw_figsize_shorthand():
 def test_draw_units_cm():
     """`units='cm'` converts to inches before sizing."""
     df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
-    fig = (ggplot(df, aes("x", "y")).geom_point()
-           .draw(width=20, height=8, units="cm"))
+    fig = ggplot(df, aes("x", "y")).geom_point().draw(width=20, height=8, units="cm")
     try:
         size = fig.get_size_inches()
         assert size[0] == pytest.approx(20 / 2.54, abs=1e-6)
@@ -4173,13 +4610,16 @@ def test_draw_figsize_and_width_height_conflict_errors():
 
 def test_draw_size_applies_to_facets():
     """Faceted plots resize too — the auto-formula isn't sticky."""
-    df = pl.DataFrame({
-        "x": [1, 2, 3, 4, 5, 6],
-        "y": [1, 2, 3, 4, 5, 6],
-        "g": ["a", "a", "a", "b", "b", "b"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1, 2, 3, 4, 5, 6],
+            "y": [1, 2, 3, 4, 5, 6],
+            "g": ["a", "a", "a", "b", "b", "b"],
+        }
+    )
     fig = (ggplot(df, aes("x", "y")) + geom_point() + facet_grid("~ g")).draw(
-        width=10, height=3,
+        width=10,
+        height=3,
     )
     try:
         size = fig.get_size_inches()
@@ -4192,6 +4632,7 @@ def test_draw_size_applies_to_facets():
 def test_draw_with_ax_skips_resize():
     """When the user passes ``ax=``, sizing is the parent figure's job."""
     import matplotlib.pyplot as plt
+
     df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
     parent_fig, ax = plt.subplots(figsize=(4, 4))
     try:
@@ -4298,11 +4739,13 @@ def test_patchwork_nested_2_deep():
 
 def test_patchwork_with_faceted_child():
     """A faceted plot inside a composition keeps its facet sub-grid intact."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0],
-        "y": [1.0, 2.0, 3.0, 4.0],
-        "g": ["a", "a", "b", "b"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y": [1.0, 2.0, 3.0, 4.0],
+            "g": ["a", "a", "b", "b"],
+        }
+    )
     p_single = ggplot(df, aes("x", "y")) + geom_point()
     p_faceted = ggplot(df, aes("x", "y")) + geom_point() + facet_grid("~ g")
     g = p_single | p_faceted
@@ -4385,6 +4828,7 @@ def test_patchwork_plus_layer_still_adds_layer():
     extended = p1 + geom_point(colour="red")
     # Still a ggplot, not a PlotGrid.
     from hea.ggplot import ggplot as ggplot_cls
+
     assert isinstance(extended, ggplot_cls)
 
 
@@ -4462,11 +4906,13 @@ def test_patchwork_faceted_child_axis_label_scoped_to_panel_column():
     the centre of its panel-area bbox. The single-panel child sets the
     xlabel on its sole axes.
     """
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-        "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-        "g": ["a", "a", "a", "a", "b", "b", "b", "b"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            "g": ["a", "a", "a", "a", "b", "b", "b", "b"],
+        }
+    )
     p_single = ggplot(df, aes("x", "y")) + geom_point()
     p_faceted = ggplot(df, aes("x", "y")) + geom_point() + facet_grid("~ g")
 
@@ -4496,15 +4942,16 @@ def test_patchwork_faceted_child_axis_label_scoped_to_panel_column():
 def _patchwork_doc_plots():
     """The four ggplots set up at the top of the patchwork tutorial."""
     from hea import data
+
     mtcars = data("mtcars")
-    p1 = (mtcars.ggplot().geom_point(aes("mpg", "disp"))
-          .ggtitle("Plot 1"))
-    p2 = (mtcars.ggplot().geom_boxplot(aes("gear", "disp", group="gear"))
-          .ggtitle("Plot 2"))
-    p3 = (mtcars.ggplot().geom_point(aes("hp", "wt", colour="mpg"))
-          .ggtitle("Plot 3"))
-    p4 = (mtcars.ggplot().geom_bar(aes("gear")).facet_wrap("~cyl")
-          .ggtitle("Plot 4"))
+    p1 = mtcars.ggplot().geom_point(aes("mpg", "disp")).ggtitle("Plot 1")
+    p2 = (
+        mtcars.ggplot()
+        .geom_boxplot(aes("gear", "disp", group="gear"))
+        .ggtitle("Plot 2")
+    )
+    p3 = mtcars.ggplot().geom_point(aes("hp", "wt", colour="mpg")).ggtitle("Plot 3")
+    p4 = mtcars.ggplot().geom_bar(aes("gear")).facet_wrap("~cyl").ggtitle("Plot 4")
     return p1, p2, p3, p4
 
 
@@ -4588,15 +5035,14 @@ def test_patchwork_doc_ex9_plot_annotation_title():
     which would interact badly with constrained_layout that we no
     longer use)."""
     p1, p2, p3, _ = _patchwork_doc_plots()
-    g = (p1 | (p2 / p3)) + plot_annotation(
-        title="The surprising story about mtcars"
-    )
+    g = (p1 | (p2 / p3)) + plot_annotation(title="The surprising story about mtcars")
     assert g.annotation is not None
     fig = g.draw()
     try:
         title_text = "The surprising story about mtcars"
-        assert any(t.get_text() == title_text for t in fig.texts), \
+        assert any(t.get_text() == title_text for t in fig.texts), (
             f"expected fig.text with {title_text!r}, got {[t.get_text() for t in fig.texts]}"
+        )
     finally:
         plt.close(fig)
 
@@ -4735,9 +5181,11 @@ def test_gg_c11_geom_text_after_stat_count():
     """GG-C11: ``geom_text(aes(label = after_stat(count)), stat = "count")``
     paints the bar count above each bar."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes(x="cyl"))
-         + geom_bar()
-         + geom_text(aes(label=after_stat("count")), stat="count", vjust=-0.5))
+    p = (
+        ggplot(mtcars, aes(x="cyl"))
+        + geom_bar()
+        + geom_text(aes(label=after_stat("count")), stat="count", vjust=-0.5)
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -4754,11 +5202,10 @@ def test_after_stat_density_with_geom_text():
     import polars as pl
 
     df = pl.DataFrame({"x": list(range(20))})
-    p = (ggplot(df, aes(x="x"))
-         + geom_text(
-             aes(y=after_stat("density"), label=after_stat("density")),
-             stat="density",
-         ))
+    p = ggplot(df, aes(x="x")) + geom_text(
+        aes(y=after_stat("density"), label=after_stat("density")),
+        stat="density",
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -4772,13 +5219,15 @@ def test_after_stat_callable_form():
     """``after_stat(callable)`` evaluates the callable against the stat output."""
     mtcars = load_dataset("datasets", "mtcars")
     # Label = "n=<count>" for each bar.
-    p = (ggplot(mtcars, aes(x="cyl"))
-         + geom_bar()
-         + geom_text(
-             aes(label=after_stat(lambda d: ["n=" + str(int(c)) for c in d["count"]])),
-             stat="count",
-             vjust=-0.5,
-         ))
+    p = (
+        ggplot(mtcars, aes(x="cyl"))
+        + geom_bar()
+        + geom_text(
+            aes(label=after_stat(lambda d: ["n=" + str(int(c)) for c in d["count"]])),
+            stat="count",
+            vjust=-0.5,
+        )
+    )
     fig = p.draw()
     try:
         labels = [t.get_text() for t in fig.axes[0].texts]
@@ -4791,11 +5240,10 @@ def test_after_stat_does_not_evaluate_at_compute_aesthetics():
     """If we evaluated `after_stat("count")` immediately, we'd hit a NameError
     (no `count` column in the raw data). The marker should defer past stat."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes(x="cyl"))
-         + geom_text(
-             aes(y=after_stat("count"), label=after_stat("count")),
-             stat="count",
-         ))
+    p = ggplot(mtcars, aes(x="cyl")) + geom_text(
+        aes(y=after_stat("count"), label=after_stat("count")),
+        stat="count",
+    )
     # Just running .draw() should succeed — no exception.
     fig = p.draw()
     plt.close(fig)
@@ -4805,11 +5253,13 @@ def test_geom_text_basic_label_aes():
     """geom_text without stat: just place text labels at (x, y)."""
     import polars as pl
 
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [1.0, 4.0, 9.0],
-        "label": ["a", "b", "c"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [1.0, 4.0, 9.0],
+            "label": ["a", "b", "c"],
+        }
+    )
     p = ggplot(df, aes("x", "y", label="label")) + geom_text()
     fig = p.draw()
     try:
@@ -4831,8 +5281,9 @@ def test_default_theme_is_gray_panel():
         # ggplot2 panel.background fill is "#EBEBEB" (≈ 0.92, 0.92, 0.92).
         assert bg[0] == pytest.approx(0.922, abs=0.01)
         # All spines hidden (gray-panel style).
-        assert not any(ax.spines[s].get_visible()
-                       for s in ("top", "right", "bottom", "left"))
+        assert not any(
+            ax.spines[s].get_visible() for s in ("top", "right", "bottom", "left")
+        )
     finally:
         plt.close(fig)
 
@@ -4848,8 +5299,9 @@ def test_gg_c7_theme_bw_overrides_default():
         bg = ax.get_facecolor()
         assert bg[0] == pytest.approx(1.0, abs=0.01)
         # All four spines visible (panel.border).
-        assert all(ax.spines[s].get_visible()
-                   for s in ("top", "right", "bottom", "left"))
+        assert all(
+            ax.spines[s].get_visible() for s in ("top", "right", "bottom", "left")
+        )
     finally:
         plt.close(fig)
 
@@ -4864,8 +5316,9 @@ def test_theme_minimal_no_spines_no_panel_bg():
         bg = ax.get_facecolor()
         assert bg[3] == pytest.approx(0.0, abs=0.01)
         # No spines.
-        assert not any(ax.spines[s].get_visible()
-                       for s in ("top", "right", "bottom", "left"))
+        assert not any(
+            ax.spines[s].get_visible() for s in ("top", "right", "bottom", "left")
+        )
     finally:
         plt.close(fig)
 
@@ -4903,15 +5356,21 @@ def test_theme_partial_override_panel_background():
     from matplotlib.colors import to_rgba
 
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + theme(panel_background=element_rect(fill="lightblue")))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + theme(panel_background=element_rect(fill="lightblue"))
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        assert ax.get_facecolor()[:3] == pytest.approx(to_rgba("lightblue")[:3], abs=0.01)
+        assert ax.get_facecolor()[:3] == pytest.approx(
+            to_rgba("lightblue")[:3], abs=0.01
+        )
         # Spines still hidden (theme_gray default survived).
-        assert not any(ax.spines[s].get_visible()
-                       for s in ("top", "right", "bottom", "left"))
+        assert not any(
+            ax.spines[s].get_visible() for s in ("top", "right", "bottom", "left")
+        )
     finally:
         plt.close(fig)
 
@@ -4919,8 +5378,11 @@ def test_theme_partial_override_panel_background():
 def test_theme_blank_clears_element():
     """Adding ``theme(panel_grid_major=element_blank())`` removes major grid."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + theme(panel_grid_major=element_blank()))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + theme(panel_grid_major=element_blank())
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -4959,11 +5421,15 @@ def test_theme_gridlines_below_data_artists():
     try:
         ax = fig.axes[0]
         assert ax.get_axisbelow() is True
-        grid_z = [g.get_zorder() for g in ax.get_xgridlines() + ax.get_ygridlines()
-                  if g.get_visible()]
+        grid_z = [
+            g.get_zorder()
+            for g in ax.get_xgridlines() + ax.get_ygridlines()
+            if g.get_visible()
+        ]
         scatter_z = [c.get_zorder() for c in ax.collections]
-        assert min(grid_z) < min(scatter_z), \
+        assert min(grid_z) < min(scatter_z), (
             f"grid {grid_z} should sit below scatter {scatter_z}"
+        )
     finally:
         plt.close(fig)
 
@@ -4971,8 +5437,11 @@ def test_theme_gridlines_below_data_artists():
 def test_theme_dot_separated_dict_form():
     """``theme({"panel.background": ...})`` — direct dotted-name form."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + theme({"panel.background": element_rect(fill="#FFE0E0")}))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + theme({"panel.background": element_rect(fill="#FFE0E0")})
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -4987,13 +5456,14 @@ def test_scale_size_area_uses_sqrt_scaling():
     radius scales as sqrt — distinct from the linear range mapping."""
     import polars as pl
 
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0],
-        "y": [1.0, 1.0, 1.0, 1.0],
-        "v": [0.0, 0.25, 0.5, 1.0],
-    })
-    p = (ggplot(df, aes("x", "y", size="v")) + geom_point()
-         + scale_size_area(max_size=4))
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y": [1.0, 1.0, 1.0, 1.0],
+            "v": [0.0, 0.25, 0.5, 1.0],
+        }
+    )
+    p = ggplot(df, aes("x", "y", size="v")) + geom_point() + scale_size_area(max_size=4)
     fig = p.draw()
     try:
         sizes = fig.axes[0].collections[0].get_sizes()
@@ -5008,8 +5478,11 @@ def test_scale_size_area_uses_sqrt_scaling():
 def test_scale_color_brewer_unknown_palette_errors():
     mtcars = load_dataset("datasets", "mtcars")
     with pytest.raises(KeyError):
-        p = (ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
-             + geom_point() + scale_color_brewer(palette="NotARealPalette"))
+        p = (
+            ggplot(mtcars, aes("wt", "mpg", colour="factor(cyl)"))
+            + geom_point()
+            + scale_color_brewer(palette="NotARealPalette")
+        )
         p.draw()
 
 
@@ -5018,11 +5491,13 @@ def test_geom_smooth_fits_per_group_when_colour_mapped():
     per species, each in its own colour. Bug repro: previously a single fit
     was drawn in the default smooth colour."""
     from hea import data as _hea_data
+
     penguins = _hea_data("penguins", package="palmerpenguins")
-    p = (ggplot(penguins, aes(x="flipper_length_mm", y="body_mass_g",
-                              colour="species"))
-         + geom_smooth(method="lm"))
+    p = ggplot(
+        penguins, aes(x="flipper_length_mm", y="body_mass_g", colour="species")
+    ) + geom_smooth(method="lm")
     import warnings as _w
+
     with _w.catch_warnings():
         _w.simplefilter("ignore", UserWarning)  # the NA-removal warning
         fig = p.draw()
@@ -5041,10 +5516,12 @@ def test_geom_point_warns_on_missing_values():
     (`geom_point()`)``."""
     import polars as pl
 
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, float("nan"), 4.0],
-        "y": [1.0, 2.0, 3.0, float("nan")],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, float("nan"), 4.0],
+            "y": [1.0, 2.0, 3.0, float("nan")],
+        }
+    )
     p = ggplot(df, aes("x", "y")) + geom_point()
     with pytest.warns(UserWarning, match=r"Removed 2 rows .*`geom_point\(\)`"):
         fig = p.draw()
@@ -5056,10 +5533,12 @@ def test_geom_point_na_rm_silences_warning():
     import polars as pl
     import warnings as _w
 
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, float("nan"), 4.0],
-        "y": [1.0, 2.0, 3.0, float("nan")],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, float("nan"), 4.0],
+            "y": [1.0, 2.0, 3.0, float("nan")],
+        }
+    )
     p = ggplot(df, aes("x", "y")) + geom_point(na_rm=True)
     with _w.catch_warnings():
         _w.simplefilter("error")  # any warning fails the test
@@ -5088,8 +5567,7 @@ def test_aes_color_constant_kwarg_overrides_mapping():
     import polars as pl
 
     df = pl.DataFrame({"x": [1.0, 2, 3], "y": [1.0, 2, 3], "g": ["a", "b", "c"]})
-    p = (ggplot(df, aes("x", "y", colour="g"))
-         + geom_point(colour="red"))
+    p = ggplot(df, aes("x", "y", colour="g")) + geom_point(colour="red")
     fig = p.draw()
     try:
         fc = fig.axes[0].collections[0].get_facecolors()
@@ -5102,9 +5580,11 @@ def test_aes_color_constant_kwarg_overrides_mapping():
 def test_gg_c9_boxplot_with_jitter():
     """GG-C9: box-and-whisker with jittered points overlaid."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes(x="cyl", y="mpg", group="cyl"))
-         + geom_boxplot()
-         + geom_jitter(width=0.2, seed=42))
+    p = (
+        ggplot(mtcars, aes(x="cyl", y="mpg", group="cyl"))
+        + geom_boxplot()
+        + geom_jitter(width=0.2, seed=42)
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -5116,6 +5596,7 @@ def test_gg_c9_boxplot_with_jitter():
         assert offsets.shape == (len(mtcars), 2)
         # Jittered x's should differ from the integer cyl values.
         import numpy as np
+
         raw_cyl = mtcars["cyl"].to_numpy()
         assert not np.array_equal(offsets[:, 0], raw_cyl)
     finally:
@@ -5133,6 +5614,7 @@ def test_gg_c9_boxplot_with_jitter():
 def test_gg_c8_histogram_pima_diastolic():
     """`ggplot(pima, aes(x=diastolic)) + geom_histogram()` (Faraway p.5)."""
     from hea import data as _hea_data
+
     pima = _hea_data("pima", package="faraway")
     p = ggplot(pima, aes(x="diastolic")) + geom_histogram()
     fig = p.draw()
@@ -5160,11 +5642,14 @@ def test_stat_density_trim_false_uses_panel_x_range():
     rng = np.random.default_rng(0)
     # Group A is concentrated low; group B sits high. With trim=False each
     # group's grid must span the union of both groups' x.
-    df = pl.DataFrame({
-        "x": np.concatenate([rng.standard_normal(200) - 5,
-                             rng.standard_normal(200) + 5]),
-        "group": [1] * 200 + [2] * 200,
-    })
+    df = pl.DataFrame(
+        {
+            "x": np.concatenate(
+                [rng.standard_normal(200) - 5, rng.standard_normal(200) + 5]
+            ),
+            "group": [1] * 200 + [2] * 200,
+        }
+    )
     panel_min = float(df["x"].min())
     panel_max = float(df["x"].max())
 
@@ -5187,6 +5672,7 @@ def test_stat_density_trim_false_uses_panel_x_range():
 def test_gg_c10_density_pima_diastolic():
     """`ggplot(pima, aes(x=diastolic)) + geom_density()` (Faraway p.5)."""
     from hea import data as _hea_data
+
     pima = _hea_data("pima", package="faraway")
     p = ggplot(pima, aes(x="diastolic")) + geom_density()
     fig = p.draw()
@@ -5200,6 +5686,7 @@ def test_gg_c10_density_pima_diastolic():
         assert (xy[:, 1] >= 0).all(), "density must be non-negative"
         # Density integrates to ≈ 1 over its support (3·bw padding on each side).
         from numpy import trapezoid
+
         area = trapezoid(xy[:, 1], xy[:, 0])
         assert 0.95 < area < 1.05, f"density should integrate to ≈1, got {area:.4f}"
         assert ax.get_xlabel() == "diastolic"
@@ -5211,6 +5698,7 @@ def test_gg_c10_density_pima_diastolic():
 def test_draw_into_existing_axes_via_subplot_mosaic():
     """`draw(ax=ax)` paints into a caller-supplied axes (e.g. ``plt.subplot_mosaic``)."""
     from hea import data as _hea_data
+
     pima = _hea_data("pima", package="faraway")
     fig, axes = plt.subplot_mosaic([["hist", "scatter"]], figsize=(8, 3))
     try:
@@ -5233,6 +5721,7 @@ def test_draw_into_existing_axes_via_subplot_mosaic():
 def test_faraway_p5_scatter_pima_diastolic_diabetes():
     """`ggplot(pima, aes(x=diastolic, y=diabetes)) + geom_point()` (Faraway p.5)."""
     from hea import data as _hea_data
+
     pima = _hea_data("pima", package="faraway")
     p = ggplot(pima, aes(x="diastolic", y="diabetes")) + geom_point()
     fig = p.draw()
@@ -5249,6 +5738,7 @@ def test_faraway_p5_scatter_pima_diastolic_diabetes():
 # ---------------------------------------------------------------------------
 # Labels & limits — `labs`, `xlab`, `ylab`, `ggtitle`, `xlim`, `ylim`, `lims`
 # ---------------------------------------------------------------------------
+
 
 def test_labs_overrides_axis_labels():
     mtcars = load_dataset("datasets", "mtcars")
@@ -5291,7 +5781,7 @@ def test_after_stat_kwarg_form_promotes_into_mapping():
         h_aes = sorted(round(p.get_height(), 4) for p in fig_aes.axes[0].patches)
         assert h_kwarg == h_aes
         # Sanity: heights are sqrt of counts (1, 2, 3 → 1.0, 1.414, 1.732).
-        assert h_aes == [1.0, round(2 ** 0.5, 4), round(3 ** 0.5, 4)]
+        assert h_aes == [1.0, round(2**0.5, 4), round(3**0.5, 4)]
     finally:
         plt.close(fig_kwarg)
         plt.close(fig_aes)
@@ -5363,7 +5853,11 @@ def test_ggtitle_with_subtitle_renders_both():
     the left ``set_title`` slot; the subtitle is an axes-level text artist
     anchored just above the spine."""
     mtcars = load_dataset("datasets", "mtcars")
-    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + ggtitle("Cars", subtitle="MTcars data")
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + ggtitle("Cars", subtitle="MTcars data")
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -5376,7 +5870,11 @@ def test_ggtitle_with_subtitle_renders_both():
 
 def test_labs_caption_renders_as_figure_text():
     mtcars = load_dataset("datasets", "mtcars")
-    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + labs(caption="Source: 1974 Motor Trend")
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + labs(caption="Source: 1974 Motor Trend")
+    )
     fig = p.draw()
     try:
         texts = [t.get_text() for t in fig.texts]
@@ -5503,6 +6001,7 @@ def test_xlim_fluent_method_form():
 # Reference-line geoms — geom_hline / geom_vline / geom_abline
 # ---------------------------------------------------------------------------
 
+
 def test_geom_hline_single_intercept():
     mtcars = load_dataset("datasets", "mtcars")
     p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + geom_hline(yintercept=20)
@@ -5519,7 +6018,11 @@ def test_geom_hline_single_intercept():
 
 def test_geom_hline_multiple_intercepts():
     mtcars = load_dataset("datasets", "mtcars")
-    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + geom_hline(yintercept=[10, 20, 30])
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + geom_hline(yintercept=[10, 20, 30])
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -5574,8 +6077,14 @@ def test_geom_abline_custom_slope_intercept():
 
 def test_geom_hline_aes_params_apply_colour_and_linetype():
     df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
-    p = ggplot(df, aes("x", "y")) + geom_point() + geom_hline(
-        yintercept=[1.5, 2.5], colour="red", linetype="dashed",
+    p = (
+        ggplot(df, aes("x", "y"))
+        + geom_point()
+        + geom_hline(
+            yintercept=[1.5, 2.5],
+            colour="red",
+            linetype="dashed",
+        )
     )
     fig = p.draw()
     try:
@@ -5585,6 +6094,7 @@ def test_geom_hline_aes_params_apply_colour_and_linetype():
             assert ln.get_linestyle() == "--"
             # matplotlib normalises colour names.
             from matplotlib.colors import to_rgba
+
             assert to_rgba(ln.get_color()) == to_rgba("red")
     finally:
         plt.close(fig)
@@ -5593,7 +6103,11 @@ def test_geom_hline_aes_params_apply_colour_and_linetype():
 def test_geom_abline_broadcasts_scalar_against_iterable():
     """Common case: many intercepts, one slope. Scalar broadcasts."""
     df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0]})
-    p = ggplot(df, aes("x", "y")) + geom_point() + geom_abline(slope=1, intercept=[0, 1, 2])
+    p = (
+        ggplot(df, aes("x", "y"))
+        + geom_point()
+        + geom_abline(slope=1, intercept=[0, 1, 2])
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -5635,10 +6149,13 @@ def test_geom_hline_fluent_form():
 # Coords — coord_cartesian, coord_fixed
 # ---------------------------------------------------------------------------
 
+
 def test_coord_cartesian_default_is_no_op():
     mtcars = load_dataset("datasets", "mtcars")
     p_no_coord = ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-    p_default_coord = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + coord_cartesian()
+    p_default_coord = (
+        ggplot(mtcars, aes("wt", "mpg")) + geom_point() + coord_cartesian()
+    )
     f1 = p_no_coord.draw()
     f2 = p_default_coord.draw()
     try:
@@ -5662,10 +6179,14 @@ def test_coord_cartesian_xlim_zooms_axis():
 def test_coord_cartesian_overrides_scale_limits():
     """Coord-level limits beat scale-level (ggplot2 semantics — coord wins)."""
     from hea.ggplot import xlim as gg_xlim
+
     mtcars = load_dataset("datasets", "mtcars")
-    p = (ggplot(mtcars, aes("wt", "mpg")) + geom_point()
-         + gg_xlim(0, 5)
-         + coord_cartesian(xlim=(0, 10)))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + gg_xlim(0, 5)
+        + coord_cartesian(xlim=(0, 10))
+    )
     fig = p.draw()
     try:
         assert fig.axes[0].get_xlim() == pytest.approx((0, 10))
@@ -5695,7 +6216,11 @@ def test_coord_fixed_default_ratio_is_one():
 
 def test_coord_fixed_with_xlim():
     mtcars = load_dataset("datasets", "mtcars")
-    p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + coord_fixed(ratio=1, xlim=(0, 10))
+    p = (
+        ggplot(mtcars, aes("wt", "mpg"))
+        + geom_point()
+        + coord_fixed(ratio=1, xlim=(0, 10))
+    )
     fig = p.draw()
     try:
         assert fig.axes[0].get_xlim() == pytest.approx((0, 10))
@@ -5718,18 +6243,22 @@ def test_coord_cartesian_fluent_form():
 # scale_color_hue / scale_fill_hue — explicit form of ggplot2's default qual palette
 # ---------------------------------------------------------------------------
 
+
 def test_scale_color_hue_assigns_distinct_colors_per_level():
-    df = pl.DataFrame({
-        "x": [1, 2, 3, 4],
-        "y": [1, 2, 3, 4],
-        "g": ["a", "b", "c", "d"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1, 2, 3, 4],
+            "y": [1, 2, 3, 4],
+            "g": ["a", "b", "c", "d"],
+        }
+    )
     p = ggplot(df, aes("x", "y", color="g")) + geom_point() + scale_color_hue()
     fig = p.draw()
     try:
         sc = fig.axes[0].collections[0]
         # 4 distinct levels → 4 distinct colours.
         from matplotlib.colors import to_hex
+
         rgba = sc.get_facecolors()
         hexes = {to_hex(c) for c in rgba}
         assert len(hexes) == 4
@@ -5740,11 +6269,16 @@ def test_scale_color_hue_assigns_distinct_colors_per_level():
 def test_scale_color_hue_direction_reverses_palette():
     df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3], "g": ["a", "b", "c"]})
     p_fwd = ggplot(df, aes("x", "y", color="g")) + geom_point() + scale_color_hue()
-    p_rev = ggplot(df, aes("x", "y", color="g")) + geom_point() + scale_color_hue(direction=-1)
+    p_rev = (
+        ggplot(df, aes("x", "y", color="g"))
+        + geom_point()
+        + scale_color_hue(direction=-1)
+    )
     f1 = p_fwd.draw()
     f2 = p_rev.draw()
     try:
         from matplotlib.colors import to_hex
+
         c1 = [to_hex(c) for c in f1.axes[0].collections[0].get_facecolors()]
         c2 = [to_hex(c) for c in f2.axes[0].collections[0].get_facecolors()]
         assert c1 == c2[::-1]
@@ -5756,6 +6290,7 @@ def test_scale_color_hue_direction_reverses_palette():
 # ---------------------------------------------------------------------------
 # geom_label — geom_text + background bbox
 # ---------------------------------------------------------------------------
+
 
 def test_geom_label_renders_text_with_bbox():
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0], "lbl": ["A", "B"]})
@@ -5780,6 +6315,7 @@ def test_geom_label_fill_kwarg_sets_bbox_facecolor():
     try:
         bbox = fig.axes[0].texts[0].get_bbox_patch()
         from matplotlib.colors import to_rgba
+
         assert to_rgba(bbox.get_facecolor()) == to_rgba("yellow")
     finally:
         plt.close(fig)
@@ -5799,11 +6335,15 @@ def test_geom_label_fluent_form():
 # stat_function / geom_function — y = f(x) curves
 # ---------------------------------------------------------------------------
 
+
 def test_stat_function_explicit_xlim():
     """``xlim`` directly determines the sampled x range."""
     import numpy as np
+
     df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0]})
-    p = ggplot(df, aes("x", "y")) + stat_function(fun=lambda x: x ** 2, xlim=(-2, 2), n=51)
+    p = ggplot(df, aes("x", "y")) + stat_function(
+        fun=lambda x: x**2, xlim=(-2, 2), n=51
+    )
     fig = p.draw()
     try:
         ax = fig.axes[0]
@@ -5816,13 +6356,14 @@ def test_stat_function_explicit_xlim():
         assert float(np.max(xs)) == pytest.approx(2.0)
         # y = x^2: each y matches its x squared.
         for x, y in zip(xs, ys):
-            assert y == pytest.approx(x ** 2)
+            assert y == pytest.approx(x**2)
     finally:
         plt.close(fig)
 
 
 def test_stat_function_uses_main_data_xrange_when_xlim_omitted():
     import numpy as np
+
     df = pl.DataFrame({"x": [0.0, 5.0], "y": [0.0, 25.0]})
     p = ggplot(df, aes("x", "y")) + stat_function(fun=lambda x: 2 * x, n=11)
     fig = p.draw()
@@ -5838,7 +6379,10 @@ def test_stat_function_passes_args_through():
     """``args=`` provides additional positional args to ``fun``."""
     df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0]})
     p = ggplot(df, aes("x", "y")) + stat_function(
-        fun=lambda x, a, b: a * x + b, xlim=(0, 1), n=11, args=(2, 3),
+        fun=lambda x, a, b: a * x + b,
+        xlim=(0, 1),
+        n=11,
+        args=(2, 3),
     )
     fig = p.draw()
     try:
@@ -5854,7 +6398,9 @@ def test_geom_function_alias():
     """``geom_function`` and ``stat_function(geom='line')`` produce equivalent layers."""
     df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0]})
     p1 = ggplot(df, aes("x", "y")) + geom_function(fun=lambda x: x, xlim=(0, 1), n=10)
-    p2 = ggplot(df, aes("x", "y")) + stat_function(fun=lambda x: x, xlim=(0, 1), n=10, geom="line")
+    p2 = ggplot(df, aes("x", "y")) + stat_function(
+        fun=lambda x: x, xlim=(0, 1), n=10, geom="line"
+    )
     f1, f2 = p1.draw(), p2.draw()
     try:
         xs1 = f1.axes[0].lines[0].get_xdata()

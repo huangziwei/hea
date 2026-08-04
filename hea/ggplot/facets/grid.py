@@ -35,8 +35,12 @@ class FacetGrid(Facet):
         return (self._nrow, self._ncol)
 
     def share_axes(self) -> tuple:
-        sharex = {"fixed": True, "free_y": True, "free_x": "col", "free": "col"}[self.scales]
-        sharey = {"fixed": True, "free_x": True, "free_y": "row", "free": "row"}[self.scales]
+        sharex = {"fixed": True, "free_y": True, "free_x": "col", "free": "col"}[
+            self.scales
+        ]
+        sharey = {"fixed": True, "free_x": True, "free_y": "row", "free": "row"}[
+            self.scales
+        ]
         return (sharex, sharey)
 
     def compute_layout(self, data: pl.DataFrame) -> pl.DataFrame:
@@ -63,7 +67,9 @@ class FacetGrid(Facet):
         )
 
     @staticmethod
-    def _unique_axis(data: pl.DataFrame, vars_: list[str], idx_name: str) -> pl.DataFrame:
+    def _unique_axis(
+        data: pl.DataFrame, vars_: list[str], idx_name: str
+    ) -> pl.DataFrame:
         return (
             data.select(vars_)
             .unique(maintain_order=True)
@@ -119,9 +125,7 @@ def facet_grid(formula=None, *, rows=None, cols=None, scales="fixed"):
       for y).
     """
     if formula is not None and (rows is not None or cols is not None):
-        raise ValueError(
-            "facet_grid: pass either a formula or rows=/cols=, not both"
-        )
+        raise ValueError("facet_grid: pass either a formula or rows=/cols=, not both")
 
     if formula is not None:
         if not isinstance(formula, str):

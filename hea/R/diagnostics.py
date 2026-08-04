@@ -11,6 +11,7 @@ the lm path uses ``XtXinv``; the glm / gam / bam path uses
 ``Vp/scale`` (or ``V_bhat/dispersion``) and IRLS working weights
 recovered from leverage.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -19,13 +20,11 @@ import polars as pl
 
 def hatvalues(model):
     """R: ``hatvalues()`` — leverage ``h_ii`` (hat-matrix diagonal)."""
-    if model.__class__.__name__ == "gmm":                 # mixed model
+    if model.__class__.__name__ == "gmm":  # mixed model
         return np.asarray(model.hatvalues())
     if hasattr(model, "leverage"):
         return np.asarray(model.leverage)
-    raise TypeError(
-        f"hatvalues(): {model.__class__.__name__} has no leverage"
-    )
+    raise TypeError(f"hatvalues(): {model.__class__.__name__} has no leverage")
 
 
 def rstandard(model, type=None):
@@ -39,8 +38,7 @@ def rstandard(model, type=None):
         return np.asarray(model.std_pearson_residuals)
     if type not in (None, "deviance", "pearson"):
         raise ValueError(
-            f"rstandard(): type={type!r} not recognized "
-            "(use 'deviance' or 'pearson')"
+            f"rstandard(): type={type!r} not recognized (use 'deviance' or 'pearson')"
         )
     if hasattr(model, "std_dev_residuals"):
         return np.asarray(model.std_dev_residuals)
@@ -71,10 +69,7 @@ def _loo_sigma_lm(model) -> np.ndarray:
     p = int(model.p)
     df_loo = n - p - 1
     if df_loo <= 0:
-        raise ValueError(
-            "deletion diagnostics need n - p - 1 > 0; "
-            f"got n={n}, p={p}"
-        )
+        raise ValueError(f"deletion diagnostics need n - p - 1 > 0; got n={n}, p={p}")
     weights = getattr(model, "weights", None)
     if weights is None:
         w = np.ones_like(e)
@@ -127,12 +122,10 @@ def _loo_sigma_glm_gam(model) -> np.ndarray:
     p = int(model.p)
     df_loo = n - p - 1
     if df_loo <= 0:
-        raise ValueError(
-            f"deletion diagnostics need n - p - 1 > 0; got n={n}, p={p}"
-        )
+        raise ValueError(f"deletion diagnostics need n - p - 1 > 0; got n={n}, p={p}")
     d = np.asarray(model.residuals_of("deviance"))
     one_minus_h = np.clip(1 - h, 1e-12, None)
-    sigma_sq = (float(model.deviance) - d ** 2 / one_minus_h) / df_loo
+    sigma_sq = (float(model.deviance) - d**2 / one_minus_h) / df_loo
     return np.sqrt(np.maximum(sigma_sq, 0.0))
 
 
@@ -207,7 +200,7 @@ def rstudent(model):
     where ``d_i`` and ``p_i`` are raw deviance and Pearson residuals.
     Known-scale families fix ``σ_(-i) = 1``.
     """
-    if model.__class__.__name__ == "gmm":                 # mixed model
+    if model.__class__.__name__ == "gmm":  # mixed model
         return np.asarray(model.rstudent())
     # lm path — direct formula ``e_i · √w_i / (σ_(-i) · √(1-h_i))``
     # (equivalent to the closed form for unweighted lm; weighted-aware).
@@ -221,14 +214,12 @@ def rstudent(model):
 
     # glm / gam / bam path — Williams' likelihood residual
     if not hasattr(model, "residuals_of"):
-        raise TypeError(
-            f"rstudent(): {model.__class__.__name__} not supported"
-        )
+        raise TypeError(f"rstudent(): {model.__class__.__name__} not supported")
     h = np.asarray(model.leverage)
     one_minus_h = np.clip(1 - h, 1e-12, None)
     d = np.asarray(model.residuals_of("deviance"))
     pe = np.asarray(model.residuals_of("pearson"))
-    likelihood_r = np.sign(d) * np.sqrt(d ** 2 + (pe ** 2) * h / one_minus_h)
+    likelihood_r = np.sign(d) * np.sqrt(d**2 + (pe**2) * h / one_minus_h)
     sigma_loo = _loo_sigma_glm_gam(model)
     return likelihood_r / (sigma_loo * np.sqrt(one_minus_h))
 
@@ -256,12 +247,10 @@ def cooks_distance(model):
         r = np.asarray(model.std_residuals)
         p = float(model.p)
     else:
-        raise TypeError(
-            f"cooks_distance(): {model.__class__.__name__} not supported"
-        )
+        raise TypeError(f"cooks_distance(): {model.__class__.__name__} not supported")
     if p <= 0:
         raise ValueError("cooks_distance(): effective parameter count is zero")
-    return r ** 2 * h / (one_minus_h * p)
+    return r**2 * h / (one_minus_h * p)
 
 
 def dffits(model):
@@ -283,9 +272,7 @@ def dffits(model):
         return e * sqrt_w * np.sqrt(h) / (sigma_loo * one_minus_h)
 
     if not hasattr(model, "residuals_of"):
-        raise TypeError(
-            f"dffits(): {model.__class__.__name__} not supported"
-        )
+        raise TypeError(f"dffits(): {model.__class__.__name__} not supported")
     h = np.asarray(model.leverage)
     one_minus_h = np.clip(1 - h, 1e-12, None)
     pe = np.asarray(model.residuals_of("pearson"))
@@ -305,7 +292,7 @@ def dfbetas(model):
     ``bam``: IRLS closed form using ``Vp/scale`` (or ``V_bhat/dispersion``)
     and IRLS working weights recovered from ``leverage``.
     """
-    if model.__class__.__name__ == "Influence":       # deletion object
+    if model.__class__.__name__ == "Influence":  # deletion object
         return model.dfbetas()
     # lm path — closed form
     # β̂ - β̂_(-i) = (X'WX)^{-1} · X_i · w_i · e_i / (1 - h_i)
@@ -328,9 +315,7 @@ def dfbetas(model):
 
     # glm / gam / bam path — IRLS closed form
     if not hasattr(model, "residuals_of"):
-        raise TypeError(
-            f"dfbetas(): {model.__class__.__name__} not supported"
-        )
+        raise TypeError(f"dfbetas(): {model.__class__.__name__} not supported")
     inputs = _irls_inputs(model)
     X, XtWXinv = inputs["X"], inputs["XtWXinv"]
     w_irls = inputs["w_irls"]
@@ -346,9 +331,7 @@ def dfbetas(model):
     sd_j = np.sqrt(np.diag(XtWXinv))
     sd_j = np.where(sd_j > 0, sd_j, 1.0)
     out = delta / (sigma_loo[:, None] * sd_j[None, :])
-    return pl.DataFrame(
-        {col: out[:, i] for i, col in enumerate(model.column_names)}
-    )
+    return pl.DataFrame({col: out[:, i] for i, col in enumerate(model.column_names)})
 
 
 def dfbeta(model):
@@ -364,7 +347,7 @@ def dfbeta(model):
     ``dfbeta.influence.merMod`` (``β̂[-i] − β̂``, the *deleted minus full*
     convention — opposite sign to ``dfbeta.lm``).
     """
-    if model.__class__.__name__ == "Influence":      # deletion object
+    if model.__class__.__name__ == "Influence":  # deletion object
         return model.dfbeta()
     if hasattr(model, "XtXinv"):  # lm
         X = model.X.to_numpy().astype(float)
@@ -382,12 +365,10 @@ def dfbeta(model):
     inputs = _irls_inputs(model)
     X, XtWXinv = inputs["X"], inputs["XtWXinv"]
     one_minus_h = np.clip(1 - inputs["h"], 1e-12, None)
-    delta = (X @ XtWXinv) * (
-        inputs["w_irls"] * inputs["working_resid"] / one_minus_h
-    )[:, None]
-    return pl.DataFrame(
-        {col: delta[:, i] for i, col in enumerate(model.column_names)}
-    )
+    delta = (X @ XtWXinv) * (inputs["w_irls"] * inputs["working_resid"] / one_minus_h)[
+        :, None
+    ]
+    return pl.DataFrame({col: delta[:, i] for i, col in enumerate(model.column_names)})
 
 
 def influence(model, groups=None, **kwargs):
@@ -409,7 +390,7 @@ def influence(model, groups=None, **kwargs):
       ``gam`` / ``bam``, working residuals (matches R's
       ``influence.glm`` "wt.res")
     """
-    if model.__class__.__name__ == "gmm":             # → Influence object
+    if model.__class__.__name__ == "gmm":  # → Influence object
         return model.influence(groups=groups, **kwargs)
     # lm path
     if hasattr(model, "XtXinv"):
@@ -431,9 +412,7 @@ def influence(model, groups=None, **kwargs):
 
     # glm / gam / bam path — IRLS closed form
     if not hasattr(model, "residuals_of"):
-        raise TypeError(
-            f"influence(): {model.__class__.__name__} not supported"
-        )
+        raise TypeError(f"influence(): {model.__class__.__name__} not supported")
     inputs = _irls_inputs(model)
     X, XtWXinv = inputs["X"], inputs["XtWXinv"]
     w_irls = inputs["w_irls"]

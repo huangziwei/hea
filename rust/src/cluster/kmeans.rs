@@ -119,7 +119,15 @@ fn wss_of(x: &[f64], cen: &[f64], cl: &[i64], n: usize, p: usize, k: usize) -> V
 
 /// Recompute centres as cluster means (the Lloyd / MacQueen-init step): zero,
 /// accumulate points in i-order, divide. Sequential accumulation (0-ulp).
-fn recompute_centres(x: &[f64], cen: &mut [f64], nc: &mut [i64], cl: &[i64], n: usize, p: usize, k: usize) {
+fn recompute_centres(
+    x: &[f64],
+    cen: &mut [f64],
+    nc: &mut [i64],
+    cl: &[i64],
+    n: usize,
+    p: usize,
+    k: usize,
+) {
     cen.iter_mut().for_each(|v| *v = 0.0);
     nc.iter_mut().for_each(|v| *v = 0);
     for i in 0..n {
@@ -142,7 +150,12 @@ fn recompute_centres(x: &[f64], cen: &mut [f64], nc: &mut [i64], cl: &[i64], n: 
 #[inline]
 fn assign_all(py: Python<'_>, x: &[f64], cen: &[f64], n: usize, p: usize, k: usize) -> Vec<usize> {
     if n >= KM_PAR_MIN {
-        py.allow_threads(|| (0..n).into_par_iter().map(|i| nearest(x, cen, p, k, i)).collect())
+        py.allow_threads(|| {
+            (0..n)
+                .into_par_iter()
+                .map(|i| nearest(x, cen, p, k, i))
+                .collect()
+        })
     } else {
         (0..n).map(|i| nearest(x, cen, p, k, i)).collect()
     }
@@ -156,7 +169,14 @@ type KmOut<'py> = (
     i64,
 );
 
-fn finish<'py>(py: Python<'py>, cl: Vec<i64>, cen: Vec<f64>, nc: Vec<i64>, wss: Vec<f64>, it: i64) -> KmOut<'py> {
+fn finish<'py>(
+    py: Python<'py>,
+    cl: Vec<i64>,
+    cen: Vec<f64>,
+    nc: Vec<i64>,
+    wss: Vec<f64>,
+    it: i64,
+) -> KmOut<'py> {
     (
         cl.into_pyarray(py),
         cen.into_pyarray(py),
@@ -524,7 +544,9 @@ pub fn kmns<'py>(
                 .map(|i0| two_closest(xs, &hw.cen, p, k, i0))
                 .collect()
         } else {
-            (0..m).map(|i0| two_closest(xs, &hw.cen, p, k, i0)).collect()
+            (0..m)
+                .map(|i0| two_closest(xs, &hw.cen, p, k, i0))
+                .collect()
         };
         for i in 1..=m {
             hw.ic1[i] = pairs[i - 1].0;

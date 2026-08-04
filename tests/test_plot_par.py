@@ -8,6 +8,7 @@ plot call once again opens its own fresh figure (no leakage).
 from __future__ import annotations
 
 import matplotlib
+
 matplotlib.use("Agg")  # noqa: E402
 
 import matplotlib.axes
@@ -186,6 +187,7 @@ def test_profile_plot_single_param_inside_par():
     its own figure (Bates Fig. 1.7-style ``par`` ergonomics)."""
     from hea.models import gmm
     from hea import data
+
     dye = data("Dyestuff")
     fm = gmm("Yield ~ 1 + (1 | Batch)", dye, REML=False)
     pr = fm.profile()

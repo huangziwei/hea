@@ -37,7 +37,6 @@ from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
-from scipy import stats as _sps
 from . import distributions as _dist
 
 
@@ -123,8 +122,15 @@ def emmeans(
                 f"emmeans: ref={ref} out of range for {len(levels)} levels"
             )
         contrasts_df = _vs_control_table(
-            target, levels, L, beta, V, df_resid,
-            ref_pos=ref_pos, side=side, adjust=adjust,
+            target,
+            levels,
+            L,
+            beta,
+            V,
+            df_resid,
+            ref_pos=ref_pos,
+            side=side,
+            adjust=adjust,
         )
     elif spec_lhs:
         raise NotImplementedError(
@@ -180,10 +186,12 @@ def summary_emmgrid_contrasts(
         z = _dist.qt((1 + level) / 2, dfs)
         est = df["estimate"].to_numpy()
         se = df["SE"].to_numpy()
-        df = df.with_columns([
-            pl.Series("lower.CL", est - z * se),
-            pl.Series("upper.CL", est + z * se),
-        ])
+        df = df.with_columns(
+            [
+                pl.Series("lower.CL", est - z * se),
+                pl.Series("upper.CL", est + z * se),
+            ]
+        )
     return df
 
 
@@ -196,9 +204,7 @@ def _parse_specs(specs: str) -> tuple[str, str]:
     """``"pairwise ~ variety"`` → ``("pairwise", "variety")``;
     ``"~variety"`` → ``("", "variety")``."""
     if "~" not in specs:
-        raise ValueError(
-            f"emmeans: specs must contain '~'; got {specs!r}"
-        )
+        raise ValueError(f"emmeans: specs must contain '~'; got {specs!r}")
     lhs, rhs = (s.strip() for s in specs.split("~", 1))
     return lhs, rhs
 
@@ -225,7 +231,7 @@ def _reference_grid(model, target: str, levels: list) -> np.ndarray:
     X = model.X.to_numpy().astype(float)
 
     target_cols = [
-        (j, col_names[j][len(target):])
+        (j, col_names[j][len(target) :])
         for j, name in enumerate(col_names)
         if name.startswith(target) and name != target and name != "(Intercept)"
     ]
@@ -234,7 +240,8 @@ def _reference_grid(model, target: str, levels: list) -> np.ndarray:
         col_names.index("(Intercept)") if "(Intercept)" in col_names else None
     )
     other_cols = [
-        j for j in range(X.shape[1])
+        j
+        for j in range(X.shape[1])
         if j not in target_col_idx.values() and j != intercept_idx
     ]
     other_means = X[:, other_cols].mean(axis=0)
@@ -253,31 +260,46 @@ def _reference_grid(model, target: str, levels: list) -> np.ndarray:
 
 
 def _means_table(
-    target, levels, L, beta, V, df_resid, level,
+    target,
+    levels,
+    L,
+    beta,
+    V,
+    df_resid,
+    level,
 ) -> pl.DataFrame:
     """Marginal means with SE and confidence intervals."""
     means = L @ beta
     se = np.sqrt(np.einsum("ij,jk,ik->i", L, V, L))
     z = _dist.qt((1 + level) / 2, df_resid)
-    return pl.DataFrame({
-        target: [str(lvl) for lvl in levels],
-        "emmean": means,
-        "SE": se,
-        "df": [df_resid] * len(levels),
-        "lower.CL": means - z * se,
-        "upper.CL": means + z * se,
-    })
+    return pl.DataFrame(
+        {
+            target: [str(lvl) for lvl in levels],
+            "emmean": means,
+            "SE": se,
+            "df": [df_resid] * len(levels),
+            "lower.CL": means - z * se,
+            "upper.CL": means + z * se,
+        }
+    )
 
 
 def _pairwise_table(
-    target, levels, L, beta, V, df_resid, *, adjust,
+    target,
+    levels,
+    L,
+    beta,
+    V,
+    df_resid,
+    *,
+    adjust,
 ) -> pl.DataFrame:
     """All C(k, 2) pairwise differences with adjusted p-values."""
     k = len(levels)
     L_arr = np.asarray(L, dtype=float)
     iu, ju = np.triu_indices(k, k=1)
-    C = L_arr[iu] - L_arr[ju]                    # (n_pairs, p)
-    ests_a = C @ np.asarray(beta, dtype=float)   # (n_pairs,)
+    C = L_arr[iu] - L_arr[ju]  # (n_pairs, p)
+    ests_a = C @ np.asarray(beta, dtype=float)  # (n_pairs,)
     CV = C @ np.asarray(V, dtype=float)
     quad = np.einsum("ip,ip->i", CV, C)
     ses_a = np.sqrt(np.maximum(quad, 0.0))
@@ -286,25 +308,36 @@ def _pairwise_table(
     labels = [f"{levels[int(i)]} - {levels[int(j)]}" for i, j in zip(iu, ju)]
     p_raw = 2.0 * _dist.pt(np.abs(ts_a), df_resid, lower_tail=False)
     p_adj = _p_adjust(p_raw, ts_a, np.full_like(ts_a, df_resid), adjust, k)
-    return pl.DataFrame({
-        "contrast": labels,
-        "estimate": ests_a,
-        "SE": ses_a,
-        "df": np.full(len(labels), df_resid),
-        "t.ratio": ts_a,
-        "p.value": np.asarray(p_adj),
-        "adjust": [adjust] * len(labels),
-    })
+    return pl.DataFrame(
+        {
+            "contrast": labels,
+            "estimate": ests_a,
+            "SE": ses_a,
+            "df": np.full(len(labels), df_resid),
+            "t.ratio": ts_a,
+            "p.value": np.asarray(p_adj),
+            "adjust": [adjust] * len(labels),
+        }
+    )
 
 
 def _vs_control_table(
-    target, levels, L, beta, V, df_resid, *, ref_pos, side, adjust,
+    target,
+    levels,
+    L,
+    beta,
+    V,
+    df_resid,
+    *,
+    ref_pos,
+    side,
+    adjust,
 ) -> pl.DataFrame:
     """Each non-reference level minus the reference (R's ``trt.vs.ctrlk``)."""
     k = len(levels)
     L_arr = np.asarray(L, dtype=float)
     nonref = np.array([i for i in range(k) if i != ref_pos], dtype=int)
-    C = L_arr[nonref] - L_arr[ref_pos]            # (k-1, p)
+    C = L_arr[nonref] - L_arr[ref_pos]  # (k-1, p)
     ests_a = C @ np.asarray(beta, dtype=float)
     CV = C @ np.asarray(V, dtype=float)
     quad = np.einsum("ip,ip->i", CV, C)
@@ -319,15 +352,17 @@ def _vs_control_table(
     else:
         p_raw = 2.0 * _dist.pt(np.abs(ts_a), df_resid, lower_tail=False)
     p_adj = _p_adjust(p_raw, ts_a, np.full_like(ts_a, df_resid), adjust, k - 1)
-    return pl.DataFrame({
-        "contrast": labels,
-        "estimate": ests_a,
-        "SE": ses_a,
-        "df": np.full(len(labels), df_resid),
-        "t.ratio": ts_a,
-        "p.value": np.asarray(p_adj),
-        "adjust": [adjust] * len(labels),
-    })
+    return pl.DataFrame(
+        {
+            "contrast": labels,
+            "estimate": ests_a,
+            "SE": ses_a,
+            "df": np.full(len(labels), df_resid),
+            "t.ratio": ts_a,
+            "p.value": np.asarray(p_adj),
+            "adjust": [adjust] * len(labels),
+        }
+    )
 
 
 def _p_adjust(p_raw, t_vals, dfs, method, k_levels) -> np.ndarray:
@@ -340,15 +375,10 @@ def _p_adjust(p_raw, t_vals, dfs, method, k_levels) -> np.ndarray:
         m = len(p_raw)
         return np.minimum(np.asarray(p_raw) * m, 1.0)
     if method == "tukey":
-        # Studentized range for ``k_levels`` groups.
+        # Studentized range upper tail for ``k_levels`` groups — R's
+        # ptukey(q, nmeans, df, lower.tail=FALSE), bit-exact via nmath.
         q = np.abs(t_vals) * np.sqrt(2.0)
-        try:
-            sr = _sps.studentized_range
-            return 1.0 - sr.cdf(q, k_levels, dfs)
-        except AttributeError:
-            # Older scipy fallback — Bonferroni is a conservative proxy.
-            m = len(p_raw)
-            return np.minimum(np.asarray(p_raw) * m, 1.0)
+        return _dist.ptukey(q, k_levels, dfs, lower_tail=False)
     raise ValueError(f"emmeans: unknown adjust={method!r}")
 
 

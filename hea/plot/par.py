@@ -54,8 +54,11 @@ class _ParContext:
         # list, and forcing the user to wrap in a tuple is needless friction.
         if isinstance(shape, list):
             shape = tuple(shape)
-        if not (isinstance(shape, tuple) and len(shape) == 2
-                and all(isinstance(x, int) and x > 0 for x in shape)):
+        if not (
+            isinstance(shape, tuple)
+            and len(shape) == 2
+            and all(isinstance(x, int) and x > 0 for x in shape)
+        ):
             raise TypeError(
                 f"par(): mfrow/mfcol must be a (nrow, ncol) tuple of "
                 f"positive ints; got {shape!r}."
@@ -89,7 +92,7 @@ class _ParContext:
         # Hide cells that no plotter claimed — matches R's default of
         # leaving the trailing slots blank rather than stretching the
         # used ones.
-        for ax in self._cells[self._idx:]:
+        for ax in self._cells[self._idx :]:
             ax.set_visible(False)
         if self.fig is not None:
             try:

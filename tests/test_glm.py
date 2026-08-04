@@ -43,28 +43,55 @@ from hea.models import glm
 
 
 EXPECTED = [
-    ("gaussian_identity_iris",        "gaussian", "identity"),
-    ("gaussian_log_insurance",        "gaussian", "log"),
-    ("gamma_inverse_trees",           "Gamma",    "inverse"),
-    ("gamma_log_trees",               "Gamma",    "log"),
-    ("poisson_log_quine",             "poisson",  "log"),
-    ("poisson_sqrt_quine",            "poisson",  "sqrt"),
-    ("binomial_logit_menarche",       "binomial", "logit"),
-    ("binomial_probit_menarche",      "binomial", "probit"),
-    ("binomial_cauchit_menarche",     "binomial", "cauchit"),
-    ("binomial_cloglog_menarche",     "binomial", "cloglog"),
-    ("ig_canonical_insurance",        "inverse.gaussian", "1/mu^2"),
+    ("gaussian_identity_iris", "gaussian", "identity"),
+    ("gaussian_log_insurance", "gaussian", "log"),
+    ("gamma_inverse_trees", "Gamma", "inverse"),
+    ("gamma_log_trees", "Gamma", "log"),
+    ("poisson_log_quine", "poisson", "log"),
+    ("poisson_sqrt_quine", "poisson", "sqrt"),
+    ("binomial_logit_menarche", "binomial", "logit"),
+    ("binomial_probit_menarche", "binomial", "probit"),
+    ("binomial_cauchit_menarche", "binomial", "cauchit"),
+    ("binomial_cloglog_menarche", "binomial", "cloglog"),
+    ("ig_canonical_insurance", "inverse.gaussian", "1/mu^2"),
 ]
 
 REQUIRED_KEYS = {
-    "id", "formula", "family_name", "link_name", "n", "coef_names",
-    "coefficients", "std_error", "test_stat", "p_value", "test_kind",
-    "ci_lower", "ci_upper", "vcov",
-    "deviance", "null_deviance", "df_residual", "df_null",
-    "aic", "bic", "loglik", "loglik_df", "dispersion", "iter", "converged",
-    "fitted_values", "linear_pred",
-    "res_deviance", "res_pearson", "res_working", "res_response",
-    "pred_link_fit", "pred_link_se", "pred_resp_fit", "pred_resp_se",
+    "id",
+    "formula",
+    "family_name",
+    "link_name",
+    "n",
+    "coef_names",
+    "coefficients",
+    "std_error",
+    "test_stat",
+    "p_value",
+    "test_kind",
+    "ci_lower",
+    "ci_upper",
+    "vcov",
+    "deviance",
+    "null_deviance",
+    "df_residual",
+    "df_null",
+    "aic",
+    "bic",
+    "loglik",
+    "loglik_df",
+    "dispersion",
+    "iter",
+    "converged",
+    "fitted_values",
+    "linear_pred",
+    "res_deviance",
+    "res_pearson",
+    "res_working",
+    "res_response",
+    "pred_link_fit",
+    "pred_link_se",
+    "pred_resp_fit",
+    "pred_resp_se",
 }
 
 
@@ -108,16 +135,16 @@ def _build_iris():
 
 
 def _build_insurance_gaussian_log():
-    d = load_dataset("MASS", "Insurance").filter(load_dataset("MASS", "Insurance")["Claims"] > 0)
+    d = load_dataset("MASS", "Insurance").filter(
+        load_dataset("MASS", "Insurance")["Claims"] > 0
+    )
     off = np.log(d["Holders"].to_numpy().astype(float))
-    return glm("Claims ~ District + Group", d, family=Gaussian(link="log"),
-               offset=off)
+    return glm("Claims ~ District + Group", d, family=Gaussian(link="log"), offset=off)
 
 
 def _build_trees(link: str):
     d = load_dataset("R", "trees")
-    return glm("Volume ~ log(Height) + log(Girth)", d,
-               family=Gamma(link=link))
+    return glm("Volume ~ log(Height) + log(Girth)", d, family=Gamma(link=link))
 
 
 def _build_quine(link: str):
@@ -132,27 +159,33 @@ def _build_menarche(link: str):
     # binomial-with-size form.
     d = load_dataset("MASS", "menarche")
     d2 = d.with_columns([(d["Menarche"] / d["Total"]).alias("p")])
-    return glm("p ~ Age", d2, family=Binomial(link=link),
-               weights=d["Total"].to_numpy().astype(float))
+    return glm(
+        "p ~ Age",
+        d2,
+        family=Binomial(link=link),
+        weights=d["Total"].to_numpy().astype(float),
+    )
 
 
 def _build_ig_insurance():
-    d = load_dataset("MASS", "Insurance").filter(load_dataset("MASS", "Insurance")["Claims"] > 0)
+    d = load_dataset("MASS", "Insurance").filter(
+        load_dataset("MASS", "Insurance")["Claims"] > 0
+    )
     return glm("Claims ~ Group", d, family=InverseGaussian())
 
 
 CASES = {
-    "gaussian_identity_iris":     _build_iris,
-    "gaussian_log_insurance":     _build_insurance_gaussian_log,
-    "gamma_inverse_trees":        lambda: _build_trees("inverse"),
-    "gamma_log_trees":            lambda: _build_trees("log"),
-    "poisson_log_quine":          lambda: _build_quine("log"),
-    "poisson_sqrt_quine":         lambda: _build_quine("sqrt"),
-    "binomial_logit_menarche":    lambda: _build_menarche("logit"),
-    "binomial_probit_menarche":   lambda: _build_menarche("probit"),
-    "binomial_cauchit_menarche":  lambda: _build_menarche("cauchit"),
-    "binomial_cloglog_menarche":  lambda: _build_menarche("cloglog"),
-    "ig_canonical_insurance":     _build_ig_insurance,
+    "gaussian_identity_iris": _build_iris,
+    "gaussian_log_insurance": _build_insurance_gaussian_log,
+    "gamma_inverse_trees": lambda: _build_trees("inverse"),
+    "gamma_log_trees": lambda: _build_trees("log"),
+    "poisson_log_quine": lambda: _build_quine("log"),
+    "poisson_sqrt_quine": lambda: _build_quine("sqrt"),
+    "binomial_logit_menarche": lambda: _build_menarche("logit"),
+    "binomial_probit_menarche": lambda: _build_menarche("probit"),
+    "binomial_cauchit_menarche": lambda: _build_menarche("cauchit"),
+    "binomial_cloglog_menarche": lambda: _build_menarche("cloglog"),
+    "ig_canonical_insurance": _build_ig_insurance,
 }
 
 ALL_ORACLES = list(CASES.keys())
@@ -160,13 +193,17 @@ ALL_ORACLES = list(CASES.keys())
 
 def _allclose(actual, expected, *, atol, rtol=0.0, name=""):
     np.testing.assert_allclose(
-        actual, expected, atol=atol, rtol=rtol,
+        actual,
+        expected,
+        atol=atol,
+        rtol=rtol,
         err_msg=f"{name}: hea={actual} R={expected}",
     )
 
 
 # Phase 1 — engine + core fit (coef, deviance, fitted/η, residuals, iter).
 # Tight tolerances: Fisher IRLS is essentially deterministic.
+
 
 @pytest.mark.parametrize("oid", ALL_ORACLES)
 def test_glm_core_fit(oid: str):
@@ -184,26 +221,42 @@ def test_glm_core_fit(oid: str):
     # converges in 4. Allow hea ≤ R+2.
     assert m.iter <= o["iter"] + 2, f"iter: hea={m.iter} R={o['iter']}"
 
-    _allclose(m._bhat_arr, np.asarray(o["coefficients"]),
-              atol=5e-5, name="coef")
+    _allclose(m._bhat_arr, np.asarray(o["coefficients"]), atol=5e-5, name="coef")
     _allclose(m.deviance, o["deviance"], atol=5e-4, name="deviance")
-    _allclose(m.fitted_values, np.asarray(o["fitted_values"]),
-              atol=5e-4, name="fitted")
-    _allclose(m.linear_predictors, np.asarray(o["linear_pred"]),
-              atol=5e-4, name="linear_pred")
-    _allclose(m.residuals_of("response"), np.asarray(o["res_response"]),
-              atol=5e-4, name="res_response")
-    _allclose(m.residuals_of("working"), np.asarray(o["res_working"]),
-              atol=5e-4, name="res_working")
-    _allclose(m.residuals_of("pearson"), np.asarray(o["res_pearson"]),
-              atol=5e-4, name="res_pearson")
-    _allclose(m.residuals_of("deviance"), np.asarray(o["res_deviance"]),
-              atol=5e-4, name="res_deviance")
+    _allclose(m.fitted_values, np.asarray(o["fitted_values"]), atol=5e-4, name="fitted")
+    _allclose(
+        m.linear_predictors, np.asarray(o["linear_pred"]), atol=5e-4, name="linear_pred"
+    )
+    _allclose(
+        m.residuals_of("response"),
+        np.asarray(o["res_response"]),
+        atol=5e-4,
+        name="res_response",
+    )
+    _allclose(
+        m.residuals_of("working"),
+        np.asarray(o["res_working"]),
+        atol=5e-4,
+        name="res_working",
+    )
+    _allclose(
+        m.residuals_of("pearson"),
+        np.asarray(o["res_pearson"]),
+        atol=5e-4,
+        name="res_pearson",
+    )
+    _allclose(
+        m.residuals_of("deviance"),
+        np.asarray(o["res_deviance"]),
+        atol=5e-4,
+        name="res_deviance",
+    )
 
 
 # Phase 2 — Wald inference (vcov, SE, t/z, p, CI). The t-vs-z dispatch is
 # scale_known-driven; the column header for the printed summary follows
 # the same rule.
+
 
 @pytest.mark.parametrize("oid", ALL_ORACLES)
 def test_glm_inference(oid: str):
@@ -212,15 +265,14 @@ def test_glm_inference(oid: str):
 
     # vcov
     _allclose(m.vcov, np.asarray(o["vcov"]), atol=5e-6, name="vcov")
-    _allclose(m._se_bhat_arr, np.asarray(o["std_error"]),
-              atol=5e-5, name="se")
+    _allclose(m._se_bhat_arr, np.asarray(o["std_error"]), atol=5e-5, name="se")
 
     # t / z statistic — column 3 of summary(m)$coefficients
     expected_kind = o["test_kind"]
-    assert m._test_kind == expected_kind, \
+    assert m._test_kind == expected_kind, (
         f"test kind: hea={m._test_kind} R={expected_kind}"
-    _allclose(m._stat_arr, np.asarray(o["test_stat"]),
-              atol=5e-3, name="test_stat")
+    )
+    _allclose(m._stat_arr, np.asarray(o["test_stat"]), atol=5e-3, name="test_stat")
 
     # p-values — broaden tol on extreme-tail entries (R uses exact tail
     # math; we use scipy's). Anything > 1e-10 should match to 5e-3 abs.
@@ -228,12 +280,17 @@ def test_glm_inference(oid: str):
     p_R = np.asarray(o["p_value"])
     mask_meaningful = p_R > 1e-10
     if mask_meaningful.any():
-        _allclose(p_hea[mask_meaningful], p_R[mask_meaningful],
-                  atol=5e-3, name="p_value(meaningful)")
+        _allclose(
+            p_hea[mask_meaningful],
+            p_R[mask_meaningful],
+            atol=5e-3,
+            name="p_value(meaningful)",
+        )
     # Tiny p-values: just assert hea is also tiny.
     if (~mask_meaningful).any():
-        assert np.all(p_hea[~mask_meaningful] < 1e-6), \
+        assert np.all(p_hea[~mask_meaningful] < 1e-6), (
             f"p-value(tiny): hea={p_hea} R={p_R}"
+        )
 
     # 95% Wald CI — confint.default convention.
     ci_low = m.ci_bhat[m.ci_bhat.columns[1]].to_numpy()
@@ -249,18 +306,19 @@ def test_glm_inference(oid: str):
 # through family.aic + 2·rank (R glm convention; the dispersion df is
 # folded into family.aic for unknown-scale families).
 
+
 @pytest.mark.parametrize("oid", ALL_ORACLES)
 def test_glm_aic_bic_loglik(oid: str):
     o = load_glm_oracle(oid)
     m = CASES[oid]()
 
-    _allclose(m.null_deviance, o["null_deviance"], atol=5e-4,
-              name="null_deviance")
+    _allclose(m.null_deviance, o["null_deviance"], atol=5e-4, name="null_deviance")
     assert m.df_null == o["df_null"]
     _allclose(m.aic, o["aic"], atol=5e-3, name="aic")
     _allclose(m.loglike, o["loglik"], atol=5e-3, name="loglik")
-    assert m.npar == o["loglik_df"], \
+    assert m.npar == o["loglik_df"], (
         f"npar (= logLik$df): hea={m.npar} R={o['loglik_df']}"
+    )
     _allclose(m.bic, o["bic"], atol=5e-3, name="bic")
 
 
@@ -268,6 +326,7 @@ def test_glm_aic_bic_loglik(oid: str):
 # is √diag(X·vcov·Xᵀ); the response-scale SE is |dμ/dη(η̂)|·se_link
 # (delta method). predict.glm with no newdata reuses the fit-time
 # offset so η̂ matches `m$linear.predictors`.
+
 
 @pytest.mark.parametrize("oid", ALL_ORACLES)
 def test_glm_predict(oid: str):
@@ -278,10 +337,8 @@ def test_glm_predict(oid: str):
     pred_link = m.predict(type="link", se_fit=True)
     fit_link = pred_link["fit"].to_numpy()
     se_link = pred_link["se.fit"].to_numpy()
-    _allclose(fit_link, np.asarray(o["pred_link_fit"]),
-              atol=5e-4, name="pred_link_fit")
-    _allclose(se_link, np.asarray(o["pred_link_se"]),
-              atol=5e-5, name="pred_link_se")
+    _allclose(fit_link, np.asarray(o["pred_link_fit"]), atol=5e-4, name="pred_link_fit")
+    _allclose(se_link, np.asarray(o["pred_link_se"]), atol=5e-5, name="pred_link_se")
 
     # Response scale (delta method on SE). Use rtol on the SE because the
     # delta-method multiplier |dμ/dη| is huge for some links (IG canonical:
@@ -290,16 +347,25 @@ def test_glm_predict(oid: str):
     pred_resp = m.predict(type="response", se_fit=True)
     fit_resp = pred_resp["fit"].to_numpy()
     se_resp = pred_resp["se.fit"].to_numpy()
-    _allclose(fit_resp, np.asarray(o["pred_resp_fit"]),
-              atol=5e-4, name="pred_resp_fit")
-    _allclose(se_resp, np.asarray(o["pred_resp_se"]),
-              atol=5e-5, rtol=5e-4, name="pred_resp_se")
+    _allclose(fit_resp, np.asarray(o["pred_resp_fit"]), atol=5e-4, name="pred_resp_fit")
+    _allclose(
+        se_resp,
+        np.asarray(o["pred_resp_se"]),
+        atol=5e-5,
+        rtol=5e-4,
+        name="pred_resp_se",
+    )
 
     # Without se_fit, predict returns a 1-column DataFrame — same numbers.
-    _allclose(m.predict(type="link")["fit"].to_numpy(), fit_link,
-              atol=0.0, name="link no-se")
-    _allclose(m.predict(type="response")["fit"].to_numpy(), fit_resp,
-              atol=0.0, name="response no-se")
+    _allclose(
+        m.predict(type="link")["fit"].to_numpy(), fit_link, atol=0.0, name="link no-se"
+    )
+    _allclose(
+        m.predict(type="response")["fit"].to_numpy(),
+        fit_resp,
+        atol=0.0,
+        name="response no-se",
+    )
 
 
 # =============================================================================
@@ -317,15 +383,18 @@ def test_glm_predict(oid: str):
 
 # 6.1 — cbind(success, failure) on LHS for binomial.
 
+
 def test_cbind_lhs_matches_proportion_weights_form():
     """``cbind(s, f) ~ x`` and ``p ~ x, weights=s+f`` must produce the
     same fit, since hea rewrites the former into the latter internally.
     """
-    d = pl.DataFrame({
-        "s": [1.0, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-        "f": [9.0, 8, 7, 6, 5, 4, 3, 2, 1, 0.1],
-        "x": np.arange(10, dtype=float),
-    })
+    d = pl.DataFrame(
+        {
+            "s": [1.0, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "f": [9.0, 8, 7, 6, 5, 4, 3, 2, 1, 0.1],
+            "x": np.arange(10, dtype=float),
+        }
+    )
     # f has a non-integer entry (0.1) → hea warns exactly like R's two-column
     # binomial initialize ("non-integer counts in a binomial glm!"); assert it
     # so the expected R-parity warning is captured, not leaked.
@@ -350,10 +419,8 @@ def test_cbind_lhs_matches_menarche_oracle():
     o = load_glm_oracle("binomial_logit_menarche")
     d = load_dataset("MASS", "menarche")
     # cbind(a, b) accepts any expression, including subtraction.
-    m = glm("cbind(Menarche, Total - Menarche) ~ Age", d,
-            family=Binomial(link="logit"))
-    np.testing.assert_allclose(m._bhat_arr, np.asarray(o["coefficients"]),
-                               atol=5e-5)
+    m = glm("cbind(Menarche, Total - Menarche) ~ Age", d, family=Binomial(link="logit"))
+    np.testing.assert_allclose(m._bhat_arr, np.asarray(o["coefficients"]), atol=5e-5)
     np.testing.assert_allclose(m.deviance, o["deviance"], atol=5e-4)
 
 
@@ -366,11 +433,13 @@ def test_cbind_lhs_rejects_non_binomial():
 def test_bracket_lhs_equals_cbind_binomial():
     """`[s, f] ~ x` is hea-dialect sugar for `cbind(s, f) ~ x`: identical AST,
     identical code path → byte-for-byte the same binomial two-column fit."""
-    d = pl.DataFrame({
-        "s": [1.0, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-        "f": [9.0, 8, 7, 6, 5, 4, 3, 2, 1, 0.1],
-        "x": np.arange(10, dtype=float),
-    })
+    d = pl.DataFrame(
+        {
+            "s": [1.0, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "f": [9.0, 8, 7, 6, 5, 4, 3, 2, 1, 0.1],
+            "x": np.arange(10, dtype=float),
+        }
+    )
     # Both go through the cbind two-column path; f's 0.1 makes counts
     # non-integer, so each warns exactly like R (and like the cbind test above).
     with pytest.warns(UserWarning, match="non-integer counts"):
@@ -414,47 +483,54 @@ def test_cbind_prior_weights_and_na_drop_match_r():
     # R's set.seed(4) fixture captured as literals (no R dependency).
     import json
     from pathlib import Path
+
     fx = Path(__file__).parent / "fixtures" / "glm_cbind_pw.json"
     data = json.loads(fx.read_text())
-    d = pl.DataFrame({k: np.asarray(v, dtype=float)
-                      for k, v in data.items()})
+    d = pl.DataFrame({k: np.asarray(v, dtype=float) for k, v in data.items()})
     pw = d["pw"].to_numpy()
     m = glm("cbind(s, f) ~ x", d, family=Binomial(), weights=pw)
-    np.testing.assert_allclose(m._bhat_arr, [-0.3590009136, 1.8278292807],
-                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        m._bhat_arr, [-0.3590009136, 1.8278292807], rtol=0, atol=1e-9
+    )
     np.testing.assert_allclose(m.deviance, 77.4834446946, rtol=0, atol=1e-9)
     np.testing.assert_allclose(m.AIC, 246.1291034502, rtol=0, atol=1e-8)
-    np.testing.assert_allclose(m.null_deviance, 116.3366152535,
-                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(m.null_deviance, 116.3366152535, rtol=0, atol=1e-9)
     # NA in a covariate: row dropped, trials/weights stay aligned.
     d2 = d.with_columns(
-        pl.when(pl.arange(0, d.height) == 6).then(None)
-        .otherwise(pl.col("x")).alias("x")
+        pl.when(pl.arange(0, d.height) == 6)
+        .then(None)
+        .otherwise(pl.col("x"))
+        .alias("x")
     )
-    m2 = glm("cbind(s, f) ~ x", d2, family=Binomial(),
-             weights=pw[np.arange(d.height) != 6])
+    m2 = glm(
+        "cbind(s, f) ~ x", d2, family=Binomial(), weights=pw[np.arange(d.height) != 6]
+    )
     assert m2.n == 39
-    np.testing.assert_allclose(m2._bhat_arr, [-0.3540628519, 1.7828651293],
-                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        m2._bhat_arr, [-0.3540628519, 1.7828651293], rtol=0, atol=1e-9
+    )
     np.testing.assert_allclose(m2.deviance, 74.1404894214, rtol=0, atol=1e-9)
     np.testing.assert_allclose(m2.AIC, 240.8651231928, rtol=0, atol=1e-8)
 
 
 # 6.2 — offset(...) inside the formula.
 
+
 def test_formula_offset_matches_kwarg_offset():
     """``y ~ x + offset(log(t))`` must produce the same fit as
     ``y ~ x, offset=log(t)``. Both are valid R syntax and ``glm.fit`` adds
     them together when both are present."""
-    d = pl.DataFrame({
-        "y": [1, 5, 12, 30, 50, 80],
-        "x": [1.0, 2, 3, 4, 5, 6],
-        "t": [1.0, 2, 5, 10, 20, 30],
-    })
+    d = pl.DataFrame(
+        {
+            "y": [1, 5, 12, 30, 50, 80],
+            "x": [1.0, 2, 3, 4, 5, 6],
+            "t": [1.0, 2, 5, 10, 20, 30],
+        }
+    )
     log_t = np.log(d["t"].to_numpy().astype(float))
 
     m_form = glm("y ~ x + offset(log(t))", d, family=Poisson())
-    m_kw   = glm("y ~ x", d, family=Poisson(), offset=log_t)
+    m_kw = glm("y ~ x", d, family=Poisson(), offset=log_t)
     np.testing.assert_allclose(m_form._bhat_arr, m_kw._bhat_arr, atol=1e-12)
     np.testing.assert_allclose(m_form.deviance, m_kw.deviance, atol=1e-12)
 
@@ -464,35 +540,41 @@ def test_formula_offset_sums_with_kwarg_offset():
     kwarg_offset). Verify hea does the same by checking that splitting an
     offset between formula and kwarg gives the same fit as putting it all
     on one side."""
-    d = pl.DataFrame({
-        "y": [1, 5, 12, 30, 50, 80],
-        "x": [1.0, 2, 3, 4, 5, 6],
-        "t": [1.0, 2, 5, 10, 20, 30],
-    })
+    d = pl.DataFrame(
+        {
+            "y": [1, 5, 12, 30, 50, 80],
+            "x": [1.0, 2, 3, 4, 5, 6],
+            "t": [1.0, 2, 5, 10, 20, 30],
+        }
+    )
     log_t = np.log(d["t"].to_numpy().astype(float))
     half = log_t / 2
 
     m_split = glm("y ~ x + offset(log(t)/2)", d, family=Poisson(), offset=half)
-    m_all   = glm("y ~ x", d, family=Poisson(), offset=log_t)
+    m_all = glm("y ~ x", d, family=Poisson(), offset=log_t)
     np.testing.assert_allclose(m_split._bhat_arr, m_all._bhat_arr, atol=1e-10)
 
 
 # 6.3 — frequency weights (Phase 1 already plumbed; just pin one oracle).
 
+
 def test_weighted_poisson_matches_r():
     """``glm(y ~ x, weights=...)`` for Poisson. R-pinned literals from:
-        d <- data.frame(y=c(1,2,3,4,5), x=c(1,2,3,4,5))
-        coef(glm(y~x, data=d, family=poisson(), weights=c(1,2,1,3,2)))
+    d <- data.frame(y=c(1,2,3,4,5), x=c(1,2,3,4,5))
+    coef(glm(y~x, data=d, family=poisson(), weights=c(1,2,1,3,2)))
     """
     d = pl.DataFrame({"y": [1.0, 2, 3, 4, 5], "x": [1.0, 2, 3, 4, 5]})
     w = np.array([1.0, 2, 1, 3, 2])
     m = glm("y ~ x", d, family=Poisson(), weights=w)
     np.testing.assert_allclose(
-        m._bhat_arr, [-0.009707952, 0.3360234], atol=5e-7,
+        m._bhat_arr,
+        [-0.009707952, 0.3360234],
+        atol=5e-7,
     )
 
 
 # 6.4 — intercept-only.
+
 
 def test_intercept_only_gaussian():
     """``y ~ 1`` Gaussian: β̂_0 = mean(y); deviance = Σ (y-ȳ)²; df_residual = n-1."""
@@ -517,6 +599,7 @@ def test_intercept_only_poisson():
 
 # 6.5 — rank-deficient X.
 
+
 def test_rank_deficient_x_drops_to_NA_slot():
     """``y ~ x + z`` with z = 2x is rank-deficient. R sets the dropped
     coef to NA, lowers the model rank, and bumps df_residual accordingly.
@@ -524,7 +607,7 @@ def test_rank_deficient_x_drops_to_NA_slot():
     n = 8
     rng = np.random.default_rng(0)
     x = rng.normal(size=n)
-    z = 2 * x          # perfectly collinear
+    z = 2 * x  # perfectly collinear
     y = 1 + 0.5 * x + rng.normal(scale=0.1, size=n)
     d = pl.DataFrame({"y": y, "x": x, "z": z})
     m = glm("y ~ x + z", d, family=Gaussian())
@@ -536,12 +619,13 @@ def test_rank_deficient_x_drops_to_NA_slot():
     assert m.rank == 2
     assert m.df_residual == n - m.rank
     # Fit still hits the data: deviance ≈ Σ (y - ŷ)² with x's true slope.
-    np.testing.assert_allclose(m.deviance,
-                               ((y - m.fitted_values) ** 2).sum(),
-                               atol=1e-12)
+    np.testing.assert_allclose(
+        m.deviance, ((y - m.fitted_values) ** 2).sum(), atol=1e-12
+    )
 
 
 # 6.6 — factor-response binomial.
+
 
 def test_factor_response_binomial_string():
     """``y ~ x`` with y a 2-level string column. R uses level-1 = failure
@@ -551,24 +635,29 @@ def test_factor_response_binomial_string():
                         x=c(1.0,2,3,4,5,6,7,8))
         coef(glm(y ~ x, data=d, family=binomial()))
     """
-    d = pl.DataFrame({
-        "y": ["a", "b", "a", "b", "a", "b", "a", "b"],
-        "x": [1.0, 2, 3, 4, 5, 6, 7, 8],
-    })
+    d = pl.DataFrame(
+        {
+            "y": ["a", "b", "a", "b", "a", "b", "a", "b"],
+            "x": [1.0, 2, 3, 4, 5, 6, 7, 8],
+        }
+    )
     m = glm("y ~ x", d, family=Binomial())
     np.testing.assert_allclose(m._bhat_arr, [-0.8822461, 0.1960547], atol=5e-7)
-    np.testing.assert_allclose(m.fitted_values[:3],
-                               [0.3348809, 0.3798614, 0.4270048], atol=5e-6)
+    np.testing.assert_allclose(
+        m.fitted_values[:3], [0.3348809, 0.3798614, 0.4270048], atol=5e-6
+    )
 
 
 def test_factor_response_binomial_enum_respects_declared_order():
     """``pl.Enum`` declares level order explicitly; R's ``factor(..., levels=)``
     is equivalent. Reverse the levels and the encoding flips sign on β̂_x.
     """
-    base = pl.DataFrame({
-        "y": ["a", "b", "a", "b", "a", "b", "a", "b"],
-        "x": [1.0, 2, 3, 4, 5, 6, 7, 8],
-    })
+    base = pl.DataFrame(
+        {
+            "y": ["a", "b", "a", "b", "a", "b", "a", "b"],
+            "x": [1.0, 2, 3, 4, 5, 6, 7, 8],
+        }
+    )
     # default alphabetical ⇒ "a"=0, "b"=1
     d_ab = base.with_columns(pl.col("y").cast(pl.Enum(["a", "b"])))
     # reversed ⇒ "b"=0, "a"=1
@@ -580,8 +669,7 @@ def test_factor_response_binomial_enum_respects_declared_order():
 
 
 def test_factor_response_binomial_rejects_three_level():
-    d = pl.DataFrame({"y": ["a", "b", "c", "a", "b", "c"],
-                      "x": [1.0, 2, 3, 4, 5, 6]})
+    d = pl.DataFrame({"y": ["a", "b", "c", "a", "b", "c"], "x": [1.0, 2, 3, 4, 5, 6]})
     with pytest.raises(ValueError, match="2 levels"):
         glm("y ~ x", d, family=Binomial())
 
@@ -594,11 +682,15 @@ def test_factor_response_binomial_drops_unused_enum_levels():
     in its dtype but no rows. Pinned to R's coefficients.
     """
     iris = load_dataset("R", "iris")
-    irisr = iris.filter(pl.col("Species") != "virginica") \
-                .select("Sepal.Width", "Sepal.Length", "Species")
+    irisr = iris.filter(pl.col("Species") != "virginica").select(
+        "Sepal.Width", "Sepal.Length", "Species"
+    )
     # The Enum still declares all 3 levels; only 2 are present.
-    assert irisr["Species"].dtype.categories.to_list() == \
-        ["setosa", "versicolor", "virginica"]
+    assert irisr["Species"].dtype.categories.to_list() == [
+        "setosa",
+        "versicolor",
+        "virginica",
+    ]
     assert set(irisr["Species"].unique().to_list()) == {"setosa", "versicolor"}
 
     m = glm("Species ~ Sepal.Width + Sepal.Length", data=irisr, family=Binomial())
@@ -622,9 +714,9 @@ def test_factor_response_binomial_drops_unused_when_first_level_absent():
     # Filter to setosa+versicolor, then re-cast Species so virginica
     # comes first in the level order.
     irisr = iris.filter(pl.col("Species") != "virginica").with_columns(
-        pl.col("Species").cast(pl.String).cast(
-            pl.Enum(["virginica", "setosa", "versicolor"])
-        )
+        pl.col("Species")
+        .cast(pl.String)
+        .cast(pl.Enum(["virginica", "setosa", "versicolor"]))
     )
     m = glm("Species ~ Sepal.Width + Sepal.Length", data=irisr, family=Binomial())
     # After dropping unused virginica, declared order is
@@ -638,10 +730,12 @@ def test_factor_response_binomial_drops_unused_when_first_level_absent():
 
 
 def test_factor_response_binomial_boolean():
-    d = pl.DataFrame({
-        "y": [False, True, False, True, False, True, False, True],
-        "x": [1.0, 2, 3, 4, 5, 6, 7, 8],
-    })
+    d = pl.DataFrame(
+        {
+            "y": [False, True, False, True, False, True, False, True],
+            "x": [1.0, 2, 3, 4, 5, 6, 7, 8],
+        }
+    )
     m = glm("y ~ x", d, family=Binomial())
     # FALSE=0, TRUE=1 — same as factor("a","b") above (alphabetical).
     np.testing.assert_allclose(m._bhat_arr, [-0.8822461, 0.1960547], atol=5e-7)
@@ -650,10 +744,13 @@ def test_factor_response_binomial_boolean():
 # 6.7 — Quasi family: variance="mu" + log link == quasi-Poisson. Same
 # point estimates as Poisson; dispersion estimated; t-tests for Wald.
 
+
 def test_quasi_poisson_matches_poisson_betas_with_estimated_dispersion():
     d = load_dataset("MASS", "quine")  # over-dispersed counts — Wood §3.3.5 territory
     m_pois = glm("Days ~ Sex + Age + Eth + Lrn", d, family=Poisson(link="log"))
-    m_quasi = glm("Days ~ Sex + Age + Eth + Lrn", d, family=Quasi(link="log", variance="mu"))
+    m_quasi = glm(
+        "Days ~ Sex + Age + Eth + Lrn", d, family=Quasi(link="log", variance="mu")
+    )
 
     # Point estimates must be identical (same IRLS path; scale only enters SE).
     np.testing.assert_allclose(m_quasi._bhat_arr, m_pois._bhat_arr, atol=1e-10)
@@ -692,6 +789,7 @@ def test_quasibinomial_quasipoisson_constructors_through_glm():
     # plain Quasi("mu(1-mu)") does not. Bare-class family= mirrors R's
     # function-valued family argument.
     from hea.family import quasibinomial, quasipoisson
+
     d = load_dataset("MASS", "quine")
     m_q = glm("Days ~ Sex + Age", d, family=Quasi(link="log", variance="mu"))
     m_qp = glm("Days ~ Sex + Age", d, family=quasipoisson)
@@ -701,12 +799,9 @@ def test_quasibinomial_quasipoisson_constructors_through_glm():
     assert np.isnan(m_qp.aic)
 
     men = load_dataset("MASS", "menarche")
-    m_qb = glm("cbind(Menarche, Total - Menarche) ~ Age", men,
-               family=quasibinomial)
-    m_b = glm("cbind(Menarche, Total - Menarche) ~ Age", men,
-              family=Binomial())
+    m_qb = glm("cbind(Menarche, Total - Menarche) ~ Age", men, family=quasibinomial)
+    m_b = glm("cbind(Menarche, Total - Menarche) ~ Age", men, family=Binomial())
     # Same IRLS fixed point as binomial; dispersion estimated, t tests.
     np.testing.assert_allclose(m_qb._bhat_arr, m_b._bhat_arr, atol=1e-8)
     assert m_qb.dispersion != 1.0 and m_qb._test_kind == "t"
     assert np.isnan(m_qb.aic)
-

@@ -370,8 +370,11 @@ impl RsMt {
                 del = del * (1.0 - 4.8 * del * del);
                 let v = difmuk / fk;
                 if v.abs() <= 0.25 {
-                    px = fk * v * v
-                        * (((((((A7 * v + A6) * v + A5) * v + A4) * v + A3) * v + A2) * v + A1) * v
+                    px = fk
+                        * v
+                        * v
+                        * (((((((A7 * v + A6) * v + A5) * v + A4) * v + A3) * v + A2) * v + A1)
+                            * v
                             + A0)
                         - del;
                 } else {
@@ -447,7 +450,11 @@ impl RsMt {
                 let mut u = self.next_unif();
                 loop {
                     if u < f {
-                        return if prob <= 0.5 { ix as f64 } else { (n - ix) as f64 };
+                        return if prob <= 0.5 {
+                            ix as f64
+                        } else {
+                            (n - ix) as f64
+                        };
                     }
                     if ix > 110 {
                         break;
@@ -481,7 +488,11 @@ impl RsMt {
             let ix: i64;
             if u <= p1 {
                 let ixv = (xm - p1 * v + u) as i64;
-                return if prob <= 0.5 { ixv as f64 } else { (n - ixv) as f64 };
+                return if prob <= 0.5 {
+                    ixv as f64
+                } else {
+                    (n - ixv) as f64
+                };
             }
             if u <= p2 {
                 let x = xl + (u - p1) / c;
@@ -518,7 +529,11 @@ impl RsMt {
                     }
                 }
                 if v <= f {
-                    return if prob <= 0.5 { ix as f64 } else { (n - ix) as f64 };
+                    return if prob <= 0.5 {
+                        ix as f64
+                    } else {
+                        (n - ix) as f64
+                    };
                 }
                 continue;
             }
@@ -527,7 +542,11 @@ impl RsMt {
             let ynorm = -(k as f64) * k as f64 / (2.0 * npq);
             let alv = v.ln();
             if alv < ynorm - amaxp {
-                return if prob <= 0.5 { ix as f64 } else { (n - ix) as f64 };
+                return if prob <= 0.5 {
+                    ix as f64
+                } else {
+                    (n - ix) as f64
+                };
             }
             if alv > ynorm + amaxp {
                 continue;
@@ -543,12 +562,20 @@ impl RsMt {
             let t = xm * (f1 / x1).ln()
                 + (n as f64 - fm + 0.5) * (z / w).ln()
                 + (ix - m) as f64 * (w * p / (x1 * q)).ln()
-                + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / f2) / f2) / f2) / f2) / f1 / 166320.0
+                + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / f2) / f2) / f2) / f2)
+                    / f1
+                    / 166320.0
                 + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / z2) / z2) / z2) / z2) / z / 166320.0
-                + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / x2) / x2) / x2) / x2) / x1 / 166320.0
+                + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / x2) / x2) / x2) / x2)
+                    / x1
+                    / 166320.0
                 + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / w2) / w2) / w2) / w2) / w / 166320.0;
             if alv <= t {
-                return if prob <= 0.5 { ix as f64 } else { (n - ix) as f64 };
+                return if prob <= 0.5 {
+                    ix as f64
+                } else {
+                    (n - ix) as f64
+                };
             }
         }
     }
@@ -597,7 +624,9 @@ impl RsMt {
         let r = 1.0 / a;
         let q0 = horner(
             r,
-            &[GA_Q[6], GA_Q[5], GA_Q[4], GA_Q[3], GA_Q[2], GA_Q[1], GA_Q[0]],
+            &[
+                GA_Q[6], GA_Q[5], GA_Q[4], GA_Q[3], GA_Q[2], GA_Q[1], GA_Q[0],
+            ],
         ) * r;
         let (b, si, c);
         if a <= 3.686 {
@@ -619,12 +648,21 @@ impl RsMt {
                 rfma(
                     0.5 * t0
                         * t0
-                        * horner(v, &[GA_A[6], GA_A[5], GA_A[4], GA_A[3], GA_A[2], GA_A[1], GA_A[0]]),
+                        * horner(
+                            v,
+                            &[
+                                GA_A[6], GA_A[5], GA_A[4], GA_A[3], GA_A[2], GA_A[1], GA_A[0],
+                            ],
+                        ),
                     v,
                     q0,
                 )
             } else {
-                rfma(s2 + s2, (1.0 + v).ln(), rfma(0.25 * t0, t0, rfma(-s, t0, q0)))
+                rfma(
+                    s2 + s2,
+                    (1.0 + v).ln(),
+                    rfma(0.25 * t0, t0, rfma(-s, t0, q0)),
+                )
             };
             if (1.0 - u0).ln() <= qq {
                 return scale * ret;
@@ -635,14 +673,23 @@ impl RsMt {
             let u = 2.0 * self.next_unif() - 1.0;
             // R: `t = b - si*e` / `b + si*e` — clang fuses `b ± si*e` to fma on
             // arm64. copysign(si*e, u) rounds si*e first (two roundings) → 4-ulp off.
-            let t = if u < 0.0 { rfma(-si, e, b) } else { rfma(si, e, b) };
+            let t = if u < 0.0 {
+                rfma(-si, e, b)
+            } else {
+                rfma(si, e, b)
+            };
             if t >= -0.71874483771719 {
                 let v = t / (s + s);
                 let qq = if v.abs() <= 0.25 {
                     rfma(
                         0.5 * t
                             * t
-                            * horner(v, &[GA_A[6], GA_A[5], GA_A[4], GA_A[3], GA_A[2], GA_A[1], GA_A[0]]),
+                            * horner(
+                                v,
+                                &[
+                                    GA_A[6], GA_A[5], GA_A[4], GA_A[3], GA_A[2], GA_A[1], GA_A[0],
+                                ],
+                            ),
                         v,
                         q0,
                     )

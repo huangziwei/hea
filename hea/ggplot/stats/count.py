@@ -26,9 +26,13 @@ class StatCount(Stat):
             if aes in data.columns:
                 groupby_cols.append(aes)
 
-        out = data.group_by(groupby_cols, maintain_order=True).agg(
-            pl.len().alias("count"),
-        ).sort(groupby_cols)
+        out = (
+            data.group_by(groupby_cols, maintain_order=True)
+            .agg(
+                pl.len().alias("count"),
+            )
+            .sort(groupby_cols)
+        )
         # ``prop`` — fraction of the bar's count within its layer-level
         # group (ggplot2's ``StatCount$compute_group``: ``count /
         # sum(abs(count))``). With ``group=1`` all bars share one group, so

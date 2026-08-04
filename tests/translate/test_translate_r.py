@@ -168,7 +168,7 @@ class TestC:
     def test_c_numeric_to_np_array(self):
         # All-numeric c(...) becomes np.array so R's elementwise
         # arithmetic (``primes * 2``, ``primes - 1``) carries over.
-        assert _tr('c(1, 2, 3)') == "import numpy as np\nnp.array([1, 2, 3])"
+        assert _tr("c(1, 2, 3)") == "import numpy as np\nnp.array([1, 2, 3])"
 
     def test_c_of_strings(self):
         assert _tr('c("a", "b")') == "['a', 'b']"
@@ -179,7 +179,7 @@ class TestC:
 
     def test_c_with_unary_minus_still_numeric(self):
         # Unary minus is part of the numeric literal — still np.array.
-        assert _tr('c(-1, 2, -3)') == "import numpy as np\nnp.array([-1, 2, -3])"
+        assert _tr("c(-1, 2, -3)") == "import numpy as np\nnp.array([-1, 2, -3])"
 
 
 # ---------------------------------------------------------------------------
@@ -195,10 +195,10 @@ class TestPipes:
     def test_native_pipe_to_verb(self):
         # ``x |> filter(cond)`` becomes ``x.filter(...)`` with NSE on cond.
         # ``cond`` is a bare name inside filter's EXPR slot → col("cond").
-        assert _tr('x |> filter(cond)') == "x.filter(col('cond'))"
+        assert _tr("x |> filter(cond)") == "x.filter(col('cond'))"
 
     def test_magrittr_pipe(self):
-        assert _tr('x %>% filter(a == 1)') == "x.filter(col('a') == 1)"
+        assert _tr("x %>% filter(a == 1)") == "x.filter(col('a') == 1)"
 
     def test_magrittr_placeholder(self):
         # ``x %>% f(., y)`` → ``f(x, y)`` (unknown f, function form).
@@ -206,7 +206,7 @@ class TestPipes:
 
     def test_chained_pipe(self):
         # Method chain on the result of a pipe chain.
-        out = _tr('x |> filter(a == 1) |> select(b, c)')
+        out = _tr("x |> filter(a == 1) |> select(b, c)")
         assert out == "x.filter(col('a') == 1).select('b', 'c')"
 
 
@@ -223,7 +223,7 @@ class TestVerbs:
 
     def test_filter_and_chain_uses_bitand(self):
         # In EXPR slot, ``&`` becomes bitwise ``&`` (polars-Expr-friendly).
-        out = _tr('filter(flights, month == 1 & day == 1)')
+        out = _tr("filter(flights, month == 1 & day == 1)")
         assert out == "flights.filter((col('month') == 1) & (col('day') == 1))"
 
     def test_select_column_name_slot(self):
@@ -257,7 +257,7 @@ class TestVerbs:
         assert out == "flights.summarize(avg=col('dep_delay').mean())"
 
     def test_count(self):
-        out = _tr('count(flights, origin, dest, sort = TRUE)')
+        out = _tr("count(flights, origin, dest, sort = TRUE)")
         assert out == "flights.count('origin', 'dest', sort=True)"
 
     def test_distinct(self):
@@ -336,8 +336,8 @@ class TestForwardAutoload:
         # ``library(palmerpenguins)`` disambiguates a bare-name ref that
         # would otherwise be skipped (penguins is in 2 packages).
         out = _tr_full(
-            'library(palmerpenguins)\n'
-            'penguins |> ggplot(aes(x = flipper_length_mm)) + geom_point()'
+            "library(palmerpenguins)\n"
+            "penguins |> ggplot(aes(x = flipper_length_mm)) + geom_point()"
         )
         assert "penguins = data('penguins', package='palmerpenguins')" in out
         # The library() call itself is dropped from the body.
@@ -346,12 +346,20 @@ class TestForwardAutoload:
     def test_standalone_data_call_becomes_assignment(self):
         # R's ``data("X", package="Y")`` is side-effectful — translate to
         # ``X = data(...)`` so the Python script can use ``X`` after.
-        out = _tr_full('data("flights", package = "nycflights13")\nflights |> filter(dest == "IAH")')
+        out = _tr_full(
+            'data("flights", package = "nycflights13")\nflights |> filter(dest == "IAH")'
+        )
         assert "flights = data('flights', package='nycflights13')" in out
         # The data-assign must come before any use of ``flights`` below it.
         lines = out.splitlines()
-        assign_at = next(i for i, ln in enumerate(lines) if ln.startswith("flights = data("))
-        use_at = next(i for i, ln in enumerate(lines) if "flights." in ln or "flights[" in ln or "flights |" in ln)
+        assign_at = next(
+            i for i, ln in enumerate(lines) if ln.startswith("flights = data(")
+        )
+        use_at = next(
+            i
+            for i, ln in enumerate(lines)
+            if "flights." in ln or "flights[" in ln or "flights |" in ln
+        )
         assert assign_at < use_at
 
     def test_autoload_for_unique_dataset(self):
@@ -363,7 +371,7 @@ class TestForwardAutoload:
     def test_ambiguous_bare_ref_skipped(self):
         # No library() to disambiguate ``penguins`` — skip the autoload.
         # User will need to disambiguate themselves or it'll error at runtime.
-        out = _tr_full('penguins |> ggplot(aes(x = flipper_length_mm))')
+        out = _tr_full("penguins |> ggplot(aes(x = flipper_length_mm))")
         assert "data('penguins'" not in out
 
     def test_locally_defined_name_not_autoloaded(self):
@@ -379,7 +387,7 @@ class TestForwardAutoload:
     def test_r_default_package_skipped(self):
         # ``mtcars`` lives in R's ``datasets`` package which is auto-loaded
         # in R — no explicit data() load needed.
-        out = _tr_full('mtcars |> filter(mpg > 20)')
+        out = _tr_full("mtcars |> filter(mpg > 20)")
         assert "mtcars = data(" not in out
 
     def test_library_call_dropped_from_body(self):
@@ -394,9 +402,9 @@ class TestForwardAutoload:
         # User loaded modeldata but the dataset call says palmerpenguins —
         # explicit form wins.
         out = _tr_full(
-            'library(modeldata)\n'
+            "library(modeldata)\n"
             'data("penguins", package = "palmerpenguins")\n'
-            'penguins |> ggplot()'
+            "penguins |> ggplot()"
         )
         assert "penguins = data('penguins', package='palmerpenguins')" in out
 
@@ -458,7 +466,9 @@ class TestMutateSummarize:
         # Sequential evaluation is hea's runtime concern — the translator
         # just emits both kwargs in order; hea.mutate evaluates them
         # sequentially so the second can see the first.
-        out = _tr("mutate(flights, hours = air_time / 60, gain_per_hour = gain / hours)")
+        out = _tr(
+            "mutate(flights, hours = air_time / 60, gain_per_hour = gain / hours)"
+        )
         assert out == (
             "flights.mutate(hours=col('air_time') / 60, "
             "gain_per_hour=col('gain') / col('hours'))"
@@ -467,10 +477,15 @@ class TestMutateSummarize:
     def test_mutate_dot_by_to_underscore_by_as_string(self):
         # ``.by = origin`` — the column name slot, not the EXPR slot.
         out = _tr("mutate(flights, gain = dep_delay - arr_delay, .by = origin)")
-        assert out == "flights.mutate(gain=col('dep_delay') - col('arr_delay'), _by='origin')"
+        assert (
+            out
+            == "flights.mutate(gain=col('dep_delay') - col('arr_delay'), _by='origin')"
+        )
 
     def test_mutate_dot_by_with_c_list(self):
-        out = _tr("mutate(flights, gain = dep_delay - arr_delay, .by = c(origin, dest))")
+        out = _tr(
+            "mutate(flights, gain = dep_delay - arr_delay, .by = c(origin, dest))"
+        )
         assert out == (
             "flights.mutate(gain=col('dep_delay') - col('arr_delay'), "
             "_by=['origin', 'dest'])"
@@ -478,11 +493,17 @@ class TestMutateSummarize:
 
     def test_mutate_dot_before_as_column_name(self):
         out = _tr("mutate(flights, gain = dep_delay - arr_delay, .before = day)")
-        assert out == "flights.mutate(gain=col('dep_delay') - col('arr_delay'), _before='day')"
+        assert (
+            out
+            == "flights.mutate(gain=col('dep_delay') - col('arr_delay'), _before='day')"
+        )
 
     def test_mutate_dot_after_as_column_name(self):
         out = _tr("mutate(flights, speed = distance / air_time, .after = day)")
-        assert out == "flights.mutate(speed=col('distance') / col('air_time'), _after='day')"
+        assert (
+            out
+            == "flights.mutate(speed=col('distance') / col('air_time'), _after='day')"
+        )
 
     def test_mutate_dot_keep_string_literal(self):
         # ``.keep`` takes a literal string — should NOT become col("used").
@@ -491,12 +512,18 @@ class TestMutateSummarize:
 
     def test_transmute_auto_injects_keep_none(self):
         out = _tr("transmute(flights, gain = dep_delay - arr_delay)")
-        assert out == "flights.mutate(gain=col('dep_delay') - col('arr_delay'), _keep='none')"
+        assert (
+            out
+            == "flights.mutate(gain=col('dep_delay') - col('arr_delay'), _keep='none')"
+        )
 
     def test_transmute_user_keep_wins(self):
         # Explicit ``.keep`` from the user overrides the auto-injected default.
         out = _tr('transmute(flights, gain = dep_delay - arr_delay, .keep = "all")')
-        assert out == "flights.mutate(gain=col('dep_delay') - col('arr_delay'), _keep='all')"
+        assert (
+            out
+            == "flights.mutate(gain=col('dep_delay') - col('arr_delay'), _keep='all')"
+        )
 
     def test_summarize_dot_by(self):
         out = _tr("summarize(flights, avg = mean(dep_delay), .by = origin)")
@@ -567,16 +594,14 @@ class TestCaseWhen:
     """Phase 4 — case_when's tilde syntax → tuple-pair form."""
 
     def test_basic(self):
-        out = _tr(
-            'case_when(x > 0 ~ "pos", x < 0 ~ "neg", .default = "zero")'
-        )
+        out = _tr('case_when(x > 0 ~ "pos", x < 0 ~ "neg", .default = "zero")')
         assert out == (
             "case_when((col('x') > 0, 'pos'), (col('x') < 0, 'neg'), default='zero')"
         )
 
     def test_inside_mutate(self):
         out = _tr(
-            'mutate(df, label = case_when('
+            "mutate(df, label = case_when("
             '  arr_delay > 60 ~ "late",'
             '  arr_delay < -10 ~ "early",'
             '  .default = "ontime"))'
@@ -632,12 +657,10 @@ class TestPivot:
 
     def test_pivot_longer_simple(self):
         out = _tr(
-            'pivot_longer(df, c(wk1, wk2, wk3), '
-            'names_to = "week", values_to = "rank")'
+            'pivot_longer(df, c(wk1, wk2, wk3), names_to = "week", values_to = "rank")'
         )
         assert out == (
-            "df.pivot_longer(['wk1', 'wk2', 'wk3'], "
-            "names_to='week', values_to='rank')"
+            "df.pivot_longer(['wk1', 'wk2', 'wk3'], names_to='week', values_to='rank')"
         )
 
     def test_pivot_longer_with_selector(self):
@@ -652,7 +675,7 @@ class TestPivot:
 
     def test_pivot_longer_with_names_sep(self):
         out = _tr(
-            'pivot_longer(df, c(x_a, x_b), '
+            "pivot_longer(df, c(x_a, x_b), "
             'names_to = c("prefix", "key"), names_sep = "_")'
         )
         # ``names_to = c("prefix", "key")`` becomes a list.
@@ -661,12 +684,10 @@ class TestPivot:
 
     def test_pivot_wider_simple(self):
         out = _tr(
-            'pivot_wider(fish_encounters, '
-            'names_from = station, values_from = seen)'
+            "pivot_wider(fish_encounters, names_from = station, values_from = seen)"
         )
         assert out == (
-            "fish_encounters.pivot_wider("
-            "names_from='station', values_from='seen')"
+            "fish_encounters.pivot_wider(names_from='station', values_from='seen')"
         )
 
     def test_pivot_in_pipe(self):
@@ -704,9 +725,7 @@ class TestAcross:
         )
 
     def test_mixed_with_explicit_kwargs(self):
-        out = _tr(
-            "mutate(df, gain = x - y, across(c(a, b), mean), .by = origin)"
-        )
+        out = _tr("mutate(df, gain = x - y, across(c(a, b), mean), .by = origin)")
         assert out == (
             "df.mutate(gain=col('x') - col('y'), "
             "a=col('a').mean(), b=col('b').mean(), _by='origin')"
@@ -715,11 +734,13 @@ class TestAcross:
     def test_names_kwarg_raises(self):
         # .names glue templating is deferred — translator should fail loudly.
         from hea.translate.r_to_py import RTranslateError
+
         with pytest.raises(RTranslateError):
             _tr('mutate(df, across(c(a, b), mean, .names = "{col}_avg"))')
 
     def test_list_fns_raises(self):
         from hea.translate.r_to_py import RTranslateError
+
         with pytest.raises(RTranslateError):
             _tr("mutate(df, across(c(a, b), list(mean = mean, sd = sd)))")
 
@@ -759,16 +780,12 @@ class TestGgplot:
         out = _tr(
             "ggplot(d, aes(x = a)) + geom_point(aes(color = species, shape = species))"
         )
-        assert out == (
-            "d.ggplot(x='a').geom_point(color='species', shape='species')"
-        )
+        assert out == ("d.ggplot(x='a').geom_point(color='species', shape='species')")
 
     def test_geom_with_mixed_aes_and_literal_kwarg(self):
         # ``geom_point(aes(color = z), alpha = 0.5)`` — aesthetic kwargs
         # from aes unwrap; literal ``alpha`` is a regular kwarg.
-        out = _tr(
-            "ggplot(d, aes(x, y)) + geom_point(aes(color = z), alpha = 0.5)"
-        )
+        out = _tr("ggplot(d, aes(x, y)) + geom_point(aes(color = z), alpha = 0.5)")
         assert out == "d.ggplot(x='x', y='y').geom_point(color='z', alpha=0.5)"
 
     def test_aes_with_expression(self):
@@ -782,7 +799,7 @@ class TestGgplot:
         out = _tr(
             "ggplot(penguins, aes(x = flipper_length_mm, y = body_mass_g)) "
             "+ geom_point(aes(color = species)) "
-            "+ labs(title = \"Body mass vs flipper\", x = \"Flipper length (mm)\") "
+            '+ labs(title = "Body mass vs flipper", x = "Flipper length (mm)") '
             "+ theme_minimal()"
         )
         assert out == (
@@ -809,16 +826,12 @@ class TestGgplot:
     # ----- facets -----
 
     def test_facet_wrap_formula(self):
-        out = _tr(
-            "ggplot(d, aes(x, y)) + geom_point() + facet_wrap(~island)"
-        )
+        out = _tr("ggplot(d, aes(x, y)) + geom_point() + facet_wrap(~island)")
         assert out == "d.ggplot(x='x', y='y').geom_point().facet_wrap('~island')"
 
     def test_facet_grid_binary_formula(self):
         out = _tr("ggplot(d, aes(x, y)) + geom_point() + facet_grid(year ~ month)")
-        assert out == (
-            "d.ggplot(x='x', y='y').geom_point().facet_grid('year ~ month')"
-        )
+        assert out == ("d.ggplot(x='x', y='y').geom_point().facet_grid('year ~ month')")
 
     # ----- theme + element_* -----
 
@@ -833,7 +846,7 @@ class TestGgplot:
         assert ".theme(" in out
 
     def test_theme_bare_then_named_theme(self):
-        out = _tr("ggplot(d) + theme_bw() + theme(legend.position = \"none\")")
+        out = _tr('ggplot(d) + theme_bw() + theme(legend.position = "none")')
         assert out == "d.ggplot().theme_bw().theme(legend_position='none')"
 
     # ----- patchwork operators -----

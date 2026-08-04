@@ -42,7 +42,9 @@ def _write_r_script(content: str, tmp: Path, name: str = "script.R") -> Path:
     return p
 
 
-def _write_capture_pair(tmp: Path, side: str, df: pl.DataFrame, factors: dict | None = None) -> tuple[Path, Path]:
+def _write_capture_pair(
+    tmp: Path, side: str, df: pl.DataFrame, factors: dict | None = None
+) -> tuple[Path, Path]:
     """Build a synthetic CSV + schema JSON, mimicking what run_r / run_py
     produce. Used for unit-testing :func:`diff_frames` directly."""
     csv = tmp / f"{side}.csv"
@@ -129,7 +131,10 @@ class TestDiffFrames:
     def test_factor_levels_mismatch(self, tmp_path):
         df = pl.DataFrame({"x": ["a", "b", "c"]})
         r_csv, r_schema = _write_capture_pair(
-            tmp_path, "r", df, factors={"x": {"levels": ["a", "b", "c"], "ordered": False}}
+            tmp_path,
+            "r",
+            df,
+            factors={"x": {"levels": ["a", "b", "c"], "ordered": False}},
         )
         py_csv, py_schema = _write_capture_pair(
             tmp_path, "py", df, factors={"x": {"levels": ["a", "b"], "ordered": False}}
@@ -159,8 +164,12 @@ class TestGapRegistry:
 
     def test_dedup_on_repeat(self, tmp_path):
         registry = tmp_path / "gaps.jsonl"
-        g1 = log_gap(kind="unknown_function", subject="foo", source="x.R", registry=registry)
-        g2 = log_gap(kind="unknown_function", subject="foo", source="x.R", registry=registry)
+        g1 = log_gap(
+            kind="unknown_function", subject="foo", source="x.R", registry=registry
+        )
+        g2 = log_gap(
+            kind="unknown_function", subject="foo", source="x.R", registry=registry
+        )
         rows = read_gaps(registry)
         assert len(rows) == 1
         # The two writes resolve to the same id (stable hash on key fields).
@@ -243,8 +252,7 @@ class TestParityE2E:
     def test_run_py_alone(self, tmp_path):
         py_script = tmp_path / "script.py"
         py_script.write_text(
-            "import hea\n"
-            "hea.tidy.DataFrame({'x': [1, 2, 3]})\n",
+            "import hea\nhea.tidy.DataFrame({'x': [1, 2, 3]})\n",
             encoding="utf-8",
         )
         result = run_py(py_script, tmp_path)
@@ -256,6 +264,7 @@ class TestParityE2E:
     def test_parity_writes_to_registry_when_log_true(self, tmp_path, monkeypatch):
         # Redirect the default registry path to a per-test tempfile.
         import hea.translate.gaps as gaps_mod
+
         registry = tmp_path / "gaps.jsonl"
         monkeypatch.setattr(gaps_mod, "_DEFAULT_REGISTRY", registry)
 

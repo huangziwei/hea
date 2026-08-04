@@ -6,6 +6,7 @@ All eager forms route through :class:`pl.Enum`; the deferred ``factor("col")``
 form is resolved by ``hea.DataFrame.mutate`` / ``select`` via the private
 :class:`_LazyFactor` placeholder.
 """
+
 from __future__ import annotations
 
 import polars as pl
@@ -70,15 +71,20 @@ class _LazyFactor:
                 # R's factor() sorts numerically when the input is numeric
                 # (then string-casts); only character/factor inputs sort lex.
                 if src.dtype.is_numeric():
-                    levels_list = [str(v) for v in src.drop_nulls().unique().sort().to_list()]
+                    levels_list = [
+                        str(v) for v in src.drop_nulls().unique().sort().to_list()
+                    ]
                 else:
-                    levels_list = src.cast(pl.Utf8).drop_nulls().unique().sort().to_list()
+                    levels_list = (
+                        src.cast(pl.Utf8).drop_nulls().unique().sort().to_list()
+                    )
             else:
                 levels_list = [str(v) for v in self.levels]
             out_expr = s_utf8.cast(pl.Enum(levels_list), strict=self.strict)
 
         if self.ordered and col_name:
             from ..formula import _ORDERED_COLS_CV
+
             set_ordered_cols(_ORDERED_COLS_CV.get() | frozenset({col_name}))
         return out_expr
 
@@ -173,7 +179,9 @@ def factor(
             # R's factor() sorts numerically when input is numeric
             # (then string-casts); only character/factor inputs sort lex.
             if series.dtype.is_numeric():
-                levels_list = [str(v) for v in series.drop_nulls().unique().sort().to_list()]
+                levels_list = [
+                    str(v) for v in series.drop_nulls().unique().sort().to_list()
+                ]
             else:
                 levels_list = s.drop_nulls().unique().sort().to_list()
         else:
@@ -182,9 +190,11 @@ def factor(
 
     if ordered and series.name:
         from ..formula import _ORDERED_COLS_CV
+
         set_ordered_cols(_ORDERED_COLS_CV.get() | frozenset({series.name}))
 
     from ..tidy import Series as _HeaSeries
+
     result = _HeaSeries._from_pyseries(out._s)
     if ordered:
         # Local marker so unnamed Series (factor(bare_list, ordered=True)
@@ -309,6 +319,7 @@ def interaction(*args, drop=False, sep=".", lex_order=False):
 
     # Eager path — compute Cartesian-product / observed levels explicitly.
     from itertools import product as _product
+
     str_cols: list[list] = []
     n: int | None = None
     levels_per_col: list[list[str]] = []
@@ -317,9 +328,7 @@ def interaction(*args, drop=False, sep=".", lex_order=False):
         if n is None:
             n = len(vals)
         elif len(vals) != n:
-            raise ValueError(
-                "interaction(): all inputs must have the same length"
-            )
+            raise ValueError("interaction(): all inputs must have the same length")
         str_vals = [str(v) if v is not None else None for v in vals]
         str_cols.append(str_vals)
         seen: dict[str, None] = {}
@@ -346,8 +355,7 @@ def interaction(*args, drop=False, sep=".", lex_order=False):
         # itertools.product varies the LAST iterable fastest, so we
         # reverse both the input list and each output tuple.
         levels = [
-            sep.join(reversed(combo))
-            for combo in _product(*reversed(levels_per_col))
+            sep.join(reversed(combo)) for combo in _product(*reversed(levels_per_col))
         ]
 
     if lex_order:

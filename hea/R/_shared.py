@@ -14,6 +14,7 @@
   rust ``nmath::util::rfma``); the FMA-contraction parity primitive shared by
   :mod:`hea.R.rng` and :mod:`hea.R.distance`.
 """
+
 from __future__ import annotations
 
 import math
@@ -34,6 +35,7 @@ import polars as pl
 # slower — the pure-Python oracle/fallback, where correctness > speed).
 _R_FMA = platform.machine().lower() in ("arm64", "aarch64") and hasattr(math, "fma")
 if _R_FMA:
+
     def _rfma(a, b, c):
         # C99 fma never raises: overflow -> +-Inf, invalid (Inf*0) -> NaN.
         # math.fma raises OverflowError/ValueError there instead; the plain
@@ -49,6 +51,7 @@ if _R_FMA:
     def _rfma_vec(a, b, c):
         return _rfma_ufunc(a, b, c).astype(np.float64)
 else:
+
     def _rfma(a, b, c):
         return a * b + c
 
@@ -83,6 +86,7 @@ def _as_array(x) -> np.ndarray:
         return x.to_numpy().astype(float)
     return np.asarray(x, dtype=float)
 
+
 def _caller_names(models, frame, fallback: str = "model") -> list[str]:
     """Recover caller-bound variable names for ``models``, like R's
     ``match.call``. Walks ``frame``'s locals + globals; falls back to
@@ -103,6 +107,7 @@ def _caller_names(models, frame, fallback: str = "model") -> list[str]:
         out.append(names[0] if len(names) == 1 else f"{fallback} {i}")
     return out
 
+
 class NamedVector:
     """R-style named numeric vector. Indexing is 0-based on integers
     (Python convention; R / dplyr use 1-based), name-based on strings."""
@@ -114,8 +119,7 @@ class NamedVector:
         self.values = np.asarray(values, dtype=float).ravel()
         if len(self.names) != len(self.values):
             raise ValueError(
-                f"NamedVector: {len(self.names)} names vs "
-                f"{len(self.values)} values"
+                f"NamedVector: {len(self.names)} names vs {len(self.values)} values"
             )
 
     @classmethod
@@ -173,9 +177,7 @@ class NamedVector:
                     self.values[idx],
                 )
 
-        raise TypeError(
-            f"NamedVector: invalid index type {type(key).__name__}"
-        )
+        raise TypeError(f"NamedVector: invalid index type {type(key).__name__}")
 
     # ---- arithmetic ------------------------------------------------
 

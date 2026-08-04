@@ -21,6 +21,7 @@ Usage in a kernel module::
         return _rs(flat, ...).reshape(shape)
     # else: pure-Python path
 """
+
 from __future__ import annotations
 
 import os

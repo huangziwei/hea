@@ -47,9 +47,7 @@ class Expansion:
             return (float(v), float(v))
         if isinstance(v, (list, tuple)) and len(v) == 2:
             return (float(v[0]), float(v[1]))
-        raise ValueError(
-            f"expansion: expected scalar or (low, high) tuple, got {v!r}"
-        )
+        raise ValueError(f"expansion: expected scalar or (low, high) tuple, got {v!r}")
 
 
 def expansion(mult=0.05, add=0.0) -> Expansion:

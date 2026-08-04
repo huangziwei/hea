@@ -36,28 +36,63 @@ _POSITIONAL_AES = ("x", "y")
 # promotion (``_promote_string_aes_params``) then resolves string values
 # against the data: column match → MAP, otherwise SET. Includes American
 # aliases so ``geom_point(color=...)`` is recognised as an aesthetic.
-_ALL_AES_NAMES = frozenset({
-    # Positional
-    "x", "y", "z",
-    "xmin", "xmax", "ymin", "ymax",
-    "xend", "yend",
-    "xintercept", "yintercept", "slope", "intercept",
-    # Style
-    "colour", "color", "fill", "alpha", "size", "shape",
-    "linetype", "linewidth", "stroke",
-    # Text
-    "label", "family", "fontface", "hjust", "vjust", "angle", "lineheight",
-    # Structural
-    "group", "weight",
-    # Boxplot/violin extras
-    "lower", "middle", "upper", "ymin_final", "ymax_final",
-    "outlier_colour", "outlier_color", "outlier_fill",
-    "outlier_shape", "outlier_size", "outlier_stroke", "outlier_alpha",
-    # Per-row geometry (rect/tile/raster, errorbar, stat_summary)
-    "width", "height",
-    # geom_curve
-    "curvature",
-})
+_ALL_AES_NAMES = frozenset(
+    {
+        # Positional
+        "x",
+        "y",
+        "z",
+        "xmin",
+        "xmax",
+        "ymin",
+        "ymax",
+        "xend",
+        "yend",
+        "xintercept",
+        "yintercept",
+        "slope",
+        "intercept",
+        # Style
+        "colour",
+        "color",
+        "fill",
+        "alpha",
+        "size",
+        "shape",
+        "linetype",
+        "linewidth",
+        "stroke",
+        # Text
+        "label",
+        "family",
+        "fontface",
+        "hjust",
+        "vjust",
+        "angle",
+        "lineheight",
+        # Structural
+        "group",
+        "weight",
+        # Boxplot/violin extras
+        "lower",
+        "middle",
+        "upper",
+        "ymin_final",
+        "ymax_final",
+        "outlier_colour",
+        "outlier_color",
+        "outlier_fill",
+        "outlier_shape",
+        "outlier_size",
+        "outlier_stroke",
+        "outlier_alpha",
+        # Per-row geometry (rect/tile/raster, errorbar, stat_summary)
+        "width",
+        "height",
+        # geom_curve
+        "curvature",
+    }
+)
 
 
 def _canon(name: str) -> str:

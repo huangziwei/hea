@@ -28,13 +28,15 @@ class GeomDotplot(Geom):
     # ``stroke = 2 * borderwidth = 1.0``, ``linetype = "solid"`` —
     # missing in hea would let users override but no per-row default
     # means the dot border is always whatever the geom hard-codes.
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "black",
-        "fill": "black",
-        "alpha": 1.0,
-        "stroke": 1.0,
-        "linetype": "solid",
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "black",
+            "fill": "black",
+            "alpha": 1.0,
+            "stroke": 1.0,
+            "linetype": "solid",
+        }
+    )
     required_aes: tuple = ("x",)
 
     def draw_panel(self, data, ax) -> None:
@@ -85,8 +87,13 @@ class GeomDotplot(Geom):
         # Cheap proxy: fixed dot size equal to ``binwidth × 2.83 × 6`` pt.
         size_pt = (bw * _PT_PER_MM * 6) ** 2 if bw > 0 else 36
         ax.scatter(
-            x_centres, y_centres,
-            s=size_pt, c=fill, edgecolors=colour, alpha=alpha, marker="o",
+            x_centres,
+            y_centres,
+            s=size_pt,
+            c=fill,
+            edgecolors=colour,
+            alpha=alpha,
+            marker="o",
         )
 
 
@@ -97,8 +104,15 @@ def _first(df, col, default):
     return default if v is None else v
 
 
-def geom_dotplot(mapping=None, data=None, *, stat="identity", position="identity",
-                 binwidth=None, **kwargs):
+def geom_dotplot(
+    mapping=None,
+    data=None,
+    *,
+    stat="identity",
+    position="identity",
+    binwidth=None,
+    **kwargs,
+):
     """Wilkinson dot plot. Each observation becomes one dot, stacked
     vertically inside its x-bin. ``binwidth`` defaults to ``range/30``."""
     from ..layer import Layer

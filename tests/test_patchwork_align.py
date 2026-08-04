@@ -17,28 +17,38 @@ import polars as pl
 import pytest
 
 from hea.ggplot import (
-    aes, geom_bin2d, geom_point, ggplot,
-    ggtitle, labs,
+    aes,
+    geom_bin2d,
+    geom_point,
+    ggplot,
+    ggtitle,
+    labs,
 )
 
 
 def _mtcars() -> pl.DataFrame:
     from hea import data
-    return data("mtcars").to_polars() if hasattr(data("mtcars"), "to_polars") else data("mtcars")
+
+    return (
+        data("mtcars").to_polars()
+        if hasattr(data("mtcars"), "to_polars")
+        else data("mtcars")
+    )
 
 
 def _patchwork_doc_plots():
     """Same four plots as the patchwork tutorial doc."""
     from hea import data
+
     mtcars = data("mtcars")
-    p1 = (mtcars.ggplot().geom_point(aes("mpg", "disp"))
-          .ggtitle("Plot 1"))
-    p2 = (mtcars.ggplot().geom_boxplot(aes("gear", "disp", group="gear"))
-          .ggtitle("Plot 2"))
-    p3 = (mtcars.ggplot().geom_point(aes("hp", "wt", colour="mpg"))
-          .ggtitle("Plot 3"))
-    p4 = (mtcars.ggplot().geom_bar(aes("gear")).facet_wrap("~cyl")
-          .ggtitle("Plot 4"))
+    p1 = mtcars.ggplot().geom_point(aes("mpg", "disp")).ggtitle("Plot 1")
+    p2 = (
+        mtcars.ggplot()
+        .geom_boxplot(aes("gear", "disp", group="gear"))
+        .ggtitle("Plot 2")
+    )
+    p3 = mtcars.ggplot().geom_point(aes("hp", "wt", colour="mpg")).ggtitle("Plot 3")
+    p4 = mtcars.ggplot().geom_bar(aes("gear")).facet_wrap("~cyl").ggtitle("Plot 4")
     return p1, p2, p3, p4
 
 
@@ -49,10 +59,7 @@ def _panel_bboxes(fig) -> list:
     right-margin column. Heuristic: a colorbar cax is much narrower than
     a panel (≤ 0.05 of figure width is a reliable threshold)."""
     fig.canvas.draw()
-    return [
-        ax.get_position() for ax in fig.axes
-        if ax.get_position().width > 0.05
-    ]
+    return [ax.get_position() for ax in fig.axes if ax.get_position().width > 0.05]
 
 
 def test_horizontal_compose_panels_share_top_and_bottom():
@@ -119,7 +126,8 @@ def test_subtitle_on_one_sibling_does_not_squeeze_the_other():
     df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
     p_no = ggplot(df, aes("x", "y")) + geom_point() + ggtitle("Plain")
     p_yes = (
-        ggplot(df, aes("x", "y")) + geom_point()
+        ggplot(df, aes("x", "y"))
+        + geom_point()
         + labs(title="With subtitle", subtitle="A second line of metadata")
     )
     fig = (p_no | p_yes).draw(figsize=(8, 3))
@@ -168,6 +176,7 @@ def test_nested_compose_does_not_crash_with_annotation():
     fig.text artist."""
     p1, p2, p3, _ = _patchwork_doc_plots()
     from hea.ggplot import plot_annotation
+
     g = (p1 | (p2 / p3)) + plot_annotation(title="A nested story")
     fig = g.draw()
     try:
@@ -188,11 +197,14 @@ def test_inter_plot_gap_consistent_across_ytick_widths():
     spaced than ``p1 | p2_count`` even though both should align flush.
     """
     import numpy as np
+
     rng = np.random.default_rng(0)
-    df_wide = pl.DataFrame({"x": rng.uniform(0, 10, 200),
-                            "y": rng.uniform(0, 15000, 200)})
-    df_narrow = pl.DataFrame({"x": rng.uniform(0, 10, 200),
-                              "y": rng.uniform(0, 0.06, 200)})
+    df_wide = pl.DataFrame(
+        {"x": rng.uniform(0, 10, 200), "y": rng.uniform(0, 15000, 200)}
+    )
+    df_narrow = pl.DataFrame(
+        {"x": rng.uniform(0, 10, 200), "y": rng.uniform(0, 0.06, 200)}
+    )
 
     def gap_in(combo):
         fig = combo.draw()
@@ -224,8 +236,8 @@ def test_inter_plot_gap_consistent_across_ytick_widths():
     # 0.10" tolerance — within rendering noise once the budget tracks
     # the actual tick text. Pre-fix this difference was ~0.12".
     assert abs(g_wide - g_narrow) < 0.10, (
-        f"inter-plot gap drifts with y-tick width: wide={g_wide:.3f}\", "
-        f"narrow={g_narrow:.3f}\""
+        f'inter-plot gap drifts with y-tick width: wide={g_wide:.3f}", '
+        f'narrow={g_narrow:.3f}"'
     )
 
 
@@ -239,11 +251,14 @@ def test_colorbar_tick_labels_do_not_overlap_next_plot():
     column boundary and overlapped p2's ``ylabel``.
     """
     import numpy as np
+
     rng = np.random.default_rng(0)
-    df = pl.DataFrame({
-        "x": rng.uniform(0, 3, 5000),
-        "y": rng.uniform(0, 20000, 5000),
-    })
+    df = pl.DataFrame(
+        {
+            "x": rng.uniform(0, 3, 5000),
+            "y": rng.uniform(0, 20000, 5000),
+        }
+    )
     p1 = ggplot(df, aes("x", "y")) + geom_bin2d()
     p2 = ggplot(df, aes("x", "y")) + geom_bin2d()
     fig = (p1 | p2).draw()

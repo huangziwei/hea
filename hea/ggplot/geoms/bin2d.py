@@ -32,13 +32,15 @@ _PT_PER_MM = 72.27 / 25.4
 
 @dataclass
 class GeomHex(Geom):
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": None,
-        "fill": "grey20",
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": None,
+            "fill": "grey20",
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+        }
+    )
     required_aes: tuple = ("x", "y")
     key_glyph: str = "polygon"
 
@@ -52,23 +54,31 @@ class GeomHex(Geom):
         # Width / height of the hex polygon in data units. Stat output
         # carries these per-row (constant across rows for a given panel)
         # so a future ``coord_fixed`` could override on the geom side.
-        w = data["width"].to_numpy().astype(float) if "width" in data.columns \
+        w = (
+            data["width"].to_numpy().astype(float)
+            if "width" in data.columns
             else np.ones(n)
-        h = data["height"].to_numpy().astype(float) if "height" in data.columns \
+        )
+        h = (
+            data["height"].to_numpy().astype(float)
+            if "height" in data.columns
             else np.ones(n)
+        )
 
         # Pointy-top hex polygon, vertices in CCW order relative to centre:
         # top, upper-right, lower-right, bottom, lower-left, upper-left.
         # Width is the horizontal extent (between the two vertical edges);
         # height is the vertical extent (top vertex to bottom vertex).
-        rel = np.array([
-            [ 0.0,  0.5],
-            [ 0.5,  0.25],
-            [ 0.5, -0.25],
-            [ 0.0, -0.5],
-            [-0.5, -0.25],
-            [-0.5,  0.25],
-        ])
+        rel = np.array(
+            [
+                [0.0, 0.5],
+                [0.5, 0.25],
+                [0.5, -0.25],
+                [0.0, -0.5],
+                [-0.5, -0.25],
+                [-0.5, 0.25],
+            ]
+        )
         polygons = np.zeros((n, 6, 2))
         polygons[:, :, 0] = x[:, None] + rel[None, :, 0] * w[:, None]
         polygons[:, :, 1] = y[:, None] + rel[None, :, 1] * h[:, None]
@@ -87,10 +97,12 @@ class GeomHex(Geom):
         )
         ax.add_collection(coll)
         # PolyCollection doesn't auto-update data limits.
-        ax.update_datalim([
-            (float(polygons[:, :, 0].min()), float(polygons[:, :, 1].min())),
-            (float(polygons[:, :, 0].max()), float(polygons[:, :, 1].max())),
-        ])
+        ax.update_datalim(
+            [
+                (float(polygons[:, :, 0].min()), float(polygons[:, :, 1].min())),
+                (float(polygons[:, :, 0].max()), float(polygons[:, :, 1].max())),
+            ]
+        )
         ax.autoscale_view()
 
 
@@ -130,8 +142,9 @@ def _per_row_color(df, col, default, *, missing_value=None):
 # ---------------------------------------------------------------------------
 
 
-def geom_hex(mapping=None, data=None, *, stat="binhex", position="identity",
-             bins=30, **kwargs):
+def geom_hex(
+    mapping=None, data=None, *, stat="binhex", position="identity", bins=30, **kwargs
+):
     """Hexagonal 2D bin counts. Each non-empty hex is rendered as a
     polygon; ``fill`` defaults to ``count`` (mapped through the fill
     scale). Pass ``aes(fill=after_stat("density"))`` to switch to
@@ -162,8 +175,16 @@ def geom_hex(mapping=None, data=None, *, stat="binhex", position="identity",
     )
 
 
-def geom_bin2d(mapping=None, data=None, *, stat="bin_2d", position="identity",
-               bins=30, binwidth=None, **kwargs):
+def geom_bin2d(
+    mapping=None,
+    data=None,
+    *,
+    stat="bin_2d",
+    position="identity",
+    bins=30,
+    binwidth=None,
+    **kwargs,
+):
     """Rectangular 2D bin counts. Each non-empty bin is rendered as a
     tile (via :class:`GeomTile`); ``fill`` defaults to ``count`` (mapped
     through the fill scale).

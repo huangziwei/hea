@@ -57,7 +57,7 @@ def _build_inverse_verbs() -> dict[str, str]:
 
     # Explicit canonicals — supersede whatever first-seen happened to pick.
     canonical = {
-        "mutate":    "mutate",     # NOT transmute (auto-kwargs encode that)
+        "mutate": "mutate",  # NOT transmute (auto-kwargs encode that)
         "summarize": "summarize",  # NOT summarise
     }
     for hea_method, r_name in canonical.items():
@@ -76,8 +76,8 @@ def _build_inverse_functions() -> dict[str, str]:
         inverse.setdefault(func.hea_name, r_name)
     # Canonical overrides.
     canonical = {
-        "if_else":  "if_else",   # NOT ifelse
-        "is_null":  "is.na",     # forward maps both is.na and is.null to is_null
+        "if_else": "if_else",  # NOT ifelse
+        "is_null": "is.na",  # forward maps both is.na and is.null to is_null
     }
     for hea_name, r_name in canonical.items():
         if r_name in FUNCTION_TABLE:
@@ -111,8 +111,8 @@ def _build_inverse_kwargs() -> dict[str, str]:
         inverse[alias.py_name] = r_name
     # Universal additions — Python names that always reverse to dotted R.
     universal = {
-        "na_rm":     "na.rm",
-        "keep_all":  ".keep_all",  # already in KWARG_ALIASES but double-check
+        "na_rm": "na.rm",
+        "keep_all": ".keep_all",  # already in KWARG_ALIASES but double-check
     }
     inverse.update(universal)
     return inverse
@@ -128,17 +128,44 @@ _PY_KWARG_TO_R: dict[str, str] = _build_inverse_kwargs()
 # whether a geom kwarg gets wrapped in ``aes(...)``. Sourced from
 # ``hea/ggplot/aes.py`` (kept in sync; if hea adds aesthetics we may
 # under-detect in reverse, which is a benign gap not a crash).
-_AESTHETIC_NAMES: frozenset[str] = frozenset({
-    "x", "y", "z",
-    "xmin", "xmax", "ymin", "ymax",
-    "xend", "yend",
-    "xintercept", "yintercept", "slope", "intercept",
-    "colour", "color", "fill", "alpha", "size", "shape",
-    "linetype", "linewidth", "stroke",
-    "label", "family", "fontface", "hjust", "vjust", "angle", "lineheight",
-    "group", "weight",
-    "lower", "middle", "upper",
-})
+_AESTHETIC_NAMES: frozenset[str] = frozenset(
+    {
+        "x",
+        "y",
+        "z",
+        "xmin",
+        "xmax",
+        "ymin",
+        "ymax",
+        "xend",
+        "yend",
+        "xintercept",
+        "yintercept",
+        "slope",
+        "intercept",
+        "colour",
+        "color",
+        "fill",
+        "alpha",
+        "size",
+        "shape",
+        "linetype",
+        "linewidth",
+        "stroke",
+        "label",
+        "family",
+        "fontface",
+        "hjust",
+        "vjust",
+        "angle",
+        "lineheight",
+        "group",
+        "weight",
+        "lower",
+        "middle",
+        "upper",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -147,39 +174,39 @@ _AESTHETIC_NAMES: frozenset[str] = frozenset({
 
 
 _PY_BIN_TO_R = {
-    P.Add:      "+",
-    P.Sub:      "-",
-    P.Mult:     "*",
-    P.MatMult:  "%*%",   # numpy / hea ``a @ b`` ↔ R matrix multiply
-    P.Div:      "/",
+    P.Add: "+",
+    P.Sub: "-",
+    P.Mult: "*",
+    P.MatMult: "%*%",  # numpy / hea ``a @ b`` ↔ R matrix multiply
+    P.Div: "/",
     P.FloorDiv: "%/%",
-    P.Mod:      "%%",
-    P.Pow:      "^",
-    P.BitAnd:   "&",
-    P.BitOr:    "|",
+    P.Mod: "%%",
+    P.Pow: "^",
+    P.BitAnd: "&",
+    P.BitOr: "|",
 }
 
 _PY_CMP_TO_R = {
-    P.Eq:    "==",
+    P.Eq: "==",
     P.NotEq: "!=",
-    P.Lt:    "<",
-    P.LtE:   "<=",
-    P.Gt:    ">",
-    P.GtE:   ">=",
-    P.In:    "%in%",
+    P.Lt: "<",
+    P.LtE: "<=",
+    P.Gt: ">",
+    P.GtE: ">=",
+    P.In: "%in%",
     P.NotIn: "%!in%",  # not idiomatic R but the closest direct translation
 }
 
 _PY_UNARY_TO_R = {
-    P.UAdd:   "+",
-    P.USub:   "-",
-    P.Not:    "!",
+    P.UAdd: "+",
+    P.USub: "-",
+    P.Not: "!",
     P.Invert: "!",
 }
 
 _PY_BOOL_TO_R = {
     P.And: "&&",
-    P.Or:  "||",
+    P.Or: "||",
 }
 
 
@@ -188,21 +215,39 @@ _PY_BOOL_TO_R = {
 # table mirrors :data:`hea.translate.r_parser._LBP` but with our own
 # tightness encoding (higher = looser).
 _PREC = {
-    "::": 1, ":::": 1,
-    "$":  2, "@": 2,
-    "[":  3, "[[": 3,
-    "^":  4,
-    "u-": 5, "u+": 5,
-    ":":  6,
-    "%in%": 7, "%%": 7, "%/%": 7, "%*%": 7, "|>": 7,
-    "*":  8, "/": 8,
-    "+":  9, "-": 9,
-    "<": 10, "<=": 10, ">": 10, ">=": 10, "==": 10, "!=": 10,
+    "::": 1,
+    ":::": 1,
+    "$": 2,
+    "@": 2,
+    "[": 3,
+    "[[": 3,
+    "^": 4,
+    "u-": 5,
+    "u+": 5,
+    ":": 6,
+    "%in%": 7,
+    "%%": 7,
+    "%/%": 7,
+    "%*%": 7,
+    "|>": 7,
+    "*": 8,
+    "/": 8,
+    "+": 9,
+    "-": 9,
+    "<": 10,
+    "<=": 10,
+    ">": 10,
+    ">=": 10,
+    "==": 10,
+    "!=": 10,
     "!": 11,
-    "&": 12, "&&": 12,
-    "|": 13, "||": 13,
+    "&": 12,
+    "&&": 12,
+    "|": 13,
+    "||": 13,
     "~": 14,
-    "<-": 15, "=": 15,
+    "<-": 15,
+    "=": 15,
 }
 
 
@@ -351,11 +396,15 @@ class Translator:
         # guessing.
         pkg = None
         for kw in value.keywords:
-            if kw.arg == "package" and isinstance(kw.value, P.Constant) and isinstance(kw.value.value, str):
+            if (
+                kw.arg == "package"
+                and isinstance(kw.value, P.Constant)
+                and isinstance(kw.value.value, str)
+            ):
                 pkg = kw.value.value
         if pkg is None:
             return None
-        return f'data({_quote_string(target.id)}, package = {_quote_string(pkg)})'
+        return f"data({_quote_string(target.id)}, package = {_quote_string(pkg)})"
 
     def _emit_if_stmt(self, stmt: P.If) -> str:
         cond = self._emit_expr(stmt.test, prec=20)
@@ -748,8 +797,10 @@ class Translator:
         if isinstance(node, P.Call):
             cargs, ckw, node = node.args, node.keywords, node.func
         name = (
-            node.attr if isinstance(node, P.Attribute)
-            else node.id if isinstance(node, P.Name)
+            node.attr
+            if isinstance(node, P.Attribute)
+            else node.id
+            if isinstance(node, P.Name)
             else None
         )
         r_name = _R_FAMILY_NAMES.get(name.lower()) if name else None
@@ -822,7 +873,9 @@ class Translator:
             return self._emit_helper_call("c", call.args, call.keywords, name)
         return self._emit_helper_call(r_name, call.args, call.keywords, name)
 
-    def _emit_helper_call(self, r_name: str, args: list, kwargs: list, hea_name: str) -> str:
+    def _emit_helper_call(
+        self, r_name: str, args: list, kwargs: list, hea_name: str
+    ) -> str:
         """Emit a helper call, pushing the registered arg_slot (if any)
         for the duration of arg translation."""
         slot = _HEA_FN_ARG_SLOTS.get(hea_name)
@@ -848,7 +901,12 @@ class Translator:
 
     def _emit_col_unwrap(self, call: P.Call) -> str:
         """``col("x")`` → bare ``x``. Single string arg, no kwargs."""
-        if len(call.args) == 1 and not call.keywords and isinstance(call.args[0], P.Constant) and isinstance(call.args[0].value, str):
+        if (
+            len(call.args) == 1
+            and not call.keywords
+            and isinstance(call.args[0], P.Constant)
+            and isinstance(call.args[0].value, str)
+        ):
             return call.args[0].value
         # Unusual shapes — keep as a function call.
         return self._emit_plain_call("col", call.args, call.keywords)
@@ -924,7 +982,9 @@ class Translator:
 
         return current
 
-    def _emit_slice_reverse(self, current: str, args: list, kwargs: list) -> Optional[str]:
+    def _emit_slice_reverse(
+        self, current: str, args: list, kwargs: list
+    ) -> Optional[str]:
         """``df.slice(...)`` → R ``df |> slice(...)``, undoing the forward map.
 
         Keep positions shift 0→1-based (``[0, 2, 4]`` → ``c(1, 3, 5)``,
@@ -958,7 +1018,8 @@ class Translator:
                 return None
             return f"{current} |>\n  slice({pos})"
         if len(args) == 2 and all(
-            isinstance(a, P.Constant) and isinstance(a.value, int)
+            isinstance(a, P.Constant)
+            and isinstance(a.value, int)
             and not isinstance(a.value, bool)
             for a in args
         ):
@@ -970,15 +1031,23 @@ class Translator:
     def _shift_up_positions(node: P.expr) -> Optional[str]:
         """0-based Python positions → R 1-based source, or ``None`` if not a
         statically shiftable literal."""
+
         def _int_val(e):
             # Python parses a negative literal as ``UnaryOp(USub, Constant)``,
             # not ``Constant(-n)`` — handle both.
-            if isinstance(e, P.Constant) and isinstance(e.value, int) and not isinstance(e.value, bool):
+            if (
+                isinstance(e, P.Constant)
+                and isinstance(e.value, int)
+                and not isinstance(e.value, bool)
+            ):
                 return e.value
-            if (isinstance(e, P.UnaryOp) and isinstance(e.op, P.USub)
-                    and isinstance(e.operand, P.Constant)
-                    and isinstance(e.operand.value, int)
-                    and not isinstance(e.operand.value, bool)):
+            if (
+                isinstance(e, P.UnaryOp)
+                and isinstance(e.op, P.USub)
+                and isinstance(e.operand, P.Constant)
+                and isinstance(e.operand.value, int)
+                and not isinstance(e.operand.value, bool)
+            ):
                 return -e.operand.value
             return None
 
@@ -1067,7 +1136,10 @@ class Translator:
             if isinstance(value, P.Constant) and isinstance(value.value, str):
                 return value.value
             if isinstance(value, P.List):
-                if all(isinstance(e, P.Constant) and isinstance(e.value, str) for e in value.elts):
+                if all(
+                    isinstance(e, P.Constant) and isinstance(e.value, str)
+                    for e in value.elts
+                ):
                     return "c(" + ", ".join(e.value for e in value.elts) + ")"
             if isinstance(value, P.Dict):
                 # ``by={"a": "b"}`` → ``c("a" = "b")``.
@@ -1076,7 +1148,9 @@ class Translator:
                     if isinstance(k, P.Constant) and isinstance(v, P.Constant):
                         parts.append(f'"{k.value}" = "{v.value}"')
                     else:
-                        parts.append(f"{self._emit_expr(k, prec=20)} = {self._emit_expr(v, prec=20)}")
+                        parts.append(
+                            f"{self._emit_expr(k, prec=20)} = {self._emit_expr(v, prec=20)}"
+                        )
                 return f"c({', '.join(parts)})"
         with self.nse.enter(slot):
             return self._emit_expr(value, prec=20)
@@ -1092,14 +1166,22 @@ class Translator:
         for a in args:
             # facet_wrap('~island') / facet_grid('y~x') — the string
             # carries the formula. Try to round-trip it.
-            if isinstance(a, P.Constant) and isinstance(a.value, str) and "~" in a.value:
+            if (
+                isinstance(a, P.Constant)
+                and isinstance(a.value, str)
+                and "~" in a.value
+            ):
                 positional.append(a.value.strip())
             else:
                 positional.append(self._emit_expr(a, prec=20))
         for kw in kwargs:
             r_name = _PY_KWARG_TO_R.get(kw.arg, kw.arg)
             value = kw.value
-            if kw.arg in _AESTHETIC_NAMES and isinstance(value, P.Constant) and isinstance(value.value, str):
+            if (
+                kw.arg in _AESTHETIC_NAMES
+                and isinstance(value, P.Constant)
+                and isinstance(value.value, str)
+            ):
                 # Aesthetic-name + string value = column mapping → goes in aes().
                 aes_pairs.append((r_name, value.value))
             else:
@@ -1107,7 +1189,9 @@ class Translator:
         body_parts: list[str] = []
         body_parts.extend(positional)
         if aes_pairs:
-            body_parts.append("aes(" + ", ".join(f"{k} = {v}" for k, v in aes_pairs) + ")")
+            body_parts.append(
+                "aes(" + ", ".join(f"{k} = {v}" for k, v in aes_pairs) + ")"
+            )
         body_parts.extend(f"{k} = {v}" for k, v in other_pairs)
         return f"{method}({', '.join(body_parts)})"
 
@@ -1190,10 +1274,7 @@ def _flatten_method_chain(call: P.Call) -> tuple[P.expr, list]:
     """
     chain: list[tuple[str, list, list]] = []
     cur: P.AST = call
-    while (
-        isinstance(cur, P.Call)
-        and isinstance(cur.func, P.Attribute)
-    ):
+    while isinstance(cur, P.Call) and isinstance(cur.func, P.Attribute):
         chain.append((cur.func.attr, list(cur.args), list(cur.keywords)))
         cur = cur.func.value
     chain.reverse()
@@ -1238,45 +1319,136 @@ def _maybe_paren(text: str, my_prec: int, outer_prec: int) -> str:
 # expression helpers, lubridate/forcats/stringr fns. ``ggplot``/``aes``
 # and the open-set prefixes ``geom_*``/``scale_*``/``coord_*``/``facet_*``/
 # ``theme_*`` are handled by :data:`_GGPLOT_PATTERN` below.
-_TIDYVERSE_FN_NAMES: frozenset[str] = frozenset({
-    # dplyr verbs (mirror VERB_TABLE.keys minus joins which only need dplyr)
-    "filter", "mutate", "transmute", "summarize", "summarise",
-    "select", "group_by", "ungroup", "count", "add_count", "distinct",
-    "arrange", "rename", "relocate", "pull", "glimpse",
-    "inner_join", "left_join", "right_join", "full_join",
-    "semi_join", "anti_join", "cross_join", "nest_join",
-    # tidyr
-    "pivot_longer", "pivot_wider", "separate", "unite",
-    "drop_na", "replace_na", "fill", "complete", "expand",
-    "nest", "unnest",
-    # dplyr expression helpers
-    "case_when", "if_else", "coalesce", "na_if", "between", "near",
-    "desc", "n_distinct", "row_number", "lag", "lead",
-    "min_rank", "dense_rank", "percent_rank", "cume_dist", "ntile",
-    "cummean", "cumall", "cumany", "consecutive_id", "nth",
-    # tidy-select helpers
-    "starts_with", "ends_with", "contains", "matches", "everything",
-    "all_of", "any_of", "last_col", "num_range",
-    # forcats
-    "fct_infreq", "fct_relevel", "fct_recode", "fct_collapse",
-    "fct_lump_n", "fct_lump_lowfreq", "fct_reorder", "fct_reorder2", "fct_rev",
-    # stringr
-    "str_detect", "str_replace", "str_replace_all",
-    "str_to_lower", "str_to_upper", "str_to_title",
-    "str_length", "str_sub", "str_trim", "str_squish",
-    "str_pad", "str_wrap", "str_split", "str_extract", "str_extract_all",
-    "str_count", "str_starts", "str_ends",
-    # lubridate
-    "ymd", "mdy", "dmy", "ymd_hms", "as_date",
-    "wday", "yday",
-    # ggplot top-level entry points
-    "ggplot", "aes", "labs", "xlab", "ylab", "ggtitle",
-    "xlim", "ylim", "lims", "guides", "annotate",
-})
+_TIDYVERSE_FN_NAMES: frozenset[str] = frozenset(
+    {
+        # dplyr verbs (mirror VERB_TABLE.keys minus joins which only need dplyr)
+        "filter",
+        "mutate",
+        "transmute",
+        "summarize",
+        "summarise",
+        "select",
+        "group_by",
+        "ungroup",
+        "count",
+        "add_count",
+        "distinct",
+        "arrange",
+        "rename",
+        "relocate",
+        "pull",
+        "glimpse",
+        "inner_join",
+        "left_join",
+        "right_join",
+        "full_join",
+        "semi_join",
+        "anti_join",
+        "cross_join",
+        "nest_join",
+        # tidyr
+        "pivot_longer",
+        "pivot_wider",
+        "separate",
+        "unite",
+        "drop_na",
+        "replace_na",
+        "fill",
+        "complete",
+        "expand",
+        "nest",
+        "unnest",
+        # dplyr expression helpers
+        "case_when",
+        "if_else",
+        "coalesce",
+        "na_if",
+        "between",
+        "near",
+        "desc",
+        "n_distinct",
+        "row_number",
+        "lag",
+        "lead",
+        "min_rank",
+        "dense_rank",
+        "percent_rank",
+        "cume_dist",
+        "ntile",
+        "cummean",
+        "cumall",
+        "cumany",
+        "consecutive_id",
+        "nth",
+        # tidy-select helpers
+        "starts_with",
+        "ends_with",
+        "contains",
+        "matches",
+        "everything",
+        "all_of",
+        "any_of",
+        "last_col",
+        "num_range",
+        # forcats
+        "fct_infreq",
+        "fct_relevel",
+        "fct_recode",
+        "fct_collapse",
+        "fct_lump_n",
+        "fct_lump_lowfreq",
+        "fct_reorder",
+        "fct_reorder2",
+        "fct_rev",
+        # stringr
+        "str_detect",
+        "str_replace",
+        "str_replace_all",
+        "str_to_lower",
+        "str_to_upper",
+        "str_to_title",
+        "str_length",
+        "str_sub",
+        "str_trim",
+        "str_squish",
+        "str_pad",
+        "str_wrap",
+        "str_split",
+        "str_extract",
+        "str_extract_all",
+        "str_count",
+        "str_starts",
+        "str_ends",
+        # lubridate
+        "ymd",
+        "mdy",
+        "dmy",
+        "ymd_hms",
+        "as_date",
+        "wday",
+        "yday",
+        # ggplot top-level entry points
+        "ggplot",
+        "aes",
+        "labs",
+        "xlab",
+        "ylab",
+        "ggtitle",
+        "xlim",
+        "ylim",
+        "lims",
+        "guides",
+        "annotate",
+    }
+)
 
-_PATCHWORK_FN_NAMES: frozenset[str] = frozenset({
-    "plot_annotation", "plot_layout", "wrap_plots",
-})
+_PATCHWORK_FN_NAMES: frozenset[str] = frozenset(
+    {
+        "plot_annotation",
+        "plot_layout",
+        "wrap_plots",
+    }
+)
 
 # Open-set ggplot prefixes — any ``geom_x(``, ``scale_y(``, etc.
 _GGPLOT_PATTERN = re.compile(
@@ -1378,5 +1550,10 @@ def _quote_string(s: str) -> str:
     """R-style string literal — prefer double quotes; escape minimally."""
     if '"' in s and "'" not in s:
         return f"'{s}'"
-    escaped = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
+    escaped = (
+        s.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+    )
     return f'"{escaped}"'

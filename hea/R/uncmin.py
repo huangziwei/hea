@@ -38,6 +38,7 @@ Entry point: :func:`optif9` (plus :func:`fdhess` for ``nlm(hessian=
 TRUE)``); R-side semantics (function-value cache, msg bit handling,
 DBL_MAX mapping) live in :mod:`hea.R.optimize`.
 """
+
 from __future__ import annotations
 
 import math
@@ -80,14 +81,16 @@ def fdhess(n, x, fval, fun, h, nfd, ndigit, typx):
         x[i] = tempi + float(step[i]) * 2.0
         fii = fun(x)
         h[i, i] = ((fval - float(f[i])) + (fii - float(f[i]))) / (
-            float(step[i]) * float(step[i]))
+            float(step[i]) * float(step[i])
+        )
         x[i] = tempi + float(step[i])
         for j in range(i + 1, n):
             tempj = float(x[j])
             x[j] = tempj + float(step[j])
             fij = fun(x)
             h[i, j] = ((fval - float(f[i])) + (fij - float(f[j]))) / (
-                float(step[i]) * float(step[j]))
+                float(step[i]) * float(step[j])
+            )
             x[j] = tempj
         x[i] = tempi
 
@@ -216,8 +219,26 @@ def _qrupdt(n, a, u, v):
             _qraux2(n, a, i, t1, t2)
 
 
-def _tregup(n, x, f, g, a, fcn, sc, sx, nwtake, stepmx, steptl, dlt,
-            iretcd, xplsp, fplsp, xpls, method, udiag):
+def _tregup(
+    n,
+    x,
+    f,
+    g,
+    a,
+    fcn,
+    sc,
+    sx,
+    nwtake,
+    stepmx,
+    steptl,
+    dlt,
+    iretcd,
+    xplsp,
+    fplsp,
+    xpls,
+    method,
+    udiag,
+):
     """uncmin.c ``tregup`` (:444): trust-region accept/update (methods
     2 & 3). Returns ``(dlt, iretcd, fplsp, fpls, mxtake)``; mutates
     ``xpls``/``xplsp``."""
@@ -240,7 +261,8 @@ def _tregup(n, x, f, g, a, fcn, sc, sx, nwtake, stepmx, steptl, dlt,
             rln = 0.0
             for i in range(n):
                 temp1 = abs(float(sc[i])) / _fmax2(
-                    abs(float(xpls[i])), 1.0 / float(sx[i]))
+                    abs(float(xpls[i])), 1.0 / float(sx[i])
+                )
                 if rln < temp1:
                     rln = temp1
             if rln < steptl:
@@ -270,8 +292,12 @@ def _tregup(n, x, f, g, a, fcn, sc, sx, nwtake, stepmx, steptl, dlt,
                         temp1 += float(a[i, j]) * float(sc[i]) * float(sc[j])
                     dltfp += temp1 * 2.0
             dltfp = slp + dltfp / 2.0
-            if (iretcd != 2 and abs(dltfp - dltf) <= abs(dltf) * 0.1
-                    and nwtake and dlt <= stepmx * 0.99):
+            if (
+                iretcd != 2
+                and abs(dltfp - dltf) <= abs(dltf) * 0.1
+                and nwtake
+                and dlt <= stepmx * 0.99
+            ):
                 # double trust region and continue global step
                 iretcd = 3
                 for i in range(n):
@@ -300,8 +326,7 @@ def _lnsrch(n, x, f, g, p, xpls, fcn, stepmx, steptl, sx):
     plmbda = 0.0
     temp1 = 0.0
     for i in range(n):
-        temp1 = _rfma(float(sx[i]) * float(sx[i]) * float(p[i]),
-                      float(p[i]), temp1)
+        temp1 = _rfma(float(sx[i]) * float(sx[i]) * float(p[i]), float(p[i]), temp1)
     sln = math.sqrt(temp1)
     if sln > stepmx:
         # newton step longer than maximum allowed
@@ -310,8 +335,7 @@ def _lnsrch(n, x, f, g, p, xpls, fcn, stepmx, steptl, sx):
     slp = _ddot(n, g, p)
     rln = 0.0
     for i in range(n):
-        temp1 = abs(float(p[i])) / _fmax2(abs(float(x[i])),
-                                          1.0 / float(sx[i]))
+        temp1 = abs(float(p[i])) / _fmax2(abs(float(x[i])), 1.0 / float(sx[i]))
         if rln < temp1:
             rln = temp1
     rmnlmb = steptl / rln
@@ -346,19 +370,19 @@ def _lnsrch(n, x, f, g, p, xpls, fcn, stepmx, steptl, sx):
                 t1 = _rfma(-lam, slp, fpls - f)
                 t2 = _rfma(-plmbda, slp, pfpls - f)
                 t3 = 1.0 / (lam - plmbda)
-                a3 = 3.0 * t3 * (t1 / (lam * lam)
-                                 - t2 / (plmbda * plmbda))
-                b = t3 * (t2 * lam / (plmbda * plmbda)
-                          - t1 * plmbda / (lam * lam))
+                a3 = 3.0 * t3 * (t1 / (lam * lam) - t2 / (plmbda * plmbda))
+                b = t3 * (t2 * lam / (plmbda * plmbda) - t1 * plmbda / (lam * lam))
                 disc = _rfma(b, b, -(a3 * slp))
                 if disc > b * b:
                     # only one positive critical point: the minimum
-                    tlmbda = (-b + (-math.sqrt(disc) if a3 < 0
-                                    else math.sqrt(disc))) / a3
+                    tlmbda = (
+                        -b + (-math.sqrt(disc) if a3 < 0 else math.sqrt(disc))
+                    ) / a3
                 else:
                     # both critical points positive, first is minimum
-                    tlmbda = (-b + (math.sqrt(disc) if a3 < 0
-                                    else -math.sqrt(disc))) / a3
+                    tlmbda = (
+                        -b + (math.sqrt(disc) if a3 < 0 else -math.sqrt(disc))
+                    ) / a3
                 if tlmbda > lam * 0.5:
                     tlmbda = lam * 0.5
             plmbda = lam
@@ -370,8 +394,9 @@ def _lnsrch(n, x, f, g, p, xpls, fcn, stepmx, steptl, sx):
     return fpls, iretcd, mxtake
 
 
-def _dog_1step(n, g, a, p, sx, rnwtln, dlt, nwtake, fstdog, ssd, v, cln,
-               eta, sc, stepmx):
+def _dog_1step(
+    n, g, a, p, sx, rnwtln, dlt, nwtake, fstdog, ssd, v, cln, eta, sc, stepmx
+):
     """uncmin.c ``dog_1step`` (:742): one double-dogleg step (method 2).
     Returns ``(dlt, nwtake, fstdog, cln, eta)``; mutates ssd, v, sc."""
     nwtake = rnwtln <= dlt
@@ -390,8 +415,7 @@ def _dog_1step(n, g, a, p, sx, rnwtln, dlt, nwtake, fstdog, ssd, v, cln,
         for i in range(n):
             tmp = 0.0
             for j in range(i, n):
-                tmp += (float(a[j, i]) * float(g[j])
-                        / (float(sx[j]) * float(sx[j])))
+                tmp += float(a[j, i]) * float(g[j]) / (float(sx[j]) * float(sx[j]))
             bet += tmp * tmp
         for i in range(n):
             ssd[i] = -(alpha / bet) * float(g[i]) / float(sx[i])
@@ -413,8 +437,7 @@ def _dog_1step(n, g, a, p, sx, rnwtln, dlt, nwtake, fstdog, ssd, v, cln,
         # convex combination of ssd and eta*p with scaled length dlt
         dot1 = _ddot(n, v, ssd)
         dot2 = _ddot(n, v, v)
-        alam = (-dot1 + math.sqrt(dot1 * dot1
-                                  - dot2 * (cln * cln - dlt * dlt))) / dot2
+        alam = (-dot1 + math.sqrt(dot1 * dot1 - dot2 * (cln * cln - dlt * dlt))) / dot2
         for i in range(n):
             sc[i] = (float(ssd[i]) + alam * float(v[i])) / float(sx[i])
     return dlt, nwtake, fstdog, cln, eta
@@ -441,16 +464,34 @@ def _dogdrv(n, x, f, g, a, p, xpls, fcn, sx, stepmx, steptl, dlt):
     mxtake = False
     while iretcd > 1:
         dlt, nwtake, fstdog, cln, eta = _dog_1step(
-            n, g, a, p, sx, rnwtln, dlt, nwtake, fstdog, ssd, v, cln,
-            eta, sc, stepmx)
+            n, g, a, p, sx, rnwtln, dlt, nwtake, fstdog, ssd, v, cln, eta, sc, stepmx
+        )
         dlt, iretcd, fplsp, fpls, mxtake = _tregup(
-            n, x, f, g, a, fcn, sc, sx, nwtake, stepmx, steptl, dlt,
-            iretcd, xplsp, fplsp, xpls, 2, ssd)
+            n,
+            x,
+            f,
+            g,
+            a,
+            fcn,
+            sc,
+            sx,
+            nwtake,
+            stepmx,
+            steptl,
+            dlt,
+            iretcd,
+            xplsp,
+            fplsp,
+            xpls,
+            2,
+            ssd,
+        )
     return fpls, dlt, iretcd, mxtake
 
 
-def _hook_1step(n, g, a, udiag, p, sx, rnwtln, dlt, amu, dltp, phi,
-                phip0, fstime, sc, wrk0, epsm):
+def _hook_1step(
+    n, g, a, udiag, p, sx, rnwtln, dlt, amu, dltp, phi, phip0, fstime, sc, wrk0, epsm
+):
     """uncmin.c ``hook_1step`` (:908): one More-Hebdon step (method 3).
     Returns ``(dlt, amu, phi, phip0, fstime, nwtake)``; mutates a, sc,
     wrk0."""
@@ -503,8 +544,7 @@ def _hook_1step(n, g, a, udiag, p, sx, rnwtln, dlt, amu, dltp, phi,
         _dtrsl(a, n, wrk0, 0)
         temp1 = _dnrm2(n, wrk0)
         phip = -(temp1 * temp1) / stepln
-        if ((alo * dlt <= stepln and stepln <= hi * dlt)
-                or (amuup - amulo > 0.0)):
+        if (alo * dlt <= stepln and stepln <= hi * dlt) or (amuup - amulo > 0.0):
             # sc is acceptable hookstep
             break
         # select new amu
@@ -516,8 +556,27 @@ def _hook_1step(n, g, a, udiag, p, sx, rnwtln, dlt, amu, dltp, phi,
     return dlt, amu, phi, phip0, fstime, nwtake
 
 
-def _hookdrv(n, x, f, g, a, udiag, p, xpls, fcn, sx, stepmx, steptl,
-             dlt, amu, dltp, phi, phip0, epsm, itncnt):
+def _hookdrv(
+    n,
+    x,
+    f,
+    g,
+    a,
+    udiag,
+    p,
+    xpls,
+    fcn,
+    sx,
+    stepmx,
+    steptl,
+    dlt,
+    amu,
+    dltp,
+    phi,
+    phip0,
+    epsm,
+    itncnt,
+):
     """uncmin.c ``hookdrv`` (:1047): More-Hebdon driver (method 3).
     Returns ``(fpls, dlt, iretcd, mxtake, amu, dltp, phi, phip0)``;
     mutates a, xpls."""
@@ -534,14 +593,12 @@ def _hookdrv(n, x, f, g, a, udiag, p, xpls, fcn, sx, stepmx, steptl,
         if dlt == -1.0:
             alpha = 0.0
             for i in range(n):
-                alpha += (float(g[i]) * float(g[i])
-                          / (float(sx[i]) * float(sx[i])))
+                alpha += float(g[i]) * float(g[i]) / (float(sx[i]) * float(sx[i]))
             bet = 0.0
             for i in range(n):
                 tmp = 0.0
                 for j in range(i, n):
-                    tmp += (float(a[j, i]) * float(g[j])
-                            / (float(sx[j]) * float(sx[j])))
+                    tmp += float(a[j, i]) * float(g[j]) / (float(sx[j]) * float(sx[j]))
                 bet += tmp * tmp
             dlt = alpha * math.sqrt(alpha) / bet
             if dlt > stepmx:
@@ -552,17 +609,48 @@ def _hookdrv(n, x, f, g, a, udiag, p, xpls, fcn, sx, stepmx, steptl,
     mxtake = False
     while iretcd > 1:
         dlt, amu, phi, phip0, fstime, nwtake = _hook_1step(
-            n, g, a, udiag, p, sx, rnwtln, dlt, amu, dltp, phi, phip0,
-            fstime, sc, wrk0, epsm)
+            n,
+            g,
+            a,
+            udiag,
+            p,
+            sx,
+            rnwtln,
+            dlt,
+            amu,
+            dltp,
+            phi,
+            phip0,
+            fstime,
+            sc,
+            wrk0,
+            epsm,
+        )
         dltp = dlt
         dlt, iretcd, fplsp, fpls, mxtake = _tregup(
-            n, x, f, g, a, fcn, sc, sx, nwtake, stepmx, steptl, dlt,
-            iretcd, xplsp, fplsp, xpls, 3, udiag)
+            n,
+            x,
+            f,
+            g,
+            a,
+            fcn,
+            sc,
+            sx,
+            nwtake,
+            stepmx,
+            steptl,
+            dlt,
+            iretcd,
+            xplsp,
+            fplsp,
+            xpls,
+            3,
+            udiag,
+        )
     return fpls, dlt, iretcd, mxtake, amu, dltp, phi, phip0
 
 
-def _secunf(n, x, g, a, udiag, xpls, gpls, epsm, itncnt, rnf, iagflg,
-            noupdt):
+def _secunf(n, x, g, a, udiag, xpls, gpls, epsm, itncnt, rnf, iagflg, noupdt):
     """uncmin.c ``secunf`` (:1147): unfactored BFGS update (method 3).
     Returns ``noupdt``; mutates a."""
     s = np.zeros(n)
@@ -606,8 +694,11 @@ def _secunf(n, x, g, a, udiag, xpls, gpls, epsm, itncnt, rnf, iagflg,
     # bfgs update
     for j in range(n):
         for i in range(j, n):
-            a[i, j] = (float(a[i, j]) + float(y[i]) * float(y[j]) / den1
-                       - float(t[i]) * float(t[j]) / den2)
+            a[i, j] = (
+                float(a[i, j])
+                + float(y[i]) * float(y[j]) / den1
+                - float(t[i]) * float(t[j]) / den2
+            )
     return noupdt
 
 
@@ -644,8 +735,9 @@ def _secfac(n, x, g, a, xpls, gpls, epsm, itncnt, rnf, iagflg, noupdt):
     reltol = math.sqrt(rnf) if iagflg == 0 else rnf
     skpupd = True
     for i in range(n):
-        skpupd = (abs(float(y[i]) - float(w[i]))
-                  < reltol * _fmax2(abs(float(g[i])), abs(float(gpls[i]))))
+        skpupd = abs(float(y[i]) - float(w[i])) < reltol * _fmax2(
+            abs(float(g[i])), abs(float(gpls[i]))
+        )
         if not skpupd:
             break
     if skpupd:
@@ -752,8 +844,7 @@ def _hsnint(n, a, sx, method):
     """uncmin.c ``hsnint`` (:1539): initial Hessian for secant updates
     (diag(sx) as the factored L for methods 1-2, diag(sx²) for 3)."""
     for i in range(n):
-        a[i, i] = (float(sx[i]) * float(sx[i]) if method == 3
-                   else float(sx[i]))
+        a[i, i] = float(sx[i]) * float(sx[i]) if method == 3 else float(sx[i])
         for j in range(i):
             a[i, j] = 0.0
 
@@ -764,8 +855,7 @@ def _fstofd(m, n, xpls, fcn_vec, fpls, a, sx, rnoise, icase):
     ``fpls`` is the m-vector value at ``xpls``; ``xpls`` perturbed and
     restored in place."""
     for j in range(n):
-        stepsz = math.sqrt(rnoise) * _fmax2(abs(float(xpls[j])),
-                                            1.0 / float(sx[j]))
+        stepsz = math.sqrt(rnoise) * _fmax2(abs(float(xpls[j])), 1.0 / float(sx[j]))
         xtmpj = float(xpls[j])
         xpls[j] = xtmpj + stepsz
         fhat = fcn_vec(xpls)
@@ -784,8 +874,7 @@ def _fstocd(n, x, fcn, sx, rnoise, g):
     ``g``; ``x`` perturbed and restored in place."""
     for i in range(n):
         xtempi = float(x[i])
-        stepi = (rnoise ** (1.0 / 3.0)
-                 * _fmax2(abs(xtempi), 1.0 / float(sx[i])))
+        stepi = rnoise ** (1.0 / 3.0) * _fmax2(abs(xtempi), 1.0 / float(sx[i]))
         x[i] = xtempi + stepi
         fplus = fcn(x)
         x[i] = xtempi - stepi
@@ -801,8 +890,7 @@ def _sndofd(n, xpls, fcn, fpls, a, sx, rnoise):
     anbr = np.zeros(n)
     for i in range(n):
         xtmpi = float(xpls[i])
-        stepsz[i] = (rnoise ** (1.0 / 3.0)
-                     * _fmax2(abs(xtmpi), 1.0 / float(sx[i])))
+        stepsz[i] = rnoise ** (1.0 / 3.0) * _fmax2(abs(xtmpi), 1.0 / float(sx[i]))
         xpls[i] = xtmpi + float(stepsz[i])
         anbr[i] = fcn(xpls)
         xpls[i] = xtmpi
@@ -811,7 +899,8 @@ def _sndofd(n, xpls, fcn, fpls, a, sx, rnoise):
         xpls[i] = xtmpi + float(stepsz[i]) * 2.0
         fhat = fcn(xpls)
         a[i, i] = ((fpls - float(anbr[i])) + (fhat - float(anbr[i]))) / (
-            float(stepsz[i]) * float(stepsz[i]))
+            float(stepsz[i]) * float(stepsz[i])
+        )
         if i == 0:
             xpls[i] = xtmpi
             continue
@@ -821,7 +910,8 @@ def _sndofd(n, xpls, fcn, fpls, a, sx, rnoise):
             xpls[j] = xtmpj + float(stepsz[j])
             fhat = fcn(xpls)
             a[i, j] = ((fpls - float(anbr[i])) + (fhat - float(anbr[j]))) / (
-                float(stepsz[i]) * float(stepsz[j]))
+                float(stepsz[i]) * float(stepsz[j])
+            )
             xpls[j] = xtmpj
         xpls[i] = xtmpi
 
@@ -831,19 +921,25 @@ def _grdchk(n, x, fcn, f, g, typsiz, sx, fscale, rnf, analtl, msg):
     returns msg (−21 on probable coding error)."""
     wrk1 = np.zeros(n)
     fpls_vec = np.array([f])
-    _fstofd(1, n, x, lambda xx: np.array([fcn(xx)]), fpls_vec,
-            wrk1.reshape(1, n), sx, rnf, 1)
+    _fstofd(
+        1,
+        n,
+        x,
+        lambda xx: np.array([fcn(xx)]),
+        fpls_vec,
+        wrk1.reshape(1, n),
+        sx,
+        rnf,
+        1,
+    )
     for i in range(n):
-        gs = _fmax2(abs(f), fscale) / _fmax2(abs(float(x[i])),
-                                             float(typsiz[i]))
-        if abs(float(g[i]) - float(wrk1[i])) > _fmax2(
-                abs(float(g[i])), gs) * analtl:
+        gs = _fmax2(abs(f), fscale) / _fmax2(abs(float(x[i])), float(typsiz[i]))
+        if abs(float(g[i]) - float(wrk1[i])) > _fmax2(abs(float(g[i])), gs) * analtl:
             return -21
     return msg
 
 
-def _heschk(n, x, fcn, d1fcn, d2fcn, f, g, a, typsiz, sx, rnf, analtl,
-            iagflg, msg):
+def _heschk(n, x, fcn, d1fcn, d2fcn, f, g, a, typsiz, sx, rnf, analtl, iagflg, msg):
     """uncmin.c ``heschk`` (:1804): compare analytic vs FD Hessian;
     returns msg (−22 on probable coding error). Mutates a."""
     udiag = np.zeros(n)
@@ -858,10 +954,11 @@ def _heschk(n, x, fcn, d1fcn, d2fcn, f, g, a, typsiz, sx, rnf, analtl,
             a[j, i] = float(a[i, j])
     d2fcn(x, a)
     for j in range(n):
-        hs = _fmax2(abs(float(g[j])), 1.0) / _fmax2(abs(float(x[j])),
-                                                    float(typsiz[j]))
-        if abs(float(a[j, j]) - float(udiag[j])) > _fmax2(
-                abs(float(udiag[j])), hs) * analtl:
+        hs = _fmax2(abs(float(g[j])), 1.0) / _fmax2(abs(float(x[j])), float(typsiz[j]))
+        if (
+            abs(float(a[j, j]) - float(udiag[j]))
+            > _fmax2(abs(float(udiag[j])), hs) * analtl
+        ):
             return -22
         for i in range(j + 1, n):
             temp1 = float(a[i, j])
@@ -871,8 +968,22 @@ def _heschk(n, x, fcn, d1fcn, d2fcn, f, g, a, typsiz, sx, rnf, analtl,
     return msg
 
 
-def _opt_stop(n, xpls, fpls, gpls, x, itncnt, icscmx, gradtl, steptl,
-              sx, fscale, itnlim, iretcd, mxtake):
+def _opt_stop(
+    n,
+    xpls,
+    fpls,
+    gpls,
+    x,
+    itncnt,
+    icscmx,
+    gradtl,
+    steptl,
+    sx,
+    fscale,
+    itnlim,
+    iretcd,
+    mxtake,
+):
     """uncmin.c ``opt_stop`` (:1884): termination tests. Returns
     ``(itrmcd, icscmx)`` — 0 continue, 1 relgrad small, 2 relstep small,
     3 global step failed, 4 iteration limit, 5 stepmx hit 5×."""
@@ -881,8 +992,9 @@ def _opt_stop(n, xpls, fpls, gpls, x, itncnt, icscmx, gradtl, steptl,
     d = _fmax2(abs(fpls), fscale)
     rgx = 0.0
     for i in range(n):
-        relgrd = (abs(float(gpls[i]))
-                  * _fmax2(abs(float(xpls[i])), 1.0 / float(sx[i])) / d)
+        relgrd = (
+            abs(float(gpls[i])) * _fmax2(abs(float(xpls[i])), 1.0 / float(sx[i])) / d
+        )
         if rgx < relgrd:
             rgx = relgrd
     jtrmcd = 1
@@ -891,8 +1003,9 @@ def _opt_stop(n, xpls, fpls, gpls, x, itncnt, icscmx, gradtl, steptl,
             return 0, icscmx
         rsx = 0.0
         for i in range(n):
-            relstp = (abs(float(xpls[i]) - float(x[i]))
-                      / _fmax2(abs(float(xpls[i])), 1.0 / float(sx[i])))
+            relstp = abs(float(xpls[i]) - float(x[i])) / _fmax2(
+                abs(float(xpls[i])), 1.0 / float(sx[i])
+            )
             if rsx < relstp:
                 rsx = relstp
         jtrmcd = 2
@@ -909,8 +1022,24 @@ def _opt_stop(n, xpls, fpls, gpls, x, itncnt, icscmx, gradtl, steptl,
     return jtrmcd, icscmx
 
 
-def _optchk(n, x, typsiz, sx, fscale, gradtl, itnlim, ndigit, epsm, dlt,
-            method, iexp, iagflg, iahflg, stepmx, msg):
+def _optchk(
+    n,
+    x,
+    typsiz,
+    sx,
+    fscale,
+    gradtl,
+    itnlim,
+    ndigit,
+    epsm,
+    dlt,
+    method,
+    iexp,
+    iagflg,
+    iahflg,
+    stepmx,
+    msg,
+):
     """uncmin.c ``optchk`` (:1973): validate/default the inputs. Mutates
     ``typsiz``/``sx``; returns the (possibly reset) scalars ``(fscale,
     itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, msg)``
@@ -924,17 +1053,13 @@ def _optchk(n, x, typsiz, sx, fscale, gradtl, itnlim, ndigit, epsm, dlt,
     if iexp != 0:
         iexp = 1
     if (msg // 2) % 2 == 1 and iagflg == 0:
-        return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, \
-            stepmx, -6
+        return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -6
     if (msg // 4) % 2 == 1 and iahflg == 0:
-        return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, \
-            stepmx, -7
+        return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -7
     if n <= 0:
-        return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, \
-            stepmx, -1
+        return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -1
     if n == 1 and msg % 2 == 0:
-        return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, \
-            stepmx, -2
+        return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -2
     # compute scale matrix
     for i in range(n):
         if float(typsiz[i]) == 0.0:
@@ -946,8 +1071,9 @@ def _optchk(n, x, typsiz, sx, fscale, gradtl, itnlim, ndigit, epsm, dlt,
     if stepmx <= 0.0:
         stpsiz = 0.0
         for i in range(n):
-            stpsiz = _rfma(float(x[i]) * float(x[i]) * float(sx[i]),
-                           float(sx[i]), stpsiz)
+            stpsiz = _rfma(
+                float(x[i]) * float(x[i]) * float(sx[i]), float(sx[i]), stpsiz
+            )
         stepmx = 1000.0 * _fmax2(math.sqrt(stpsiz), 1.0)
     # check function scale
     if fscale == 0.0:
@@ -955,22 +1081,18 @@ def _optchk(n, x, typsiz, sx, fscale, gradtl, itnlim, ndigit, epsm, dlt,
     elif fscale < 0.0:
         fscale = -fscale
     if gradtl < 0.0:
-        return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, \
-            stepmx, -3
+        return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -3
     if itnlim <= 0:
-        return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, \
-            stepmx, -4
+        return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -4
     if ndigit == 0:
-        return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, \
-            stepmx, -5
+        return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -5
     if ndigit < 0:
         ndigit = int(-math.log10(epsm))
     if dlt <= 0.0:
         dlt = -1.0
     elif dlt > stepmx:
         dlt = stepmx
-    return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, \
-        stepmx, msg
+    return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, msg
 
 
 def _prt_result(n, x, f, g, p, itncnt, iflg):
@@ -989,9 +1111,28 @@ def _prt_result(n, x, f, g, p, itncnt, iflg):
     print()
 
 
-def optdrv(n, x, fcn, d1fcn, d2fcn, typsiz, fscale, method, iexp, msg,
-           ndigit, itnlim, iagflg, iahflg, dlt, gradtl, stepmx, steptl,
-           xpls, gpls):
+def optdrv(
+    n,
+    x,
+    fcn,
+    d1fcn,
+    d2fcn,
+    typsiz,
+    fscale,
+    method,
+    iexp,
+    msg,
+    ndigit,
+    itnlim,
+    iagflg,
+    iahflg,
+    dlt,
+    gradtl,
+    stepmx,
+    steptl,
+    xpls,
+    gpls,
+):
     """uncmin.c ``optdrv`` (:2166): the optimization driver. Mutates
     ``x`` (working copy), fills ``xpls``/``gpls``; returns ``(fpls,
     itrmcd, itncnt, msg)`` with msg < 0 on input error, 0 otherwise."""
@@ -1003,9 +1144,24 @@ def optdrv(n, x, fcn, d1fcn, d2fcn, typsiz, fscale, method, iexp, msg,
     wrk1 = np.zeros(n)
     itncnt = 0
     epsm = _DBL_EPSILON
-    (fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx,
-     msg) = _optchk(n, x, typsiz, sx, fscale, gradtl, itnlim, ndigit,
-                    epsm, dlt, method, iexp, iagflg, iahflg, stepmx, msg)
+    (fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, msg) = _optchk(
+        n,
+        x,
+        typsiz,
+        sx,
+        fscale,
+        gradtl,
+        itnlim,
+        ndigit,
+        epsm,
+        dlt,
+        method,
+        iexp,
+        iagflg,
+        iahflg,
+        stepmx,
+        msg,
+    )
     if msg < 0:
         return 0.0, 0, itncnt, msg
     rnf = _fmax2(10.0 ** (-float(ndigit)), epsm)
@@ -1014,18 +1170,27 @@ def optdrv(n, x, fcn, d1fcn, d2fcn, typsiz, fscale, method, iexp, msg,
     f = fcn(x)
     # analytic or finite-difference gradient (+ optional check)
     if not iagflg:
-        _fstofd(1, n, x, lambda xx: np.array([fcn(xx)]), np.array([f]),
-                g.reshape(1, n), sx, rnf, 1)
+        _fstofd(
+            1,
+            n,
+            x,
+            lambda xx: np.array([fcn(xx)]),
+            np.array([f]),
+            g.reshape(1, n),
+            sx,
+            rnf,
+            1,
+        )
     else:
         g[:] = d1fcn(x)
         if (msg // 2) % 2 == 0:
-            msg = _grdchk(n, x, fcn, f, g, typsiz, sx, fscale, rnf,
-                          analtl, msg)
+            msg = _grdchk(n, x, fcn, f, g, typsiz, sx, fscale, rnf, analtl, msg)
             if msg < 0:
                 return f, 0, itncnt, msg
     iretcd = -1
-    itrmcd, icscmx = _opt_stop(n, x, f, g, wrk1, itncnt, 0, gradtl,
-                               steptl, sx, fscale, itnlim, iretcd, False)
+    itrmcd, icscmx = _opt_stop(
+        n, x, f, g, wrk1, itncnt, 0, gradtl, steptl, sx, fscale, itnlim, iretcd, False
+    )
     if itrmcd != 0:
         # immediate convergence: optdrv_end with the itrmcd-3 reset
         fpls = f
@@ -1048,8 +1213,22 @@ def optdrv(n, x, fcn, d1fcn, d2fcn, typsiz, fscale, method, iexp, msg,
             if (msg // 4) % 2 == 1:
                 d2fcn(x, a)
             else:
-                msg = _heschk(n, x, fcn, d1fcn, d2fcn, f, g, a, typsiz,
-                              sx, rnf, analtl, iagflg, msg)
+                msg = _heschk(
+                    n,
+                    x,
+                    fcn,
+                    d1fcn,
+                    d2fcn,
+                    f,
+                    g,
+                    a,
+                    typsiz,
+                    sx,
+                    rnf,
+                    analtl,
+                    iagflg,
+                    msg,
+                )
                 if msg < 0:
                     return f, 0, itncnt, msg
     if (msg // 8) % 2 == 0:
@@ -1081,30 +1260,49 @@ def optdrv(n, x, fcn, d1fcn, d2fcn, typsiz, fscale, method, iexp, msg,
                     phpsav = phip0
             if method == 1:
                 fpls, iretcd, mxtake = _lnsrch(
-                    n, x, f, g, p, xpls, fcn, stepmx, steptl, sx)
+                    n, x, f, g, p, xpls, fcn, stepmx, steptl, sx
+                )
             elif method == 2:
                 fpls, dlt, iretcd, mxtake = _dogdrv(
-                    n, x, f, g, a, p, xpls, fcn, sx, stepmx, steptl, dlt)
+                    n, x, f, g, a, p, xpls, fcn, sx, stepmx, steptl, dlt
+                )
             else:
-                (fpls, dlt, iretcd, mxtake, amu, dltp, phi,
-                 phip0) = _hookdrv(
-                    n, x, f, g, a, udiag, p, xpls, fcn, sx, stepmx,
-                    steptl, dlt, amu, dltp, phi, phip0, epsm, itncnt)
+                (fpls, dlt, iretcd, mxtake, amu, dltp, phi, phip0) = _hookdrv(
+                    n,
+                    x,
+                    f,
+                    g,
+                    a,
+                    udiag,
+                    p,
+                    xpls,
+                    fcn,
+                    sx,
+                    stepmx,
+                    steptl,
+                    dlt,
+                    amu,
+                    dltp,
+                    phi,
+                    phip0,
+                    epsm,
+                    itncnt,
+                )
             # if the step failed on a forward-difference gradient,
             # retry with central differences
             if iretcd == 1 and iagflg == 0:
                 iagflg = -1
                 _fstocd(n, x, fcn, sx, rnf, g)
                 if method == 1:
-                    continue        # goto L105
+                    continue  # goto L105
                 dlt = dltsav
                 if method == 2:
-                    continue        # goto L105
+                    continue  # goto L105
                 amu = amusav
                 dltp = dlpsav
                 phi = phisav
                 phip0 = phpsav
-                _chlhsn(n, a, epsm, sx, udiag)   # goto L103
+                _chlhsn(n, a, epsm, sx, udiag)  # goto L103
                 continue
             break
         # calculate step for output
@@ -1114,24 +1312,48 @@ def optdrv(n, x, fcn, d1fcn, d2fcn, typsiz, fscale, method, iexp, msg,
         if iagflg == -1:
             _fstocd(n, xpls, fcn, sx, rnf, gpls)
         elif iagflg == 0:
-            _fstofd(1, n, xpls, lambda xx: np.array([fcn(xx)]),
-                    np.array([fpls]), gpls.reshape(1, n), sx, rnf, 1)
+            _fstofd(
+                1,
+                n,
+                xpls,
+                lambda xx: np.array([fcn(xx)]),
+                np.array([fpls]),
+                gpls.reshape(1, n),
+                sx,
+                rnf,
+                1,
+            )
         else:
             gpls[:] = d1fcn(xpls)
         # check whether stopping criteria satisfied
-        itrmcd, icscmx = _opt_stop(n, xpls, fpls, gpls, x, itncnt,
-                                   icscmx, gradtl, steptl, sx, fscale,
-                                   itnlim, iretcd, mxtake)
+        itrmcd, icscmx = _opt_stop(
+            n,
+            xpls,
+            fpls,
+            gpls,
+            x,
+            itncnt,
+            icscmx,
+            gradtl,
+            steptl,
+            sx,
+            fscale,
+            itnlim,
+            iretcd,
+            mxtake,
+        )
         if itrmcd != 0:
             break
         # evaluate hessian at xpls
         if iexp:
             if method == 3:
-                noupdt = _secunf(n, x, g, a, udiag, xpls, gpls, epsm,
-                                 itncnt, rnf, iagflg, noupdt)
+                noupdt = _secunf(
+                    n, x, g, a, udiag, xpls, gpls, epsm, itncnt, rnf, iagflg, noupdt
+                )
             else:
-                noupdt = _secfac(n, x, g, a, xpls, gpls, epsm, itncnt,
-                                 rnf, iagflg, noupdt)
+                noupdt = _secfac(
+                    n, x, g, a, xpls, gpls, epsm, itncnt, rnf, iagflg, noupdt
+                )
         else:
             if not iahflg:
                 if iagflg:
@@ -1158,15 +1380,51 @@ def optdrv(n, x, fcn, d1fcn, d2fcn, typsiz, fscale, method, iexp, msg,
     return fpls, itrmcd, itncnt, 0
 
 
-def optif9(n, x, fcn, d1fcn, d2fcn, typsiz, fscale, method, iexp, msg,
-           ndigit, itnlim, iagflg, iahflg, dlt, gradtl, stepmx, steptl):
+def optif9(
+    n,
+    x,
+    fcn,
+    d1fcn,
+    d2fcn,
+    typsiz,
+    fscale,
+    method,
+    iexp,
+    msg,
+    ndigit,
+    itnlim,
+    iagflg,
+    iahflg,
+    dlt,
+    gradtl,
+    stepmx,
+    steptl,
+):
     """uncmin.c ``optif9`` (:2561): the full-control entry point R's
     ``nlm`` uses. ``x``/``typsiz`` are mutated working copies. Returns
     ``(xpls, fpls, gpls, itrmcd, itncnt, msg)``."""
     xpls = np.zeros(n)
     gpls = np.zeros(n)
     fpls, itrmcd, itncnt, msg = optdrv(
-        n, x, fcn, d1fcn, d2fcn, typsiz, fscale, method, iexp, msg,
-        ndigit, itnlim, iagflg, iahflg, dlt, gradtl, stepmx, steptl,
-        xpls, gpls)
+        n,
+        x,
+        fcn,
+        d1fcn,
+        d2fcn,
+        typsiz,
+        fscale,
+        method,
+        iexp,
+        msg,
+        ndigit,
+        itnlim,
+        iagflg,
+        iahflg,
+        dlt,
+        gradtl,
+        stepmx,
+        steptl,
+        xpls,
+        gpls,
+    )
     return xpls, fpls, gpls, itrmcd, itncnt, msg

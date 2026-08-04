@@ -9,6 +9,7 @@ cumulative ops, binning.
 * ``unique`` / ``duplicated`` / ``tabulate``.
 * ``cut`` / ``findInterval`` — bin a numeric vector to a factor / index.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -92,9 +93,7 @@ def sort(x, decreasing=False):
     if isinstance(x, pl.Series):
         return x.sort(descending=decreasing)
     if isinstance(x, pl.DataFrame):
-        raise TypeError(
-            "sort(DataFrame): pass a column name to .sort() instead"
-        )
+        raise TypeError("sort(DataFrame): pass a column name to .sort() instead")
     arr = np.sort(np.asarray(x))
     return arr[::-1] if decreasing else arr
 
@@ -234,7 +233,7 @@ def tabulate(x, nbins=None):
         nbins = int(arr.max()) + 1 if arr.size else 0
     if nbins == 0:
         return np.zeros(0, dtype=int)
-    return np.bincount(arr, minlength=int(nbins))[:int(nbins)]
+    return np.bincount(arr, minlength=int(nbins))[: int(nbins)]
 
 
 def cut(x, breaks, *, labels=None, right=True, include_lowest=False):
@@ -303,28 +302,21 @@ def cut(x, breaks, *, labels=None, right=True, include_lowest=False):
                 for i in range(n_bins)
             ]
             if include_lowest:
-                lab_list[0] = (
-                    f"[{_fmt(breaks_arr[0])},{_fmt(breaks_arr[1])}]"
-                )
+                lab_list[0] = f"[{_fmt(breaks_arr[0])},{_fmt(breaks_arr[1])}]"
         else:
             lab_list = [
                 f"[{_fmt(breaks_arr[i])},{_fmt(breaks_arr[i + 1])})"
                 for i in range(n_bins)
             ]
             if include_lowest:
-                lab_list[-1] = (
-                    f"[{_fmt(breaks_arr[-2])},{_fmt(breaks_arr[-1])}]"
-                )
+                lab_list[-1] = f"[{_fmt(breaks_arr[-2])},{_fmt(breaks_arr[-1])}]"
     else:
         lab_list = [str(la) for la in labels]
         if len(lab_list) != n_bins:
-            raise ValueError(
-                f"cut(): {len(lab_list)} labels but {n_bins} bins"
-            )
+            raise ValueError(f"cut(): {len(lab_list)} labels but {n_bins} bins")
 
     result = [
-        None if out_of_range[i] else lab_list[int(idx[i])]
-        for i in range(len(arr))
+        None if out_of_range[i] else lab_list[int(idx[i])] for i in range(len(arr))
     ]
     return pl.Series(result, dtype=pl.Utf8).cast(pl.Enum(lab_list))
 

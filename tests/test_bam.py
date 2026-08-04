@@ -421,7 +421,6 @@ def test_chicago_lag():
 # a continuous by makes bamF ≠ bamT by ~1e-3. Sourcing the raw by under
 # discrete=TRUE would be a parity bug (reproducing bamF under the bamT flag);
 # the bamF check below carries a lower bound to guard against that regression.
-# See .claude/plans/bam-rf1a-binned-by-parity.md.
 
 _RF_BY = Path(__file__).parent / "fixtures" / "bam_rf_by"
 
@@ -968,6 +967,196 @@ def test_bam_discrete_matrix_by_scatter_matches_dense():
     np.testing.assert_allclose(XWyd(d, w, yv), X.T @ (w * yv), rtol=0, atol=1e-10)
 
 
+def test_bam_discrete_parametric_terms2tensor_shapes():
+    """mgcv stores the parametric part as ordinary discrete terms, one per
+    ``terms2tensor`` block (bam.r:2091-2174 → 2436-2451): the intercept is a
+    1x1 marginal read through the all-ones ``k`` column, a factor main effect
+    is its contrast matrix on the factor's ``nr`` levels, and an interaction is
+    one marginal per variable in REVERSE order (terms2tensor:2150).
+
+    Verified against R for ``y ~ fb + z + s(x, k=10)``, where
+    ``bam(..., discrete=TRUE, fit=FALSE)`` reports Xd dims 1x1, 3x2, 954x1,
+    951x9 with ``ts = 1 2 3 4``, ``dt = 1 1 1 1``.
+    """
+    rng = np.random.default_rng(11)
+    n = 3000
+    x = rng.uniform(0, 1, n)
+    fb = np.asarray(["a", "b", "c"])[rng.integers(0, 3, n)]
+    yv = 2 + np.sin(2 * np.pi * x) + rng.standard_normal(n) * 0.3
+    m = hea.models.bam(
+        "y ~ fb + s(x, k=10)", {"y": yv, "x": x, "fb": fb}, discrete=True
+    )
+    terms = m._discrete_design.terms
+    assert [t.label for t in terms] == ["(Intercept)", "fb", "s(x)"]
+    assert [t.kind for t in terms] == ["single", "single", "single"]
+    # Intercept: the literal 1x1 matrix, on discrete_mf's appended ones column.
+    np.testing.assert_array_equal(terms[0].Xd_list[0], np.ones((1, 1)))
+    assert terms[0].k_cols[0] == (
+        int(m._discrete_frame.ks[-1, 0]),
+        int(m._discrete_frame.ks[-1, 1]),
+    )
+    assert np.all(m._discrete_frame.k[:, terms[0].k_cols[0][0]] == 0)
+    # Factor: discretised to its 3 levels, 2 treatment-contrast columns.
+    assert terms[1].Xd_list[0].shape == (3, 2)
+
+
+def test_bam_discrete_parametric_interaction_marginal_order():
+    """An interaction's marginals go in REVERSE variable order — the row
+    tensor takes its FIRST marginal as slowest-varying (``tensorXj``,
+    discrete.c:301) where hea's dense ``_khatri_rao`` takes the first atom as
+    fastest — so the discrete columns land in the dense design's order. A
+    parametric atom that is not a bare discretised column (``I(x^2)``) leaves
+    its block, and every later block, un-discretised."""
+    from hea.models.bam import design_full_X
+
+    rng = np.random.default_rng(12)
+    n = 1200
+    x = rng.uniform(0, 1, n)
+    a = np.asarray(["p", "q", "r"])[rng.integers(0, 3, n)]
+    b = np.asarray(["u", "v"])[rng.integers(0, 2, n)]
+    yv = rng.standard_normal(n)
+    data = {"y": yv, "x": x, "a": a, "b": b}
+
+    m = hea.models.bam("y ~ a*b + s(x, k=8)", data, discrete=True)
+    terms = m._discrete_design.terms
+    assert [t.label for t in terms] == ["(Intercept)", "a", "b", "a:b", "s(x)"]
+    # a:b — marginals reversed (b then a), so p = 1*2 matches the dense block.
+    assert [Xd.shape for Xd in terms[3].Xd_list] == [(2, 1), (3, 2)]
+    from hea.formula import materialize
+
+    Xf = design_full_X(m._discrete_design)
+    Xdense = materialize(m._expanded, m.data).to_numpy().astype(float)
+    np.testing.assert_array_equal(Xf[:, :6], Xdense)
+
+    m2 = hea.models.bam("y ~ I(x^2) + a + s(x, k=8)", data, discrete=True)
+    kinds = {t.label: t.kind for t in m2._discrete_design.terms}
+    assert kinds["(Intercept)"] == "single"
+    assert kinds["I(x^2)"] == "param"  # no column to compress
+    assert kinds["a"] == "param"  # and the covered-margin chain stops there
+
+
+def test_bam_discrete_parametric_split_is_numerically_exact():
+    """Splitting the parametric part into marginals must not move the design:
+    the materialised ``X`` is bit-identical to the un-split store and ``X'WX``
+    differs only by summation reassociation."""
+    import sys
+
+    from hea.models.bam import XWXd, design_full_X, param_tensor_blocks
+
+    bam_mod = sys.modules["hea.models.bam"]
+    rng = np.random.default_rng(13)
+    n = 2500
+    x = rng.uniform(0, 1, n)
+    fb = np.asarray(["a", "b", "c", "d"])[rng.integers(0, 4, n)]
+    yv = rng.poisson(2.0, n).astype(float)
+    data = {"y": yv, "x": x, "fb": fb}
+    f = "y ~ fb + s(x, k=8, by=fb)"
+
+    m_split = hea.models.bam(f, data, family=Poisson(), discrete=True, sp=np.ones(4))
+    real = bam_mod.param_tensor_blocks
+    bam_mod.param_tensor_blocks = lambda *a, **kw: []
+    try:
+        m_flat = hea.models.bam(f, data, family=Poisson(), discrete=True, sp=np.ones(4))
+    finally:
+        bam_mod.param_tensor_blocks = real
+    assert param_tensor_blocks is real
+
+    d1, d0 = m_split._discrete_design, m_flat._discrete_design
+    assert d1.p == d0.p
+    assert [t.kind for t in d0.terms][0] == "param"
+    np.testing.assert_array_equal(design_full_X(d1), design_full_X(d0))
+    w = rng.uniform(0.1, 2.0, n)
+    A1, A0 = XWXd(d1, w), XWXd(d0, w)
+    np.testing.assert_allclose(A1, A0, rtol=0, atol=1e-9 * np.abs(A0).max())
+
+
+def test_bin_accum_single_bin_is_the_sequential_sum():
+    """``m == 1`` takes a register accumulator instead of the scatter, so the
+    intercept marginal is not bound by store-to-load forwarding. It must fold
+    the SAME values in the SAME row-ascending order mgcv's
+    ``wb[K[kk]] += w[kk]`` (discrete.c:1775) does — bit for bit."""
+    from hea.models.bam import _bin_accum
+
+    rng = np.random.default_rng(14)
+    for n in (1, 7, 5000):
+        for scale in (1.0, 1e6, 1e-6):
+            v = rng.standard_normal(n) * scale
+            u = rng.standard_normal(n)
+            k0 = np.zeros(n, dtype=np.int64)
+            seq = 0.0
+            for t in v:
+                seq += t
+            assert _bin_accum(k0, v, 1)[0].hex() == float(seq).hex()
+            sequ = 0.0
+            for t, s in zip(v, u):
+                sequ += t * s
+            assert _bin_accum(k0, v, 1, u=u)[0].hex() == float(sequ).hex()
+
+
+@pytest.mark.skipif(not have_rscript(), reason="Rscript not on PATH (install R)")
+def test_bam_discrete_bins_parametric_covariates_like_mgcv(tmp_path):
+    """``bam(discrete=TRUE)`` puts the parametric covariates through
+    ``compress.df`` too (bam.r:321-350), so a continuous parametric term is
+    fitted on its BINNED values — bamT and bamF genuinely differ, exactly as
+    they do for a continuous ``by=``. hea must land on bamT, not bamF: storing
+    the parametric columns un-binned gave a third answer that matched neither
+    (b_z 1.666667 against mgcv's 1.666635 / 1.666775)."""
+    rng = np.random.default_rng(21)
+    n = 2500
+    x = rng.uniform(0, 1, n)
+    z = rng.uniform(0, 1, n)
+    yv = np.sin(6 * x) + 1.7 * z + rng.standard_normal(n) * 0.3
+    csv_path = tmp_path / "d.csv"
+    with open(csv_path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["y", "x", "z"])
+        for i in range(n):
+            w.writerow([repr(float(yv[i])), repr(float(x[i])), repr(float(z[i]))])
+    rexpr = (
+        f'suppressMessages(library(mgcv));d<-read.csv("{csv_path}");'
+        'mT<-bam(y~z+s(x,k=10),data=d,discrete=TRUE,method="fREML");'
+        'mF<-bam(y~z+s(x,k=10),data=d,discrete=FALSE,method="fREML");'
+        'cat(sprintf("%.17g %.17g %.17g %.17g",'
+        "coef(mT)[2],mT$deviance,coef(mF)[2],mF$deviance))"
+    )
+    r_bT, r_devT, r_bF, r_devF = (
+        float(v)
+        for v in subprocess.run(
+            ["Rscript", "-e", rexpr],
+            stdin=subprocess.DEVNULL,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        ).stdout.split()
+    )
+    # The two mgcv rails must actually differ, or the test proves nothing.
+    assert abs(r_bT - r_bF) > 1e-6
+
+    data = {"y": yv, "x": x, "z": z}
+    mT = hea.models.bam("y ~ z + s(x, k=10)", data, discrete=True, method="fREML")
+    mF = hea.models.bam("y ~ z + s(x, k=10)", data, discrete=False, method="fREML")
+    assert abs(float(np.asarray(mT.coef)[1]) - r_bT) < 1e-10
+    assert abs(float(mT.deviance) - r_devT) < 1e-8 * (abs(r_devT) + 1.0)
+    assert abs(float(np.asarray(mF.coef)[1]) - r_bF) < 1e-10
+    assert abs(float(mF.deviance) - r_devF) < 1e-8 * (abs(r_devF) + 1.0)
+
+
+def test_bam_no_parametric_columns():
+    """``y ~ s(x) - 1`` has a zero-column parametric design; polars collapses
+    that to ``(0, 0)``, so the row count has to come from the response (the
+    guard gam.__init__ already carries)."""
+    rng = np.random.default_rng(15)
+    n = 1500
+    x = rng.uniform(0, 1, n)
+    yv = 2 + np.sin(6 * x) + rng.standard_normal(n) * 0.3
+    for disc in (False, True):
+        m = hea.models.bam("y ~ s(x, k=8) - 1", {"y": yv, "x": x}, discrete=disc)
+        assert m.n == n
+        assert m.fitted_values.shape == (n,)
+        assert np.isfinite(m.deviance)
+
+
 def test_distinct_exceeds_1d_exact_vs_npunique():
     """RF1a-R5: the early-exit ``>threshold distinct?`` predicate must be
     EXACTLY ``np.unique(a).size > threshold`` (it drives compress.df's round
@@ -1104,11 +1293,15 @@ def test_bam_mini_mf_drops_unused_columns():
     n = 300
     x0 = rng.uniform(0, 1, n)
     x1 = rng.uniform(0, 1, n)
-    z = rng.uniform(0, 1, n)            # never referenced by the formula
+    z = rng.uniform(0, 1, n)  # never referenced by the formula
     y = np.sin(2 * np.pi * x1) + 0.6 * x0 + rng.normal(0, 0.3, n)
-    m = hea.models.bam("y ~ x0 + s(x1)",
-                       {"y": y, "x0": x0, "x1": x1, "z": z},
-                       method="REML", chunk_size=50, sp=[0.0117])
+    m = hea.models.bam(
+        "y ~ x0 + s(x1)",
+        {"y": y, "x0": x0, "x1": x1, "z": z},
+        method="REML",
+        chunk_size=50,
+        sp=[0.0117],
+    )
     assert float(np.sum(m.edf)) == pytest.approx(9.418359686148126, abs=1e-6)
 
 
@@ -1130,13 +1323,18 @@ def test_bam_mini_mf_matrix_response_chunk():
     from hea.family import cnorm
 
     _, df, _ = _censored_frames()
-    m = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=cnorm(),
-                       method="fREML", chunk_size=50)
-    np.testing.assert_allclose(np.asarray(m.sp),
-                               [0.3551577, 1.3868056], rtol=1e-6)
+    m = hea.models.bam(
+        "cbind(y, yat) ~ s(x0) + s(x1)",
+        df,
+        family=cnorm(),
+        method="fREML",
+        chunk_size=50,
+    )
+    np.testing.assert_allclose(np.asarray(m.sp), [0.3551577, 1.3868056], rtol=1e-6)
     assert float(np.sum(m.edf)) == pytest.approx(9.476528568, abs=1e-6)
     assert float(np.exp(m.family.get_theta()[0])) == pytest.approx(
-        0.5593111415963565, rel=1e-6)
+        0.5593111415963565, rel=1e-6
+    )
     # Chunking is real: the chunked sp is far from the unchunked optimum
     # (mgcv full sp[1] = 0.8078948), so this exercises the subsample path.
     assert abs(float(np.asarray(m.sp)[1]) - 0.8078948) > 0.3
@@ -1476,8 +1674,7 @@ def test_bam_scale_extended_matches_mgcv():
     np.testing.assert_allclose(m1.sp, [0.1106650922], rtol=1e-4)
     np.testing.assert_allclose(m1.sigma_squared, 0.9833106126, rtol=1e-5)
     np.testing.assert_allclose(_p_of(m1), 1.112649448, rtol=0, atol=1e-4)
-    np.testing.assert_allclose(m1.REML_criterion / 2, 508.5846309308,
-                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m1.REML_criterion / 2, 508.5846309308, rtol=0, atol=1e-4)
     np.testing.assert_allclose(m1.edf_total, 6.24722775, rtol=1e-4)
     np.testing.assert_allclose(m1.deviance, 434.23818021, rtol=1e-6)
 
@@ -1485,38 +1682,35 @@ def test_bam_scale_extended_matches_mgcv():
     assert m2.sigma_squared == 1.5 and not m2.scale_estimated
     np.testing.assert_allclose(m2.sp, [0.179020433], rtol=1e-4)
     np.testing.assert_allclose(_p_of(m2), 1.227579735, rtol=0, atol=1e-4)
-    np.testing.assert_allclose(m2.REML_criterion / 2, 509.4023694243,
-                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m2.REML_criterion / 2, 509.4023694243, rtol=0, atol=1e-4)
 
     m3 = hea.models.bam("y ~ s(x)", df, family=tw(), discrete=False)
     np.testing.assert_allclose(m3.sp, [0.1085864303], rtol=1e-4)
     np.testing.assert_allclose(m3.sigma_squared, 0.9670077775, rtol=1e-5)
     np.testing.assert_allclose(_p_of(m3), 1.109425155, rtol=0, atol=1e-4)
-    np.testing.assert_allclose(m3.REML_criterion / 2, 508.8014334802,
-                               rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m3.REML_criterion / 2, 508.8014334802, rtol=0, atol=1e-4)
 
     # nb: family scale slot NULL — user scale= silently ignored, φ ≡ 1.
     g2 = RGenerator(12)
     x2 = g2.uniform(0, 1, n)
-    yq = np.floor(np.exp(0.8 + np.sin(2 * np.pi * x2))
-                  * (0.5 + g2.uniform(0, 1, n)) * 2)
+    yq = np.floor(
+        np.exp(0.8 + np.sin(2 * np.pi * x2)) * (0.5 + g2.uniform(0, 1, n)) * 2
+    )
     df2 = pl.DataFrame({"x": x2, "y": yq})
     c0 = hea.models.bam("y ~ s(x)", df2, family=nb(theta=2), discrete=True)
-    c1 = hea.models.bam("y ~ s(x)", df2, family=nb(theta=2), discrete=True,
-                        scale=3.0)
+    c1 = hea.models.bam("y ~ s(x)", df2, family=nb(theta=2), discrete=True, scale=3.0)
     for c in (c0, c1):
         np.testing.assert_allclose(c.sp, [0.1278109034], rtol=1e-4)
         assert c.sigma_squared == 1.0
-        np.testing.assert_allclose(c.REML_criterion / 2, 690.5789612317,
-                                   rtol=0, atol=1e-4)
+        np.testing.assert_allclose(
+            c.REML_criterion / 2, 690.5789612317, rtol=0, atol=1e-4
+        )
 
     # poisson discrete: fixed φ≠1 shifts the criterion; scale<0 estimates.
-    p1 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=True,
-                        scale=2.5)
+    p1 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=True, scale=2.5)
     np.testing.assert_allclose(p1.sp, [0.3361340333], rtol=1e-4)
     assert p1.sigma_squared == 2.5
-    p2 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=True,
-                        scale=-1.0)
+    p2 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=True, scale=-1.0)
     np.testing.assert_allclose(p2.sp, [0.08140612721], rtol=1e-4)
     np.testing.assert_allclose(p2.sigma_squared, 0.5493602061, rtol=1e-5)
     assert p2.scale_estimated
@@ -1526,8 +1720,7 @@ def test_bam_scale_extended_matches_mgcv():
     x3 = g3.uniform(0, 1, n)
     y3 = np.sin(2 * np.pi * x3) + (g3.uniform(0, 1, n) - 0.5)
     df3 = pl.DataFrame({"x": x3, "y": y3})
-    g1 = hea.models.bam("y ~ s(x)", df3, family=Gaussian(), discrete=True,
-                        scale=0.2)
+    g1 = hea.models.bam("y ~ s(x)", df3, family=Gaussian(), discrete=True, scale=0.2)
     np.testing.assert_allclose(g1.sp, [0.03364092463], rtol=1e-4)
     assert g1.sigma_squared == 0.2
     g0 = hea.models.bam("y ~ s(x)", df3, family=Gaussian(), discrete=True)
@@ -1553,12 +1746,10 @@ def test_bam_min_sp_warns_ignored():
 
     m_plain = hea.models.bam("y ~ s(x, k=10) + s(z, k=10)", d)
     with pytest.warns(UserWarning, match="min.sp not supported with fast"):
-        m_msp = hea.models.bam("y ~ s(x, k=10) + s(z, k=10)", d,
-                               min_sp=[0.05, 0.5])
+        m_msp = hea.models.bam("y ~ s(x, k=10) + s(z, k=10)", d, min_sp=[0.05, 0.5])
     # min.sp was ignored ⇒ identical optimum.
     np.testing.assert_allclose(m_msp.sp, m_plain.sp, rtol=1e-10)
-    np.testing.assert_allclose(m_msp.edf_total, m_plain.edf_total,
-                               rtol=1e-10)
+    np.testing.assert_allclose(m_msp.edf_total, m_plain.edf_total, rtol=1e-10)
 
 
 def test_bam_parapen_matches_mgcv():
@@ -1575,27 +1766,41 @@ def test_bam_parapen_matches_mgcv():
     x0 = g.uniform(0, 1, n)
     x1 = g.uniform(0, 1, n)
     x2 = g.uniform(0, 1, n)
-    y = (2 * np.sin(np.pi * x0) + 0.5 * x1 + 0.3 * x2
-         - 0.4 * x1 * x2 + g.normal(0, 1, n) * 0.5)
+    y = (
+        2 * np.sin(np.pi * x0)
+        + 0.5 * x1
+        + 0.3 * x2
+        - 0.4 * x1 * x2
+        + g.normal(0, 1, n) * 0.5
+    )
     d = {"y": y, "x0": x0, "x1": x1, "x2": x2}
 
-    m = hea.models.bam("y ~ s(x0) + x1 + x2", d, method="fREML",
-                       paraPen={"x1": {"S": np.array([[1.0]])}})
-    assert m._Mp == 3                                # x1 leaves the null space
+    m = hea.models.bam(
+        "y ~ s(x0) + x1 + x2",
+        d,
+        method="fREML",
+        paraPen={"x1": {"S": np.array([[1.0]])}},
+    )
+    assert m._Mp == 3  # x1 leaves the null space
     assert [s.block.label for s in m._slots] == ["x1", "s(x0)"]
-    np.testing.assert_allclose(np.asarray(m.sp),
-                               [3.784527815, 0.08479036464], rtol=1e-4)
+    np.testing.assert_allclose(
+        np.asarray(m.sp), [3.784527815, 0.08479036464], rtol=1e-4
+    )
     np.testing.assert_allclose(m.edf_total, 8.565536333, rtol=1e-5)
-    np.testing.assert_allclose(m.REML_criterion / 2.0, 301.940072244,
-                               rtol=1e-6)
-    np.testing.assert_allclose(np.asarray(m.coefficients)[:3],
-                               [1.4431799, 0.24269495, 0.12788868],
-                               rtol=1e-4)
+    np.testing.assert_allclose(m.REML_criterion / 2.0, 301.940072244, rtol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(m.coefficients)[:3], [1.4431799, 0.24269495, 0.12788868], rtol=1e-4
+    )
     # single-LP only (mgcv.r:930 stops multi-formula).
     from hea.family import gaulss
+
     with pytest.raises(ValueError, match="multi-formula"):
-        hea.models.bam(["y ~ s(x0) + x1", "~ 1"], d, family=gaulss(),
-                       paraPen={"x1": {"S": np.array([[1.0]])}})
+        hea.models.bam(
+            ["y ~ s(x0) + x1", "~ 1"],
+            d,
+            family=gaulss(),
+            paraPen={"x1": {"S": np.array([[1.0]])}},
+        )
 
 
 def test_bam_in_out_coef_samfrac():
@@ -1622,12 +1827,12 @@ def test_bam_in_out_coef_samfrac():
     df = pl.DataFrame({"x": x, "z": z, "y": y})
     for disc in (True, False):
         b0 = hea.models.bam("y ~ s(x) + z", df, discrete=disc)
-        b1 = hea.models.bam("y ~ s(x) + z", df, discrete=disc,
-                            in_out={"sp": [5.0], "scale": 0.5})
+        b1 = hea.models.bam(
+            "y ~ s(x) + z", df, discrete=disc, in_out={"sp": [5.0], "scale": 0.5}
+        )
         np.testing.assert_allclose(b0.sp, [0.008239709431], rtol=1e-4)
         np.testing.assert_allclose(b1.sp, b0.sp, rtol=1e-6)
-        np.testing.assert_allclose(b1.sigma_squared, b0.sigma_squared,
-                                   rtol=1e-6)
+        np.testing.assert_allclose(b1.sigma_squared, b0.sigma_squared, rtol=1e-6)
 
     g2 = RGenerator(6)
     n2 = 400
@@ -1637,25 +1842,30 @@ def test_bam_in_out_coef_samfrac():
     df2 = pl.DataFrame({"x": x2, "y": y2})
     p0 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=False)
     beta0 = np.asarray(p0.bhat, dtype=float).reshape(-1)
-    p1 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=False,
-                        coef=beta0)
+    p1 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=False, coef=beta0)
     np.testing.assert_allclose(p1.sp, p0.sp, rtol=1e-6)
-    p2 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=False,
-                        samfrac=0.5)
+    p2 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=False, samfrac=0.5)
     np.testing.assert_allclose(p2.sp, p0.sp, rtol=1e-6)
     d0 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=True)
-    d1 = hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=True,
-                        coef=np.asarray(d0.bhat, dtype=float).reshape(-1))
+    d1 = hea.models.bam(
+        "y ~ s(x)",
+        df2,
+        family=Poisson(),
+        discrete=True,
+        coef=np.asarray(d0.bhat, dtype=float).reshape(-1),
+    )
     np.testing.assert_allclose(d1.sp, d0.sp, rtol=1e-5)
     with _warnings.catch_warnings(record=True) as rec:
         _warnings.simplefilter("always")
-        p3 = hea.models.bam("y ~ s(x)", df2, family=Poisson(),
-                            discrete=False, samfrac=0.01)
+        p3 = hea.models.bam(
+            "y ~ s(x)", df2, family=Poisson(), discrete=False, samfrac=0.01
+        )
     assert any("samfrac too small" in str(r.message) for r in rec)
     np.testing.assert_allclose(p3.sp, p0.sp, rtol=1e-10)
     with pytest.raises(ValueError, match="coef must have length"):
-        hea.models.bam("y ~ s(x)", df2, family=Poisson(), discrete=True,
-                       coef=[1.0, 2.0])
+        hea.models.bam(
+            "y ~ s(x)", df2, family=Poisson(), discrete=True, coef=[1.0, 2.0]
+        )
 
 
 # =============================================================================
@@ -2111,16 +2321,19 @@ def _method_probe_frame(n: int = 300) -> pl.DataFrame:
     x1 = g.uniform(0.0, 1.0, n)
     x2 = g.uniform(0.0, 1.0, n)
     e = g.normal(0.0, 0.2, n)
-    f = np.sin(2 * np.pi * x0) * 0.7 + (x1 - 0.5) ** 2 * 2 \
-        + 0.3 * np.sin(np.pi * x2)
+    f = np.sin(2 * np.pi * x0) * 0.7 + (x1 - 0.5) ** 2 * 2 + 0.3 * np.sin(np.pi * x2)
     mu = 2 + 6 * (x0 - 0.5) ** 2 + 4 * (x1 - 0.25) ** 2
     yp = g.poisson(mu)
-    return pl.DataFrame({
-        "x0": x0, "x1": x1, "x2": x2,
-        "yg": f + e,
-        "ygam": np.exp(f * 0.5 + e * 0.5) + 0.2,
-        "yp": np.asarray(yp, dtype=float),
-    })
+    return pl.DataFrame(
+        {
+            "x0": x0,
+            "x1": x1,
+            "x2": x2,
+            "yg": f + e,
+            "ygam": np.exp(f * 0.5 + e * 0.5) + 0.2,
+            "yp": np.asarray(yp, dtype=float),
+        }
+    )
 
 
 def _bam_score(m):
@@ -2143,16 +2356,36 @@ def test_bam_method_gaussian_preml_pml_ml_match_mgcv():
     df = _method_probe_frame()
     # method -> (sp, edf, scale, crit)
     pins = {
-        "REML":   ((0.01068392003, 0.128317105, 0.3613724292),
-                   17.11154768, 0.03630687674, -39.2484864563),
-        "fREML":  ((0.01068392003, 0.128317105, 0.3613724292),
-                   17.11154768, 0.03630687674, -39.9947878772),
-        "P-REML": ((0.01026474145, 0.1242113542, 0.3508758414),
-                   17.20716969, 0.03630830763, -39.84493875),
-        "P-ML":   ((0.01070543044, 0.1439456178, 0.4410389761),
-                   16.81569238, 0.03631299266, -47.27724565),
-        "ML":     ((0.01105216598, 0.1478843726, 0.4523599341),
-                   16.73782917, 0.03631213256, -46.54392219),
+        "REML": (
+            (0.01068392003, 0.128317105, 0.3613724292),
+            17.11154768,
+            0.03630687674,
+            -39.2484864563,
+        ),
+        "fREML": (
+            (0.01068392003, 0.128317105, 0.3613724292),
+            17.11154768,
+            0.03630687674,
+            -39.9947878772,
+        ),
+        "P-REML": (
+            (0.01026474145, 0.1242113542, 0.3508758414),
+            17.20716969,
+            0.03630830763,
+            -39.84493875,
+        ),
+        "P-ML": (
+            (0.01070543044, 0.1439456178, 0.4410389761),
+            16.81569238,
+            0.03631299266,
+            -47.27724565,
+        ),
+        "ML": (
+            (0.01105216598, 0.1478843726, 0.4523599341),
+            16.73782917,
+            0.03631213256,
+            -46.54392219,
+        ),
     }
     for method, (sp_t, edf_t, sc_t, crit_t) in pins.items():
         m = hea.models.bam("yg ~ s(x0) + s(x1) + s(x2)", df, method=method)
@@ -2169,19 +2402,36 @@ def test_bam_method_gamma_preml_pml_ml_reml_match_mgcv():
     constant this pins)."""
     df = _method_probe_frame()
     pins = {
-        "REML":   (0.01299407061, 0.1639959992, 12.96102743,
-                   0.008104676416, -164.3326564),
-        "P-REML": (0.01261437309, 0.1601504955, 13.01310613,
-                   0.008104912646, -269.754573),
-        "P-ML":   (0.01321795628, 0.1888532273, 12.80235962,
-                   0.008104827756, -277.8624566),
-        "ML":     (0.01353009775, 0.1926018169, 12.76057798,
-                   0.008104651095, -172.360796),
+        "REML": (
+            0.01299407061,
+            0.1639959992,
+            12.96102743,
+            0.008104676416,
+            -164.3326564,
+        ),
+        "P-REML": (
+            0.01261437309,
+            0.1601504955,
+            13.01310613,
+            0.008104912646,
+            -269.754573,
+        ),
+        "P-ML": (
+            0.01321795628,
+            0.1888532273,
+            12.80235962,
+            0.008104827756,
+            -277.8624566,
+        ),
+        "ML": (0.01353009775, 0.1926018169, 12.76057798, 0.008104651095, -172.360796),
     }
     for method, (sp0, sp1, edf_t, sc_t, crit_t) in pins.items():
-        m = hea.models.bam("ygam ~ s(x0) + s(x1)", df,
-                           family=Gamma(link=hea.family.LogLink()),
-                           method=method)
+        m = hea.models.bam(
+            "ygam ~ s(x0) + s(x1)",
+            df,
+            family=Gamma(link=hea.family.LogLink()),
+            method=method,
+        )
         assert float(m.sp[0]) == pytest.approx(sp0, rel=1e-6), method
         assert float(m.sp[1]) == pytest.approx(sp1, rel=1e-6), method
         assert float(np.sum(m.edf)) == pytest.approx(edf_t, rel=1e-6), method
@@ -2197,18 +2447,14 @@ def test_bam_method_poisson_collapse_and_ml():
     range-projected log|H| — the old fast.REML.fit routing converged to
     the REML optimum instead)."""
     df = _method_probe_frame()
-    m_r = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
-                         method="REML")
-    m_pr = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
-                          method="P-REML")
+    m_r = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(), method="REML")
+    m_pr = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(), method="P-REML")
     assert m_pr.method == "REML"
     assert np.array_equal(m_pr.sp, m_r.sp)
     assert m_pr.REML_criterion == m_r.REML_criterion
 
-    m_ml = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
-                          method="ML")
-    m_pml = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
-                           method="P-ML")
+    m_ml = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(), method="ML")
+    m_pml = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(), method="P-ML")
     assert m_pml.method == "ML"
     assert np.array_equal(m_pml.sp, m_ml.sp)
     # mgcv 1.9-4: bam(poisson, ML) — distinct optimum from REML.
@@ -2231,10 +2477,8 @@ def test_bam_method_gacv_known_scale_equals_gcv_optimum():
     optimum); the reported criterion is the compressed-view value (raw
     reduced-rows deviance at nobs = ncol(R))."""
     df = _method_probe_frame()
-    m_ga = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
-                          method="GACV.Cp")
-    m_g = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
-                         method="GCV.Cp")
+    m_ga = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(), method="GACV.Cp")
+    m_g = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(), method="GCV.Cp")
     # mgcv's own two rails (gam(G=G) newton vs magic) stop 1.6e-6 apart.
     assert np.allclose(m_ga.sp, m_g.sp, rtol=1e-5)
     # mgcv 1.9-4 pins.
@@ -2257,9 +2501,12 @@ def test_bam_method_gacv_scale_unknown_degenerate_matches_mgcv():
     assert float(np.sum(m.edf)) == pytest.approx(28.0, abs=1e-3)
     assert np.all(m.sp < 1e-6)
     assert 0.0 <= float(m.GCV_score) < 1e-6
-    m2 = hea.models.bam("ygam ~ s(x0) + s(x1)", df,
-                        family=Gamma(link=hea.family.LogLink()),
-                        method="GACV.Cp")
+    m2 = hea.models.bam(
+        "ygam ~ s(x0) + s(x1)",
+        df,
+        family=Gamma(link=hea.family.LogLink()),
+        method="GACV.Cp",
+    )
     assert float(np.sum(m2.edf)) == pytest.approx(19.0, abs=1e-3)
     assert np.all(m2.sp < 1e-6)
     assert 0.0 <= float(m2.GCV_score) < 1e-4
@@ -2274,16 +2521,18 @@ def test_bam_gcv_nongaussian_regression():
     ``initial.sp(qrx$R)`` per PIRLS iteration; the reported score/scale
     are magic's own final-fit values (bam.r:1287-1295)."""
     df = _method_probe_frame()
-    m = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
-                       method="GCV.Cp")
+    m = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(), method="GCV.Cp")
     assert float(m.sp[0]) == pytest.approx(0.4461542947, rel=1e-6)
     assert float(m.sp[1]) == pytest.approx(0.4261116581, rel=1e-6)
     assert float(np.sum(m.edf)) == pytest.approx(10.52516462, rel=1e-6)
     assert float(m.GCV_score) == pytest.approx(0.06400202961, rel=1e-8)
     # Gamma+log: the scale-unknown GCV flavor through the outer PIRLS loop.
-    m2 = hea.models.bam("ygam ~ s(x0) + s(x1)", df,
-                        family=Gamma(link=hea.family.LogLink()),
-                        method="GCV.Cp")
+    m2 = hea.models.bam(
+        "ygam ~ s(x0) + s(x1)",
+        df,
+        family=Gamma(link=hea.family.LogLink()),
+        method="GCV.Cp",
+    )
     assert float(m2.sp[0]) == pytest.approx(0.04294363551, rel=1e-6)
     assert float(m2.sp[1]) == pytest.approx(0.5657492901, rel=1e-6)
     assert float(np.sum(m2.edf)) == pytest.approx(10.54451858, rel=1e-6)
@@ -2293,7 +2542,8 @@ def test_bam_gcv_nongaussian_regression():
     # mgcv matches to all 10 printed digits.
     m3 = hea.models.bam("yg ~ s(x0) + s(x1) + s(x2)", df, method="GCV.Cp")
     assert np.asarray(m3.sp) == pytest.approx(
-        (0.03837352407, 0.4334319094, 0.8266716582), rel=1e-6)
+        (0.03837352407, 0.4334319094, 0.8266716582), rel=1e-6
+    )
     assert float(np.sum(m3.edf)) == pytest.approx(13.93969409, rel=1e-6)
     assert float(m3.GCV_score) == pytest.approx(0.03817098964, rel=1e-8)
     assert float(m3.sigma_squared) == pytest.approx(0.03639734991, rel=1e-8)
@@ -2309,21 +2559,23 @@ def test_bam_method_validation_and_discrete_fallback():
         hea.models.bam("yg ~ s(x0)", df, method="NCV")
     with pytest.raises(ValueError, match="method must be one of"):
         hea.models.bam("yg ~ s(x0)", df, method="QNCV")
-    with pytest.warns(UserWarning,
-                      match="discretization only available with fREML"):
-        m = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
-                           method="GCV.Cp", discrete=True)
-    assert m._discrete_design is None      # fell back to non-discrete
-    with pytest.warns(UserWarning,
-                      match="discretization only available with fREML"):
-        hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
-                       method="P-REML", discrete=True)
+    with pytest.warns(UserWarning, match="discretization only available with fREML"):
+        m = hea.models.bam(
+            "yp ~ s(x0) + s(x1)", df, family=Poisson(), method="GCV.Cp", discrete=True
+        )
+    assert m._discrete_design is None  # fell back to non-discrete
+    with pytest.warns(UserWarning, match="discretization only available with fREML"):
+        hea.models.bam(
+            "yp ~ s(x0) + s(x1)", df, family=Poisson(), method="P-REML", discrete=True
+        )
     # REML ≡ fREML: discrete kept, no warning.
     import warnings as _warnings
+
     with _warnings.catch_warnings():
         _warnings.simplefilter("error")
-        m_d = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
-                             method="REML", discrete=True)
+        m_d = hea.models.bam(
+            "yp ~ s(x0) + s(x1)", df, family=Poisson(), method="REML", discrete=True
+        )
     assert m_d._discrete_design is not None
 
 
@@ -2338,8 +2590,7 @@ def test_bam_negbin_matches_mgcv():
 
     df = _method_probe_frame()
     b = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=negbin(2))
-    np.testing.assert_allclose(
-        b.sp, [0.8940741769, 1.528517329], rtol=1e-7)
+    np.testing.assert_allclose(b.sp, [0.8940741769, 1.528517329], rtol=1e-7)
     assert float(np.sum(b.edf)) == pytest.approx(7.046360153, rel=1e-8)
     assert b.scale_estimated is True
     assert b.sigma_squared == pytest.approx(0.4089173384, rel=1e-8)
@@ -2348,39 +2599,32 @@ def test_bam_negbin_matches_mgcv():
     assert b.null_deviance == pytest.approx(184.3636025, rel=1e-8)
     assert b.AIC == pytest.approx(1276.651619, rel=1e-8)
     assert b.edf2_total == pytest.approx(8.023219702, rel=1e-7)
-    assert float(np.asarray(b.coefficients)[0]) == pytest.approx(
-        1.1122390542, rel=1e-7)
+    assert float(np.asarray(b.coefficients)[0]) == pytest.approx(1.1122390542, rel=1e-7)
     assert float(b.Vp[0, 0]) == pytest.approx(0.00114299957085, rel=1e-6)
 
     # discrete rail: same optimum, bgam.fitd's own reported criterion.
-    bd = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=negbin(2),
-                        discrete=True)
-    np.testing.assert_allclose(
-        bd.sp, [0.8940726045, 1.528515831], rtol=1e-7)
+    bd = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=negbin(2), discrete=True)
+    np.testing.assert_allclose(bd.sp, [0.8940726045, 1.528515831], rtol=1e-7)
     assert bd.sigma_squared == pytest.approx(0.4089173087, rel=1e-8)
     assert bd.REML_criterion / 2 == pytest.approx(759.348319953, rel=1e-10)
     assert bd.AIC == pytest.approx(1276.651622, rel=1e-8)
     assert bd.edf2_total == pytest.approx(8.023222164, rel=1e-7)
 
     # GCV.Cp (magic rail, scale estimated → GCV mode).
-    bg = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=negbin(2),
-                        method="GCV.Cp")
-    np.testing.assert_allclose(
-        bg.sp, [0.5379616717, 0.1909526192], rtol=1e-6)
+    bg = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=negbin(2), method="GCV.Cp")
+    np.testing.assert_allclose(bg.sp, [0.5379616717, 0.1909526192], rtol=1e-6)
     assert bg.GCV_score == pytest.approx(0.421121198392, rel=1e-9)
     assert bg.sigma_squared == pytest.approx(0.4081480369, rel=1e-8)
     assert bg.AIC == pytest.approx(1276.994775, rel=1e-8)
 
     # explicit REML / ML (gam(G=G) flavors — edf2 via gam.fit3.post.proc).
-    br = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=negbin(2),
-                        method="REML")
+    br = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=negbin(2), method="REML")
     assert br.AIC == pytest.approx(1277.542504, rel=1e-8)
     assert br.edf2_total == pytest.approx(8.468662921, rel=1e-6)
     # hea's REML alias shares fREML's optimizer endpoint; mgcv's separate
     # gam(G=G) Newton stops 1e-6 away in sp, shifting the criterion 1.2e-9.
     assert br.REML_criterion / 2 == pytest.approx(643.740871739, rel=3e-9)
-    bm = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=negbin(2),
-                        method="ML")
+    bm = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=negbin(2), method="ML")
     np.testing.assert_allclose(bm.sp, [1.3215849, 3.8813079], rtol=1e-6)
     assert bm.ML_criterion / 2 == pytest.approx(638.728786587, rel=1e-9)
     assert bm.AIC == pytest.approx(1276.385289, rel=1e-8)
@@ -2409,13 +2653,11 @@ def test_bam_report_layer_flavors_match_mgcv():
     assert p1.AIC == pytest.approx(1189.445385, rel=1e-8)
     assert p1.edf2_total == pytest.approx(8.569979081, rel=1e-7)
     assert p1.REML_criterion / 2 == pytest.approx(600.191044065, rel=1e-10)
-    p2 = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
-                        discrete=True)
+    p2 = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(), discrete=True)
     assert p2.REML_criterion / 2 == pytest.approx(602.94785963, rel=1e-10)
     assert p2.AIC == pytest.approx(1189.445385, rel=1e-7)
     # explicit REML rides the gam(G=G) machinery: edf2 caps at edf1.
-    p3 = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(),
-                        method="REML")
+    p3 = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson(), method="REML")
     assert p3.AIC == pytest.approx(1189.90191, rel=1e-8)
     assert p3.edf2_total == pytest.approx(8.798235556, rel=1e-6)
     # gaussian-identity: both rails, both flavors.
@@ -2452,7 +2694,7 @@ def _censored_frames(n: int = 300):
     g = RGenerator(66)
     x0 = g.uniform(0.0, 1.0, n)
     x1 = g.uniform(0.0, 1.0, n)
-    g.uniform(0.0, 1.0, n)      # x2 — stream alignment
+    g.uniform(0.0, 1.0, n)  # x2 — stream alignment
     e = g.normal(0.0, 0.2, n)
     mu = 2 + 6 * (x0 - 0.5) ** 2 + 4 * (x1 - 0.25) ** 2
     yp = np.asarray(g.poisson(mu), dtype=float)
@@ -2464,7 +2706,7 @@ def _censored_frames(n: int = 300):
     yat_p[m7 == 3] = np.inf
     cpois_df = pl.DataFrame({"x0": x0, "x1": x1, "yp": yp, "yat": yat_p})
 
-    f = mu                       # same quadratic surface
+    f = mu  # same quadratic surface
     y = f + 2.5 * e
     m7 = np.floor(y * 10) % 7
     yat_c = y.copy()
@@ -2489,32 +2731,37 @@ def test_bam_cnorm_matches_mgcv():
     from hea.family import cnorm
 
     _, df, _ = _censored_frames()
-    b = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=cnorm(),
-                       method="fREML")
-    np.testing.assert_allclose(
-        b.sp, [0.472989444525, 0.807894785622], rtol=1e-7)
+    b = hea.models.bam(
+        "cbind(y, yat) ~ s(x0) + s(x1)", df, family=cnorm(), method="fREML"
+    )
+    np.testing.assert_allclose(b.sp, [0.472989444525, 0.807894785622], rtol=1e-7)
     assert b.REML_criterion / 2 == pytest.approx(345.36313895, rel=1e-10)
     assert b.deviance == pytest.approx(334.843894949, rel=1e-9)
     assert float(np.sum(b.edf)) == pytest.approx(9.46761842841, rel=1e-8)
-    np.testing.assert_allclose(
-        b.family.get_theta(), [-0.580714624599], rtol=1e-8)
+    np.testing.assert_allclose(b.family.get_theta(), [-0.580714624599], rtol=1e-8)
     assert b.AIC == pytest.approx(676.232938084, rel=1e-9)
     assert float(np.asarray(b.coefficients)[0]) == pytest.approx(
-        3.17440057267, rel=1e-8)
+        3.17440057267, rel=1e-8
+    )
     assert float(b.Vp[0, 0]) == pytest.approx(0.00126434623522, rel=1e-7)
     np.testing.assert_allclose(
         np.asarray(b.fitted_values)[:3],
-        [3.63413072566, 3.05157121757, 2.18607995768], rtol=1e-8)
+        [3.63413072566, 3.05157121757, 2.18607995768],
+        rtol=1e-8,
+    )
     assert b.null_deviance == pytest.approx(773.566867937, rel=1e-9)
     assert b.edf2_total == pytest.approx(9.85496390801, rel=1e-7)
 
-    bd = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=cnorm(),
-                        method="fREML", discrete=True)
-    np.testing.assert_allclose(
-        bd.sp, [0.472989443964, 0.807894787124], rtol=1e-5)
+    bd = hea.models.bam(
+        "cbind(y, yat) ~ s(x0) + s(x1)",
+        df,
+        family=cnorm(),
+        method="fREML",
+        discrete=True,
+    )
+    np.testing.assert_allclose(bd.sp, [0.472989443964, 0.807894787124], rtol=1e-5)
     assert bd.REML_criterion / 2 == pytest.approx(252.882756095, rel=1e-8)
-    np.testing.assert_allclose(
-        bd.family.get_theta(), [-0.580714619898], rtol=1e-8)
+    np.testing.assert_allclose(bd.family.get_theta(), [-0.580714619898], rtol=1e-8)
     assert bd.AIC == pytest.approx(676.232936453, rel=1e-7)
 
 
@@ -2526,27 +2773,30 @@ def test_bam_clog_matches_mgcv():
     from hea.family import clog
 
     _, df, _ = _censored_frames()
-    b = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=clog(),
-                       method="fREML")
-    np.testing.assert_allclose(
-        b.sp, [0.49964459171, 0.820313585973], rtol=1e-7)
+    b = hea.models.bam(
+        "cbind(y, yat) ~ s(x0) + s(x1)", df, family=clog(), method="fREML"
+    )
+    np.testing.assert_allclose(b.sp, [0.49964459171, 0.820313585973], rtol=1e-7)
     assert b.REML_criterion / 2 == pytest.approx(-265.549835987, rel=1e-10)
     assert b.deviance == pytest.approx(363.14148195, rel=1e-9)
     assert float(np.sum(b.edf)) == pytest.approx(9.38824078638, rel=1e-8)
-    np.testing.assert_allclose(
-        b.family.get_theta(), [-1.1208724322], rtol=1e-8)
+    np.testing.assert_allclose(b.family.get_theta(), [-1.1208724322], rtol=1e-8)
     assert b.AIC == pytest.approx(-545.481203225, rel=1e-9)
     assert float(np.asarray(b.coefficients)[0]) == pytest.approx(
-        3.17114262546, rel=1e-8)
+        3.17114262546, rel=1e-8
+    )
     assert b.null_deviance == pytest.approx(742.208643476, rel=1e-9)
 
-    bd = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=clog(),
-                        method="fREML", discrete=True)
-    np.testing.assert_allclose(
-        bd.sp, [0.499644591989, 0.820313601015], rtol=1e-5)
+    bd = hea.models.bam(
+        "cbind(y, yat) ~ s(x0) + s(x1)",
+        df,
+        family=clog(),
+        method="fREML",
+        discrete=True,
+    )
+    np.testing.assert_allclose(bd.sp, [0.499644591989, 0.820313601015], rtol=1e-5)
     assert bd.REML_criterion / 2 == pytest.approx(255.039450754, rel=1e-7)
-    np.testing.assert_allclose(
-        bd.family.get_theta(), [-1.12087249736], rtol=1e-8)
+    np.testing.assert_allclose(bd.family.get_theta(), [-1.12087249736], rtol=1e-8)
     assert bd.AIC == pytest.approx(-545.481266237, rel=1e-7)
 
 
@@ -2561,27 +2811,35 @@ def test_bam_cpois_matches_mgcv():
     from hea.family import cpois
 
     df, _, _ = _censored_frames()
-    b = hea.models.bam("cbind(yp, yat) ~ s(x0) + s(x1)", df, family=cpois(),
-                       method="fREML")
+    b = hea.models.bam(
+        "cbind(yp, yat) ~ s(x0) + s(x1)", df, family=cpois(), method="fREML"
+    )
     # mgcv: crit 457.411964015, dev 472.764710739 at ITS oscillation
     # endpoint; hea stops within 1e-5 of it.
     assert b.REML_criterion / 2 == pytest.approx(457.411964015, rel=5e-5)
     assert b.deviance == pytest.approx(472.764710739, rel=5e-5)
 
-    bd = hea.models.bam("cbind(yp, yat) ~ s(x0) + s(x1)", df, family=cpois(),
-                        method="fREML", discrete=True)
-    np.testing.assert_allclose(
-        bd.sp, [0.345695451764, 0.46468963319], rtol=1e-6)
+    bd = hea.models.bam(
+        "cbind(yp, yat) ~ s(x0) + s(x1)",
+        df,
+        family=cpois(),
+        method="fREML",
+        discrete=True,
+    )
+    np.testing.assert_allclose(bd.sp, [0.345695451764, 0.46468963319], rtol=1e-6)
     assert bd.REML_criterion / 2 == pytest.approx(454.462724912, rel=1e-10)
     assert bd.deviance == pytest.approx(443.812595655, rel=1e-9)
     assert float(np.sum(bd.edf)) == pytest.approx(10.6774784266, rel=1e-8)
     assert bd.AIC == pytest.approx(886.591281199, rel=1e-8)
     assert float(np.asarray(bd.coefficients)[0]) == pytest.approx(
-        1.27452241567, rel=1e-8)
+        1.27452241567, rel=1e-8
+    )
     assert float(bd.Vp[0, 0]) == pytest.approx(0.00114878616449, rel=1e-7)
     np.testing.assert_allclose(
         np.asarray(bd.fitted_values)[:3],
-        [3.43210405172, 4.58045563835, 2.3245973422], rtol=1e-8)
+        [3.43210405172, 4.58045563835, 2.3245973422],
+        rtol=1e-8,
+    )
     assert bd.null_deviance == pytest.approx(517.252889712, rel=1e-9)
     assert bd.edf2_total == pytest.approx(12.7951400965, rel=1e-7)
 
@@ -2604,29 +2862,34 @@ def test_bam_bcg_matches_mgcv():
     # (a converging bcg would mean the loop no longer walks mgcv's
     # trajectory).
     with pytest.warns(UserWarning, match="PIRLS algorithm did not converge"):
-        b = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df, family=bcg(),
-                           method="fREML")
-    np.testing.assert_allclose(
-        b.sp, [3.45358690639, 2.74235966428], rtol=1e-7)
+        b = hea.models.bam(
+            "cbind(y, yat) ~ s(x0) + s(x1)", df, family=bcg(), method="fREML"
+        )
+    np.testing.assert_allclose(b.sp, [3.45358690639, 2.74235966428], rtol=1e-7)
     assert b.REML_criterion / 2 == pytest.approx(348.187083252, rel=1e-9)
     assert b.deviance == pytest.approx(332.271073195, rel=1e-9)
     assert float(np.sum(b.edf)) == pytest.approx(9.88923769693, rel=1e-8)
     np.testing.assert_allclose(
-        b.family.get_theta(), [0.0503296085834, -1.49816913969], rtol=1e-7)
+        b.family.get_theta(), [0.0503296085834, -1.49816913969], rtol=1e-7
+    )
     assert b.AIC == pytest.approx(677.968417239, rel=1e-9)
-    assert float(np.asarray(b.coefficients)[0]) == pytest.approx(
-        1.0808831257, rel=1e-8)
+    assert float(np.asarray(b.coefficients)[0]) == pytest.approx(1.0808831257, rel=1e-8)
     assert float(b.Vp[0, 0]) == pytest.approx(0.000204369237812, rel=1e-7)
     assert b.null_deviance == pytest.approx(737.398170441, rel=1e-9)
 
     with pytest.warns(UserWarning, match="PIRLS algorithm did not converge"):
-        bd = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df,
-                            family=bcg(), method="fREML", discrete=True)
-    np.testing.assert_allclose(
-        bd.sp, [4.3709425801, 3.44589976783], rtol=1e-6)
+        bd = hea.models.bam(
+            "cbind(y, yat) ~ s(x0) + s(x1)",
+            df,
+            family=bcg(),
+            method="fREML",
+            discrete=True,
+        )
+    np.testing.assert_allclose(bd.sp, [4.3709425801, 3.44589976783], rtol=1e-6)
     assert bd.deviance == pytest.approx(331.734883193, rel=1e-9)
     np.testing.assert_allclose(
-        bd.family.get_theta(), [-0.0597513884923, -1.60930140229], rtol=1e-7)
+        bd.family.get_theta(), [-0.0597513884923, -1.60930140229], rtol=1e-7
+    )
     assert bd.AIC == pytest.approx(678.813982896, rel=1e-8)
 
 
@@ -2640,13 +2903,13 @@ def test_bam_gfam_matches_mgcv():
 
     n2 = 210
     from hea.R.rng import RGenerator
+
     g = RGenerator(66)
     x0 = g.uniform(0.0, 1.0, n2)
     x1 = g.uniform(0.0, 1.0, n2)
     x2 = g.uniform(0.0, 1.0, n2)
     e = g.normal(0.0, 0.2, n2)
-    fg = np.sin(2 * np.pi * x0) * 0.7 + (x1 - 0.5) ** 2 * 2 \
-        + 0.3 * np.sin(np.pi * x2)
+    fg = np.sin(2 * np.pi * x0) * 0.7 + (x1 - 0.5) ** 2 * 2 + 0.3 * np.sin(np.pi * x2)
     mu = 2 + 6 * (x0 - 0.5) ** 2 + 4 * (x1 - 0.25) ** 2
     yp = np.asarray(g.poisson(mu), dtype=float)
     i1 = (yp % 3 + 1) == 1
@@ -2654,41 +2917,58 @@ def test_bam_gfam_matches_mgcv():
     fin = np.where(i1, 1.0, 2.0)
     df = pl.DataFrame({"y": y2, "fin": fin, "x0": x0, "x1": x1, "x2": x2})
 
-    b = hea.models.bam("cbind(y, fin) ~ s(x0) + s(x1) + s(x2)", df,
-                       family=gfam([Poisson(), Gaussian()]), method="fREML")
+    b = hea.models.bam(
+        "cbind(y, fin) ~ s(x0) + s(x1) + s(x2)",
+        df,
+        family=gfam([Poisson(), Gaussian()]),
+        method="fREML",
+    )
     np.testing.assert_allclose(
-        b.sp, [0.355742032722, 5.7371454329, 6.34382974108], rtol=1e-7)
+        b.sp, [0.355742032722, 5.7371454329, 6.34382974108], rtol=1e-7
+    )
     assert b.REML_criterion / 2 == pytest.approx(189.81314452, rel=1e-10)
     assert b.deviance == pytest.approx(380.686812267, rel=1e-9)
     assert float(np.sum(b.edf)) == pytest.approx(15.4578878443, rel=1e-8)
-    np.testing.assert_allclose(
-        b.family.get_theta(), [-3.47246138058], rtol=1e-9)
+    np.testing.assert_allclose(b.family.get_theta(), [-3.47246138058], rtol=1e-9)
     assert b.AIC == pytest.approx(343.772994781, rel=1e-9)
     assert b.null_deviance == pytest.approx(150.382746714, rel=1e-9)
     assert b.edf2_total == pytest.approx(15.8900820355, rel=1e-7)
 
-    nd = pl.DataFrame({"x0": [.25, .75], "x1": [.4, .1], "x2": [.3, .6],
-                       "y": [0.0, 0.0], "fin": [1.0, 2.0]})
+    nd = pl.DataFrame(
+        {
+            "x0": [0.25, 0.75],
+            "x1": [0.4, 0.1],
+            "x2": [0.3, 0.6],
+            "y": [0.0, 0.0],
+            "fin": [1.0, 2.0],
+        }
+    )
     pr = b.predict(nd, type="response", se_fit=True)
     np.testing.assert_allclose(
-        pr["fit"].to_numpy(), [2.58115797333, -0.0254589240207], rtol=1e-8)
+        pr["fit"].to_numpy(), [2.58115797333, -0.0254589240207], rtol=1e-8
+    )
     np.testing.assert_allclose(
-        pr["se.fit"].to_numpy(), [0.126849011371, 0.0587882906019],
-        rtol=1e-7)
+        pr["se.fit"].to_numpy(), [0.126849011371, 0.0587882906019], rtol=1e-7
+    )
 
-    bd = hea.models.bam("cbind(y, fin) ~ s(x0) + s(x1) + s(x2)", df,
-                        family=gfam([Poisson(), Gaussian()]),
-                        method="fREML", discrete=True)
+    bd = hea.models.bam(
+        "cbind(y, fin) ~ s(x0) + s(x1) + s(x2)",
+        df,
+        family=gfam([Poisson(), Gaussian()]),
+        method="fREML",
+        discrete=True,
+    )
     np.testing.assert_allclose(
-        bd.sp, [0.355742027064, 5.73714513127, 6.34382977167], rtol=1e-5)
+        bd.sp, [0.355742027064, 5.73714513127, 6.34382977167], rtol=1e-5
+    )
     assert bd.REML_criterion / 2 == pytest.approx(192.488901014, rel=1e-7)
-    np.testing.assert_allclose(
-        bd.family.get_theta(), [-3.47246143822], rtol=1e-8)
+    np.testing.assert_allclose(bd.family.get_theta(), [-3.47246143822], rtol=1e-8)
     assert bd.AIC == pytest.approx(343.77298757, rel=1e-7)
     # discrete gfam predict rides the exact-eval parent (see docstring).
     prd = bd.predict(nd, type="response", se_fit=True)
     np.testing.assert_allclose(
-        prd["fit"].to_numpy(), [2.58115797333, -0.0254589240207], rtol=1e-6)
+        prd["fit"].to_numpy(), [2.58115797333, -0.0254589240207], rtol=1e-6
+    )
 
 
 def test_bam_binomial_cbind_matches_mgcv():
@@ -2707,26 +2987,30 @@ def test_bam_binomial_cbind_matches_mgcv():
     mu = 2 + 6 * (x0 - 0.5) ** 2 + 4 * (x1 - 0.25) ** 2
     yp = np.asarray(g.poisson(mu), dtype=float)
     succ = np.minimum(yp, 8.0)
-    df = pl.DataFrame({"x0": x0, "x1": x1, "succ": succ,
-                       "fail": 8.0 - succ})
+    df = pl.DataFrame({"x0": x0, "x1": x1, "succ": succ, "fail": 8.0 - succ})
 
-    b = hea.models.bam("cbind(succ, fail) ~ s(x0) + s(x1)", df,
-                       family=Binomial(), method="fREML")
-    np.testing.assert_allclose(
-        b.sp, [0.419041396045, 0.144786367145], rtol=1e-7)
+    b = hea.models.bam(
+        "cbind(succ, fail) ~ s(x0) + s(x1)", df, family=Binomial(), method="fREML"
+    )
+    np.testing.assert_allclose(b.sp, [0.419041396045, 0.144786367145], rtol=1e-7)
     assert b.REML_criterion / 2 == pytest.approx(625.071989454, rel=1e-10)
     assert b.deviance == pytest.approx(570.636154793, rel=1e-9)
     assert float(np.sum(b.edf)) == pytest.approx(10.594201809, rel=1e-8)
     assert b.AIC == pytest.approx(1234.92118621, rel=1e-9)
     assert float(np.asarray(b.coefficients)[0]) == pytest.approx(
-        -0.458591380509, rel=1e-8)
+        -0.458591380509, rel=1e-8
+    )
     assert float(b.Vp[0, 0]) == pytest.approx(0.00184652289111, rel=1e-7)
     assert b.null_deviance == pytest.approx(697.433406288, rel=1e-9)
 
-    bd = hea.models.bam("cbind(succ, fail) ~ s(x0) + s(x1)", df,
-                        family=Binomial(), method="fREML", discrete=True)
-    np.testing.assert_allclose(
-        bd.sp, [0.419041364372, 0.144786368908], rtol=1e-6)
+    bd = hea.models.bam(
+        "cbind(succ, fail) ~ s(x0) + s(x1)",
+        df,
+        family=Binomial(),
+        method="fREML",
+        discrete=True,
+    )
+    np.testing.assert_allclose(bd.sp, [0.419041364372, 0.144786368908], rtol=1e-6)
     assert bd.REML_criterion / 2 == pytest.approx(627.828804957, rel=1e-9)
     assert bd.AIC == pytest.approx(1234.92118678, rel=1e-9)
 
@@ -2762,21 +3046,29 @@ def test_bam_censored_chunked_subsety():
         end = min(start + 50, y.size)
         fam.set_ind(np.arange(start, end))
         np.testing.assert_array_equal(
-            fam.dev_resids(y[start:end], mu[start:end],
-                           np.ones(end - start)),
-            full_dev[start:end])
-        dd = fam.dDeta(y[start:end], mu[start:end], np.ones(end - start),
-                       fam.get_theta(), level=0)
+            fam.dev_resids(y[start:end], mu[start:end], np.ones(end - start)),
+            full_dev[start:end],
+        )
+        dd = fam.dDeta(
+            y[start:end], mu[start:end], np.ones(end - start), fam.get_theta(), level=0
+        )
         np.testing.assert_array_equal(dd["Deta"], full_dd["Deta"][start:end])
         fam.set_ind(None)
 
-    b_full = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df,
-                            family=cnorm(), method="fREML")
-    b_chunk = hea.models.bam("cbind(y, yat) ~ s(x0) + s(x1)", df,
-                             family=cnorm(), method="fREML", chunk_size=50)
+    b_full = hea.models.bam(
+        "cbind(y, yat) ~ s(x0) + s(x1)", df, family=cnorm(), method="fREML"
+    )
+    b_chunk = hea.models.bam(
+        "cbind(y, yat) ~ s(x0) + s(x1)",
+        df,
+        family=cnorm(),
+        method="fREML",
+        chunk_size=50,
+    )
     # mini.mf-level shift only (mgcv's own cnorm chunk50 moves θ by 2e-4).
     assert float(b_chunk.family.get_theta()[0]) == pytest.approx(
-        float(b_full.family.get_theta()[0]), abs=5e-3)
+        float(b_full.family.get_theta()[0]), abs=5e-3
+    )
     assert b_chunk.deviance == pytest.approx(b_full.deviance, rel=5e-3)
     # Stash restored full-length after the fit (window cleaned up).
     assert b_chunk.family._censor is not None
@@ -2785,27 +3077,41 @@ def test_bam_censored_chunked_subsety():
     # gfam: chunked fit stays sane (contrast mgcv's stale-window garbage).
     n2 = 210
     from hea.R.rng import RGenerator
+
     g = RGenerator(66)
     x0 = g.uniform(0.0, 1.0, n2)
     x1 = g.uniform(0.0, 1.0, n2)
     x2 = g.uniform(0.0, 1.0, n2)
     e = g.normal(0.0, 0.2, n2)
-    fg = np.sin(2 * np.pi * x0) * 0.7 + (x1 - 0.5) ** 2 * 2 \
-        + 0.3 * np.sin(np.pi * x2)
+    fg = np.sin(2 * np.pi * x0) * 0.7 + (x1 - 0.5) ** 2 * 2 + 0.3 * np.sin(np.pi * x2)
     mu2 = 2 + 6 * (x0 - 0.5) ** 2 + 4 * (x1 - 0.25) ** 2
     yp = np.asarray(g.poisson(mu2), dtype=float)
     i1 = (yp % 3 + 1) == 1
-    dfg = pl.DataFrame({"y": np.where(i1, yp, fg + e),
-                        "fin": np.where(i1, 1.0, 2.0),
-                        "x0": x0, "x1": x1, "x2": x2})
-    gf_full = hea.models.bam("cbind(y, fin) ~ s(x0) + s(x1) + s(x2)", dfg,
-                             family=gfam([Poisson(), Gaussian()]),
-                             method="fREML")
-    gf_chunk = hea.models.bam("cbind(y, fin) ~ s(x0) + s(x1) + s(x2)", dfg,
-                              family=gfam([Poisson(), Gaussian()]),
-                              method="fREML", chunk_size=100)
+    dfg = pl.DataFrame(
+        {
+            "y": np.where(i1, yp, fg + e),
+            "fin": np.where(i1, 1.0, 2.0),
+            "x0": x0,
+            "x1": x1,
+            "x2": x2,
+        }
+    )
+    gf_full = hea.models.bam(
+        "cbind(y, fin) ~ s(x0) + s(x1) + s(x2)",
+        dfg,
+        family=gfam([Poisson(), Gaussian()]),
+        method="fREML",
+    )
+    gf_chunk = hea.models.bam(
+        "cbind(y, fin) ~ s(x0) + s(x1) + s(x2)",
+        dfg,
+        family=gfam([Poisson(), Gaussian()]),
+        method="fREML",
+        chunk_size=100,
+    )
     assert float(gf_chunk.family.get_theta()[0]) == pytest.approx(
-        float(gf_full.family.get_theta()[0]), abs=5e-2)
+        float(gf_full.family.get_theta()[0]), abs=5e-2
+    )
     assert gf_chunk.deviance == pytest.approx(gf_full.deviance, rel=5e-2)
     assert gf_chunk.family._fi is not None
     assert gf_chunk.family._fi.shape[0] == dfg.height
@@ -2830,8 +3136,11 @@ def _gaulss_frame(n: int = 400) -> pl.DataFrame:
     x1 = g.uniform(0.0, 1.0, n)
     x2 = g.uniform(0.0, 1.0, n)
     e = g.normal(0.0, 1.0, n)
-    y = (2.0 * np.sin(2.0 * np.pi * x0) + 1.5 * x1
-         + np.exp(-0.7 + 4.8 * (x2 - 0.5) ** 2) * 0.5 * e)
+    y = (
+        2.0 * np.sin(2.0 * np.pi * x0)
+        + 1.5 * x1
+        + np.exp(-0.7 + 4.8 * (x2 - 0.5) ** 2) * 0.5 * e
+    )
     return pl.DataFrame({"y": y, "x0": x0, "x1": x1, "x2": x2})
 
 
@@ -2844,8 +3153,11 @@ def _gaulss_bam_fit():
         from hea.family import gaulss
 
         _GAULSS_BAM_CACHE["m"] = hea.models.bam(
-            ["y ~ s(x0) + x1", "~ s(x2)"], _gaulss_frame(),
-            family=gaulss(), discrete=True)
+            ["y ~ s(x0) + x1", "~ s(x2)"],
+            _gaulss_frame(),
+            family=gaulss(),
+            discrete=True,
+        )
     return _GAULSS_BAM_CACHE["m"]
 
 
@@ -2861,7 +3173,7 @@ def test_bam_general_discrete_kernels_match_dense():
 
     m = _gaulss_bam_fit()
     design = m._discrete_design
-    X = m._md.X                      # the DiscreteX bundle
+    X = m._md.X  # the DiscreteX bundle
     lpid = X.lpid
     lpi = m.lpi
     Xf = design_full_X(design)
@@ -2870,8 +3182,7 @@ def test_bam_general_discrete_kernels_match_dense():
     rng = np.random.default_rng(3)
     w = rng.uniform(0.5, 2.0, n)
     yy = rng.normal(0.0, 1.0, n)
-    assert np.allclose(XWXd(design, w), Xf.T @ (w[:, None] * Xf),
-                       atol=1e-9)
+    assert np.allclose(XWXd(design, w), Xf.T @ (w[:, None] * Xf), atol=1e-9)
     for i in range(2):
         for j in range(2):
             blk = XWXd(design, w, lt=lpid[i], rt=lpid[j])
@@ -2879,18 +3190,22 @@ def test_bam_general_discrete_kernels_match_dense():
             assert blk.shape == (len(lpi[i]), len(lpi[j]))
             assert np.allclose(blk, ref, atol=1e-9), (i, j)
     # one-sided selection defaults the other side (misc.r:206)
-    assert np.allclose(XWXd(design, w, lt=lpid[0]),
-                       XWXd(design, w, lt=lpid[0], rt=lpid[0]))
+    assert np.allclose(
+        XWXd(design, w, lt=lpid[0]), XWXd(design, w, lt=lpid[0], rt=lpid[0])
+    )
     for i in range(2):
-        assert np.allclose(XWyd(design, w, yy, lt=lpid[i]),
-                           Xf[:, lpi[i]].T @ (w * yy), atol=1e-9)
+        assert np.allclose(
+            XWyd(design, w, yy, lt=lpid[i]), Xf[:, lpi[i]].T @ (w * yy), atol=1e-9
+        )
     beta = rng.normal(0.0, 1.0, p)
     for i in range(2):
-        assert np.allclose(Xbd(design, beta, lt=lpid[i]),
-                           Xf[:, lpi[i]] @ beta[lpi[i]], atol=1e-10)
+        assert np.allclose(
+            Xbd(design, beta, lt=lpid[i]), Xf[:, lpi[i]] @ beta[lpi[i]], atol=1e-10
+        )
     B2 = rng.normal(0.0, 1.0, (p, 2))
-    assert np.allclose(Xbd(design, B2, lt=lpid[1]),
-                       Xf[:, lpi[1]] @ B2[lpi[1], :], atol=1e-10)
+    assert np.allclose(
+        Xbd(design, B2, lt=lpid[1]), Xf[:, lpi[1]] @ B2[lpi[1], :], atol=1e-10
+    )
 
     fam = gaulss()
     yv = m._y_arr
@@ -2929,21 +3244,39 @@ def test_bam_general_discrete_fit5_matches_dense_rail():
     lsp = np.array([1.0, 0.5])
     for dv in (0, 1):
         sl_d = _sl_setup(slots, p)
-        fit_d = _gam_fit5(_sl_initial_repara(sl_d, Xf, both_sides=False),
-                          yv, lsp, sl_d, family=fam, lpi=lpi,
-                          weights=None, offset=None, Mp=Mp, deriv=dv)
+        fit_d = _gam_fit5(
+            _sl_initial_repara(sl_d, Xf, both_sides=False),
+            yv,
+            lsp,
+            sl_d,
+            family=fam,
+            lpi=lpi,
+            weights=None,
+            offset=None,
+            Mp=Mp,
+            deriv=dv,
+        )
         sl_c = _sl_setup(slots, p)
-        fit_c = _gam_fit5(X, yv, lsp, sl_c, family=fam, lpi=lpi,
-                          weights=None, offset=None, Mp=Mp, deriv=dv)
+        fit_c = _gam_fit5(
+            X,
+            yv,
+            lsp,
+            sl_c,
+            family=fam,
+            lpi=lpi,
+            weights=None,
+            offset=None,
+            Mp=Mp,
+            deriv=dv,
+        )
         assert fit_d["converged"] and fit_c["converged"]
         assert fit_c["REML"] == pytest.approx(fit_d["REML"], rel=1e-11)
-        assert np.allclose(fit_c["coefficients"], fit_d["coefficients"],
-                           atol=1e-9)
-        assert np.allclose(fit_c["linear_predictors"],
-                           fit_d["linear_predictors"], atol=1e-9)
+        assert np.allclose(fit_c["coefficients"], fit_d["coefficients"], atol=1e-9)
+        assert np.allclose(
+            fit_c["linear_predictors"], fit_d["linear_predictors"], atol=1e-9
+        )
         if dv == 1:
-            assert np.allclose(fit_c["REML1"], fit_d["REML1"],
-                               rtol=1e-7, atol=1e-8)
+            assert np.allclose(fit_c["REML1"], fit_d["REML1"], rtol=1e-7, atol=1e-8)
 
 
 def test_bam_gaulss_discrete_matches_mgcv():
@@ -2969,26 +3302,24 @@ def test_bam_gaulss_discrete_matches_mgcv():
     m = _gaulss_bam_fit()
     assert m.converged
     # hea stores 2·V_R; mgcv prints V_R (the summary line shows /2)
-    assert m.REML_criterion / 2.0 == pytest.approx(191.7194511707,
-                                                   abs=1e-6)
+    assert m.REML_criterion / 2.0 == pytest.approx(191.7194511707, abs=1e-6)
     assert np.allclose(m.sp, [0.04369801, 0.67410720], rtol=1e-3)
-    assert np.allclose(m.fitted_values[:3, 0],
-                       [0.63365452, -1.66060571, -0.46139888], atol=5e-3)
-    assert np.allclose(m.fitted_values[:3, 1],
-                       [1.44075881, 2.68427594, 1.61579331], atol=5e-3)
+    assert np.allclose(
+        m.fitted_values[:3, 0], [0.63365452, -1.66060571, -0.46139888], atol=5e-3
+    )
+    assert np.allclose(
+        m.fitted_values[:3, 1], [1.44075881, 2.68427594, 1.61579331], atol=5e-3
+    )
     # per-machine endpoint pin (BFGS on the binned basis; regression guard)
-    assert m.REML_criterion / 2.0 == pytest.approx(191.7194511739,
-                                                   rel=1e-7)
+    assert m.REML_criterion / 2.0 == pytest.approx(191.7194511739, rel=1e-7)
     assert m.edf_total == pytest.approx(15.548, abs=0.25)
     s = m.summary()  # renders the z-table + smooth table (smoke)
     assert s is None or s  # summary prints; no crash is the assertion
 
     # same-engine cross-check: hea's DENSE gam (full-data basis, Newton
     # REML — mgcv newton REML 191.7194511707) on the same frame.
-    gd = hea.models.gam(["y ~ s(x0) + x1", "~ s(x2)"], _gaulss_frame(),
-                        family=gaulss())
-    assert gd.REML_criterion / 2.0 == pytest.approx(191.7194511707,
-                                                    abs=1e-6)
+    gd = hea.models.gam(["y ~ s(x0) + x1", "~ s(x2)"], _gaulss_frame(), family=gaulss())
+    assert gd.REML_criterion / 2.0 == pytest.approx(191.7194511707, abs=1e-6)
     assert m.REML_criterion == pytest.approx(gd.REML_criterion, abs=1e-3)
     assert np.allclose(m.fitted_values, gd.fitted_values, atol=2e-2)
 
@@ -3004,8 +3335,7 @@ def test_bam_general_discrete_guards():
     with pytest.raises(NotImplementedError, match="discrete rail"):
         hea.models.bam(["y ~ s(x0)", "~ s(x2)"], d, family=gaulss())
     with pytest.raises(ValueError, match="general"):
-        hea.models.bam(["y ~ s(x0)", "~ s(x2)"], d, family=Gaussian(),
-                       discrete=True)
+        hea.models.bam(["y ~ s(x0)", "~ s(x2)"], d, family=Gaussian(), discrete=True)
     with pytest.raises(ValueError, match="linear"):
         hea.models.bam(["y ~ s(x0)"], d, family=gaulss(), discrete=True)
 
@@ -3030,8 +3360,9 @@ def _dgf_frame(kind: str, n: int = 400) -> pl.DataFrame:
         y = np.exp(np.sin(2.0 * np.pi * x0)) * np.exp(0.3 * e)
     elif kind == "gumbls":
         u = g.uniform(0.0, 1.0, n)
-        y = (2.0 * np.sin(2.0 * np.pi * x0)
-             + np.exp(0.3 + 0.4 * x1) * (-np.log(-np.log(u))))
+        y = 2.0 * np.sin(2.0 * np.pi * x0) + np.exp(0.3 + 0.4 * x1) * (
+            -np.log(-np.log(u))
+        )
     elif kind == "gevlss":
         u = g.uniform(0.0, 1.0, n)
         mu = 2.0 * np.sin(2.0 * np.pi * x0)
@@ -3042,8 +3373,7 @@ def _dgf_frame(kind: str, n: int = 400) -> pl.DataFrame:
         p1 = np.exp(2.0 * np.sin(2.0 * np.pi * x0))
         p2 = np.exp(1.5 * (x1 - 0.5) * 3.0)
         tot = 1.0 + p1 + p2
-        y = np.where(u < 1.0 / tot, 0.0,
-                     np.where(u < (1.0 + p1) / tot, 1.0, 2.0))
+        y = np.where(u < 1.0 / tot, 0.0, np.where(u < (1.0 + p1) / tot, 1.0, 2.0))
     return pl.DataFrame({"y": y, "x0": x0, "x1": x1})
 
 
@@ -3066,7 +3396,8 @@ def _dgf_fit(kind: str):
     if kind not in _DGF_CACHE:
         cls, kw, fml = _dgf_spec(kind)
         _DGF_CACHE[kind] = hea.models.bam(
-            fml, _dgf_frame(kind), family=cls(**kw), discrete=True)
+            fml, _dgf_frame(kind), family=cls(**kw), discrete=True
+        )
     return _DGF_CACHE[kind]
 
 
@@ -3125,21 +3456,39 @@ def test_bam_general_discrete_family_fit5_rail(kind):
     lsp = np.array([1.0, 0.5])
     for dv in (0, 1):
         sl_d = _sl_setup(slots, p)
-        fit_d = _gam_fit5(_sl_initial_repara(sl_d, Xf, both_sides=False),
-                          yv, lsp, sl_d, family=fam, lpi=lpi,
-                          weights=None, offset=None, Mp=Mp, deriv=dv)
+        fit_d = _gam_fit5(
+            _sl_initial_repara(sl_d, Xf, both_sides=False),
+            yv,
+            lsp,
+            sl_d,
+            family=fam,
+            lpi=lpi,
+            weights=None,
+            offset=None,
+            Mp=Mp,
+            deriv=dv,
+        )
         sl_c = _sl_setup(slots, p)
-        fit_c = _gam_fit5(X, yv, lsp, sl_c, family=fam, lpi=lpi,
-                          weights=None, offset=None, Mp=Mp, deriv=dv)
+        fit_c = _gam_fit5(
+            X,
+            yv,
+            lsp,
+            sl_c,
+            family=fam,
+            lpi=lpi,
+            weights=None,
+            offset=None,
+            Mp=Mp,
+            deriv=dv,
+        )
         assert fit_d["converged"] and fit_c["converged"], (kind, dv)
         assert fit_c["REML"] == pytest.approx(fit_d["REML"], rel=1e-11)
-        assert np.allclose(fit_c["coefficients"], fit_d["coefficients"],
-                           atol=1e-8)
-        assert np.allclose(fit_c["linear_predictors"],
-                           fit_d["linear_predictors"], atol=1e-8)
+        assert np.allclose(fit_c["coefficients"], fit_d["coefficients"], atol=1e-8)
+        assert np.allclose(
+            fit_c["linear_predictors"], fit_d["linear_predictors"], atol=1e-8
+        )
         if dv == 1:
-            assert np.allclose(fit_c["REML1"], fit_d["REML1"],
-                               rtol=1e-7, atol=1e-8)
+            assert np.allclose(fit_c["REML1"], fit_d["REML1"], rtol=1e-7, atol=1e-8)
 
 
 def test_bam_general_discrete_family_initialize_receipts():
@@ -3187,30 +3536,33 @@ def test_bam_general_discrete_family_initialize_receipts():
         want = np.zeros(p)
         if kind == "gammals":
             s1, x1 = dense_lp(Xf, jj[0], E)
-            yt1 = np.log(yv + float(np.max(yv))
-                         * np.finfo(float).eps ** 0.75)
+            yt1 = np.log(yv + float(np.max(yv)) * np.finfo(float).eps ** 0.75)
             want[jj[0]] = guarded(s1(x1(yt1)))
-            lres1 = fam.links[1].link(np.log(np.abs(
-                yv - fam.links[0].linkinv(Xf[:, jj[0]] @ want[jj[0]]))))
+            lres1 = fam.links[1].link(
+                np.log(np.abs(yv - fam.links[0].linkinv(Xf[:, jj[0]] @ want[jj[0]])))
+            )
             s2, x2 = dense_lp(Xf, jj[1], E)
-            want[jj[1]] = s2(x2(lres1))          # no guard (:2896)
+            want[jj[1]] = s2(x2(lres1))  # no guard (:2896)
         elif kind == "gumbls":
             s1, x1 = dense_lp(Xf, jj[0], E)
             yt1 = yv.copy()
             want[jj[0]] = guarded(s1(x1(yt1)))
-            lres1 = fam.links[1].link(np.log(
-                (yv - fam.links[0].linkinv(Xf[:, jj[0]] @ want[jj[0]]))
-                ** 2) / 2.0 - 0.25)
+            lres1 = fam.links[1].link(
+                np.log((yv - fam.links[0].linkinv(Xf[:, jj[0]] @ want[jj[0]])) ** 2)
+                / 2.0
+                - 0.25
+            )
             s2, x2 = dense_lp(Xf, jj[1], E)
-            want[jj[1]] = s2(x2(lres1))          # no guard (:3226)
+            want[jj[1]] = s2(x2(lres1))  # no guard (:3226)
             eta2 = Xf[:, jj[1]] @ want[jj[1]]
             yt1 = yt1 - 0.57721 * np.exp(fam.links[1].linkinv(eta2))
-            want[jj[0]] = guarded(s1(x1(yt1)))   # pass 2, same factor
+            want[jj[0]] = guarded(s1(x1(yt1)))  # pass 2, same factor
         elif kind == "gevlss":
             s1, x1 = dense_lp(Xf, jj[0], E)
             want[jj[0]] = guarded(s1(x1(yv.copy())))
-            lres1 = np.log(np.abs(
-                yv - fam.links[0].linkinv(Xf[:, jj[0]] @ want[jj[0]])))
+            lres1 = np.log(
+                np.abs(yv - fam.links[0].linkinv(Xf[:, jj[0]] @ want[jj[0]]))
+            )
             s2, x2 = dense_lp(Xf, jj[1], E)
             want[jj[1]] = guarded(s2(x2(lres1)))
             s3, x3 = dense_lp(Xf, jj[2], E)
@@ -3281,11 +3633,9 @@ def test_bam_general_discrete_families_match_mgcv():
     for kind, (reml, sp0, atol_r, rtol_s) in pins.items():
         m = _dgf_fit(kind)
         assert m.converged, kind
-        assert m.REML_criterion / 2.0 == pytest.approx(
-            reml, abs=atol_r), kind
+        assert m.REML_criterion / 2.0 == pytest.approx(reml, abs=atol_r), kind
         assert m.sp[0] == pytest.approx(sp0, rel=rtol_s), kind
-        assert m.REML_criterion / 2.0 == pytest.approx(
-            machine[kind], rel=1e-7), kind
+        assert m.REML_criterion / 2.0 == pytest.approx(machine[kind], rel=1e-7), kind
         s = m.summary()
         assert s is None or s
 
@@ -3294,19 +3644,18 @@ def test_bam_general_discrete_ok_gate():
     """Families without mgcv's discrete.ok flag (shash/twlss — their
     mgcv ll's carry NO is.list(X) branch) are refused at the entry;
     the flag's carriers are exactly mgcv's five."""
-    from hea.family import (gammals, gaulss, gevlss, gumbls, multinom,
-                            shash, twlss)
+    from hea.family import gammals, gaulss, gevlss, gumbls, multinom, shash, twlss
 
     assert gaulss.discrete_ok and multinom.discrete_ok
     assert gevlss.discrete_ok and gammals.discrete_ok and gumbls.discrete_ok
     assert not shash.discrete_ok and not twlss.discrete_ok
     d = _dgf_frame("gumbls", 120)
     with pytest.raises(NotImplementedError, match="discrete-capable"):
-        hea.models.bam(["y ~ s(x0)", "~ s(x1)", "~ 1", "~ 1"], d,
-                       family=shash(), discrete=True)
+        hea.models.bam(
+            ["y ~ s(x0)", "~ s(x1)", "~ 1", "~ 1"], d, family=shash(), discrete=True
+        )
     with pytest.raises(NotImplementedError, match="discrete-capable"):
-        hea.models.bam(["y ~ s(x0)", "~ 1", "~ 1"], d,
-                       family=twlss(), discrete=True)
+        hea.models.bam(["y ~ s(x0)", "~ 1", "~ 1"], d, family=twlss(), discrete=True)
 
 
 def test_bam_cc_discrete_matches_mgcv():
@@ -3337,44 +3686,48 @@ def test_bam_cc_discrete_matches_mgcv():
     d = pl.DataFrame({"y": y, "x0": x0, "x1": x1})
 
     m1 = hea.models.bam("y ~ s(x0, bs='cc') + s(x1)", d, discrete=True)
-    assert m1.REML_criterion / 2.0 == pytest.approx(71.2551568062,
-                                                    abs=1e-9)
+    assert m1.REML_criterion / 2.0 == pytest.approx(71.2551568062, abs=1e-9)
     assert np.allclose(m1.sp, [2.1379679, 1.4469849e5], rtol=1e-6)
-    assert np.allclose(m1.coefficients[:4],
-                       [0.679823321, 0.359321615, 0.377099934,
-                        0.535180365], atol=1e-8)
-    assert np.allclose(m1.fitted_values[:3],
-                       [0.993362914, -0.428599149, 0.153137940],
-                       atol=1e-8)
+    assert np.allclose(
+        m1.coefficients[:4],
+        [0.679823321, 0.359321615, 0.377099934, 0.535180365],
+        atol=1e-8,
+    )
+    assert np.allclose(
+        m1.fitted_values[:3], [0.993362914, -0.428599149, 0.153137940], atol=1e-8
+    )
     assert m1.edf_total == pytest.approx(9.4135833, abs=1e-6)
 
-    m2 = hea.models.bam("y ~ s(x0, bs='cc') + s(x1)", d, discrete=True,
-                        knots={"x0": [0.0, 2.0 * np.pi]})
-    assert m2.REML_criterion / 2.0 == pytest.approx(71.0348192526,
-                                                    abs=1e-9)
+    m2 = hea.models.bam(
+        "y ~ s(x0, bs='cc') + s(x1)", d, discrete=True, knots={"x0": [0.0, 2.0 * np.pi]}
+    )
+    assert m2.REML_criterion / 2.0 == pytest.approx(71.0348192526, abs=1e-9)
     assert np.allclose(m2.sp, [2.1136989, 1.4262386e5], rtol=1e-6)
 
-    m3 = hea.models.bam(["y ~ s(x0, bs='cc') + s(x1)", "~ s(x1)"], d,
-                        family=gaulss(), discrete=True,
-                        knots={"x0": [0.0, 2.0 * np.pi]},
-                        optimizer=("efs",))   # efs-vs-efs referee
+    m3 = hea.models.bam(
+        ["y ~ s(x0, bs='cc') + s(x1)", "~ s(x1)"],
+        d,
+        family=gaulss(),
+        discrete=True,
+        knots={"x0": [0.0, 2.0 * np.pi]},
+        optimizer=("efs",),
+    )  # efs-vs-efs referee
     assert m3.converged
     # cross-rail: binned basis + EFS endpoint vs mgcv's dense efs
-    assert m3.REML_criterion / 2.0 == pytest.approx(75.757326792,
-                                                    abs=1e-4)
+    assert m3.REML_criterion / 2.0 == pytest.approx(75.757326792, abs=1e-4)
     assert m3.sp[0] == pytest.approx(25.752274, rel=1e-4)
-    assert np.allclose(m3.fitted_values[:3, 0],
-                       [0.985058476, -0.430317627, 0.156390954],
-                       atol=1e-4)
+    assert np.allclose(
+        m3.fitted_values[:3, 0], [0.985058476, -0.430317627, 0.156390954], atol=1e-4
+    )
     # per-machine endpoint pin (regression guard)
-    assert m3.REML_criterion / 2.0 == pytest.approx(75.7573257868,
-                                                    rel=1e-7)
+    assert m3.REML_criterion / 2.0 == pytest.approx(75.7573257868, rel=1e-7)
 
     # predict wraps the circle: the binned cc basis evaluated at 0 and
     # 2π (the explicit knot pair) must agree to machine precision —
     # value AND se (a circular prediction grid always hits both ends).
-    grid = pl.DataFrame({"x0": np.linspace(0.0, 2.0 * np.pi, 50),
-                         "x1": np.full(50, 0.5)})
+    grid = pl.DataFrame(
+        {"x0": np.linspace(0.0, 2.0 * np.pi, 50), "x1": np.full(50, 0.5)}
+    )
     p3 = m3.predict(grid, type="link", se_fit=True)
     assert np.all(np.isfinite(p3.to_numpy()))
     assert abs(float(p3["fit"][0]) - float(p3["fit"][-1])) < 1e-10
@@ -3391,29 +3744,39 @@ def test_bam_general_discrete_efs_and_fixed_sp():
     from hea.family import gaulss
 
     d = _gaulss_frame()
-    m_efs = hea.models.bam(["y ~ s(x0) + x1", "~ s(x2)"], d,
-                           family=gaulss(), discrete=True,
-                           optimizer=("efs",))
+    m_efs = hea.models.bam(
+        ["y ~ s(x0) + x1", "~ s(x2)"],
+        d,
+        family=gaulss(),
+        discrete=True,
+        optimizer=("efs",),
+    )
     assert m_efs.converged
     # per-machine EFS endpoint (mgcv dense efs oracle 191.7194536659)
-    assert m_efs.REML_criterion / 2.0 == pytest.approx(191.7194542235,
-                                                       rel=1e-7)
+    assert m_efs.REML_criterion / 2.0 == pytest.approx(191.7194542235, rel=1e-7)
     assert np.allclose(m_efs.sp, [0.04370736, 0.67283664], rtol=5e-3)
 
     # fixed sp: single fit at mgcv's dense-newton optimum
-    m_fix = hea.models.bam(["y ~ s(x0) + x1", "~ s(x2)"], d,
-                           family=gaulss(), discrete=True,
-                           sp=[0.04369801, 0.67410720])
+    m_fix = hea.models.bam(
+        ["y ~ s(x0) + x1", "~ s(x2)"],
+        d,
+        family=gaulss(),
+        discrete=True,
+        sp=[0.04369801, 0.67410720],
+    )
     assert m_fix.converged
-    assert m_fix.REML_criterion / 2.0 == pytest.approx(191.7194511707,
-                                                       abs=1e-6)
+    assert m_fix.REML_criterion / 2.0 == pytest.approx(191.7194511707, abs=1e-6)
 
     with pytest.raises(ValueError, match="optimizer"):
-        hea.models.bam(["y ~ s(x0)", "~ s(x2)"], d, family=gaulss(),
-                       discrete=True, optimizer=("outer", "nlm"))
+        hea.models.bam(
+            ["y ~ s(x0)", "~ s(x2)"],
+            d,
+            family=gaulss(),
+            discrete=True,
+            optimizer=("outer", "nlm"),
+        )
     with pytest.raises(ValueError, match="formula-list"):
-        hea.models.bam("y ~ s(x0)", d, discrete=True,
-                       optimizer=("efs",))
+        hea.models.bam("y ~ s(x0)", d, discrete=True, optimizer=("efs",))
 
 
 def test_bam_general_discrete_predict():
@@ -3457,14 +3820,17 @@ def test_bam_general_discrete_predict():
     assert np.array_equal(pr["fit.1"].to_numpy(), lp[:, 1])
     prr = m.predict(type="response")
     assert np.allclose(prr["fit"].to_numpy(), fv[:, 0], atol=1e-12, rtol=0)
-    assert np.allclose(prr["fit.1"].to_numpy(), fv[:, 1], atol=1e-12,
-                       rtol=0)
+    assert np.allclose(prr["fit.1"].to_numpy(), fv[:, 1], atol=1e-12, rtol=0)
 
     # -- newdata: lpmatrix / link / SE machine identities ----------------
     rng = np.random.default_rng(3)
-    nd = pl.DataFrame({"x0": rng.uniform(0, 1, 37),
-                       "x1": rng.uniform(0, 1, 37),
-                       "x2": rng.uniform(0, 1, 37)})
+    nd = pl.DataFrame(
+        {
+            "x0": rng.uniform(0, 1, 37),
+            "x1": rng.uniform(0, 1, 37),
+            "x2": rng.uniform(0, 1, 37),
+        }
+    )
     Xf = m.predict(nd, type="lpmatrix")
     prl = m.predict(nd, type="link")
     prs = m.predict(nd, type="link", se_fit=True)
@@ -3472,27 +3838,32 @@ def test_bam_general_discrete_predict():
     Xd = design_full_X(pd_design)[:n_user]
     assert np.max(np.abs(Xf - Xd)) < 1e-12
     V = m.Vp
-    for j, (fk, sk) in enumerate((("fit", "se.fit"),
-                                  ("fit.1", "se.fit.1"))):
+    for j, (fk, sk) in enumerate((("fit", "se.fit"), ("fit.1", "se.fit.1"))):
         cols = np.asarray(lpi[j], dtype=int)
         eta_ref = Xf[:, cols] @ beta[cols]
         assert np.max(np.abs(eta_ref - prl[fk].to_numpy())) < 1e-12
-        var_ref = np.einsum("ij,jk,ik->i", Xd[:, cols],
-                            V[np.ix_(cols, cols)], Xd[:, cols])
-        assert np.max(np.abs(prs[sk].to_numpy()
-                             - np.sqrt(np.maximum(var_ref, 0.0)))) < 1e-12
+        var_ref = np.einsum(
+            "ij,jk,ik->i", Xd[:, cols], V[np.ix_(cols, cols)], Xd[:, cols]
+        )
+        assert (
+            np.max(np.abs(prs[sk].to_numpy() - np.sqrt(np.maximum(var_ref, 0.0))))
+            < 1e-12
+        )
 
     # -- response: linkinv + delta-method SE, exact from link outputs ---
     prsr = m.predict(nd, type="response", se_fit=True)
-    for j, (fk, sk) in enumerate((("fit", "se.fit"),
-                                  ("fit.1", "se.fit.1"))):
+    for j, (fk, sk) in enumerate((("fit", "se.fit"), ("fit.1", "se.fit.1"))):
         eta_j = prl[fk].to_numpy()
-        assert np.array_equal(prsr[fk].to_numpy(),
-                              m.family.links[j].linkinv(eta_j))
-        assert np.max(np.abs(
-            prsr[sk].to_numpy()
-            - np.abs(m.family.links[j].mu_eta(eta_j))
-            * prs[sk].to_numpy())) < 1e-14
+        assert np.array_equal(prsr[fk].to_numpy(), m.family.links[j].linkinv(eta_j))
+        assert (
+            np.max(
+                np.abs(
+                    prsr[sk].to_numpy()
+                    - np.abs(m.family.links[j].mu_eta(eta_j)) * prs[sk].to_numpy()
+                )
+            )
+            < 1e-14
+        )
 
     # -- terms fall-through (exact-eval parent path) ---------------------
     tt = m.predict(nd, type="terms")
@@ -3500,22 +3871,19 @@ def test_bam_general_discrete_predict():
     Xex, _ = _multi_lpmatrix(m._md, nd)
     tot = sum(tt[c].to_numpy() for c in tt.columns)
     icpt = beta[lpi[0][0]] + beta[lpi[1][0]]
-    eta_sum_ref = (Xex[:, lpi[0]] @ beta[lpi[0]]
-                   + Xex[:, lpi[1]] @ beta[lpi[1]])
+    eta_sum_ref = Xex[:, lpi[0]] @ beta[lpi[0]] + Xex[:, lpi[1]] @ beta[lpi[1]]
     assert np.max(np.abs(tot + icpt - eta_sum_ref)) < 1e-12
     assert m.predict(type="terms").height == m._md.n
 
     # -- cross-rail referee: hea dense gam on the same formulas ---------
-    gd = hea.models.gam(["y ~ s(x0) + x1", "~ s(x2)"], _gaulss_frame(),
-                        family=gaulss())
+    gd = hea.models.gam(["y ~ s(x0) + x1", "~ s(x2)"], _gaulss_frame(), family=gaulss())
     pg = gd.predict(nd, type="link", se_fit=True)
     for k in ("fit", "fit.1", "se.fit", "se.fit.1"):
         assert np.max(np.abs(prs[k].to_numpy() - pg[k].to_numpy())) < 1e-4
 
     # -- hook routing, 3-LP surface, unconditional, offset guard --------
     mg = _dgf_fit("gammals")
-    ndg = pl.DataFrame({"x0": rng.uniform(0, 1, 11),
-                        "x1": rng.uniform(0, 1, 11)})
+    ndg = pl.DataFrame({"x0": rng.uniform(0, 1, 11), "x1": rng.uniform(0, 1, 11)})
     rr = mg.predict(ndg, type="response")
     assert rr.columns == ["fit", "fit.1"] and rr.height == 11
     assert np.all(np.isfinite(rr.to_numpy()))
@@ -3524,15 +3892,12 @@ def test_bam_general_discrete_predict():
     bg = np.asarray(mg.coefficients, dtype=float)
     for j, k in enumerate(("fit", "fit.1")):
         cols = np.asarray(mg._md.lpi[j], dtype=int)
-        assert np.max(np.abs(Xfg[:, cols] @ bg[cols]
-                             - rlg[k].to_numpy())) < 1e-12
+        assert np.max(np.abs(Xfg[:, cols] @ bg[cols] - rlg[k].to_numpy())) < 1e-12
 
     me = _dgf_fit("gevlss")
-    nde = pl.DataFrame({"x0": rng.uniform(0, 1, 13),
-                        "x1": rng.uniform(0, 1, 13)})
+    nde = pl.DataFrame({"x0": rng.uniform(0, 1, 13), "x1": rng.uniform(0, 1, 13)})
     pe = me.predict(nde, type="link", se_fit=True)
-    assert pe.columns == ["fit", "fit.1", "fit.2",
-                          "se.fit", "se.fit.1", "se.fit.2"]
+    assert pe.columns == ["fit", "fit.1", "fit.2", "se.fit", "se.fit.1", "se.fit.2"]
     assert np.all(np.isfinite(pe.to_numpy()))
 
     ru = m.predict(nd, type="link", se_fit=True, unconditional=True)
@@ -3573,34 +3938,47 @@ def test_bam_general_discrete_start():
     # mgcv-parity receipt, so suppress it and pin the recovered optimum.
     with _warnings.catch_warnings():
         _warnings.simplefilter("ignore", UserWarning)
-        m2 = hea.models.bam(["y ~ s(x0) + x1", "~ s(x2)"], d,
-                            family=gaulss(), discrete=True, start=coef1)
+        m2 = hea.models.bam(
+            ["y ~ s(x0) + x1", "~ s(x2)"],
+            d,
+            family=gaulss(),
+            discrete=True,
+            start=coef1,
+        )
     assert m2.converged
     # BFGS endpoint scatter: the user-start-seeded initial sp differs
     # from the pilot-seeded one, so the line-search path (not the
     # optimum) differs — same 1e-7-grade band as the EFS-vs-EFS pins.
-    assert m2.REML_criterion / 2.0 == pytest.approx(
-        m1.REML_criterion / 2.0, abs=5e-7)
+    assert m2.REML_criterion / 2.0 == pytest.approx(m1.REML_criterion / 2.0, abs=5e-7)
 
     class _NoInit(gaulss):
         def initialize_coef(self, *a, **k):
-            raise AssertionError(
-                "initializer must not run when start= is supplied")
+            raise AssertionError("initializer must not run when start= is supplied")
 
     with _warnings.catch_warnings():
         _warnings.simplefilter("ignore", UserWarning)
-        m3 = hea.models.bam(["y ~ s(x0) + x1", "~ s(x2)"], d,
-                            family=_NoInit(), discrete=True, start=coef1)
+        m3 = hea.models.bam(
+            ["y ~ s(x0) + x1", "~ s(x2)"],
+            d,
+            family=_NoInit(),
+            discrete=True,
+            start=coef1,
+        )
     assert m3.converged
-    assert m3.REML_criterion / 2.0 == pytest.approx(
-        m1.REML_criterion / 2.0, abs=5e-7)
+    assert m3.REML_criterion / 2.0 == pytest.approx(m1.REML_criterion / 2.0, abs=5e-7)
     with pytest.raises(AssertionError, match="initializer"):
-        hea.models.bam(["y ~ s(x0) + x1", "~ s(x2)"], d,
-                       family=_NoInit(), discrete=True)
+        hea.models.bam(
+            ["y ~ s(x0) + x1", "~ s(x2)"], d, family=_NoInit(), discrete=True
+        )
 
     with pytest.raises(ValueError, match="start must have length"):
-        hea.models.bam(["y ~ s(x0) + x1", "~ s(x2)"], d,
-                       family=gaulss(), discrete=True, start=np.zeros(3))
+        hea.models.bam(
+            ["y ~ s(x0) + x1", "~ s(x2)"],
+            d,
+            family=gaulss(),
+            discrete=True,
+            start=np.zeros(3),
+        )
     with pytest.raises(ValueError, match="formula-list"):
         hea.models.bam("y ~ s(x0)", d, discrete=True, start=np.zeros(5))
 
@@ -3629,23 +4007,29 @@ def test_bam_general_discrete_drop_protocol():
     z = g.uniform(0.0, 1.0, n)
     w = g.uniform(0.0, 1.0, n)
     rn = g.normal(0.0, 1.0, n)
-    df = pl.DataFrame({
-        "y": 1 + x + np.sin(2 * np.pi * z)
-             + rn * np.exp(0.3 * np.cos(2 * np.pi * w)),
-        "x": x, "xdup": x * 2.0, "z": z, "w": w,
-    })
+    df = pl.DataFrame(
+        {
+            "y": 1
+            + x
+            + np.sin(2 * np.pi * z)
+            + rn * np.exp(0.3 * np.cos(2 * np.pi * w)),
+            "x": x,
+            "xdup": x * 2.0,
+            "z": z,
+            "w": w,
+        }
+    )
     forms = ["y ~ x + xdup + s(z)", "~ s(w)"]
     m = hea.models.bam(forms, df, family=gaulss(), discrete=True)
     assert m.converged
     beta = np.asarray(m._beta)
-    assert beta.shape[0] == 22                    # mgcv ncoef
-    assert beta[2] == 0.0                         # xdup dropped → exact 0
-    np.testing.assert_allclose(beta[:2], [1.11538940632, 0.996736549025],
-                               rtol=0, atol=2e-5)
-    np.testing.assert_allclose(m.REML_criterion / 2, 311.964723261,
-                               rtol=0, atol=1e-6)
-    np.testing.assert_allclose(m.sp, [0.0681246465194, 0.431317034396],
-                               rtol=5e-4)
+    assert beta.shape[0] == 22  # mgcv ncoef
+    assert beta[2] == 0.0  # xdup dropped → exact 0
+    np.testing.assert_allclose(
+        beta[:2], [1.11538940632, 0.996736549025], rtol=0, atol=2e-5
+    )
+    np.testing.assert_allclose(m.REML_criterion / 2, 311.964723261, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(m.sp, [0.0681246465194, 0.431317034396], rtol=5e-4)
 
     # dense-rail referee on the same frame: same drop, same optimum
     # (BFGS ran its deriv-1 REML trials in the REDUCED space post-drop,
@@ -3653,13 +4037,76 @@ def test_bam_general_discrete_drop_protocol():
     md = hea.models.gam(forms, df, family=gaulss(), method="REML")
     assert np.asarray(md._beta)[2] == 0.0
     assert abs(m.REML_criterion - md.REML_criterion) / 2.0 < 1e-6
-    assert float(np.max(np.abs(np.asarray(m.fitted_values)
-                               - np.asarray(md.fitted_values)))) < 1e-4
+    assert (
+        float(
+            np.max(np.abs(np.asarray(m.fitted_values) - np.asarray(md.fitted_values)))
+        )
+        < 1e-4
+    )
 
     # the post-fit surface survives the drop
-    nd = pl.DataFrame({"x": np.linspace(0, 1, 9),
-                       "xdup": 2 * np.linspace(0, 1, 9),
-                       "z": np.linspace(0.1, 0.9, 9),
-                       "w": np.linspace(0.1, 0.9, 9)})
+    nd = pl.DataFrame(
+        {
+            "x": np.linspace(0, 1, 9),
+            "xdup": 2 * np.linspace(0, 1, 9),
+            "z": np.linspace(0.1, 0.9, 9),
+            "w": np.linspace(0.1, 0.9, 9),
+        }
+    )
     pr = m.predict(nd, type="link", se_fit=True)
     assert np.all(np.isfinite(pr.to_numpy()))
+
+
+def test_disjoint_by_level_blocks_skip_is_exact():
+    """The structural zero-block skip in ``_term_pair_XWX_raw`` must be exactly
+    equivalent to accumulating the block.
+
+    ``_terms_row_disjoint`` is a hea addition, not an mgcv port: ``XWXijs``
+    accumulates every block and reaches the same zeros the long way round. That
+    makes it the one place in the discrete kernel where hea deliberately does
+    LESS work than the C, so pin the equivalence directly — assemble ``X'WX``
+    both ways on a factor-``by`` fit (where 36 of the 45 smooth-pair blocks are
+    all-zero) and require bit-identical output.
+    """
+    import sys
+
+    B = sys.modules["hea.models.bam"]
+
+    rng = np.random.default_rng(4)
+    n = 4000
+    x = np.round(rng.uniform(0, 1, n), 2)
+    g = rng.choice(list("abc"), n)
+    lin = np.where(g == "a", np.sin(2 * np.pi * x), np.cos(2 * np.pi * x))
+    d = pl.DataFrame(
+        {"x": x, "g": g, "y": rng.poisson(np.exp(0.5 * lin))}
+    ).with_columns(pl.col("g").cast(pl.Enum(list("abc"))))
+
+    m = hea.models.bam(
+        'y ~ g + s(x, by=g, bs="ps", k=8)',
+        d,
+        family=Poisson(),
+        method="fREML",
+        discrete=True,
+    )
+    design = m._discrete_design
+    w = rng.uniform(size=n) + 0.5
+
+    smooths = [t for t in design.terms if t.kind != "param"]
+    assert (
+        sum(
+            B._terms_row_disjoint(a, b)
+            for i, a in enumerate(smooths)
+            for b in smooths[i + 1 :]
+        )
+        == 3
+    ), "fixture should have 3 disjoint by-level smooth pairs"
+
+    fast = B.XWXd(design, w)
+    orig = B._terms_row_disjoint
+    try:
+        B._terms_row_disjoint = lambda ti, tj: False
+        full = B.XWXd(design, w)
+    finally:
+        B._terms_row_disjoint = orig
+
+    np.testing.assert_array_equal(fast, full)

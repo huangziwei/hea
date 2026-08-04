@@ -9,6 +9,7 @@ tests.
 from __future__ import annotations
 
 import matplotlib
+
 matplotlib.use("Agg")  # noqa: E402
 
 import matplotlib.axes

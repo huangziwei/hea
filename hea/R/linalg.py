@@ -1,13 +1,13 @@
 """R's least-squares QR kernel — a mechanical port of the LINPACK routines R
-calls from ``lm.fit`` / ``lm.wfit`` via ``Cdqrls`` (``ref/r-stats/src/lm.c``):
+calls from ``lm.fit`` / ``lm.wfit`` via ``Cdqrls`` (``stats/src/lm.c``):
 
-  * ``dqrdc2`` — R's *modification* of LINPACK ``dqrdc`` (``ref/.../dqrdc2.f``):
+  * ``dqrdc2`` — R's *modification* of LINPACK ``dqrdc`` (``dqrdc2.f``):
     Householder QR with a limited column-pivoting strategy that defers
     near-dependent columns to the right (so sequential 1-df effects are well
     defined) and reports the rank.
-  * ``dqrsl``  — LINPACK ``dqrsl`` (``ref/.../dqrsl.f``): applies the factored Q
+  * ``dqrsl``  — LINPACK ``dqrsl`` (``dqrsl.f``): applies the factored Q
     to compute ``Qᵀy`` (effects), the coefficients ``b`` and residuals ``rsd``.
-  * ``dqrls``  — the ``dqrdc2`` + ``dqrsl`` wrapper (``ref/.../dqrls.f``).
+  * ``dqrls``  — the ``dqrdc2`` + ``dqrsl`` wrapper (``dqrls.f``).
   * ``Cdqrls`` — the ``lm.c`` entry returning R's ``$qr/$coefficients/$residuals/
     $effects/$rank/$pivot/$qraux/$tol/$pivoted``.
 
@@ -17,6 +17,7 @@ This is the **pure-Python spec + oracle** for the Rust port (``hea/_rs`` →
 [[rng-rust-port-t2]]. Per [[mechanical-port-never-guess]]: ported against the
 real sources, not reverse-engineered. ``pivot`` is returned 1-based (R parity).
 """
+
 from __future__ import annotations
 
 import math
@@ -58,18 +59,18 @@ def dqrdc2(x: np.ndarray, tol: float = 1e-7):
     n, p = qr.shape
     qraux = np.zeros(p)
     work = np.zeros((p, 2))
-    jpvt = np.arange(1, p + 1)              # 1-based column indices (R 'pivot')
+    jpvt = np.arange(1, p + 1)  # 1-based column indices (R 'pivot')
 
     # compute the norms of the columns of x
     if n > 0:
         for j in range(p):
-            qraux[j] = np.linalg.norm(qr[:, j])     # dnrm2(n, x(1,j))
+            qraux[j] = np.linalg.norm(qr[:, j])  # dnrm2(n, x(1,j))
             work[j, 0] = qraux[j]
             work[j, 1] = qraux[j] if qraux[j] != 0.0 else 1.0
 
     # Householder reduction of x
     lup = min(n, p)
-    k = p + 1                              # Fortran 'k' (1-based rank boundary)
+    k = p + 1  # Fortran 'k' (1-based rank boundary)
     for l in range(1, lup + 1):  # noqa: E741 — Fortran 'l' (1-based), kept for port fidelity
         l0 = l - 1
         # cycle columns l..p left-to-right until one has non-negligible norm;
@@ -77,29 +78,29 @@ def dqrdc2(x: np.ndarray, tol: float = 1e-7):
         while not (l >= k or qraux[l0] >= work[l0, 1] * tol):
             # cyclic left-shift of columns l..p, moving column l to position p
             tcol = qr[:, l0].copy()
-            qr[:, l0:p - 1] = qr[:, l0 + 1:p]
+            qr[:, l0 : p - 1] = qr[:, l0 + 1 : p]
             qr[:, p - 1] = tcol
             isv, tsv = jpvt[l0], qraux[l0]
             tt_sv, ttt_sv = work[l0, 0], work[l0, 1]
-            jpvt[l0:p - 1] = jpvt[l0 + 1:p]
-            qraux[l0:p - 1] = qraux[l0 + 1:p]
-            work[l0:p - 1, 0] = work[l0 + 1:p, 0]
-            work[l0:p - 1, 1] = work[l0 + 1:p, 1]
+            jpvt[l0 : p - 1] = jpvt[l0 + 1 : p]
+            qraux[l0 : p - 1] = qraux[l0 + 1 : p]
+            work[l0 : p - 1, 0] = work[l0 + 1 : p, 0]
+            work[l0 : p - 1, 1] = work[l0 + 1 : p, 1]
             jpvt[p - 1], qraux[p - 1] = isv, tsv
             work[p - 1, 0], work[p - 1, 1] = tt_sv, ttt_sv
             k -= 1
         if l != n:
             # Householder transformation for column l (rows l..n)
-            nrmxl = np.linalg.norm(qr[l0:n, l0])        # dnrm2(n-l+1, x(l,l))
+            nrmxl = np.linalg.norm(qr[l0:n, l0])  # dnrm2(n-l+1, x(l,l))
             if nrmxl != 0.0:
                 if qr[l0, l0] != 0.0:
                     nrmxl = math.copysign(nrmxl, qr[l0, l0])
-                qr[l0:n, l0] /= nrmxl                   # dscal(1/nrmxl)
+                qr[l0:n, l0] /= nrmxl  # dscal(1/nrmxl)
                 qr[l0, l0] += 1.0
                 # apply the transformation to the remaining columns + update norms
-                for j in range(l, p):                   # Fortran j = l+1..p
+                for j in range(l, p):  # Fortran j = l+1..p
                     t = -np.dot(qr[l0:n, l0], qr[l0:n, j]) / qr[l0, l0]
-                    qr[l0:n, j] += t * qr[l0:n, l0]      # daxpy
+                    qr[l0:n, j] += t * qr[l0:n, l0]  # daxpy
                     if qraux[j] != 0.0:
                         tt = 1.0 - (abs(qr[l0, j]) / qraux[j]) ** 2
                         tt = max(tt, 0.0)
@@ -107,7 +108,7 @@ def dqrdc2(x: np.ndarray, tol: float = 1e-7):
                         if abs(tt) >= 1e-6:
                             qraux[j] = qraux[j] * math.sqrt(tt)
                         else:
-                            qraux[j] = np.linalg.norm(qr[l0 + 1:n, j])  # dnrm2(n-l)
+                            qraux[j] = np.linalg.norm(qr[l0 + 1 : n, j])  # dnrm2(n-l)
                             work[j, 0] = qraux[j]
                 qraux[l0] = qr[l0, l0]
                 qr[l0, l0] = -nrmxl
@@ -117,16 +118,15 @@ def dqrdc2(x: np.ndarray, tol: float = 1e-7):
 
 def _job_flags(job: int):
     return (
-        job // 10000 != 0,            # cqy
-        job % 10000 != 0,             # cqty
-        (job % 1000) // 100 != 0,     # cb
-        (job % 100) // 10 != 0,       # cr
-        job % 10 != 0,                # cxb
+        job // 10000 != 0,  # cqy
+        job % 10000 != 0,  # cqty
+        (job % 1000) // 100 != 0,  # cb
+        (job % 100) // 10 != 0,  # cr
+        job % 10 != 0,  # cxb
     )
 
 
-def dqrsl(qr: np.ndarray, n: int, k: int, qraux: np.ndarray, y: np.ndarray,
-          job: int):
+def dqrsl(qr: np.ndarray, n: int, k: int, qraux: np.ndarray, y: np.ndarray, job: int):
     """Mechanical port of ``dqrsl.f`` — apply the ``dqrdc2`` factorization.
     Returns ``(qy, qty, b, rsd, xb, info)``; only the parts selected by ``job``
     (decimal ``abcde``: a=qy, b/c/d/e⇒qty, c=b, d=rsd, e=xb) are meaningful."""
@@ -140,7 +140,7 @@ def dqrsl(qr: np.ndarray, n: int, k: int, qraux: np.ndarray, y: np.ndarray,
     xb = np.zeros(n)
     ju = min(k, n - 1)
 
-    if ju == 0:                                    # special action when n == 1
+    if ju == 0:  # special action when n == 1
         if cqy:
             qy[0] = y[0]
         if cqty:
@@ -160,7 +160,7 @@ def dqrsl(qr: np.ndarray, n: int, k: int, qraux: np.ndarray, y: np.ndarray,
         qy[:] = y
     if cqty:
         qty[:] = y
-    if cqy:                                         # compute Q·y (descending j)
+    if cqy:  # compute Q·y (descending j)
         for jj in range(1, ju + 1):
             j0 = (ju - jj + 1) - 1
             if qraux[j0] != 0.0:
@@ -169,7 +169,7 @@ def dqrsl(qr: np.ndarray, n: int, k: int, qraux: np.ndarray, y: np.ndarray,
                 t = -np.dot(qr[j0:n, j0], qy[j0:n]) / qr[j0, j0]
                 qy[j0:n] += t * qr[j0:n, j0]
                 qr[j0, j0] = temp
-    if cqty:                                        # compute Qᵀ·y (ascending j)
+    if cqty:  # compute Qᵀ·y (ascending j)
         for j in range(1, ju + 1):
             j0 = j - 1
             if qraux[j0] != 0.0:
@@ -190,7 +190,7 @@ def dqrsl(qr: np.ndarray, n: int, k: int, qraux: np.ndarray, y: np.ndarray,
     if cr:
         rsd[:k] = 0.0
 
-    if cb:                                          # back-substitute for b
+    if cb:  # back-substitute for b
         for jj in range(1, k + 1):
             j = k - jj + 1
             j0 = j - 1
@@ -200,9 +200,9 @@ def dqrsl(qr: np.ndarray, n: int, k: int, qraux: np.ndarray, y: np.ndarray,
             b[j0] = b[j0] / qr[j0, j0]
             if j != 1:
                 t = -b[j0]
-                b[:j0] += t * qr[:j0, j0]           # daxpy(j-1, t, x(1,j), b)
+                b[:j0] += t * qr[:j0, j0]  # daxpy(j-1, t, x(1,j), b)
 
-    if cr or cxb:                                   # compute rsd / xb (descending)
+    if cr or cxb:  # compute rsd / xb (descending)
         for jj in range(1, ju + 1):
             j0 = (ju - jj + 1) - 1
             if qraux[j0] != 0.0:
@@ -230,14 +230,14 @@ def dqrls(x: np.ndarray, y: np.ndarray, tol: float = 1e-7):
     if k > 0:
         _, qty, b_k, rsd, _, _ = dqrsl(qr, n, k, qraux, y, 1110)
         coef[:k] = b_k[:k]
-    else:                                           # k == 0: rsd = y, qty = y
+    else:  # k == 0: rsd = y, qty = y
         qty = y.copy()
         rsd = y.copy()
     return qr, coef, rsd, qty, k, jpvt, qraux
 
 
 def Cdqrls(x: np.ndarray, y: np.ndarray, tol: float = 1e-7) -> dict:
-    """Port of ``Cdqrls`` (``ref/r-stats/src/lm.c``) — the entry ``lm.fit`` calls.
+    """Port of ``Cdqrls`` (``stats/src/lm.c``) — the entry ``lm.fit`` calls.
     Returns R's list as a dict: ``qr`` (compact factor), ``coefficients`` (pivoted,
     unused→0), ``residuals``, ``effects`` (``Qᵀy``), ``rank``, ``pivot`` (1-based),
     ``qraux``, ``tol``, ``pivoted``."""
@@ -252,12 +252,12 @@ def Cdqrls(x: np.ndarray, y: np.ndarray, tol: float = 1e-7) -> dict:
         raise ValueError("NA/NaN/Inf in 'x'")
     if not np.all(np.isfinite(y)):
         raise ValueError("NA/NaN/Inf in 'y'")
-    if _rs_dqrls is not None:                # Rust active path (pure-Py = oracle)
+    if _rs_dqrls is not None:  # Rust active path (pure-Py = oracle)
         # F-order X so the column-major kernel copies contiguously (no transpose);
         # no-op for polars-origin (F) designs. y is 1-D (layout-agnostic).
         qr, coef, rsd, qty, k, jpvt, qraux = _rs_dqrls(
-            np.asfortranarray(x, dtype=float),
-            np.asarray(y, dtype=float), tol)
+            np.asfortranarray(x, dtype=float), np.asarray(y, dtype=float), tol
+        )
         k = int(k)
     else:
         qr, coef, rsd, qty, k, jpvt, qraux = dqrls(x.copy(), y, tol)

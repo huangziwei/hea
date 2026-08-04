@@ -39,13 +39,11 @@ def render(plot, build_output, ax=None, subplotspec=None) -> "plt.Figure":
     n_panels = 1 if layout is None else len(layout)
 
     if n_panels <= 1:
-        return _render_single(plot, build_output, ax=ax,
-                              subplotspec=subplotspec)
+        return _render_single(plot, build_output, ax=ax, subplotspec=subplotspec)
     if ax is not None:
         # Single ax requested for a faceted plot — collapse to one panel.
         return _render_single(plot, build_output, ax=ax, subplotspec=None)
-    return _render_facets(plot, build_output, layout,
-                          subplotspec=subplotspec)
+    return _render_facets(plot, build_output, layout, subplotspec=subplotspec)
 
 
 def _is_coord_flip(coord) -> bool:
@@ -125,9 +123,13 @@ def _polar_prep_layer_data(df, x_scale):
             x_dtype = df["x"].dtype
             if not x_dtype.is_numeric():
                 df = df.with_columns(
-                    pl.col("x").cast(pl.Utf8).replace_strict(
-                        level_to_pos, default=None,
-                    ).alias("x"),
+                    pl.col("x")
+                    .cast(pl.Utf8)
+                    .replace_strict(
+                        level_to_pos,
+                        default=None,
+                    )
+                    .alias("x"),
                 )
     return df
 
@@ -263,7 +265,9 @@ def _panel_scale(build_output, panel_id, axis: str):
     ``scales="free*"``); falls back to the global scale for fixed mode
     or unfaceted plots.
     """
-    panel = build_output.panel_scales.get(panel_id) if build_output.panel_scales else None
+    panel = (
+        build_output.panel_scales.get(panel_id) if build_output.panel_scales else None
+    )
     if panel is not None:
         sc = panel.get(axis)
         if sc is not None:
@@ -280,7 +284,8 @@ def _render_single(plot, build_output, ax, subplotspec=None):
     if subplotspec is not None:
         fig = subplotspec.get_gridspec().figure
         ax = fig.add_subplot(
-            subplotspec, projection="polar" if is_polar else None,
+            subplotspec,
+            projection="polar" if is_polar else None,
         )
         owns_fig = False
     elif ax is None:
@@ -326,6 +331,7 @@ def _render_single(plot, build_output, ax, subplotspec=None):
     for layer, df in zip(plot.layers, build_output.data):
         if is_flipped:
             from .coords.flip import flip_columns
+
             df = flip_columns(df)
         if is_polar:
             df = _polar_prep_layer_data(df, x_scale)
@@ -339,7 +345,10 @@ def _render_single(plot, build_output, ax, subplotspec=None):
         # ticks at the wrong (unrescaled) positions; ``_polar_apply_scales``
         # adapts both axes.
         _polar_apply_scales(
-            ax, x_scale, _panel_scale(build_output, 1, "y"), x_range,
+            ax,
+            x_scale,
+            _panel_scale(build_output, 1, "y"),
+            x_range,
         )
     else:
         for axis in ("x", "y"):
@@ -350,7 +359,8 @@ def _render_single(plot, build_output, ax, subplotspec=None):
             sc = _panel_scale(build_output, 1, scale_aes)
             if sc is not None:
                 sc.apply_to_axis(
-                    ax, axis,
+                    ax,
+                    axis,
                     view_limits=_coord_view_limits(plot.coordinates, axis),
                 )
 
@@ -374,6 +384,7 @@ def _render_single(plot, build_output, ax, subplotspec=None):
         apply(ax)
 
     from .guides import apply_axis_guides, apply_legends
+
     apply_axis_guides([ax], plot)
     apply_legends(fig, [ax], plot, build_output)
 
@@ -397,7 +408,8 @@ def _render_facets(plot, build_output, layout, subplotspec=None):
         owns_fig = False
     else:
         fig, axes = plt.subplots(
-            nrow, ncol,
+            nrow,
+            ncol,
             sharex=sharex,
             sharey=sharey,
             figsize=(3.0 * ncol, 2.5 * nrow),
@@ -425,6 +437,7 @@ def _render_facets(plot, build_output, layout, subplotspec=None):
                 panel_data = df.filter(pl.col("PANEL") == panel_row["PANEL"])
             if is_flipped:
                 from .coords.flip import flip_columns
+
                 panel_data = flip_columns(panel_data)
             if len(panel_data) > 0:
                 layer.geom.draw_panel(panel_data, panel_ax)
@@ -438,7 +451,8 @@ def _render_facets(plot, build_output, layout, subplotspec=None):
             sc = _panel_scale(build_output, panel_row["PANEL"], scale_aes)
             if sc is not None:
                 sc.apply_to_axis(
-                    panel_ax, axis,
+                    panel_ax,
+                    axis,
                     view_limits=_coord_view_limits(plot.coordinates, axis),
                 )
 
@@ -470,8 +484,9 @@ def _render_facets(plot, build_output, layout, subplotspec=None):
 
     if owns_fig:
         _apply_plot_titles(plot, fig, ax_list=list(flat_axes[:n_panels]))
-    _apply_theme(plot.theme, fig, list(flat_axes[:n_panels]),
-                 owns_fig=owns_fig, is_faceted=True)
+    _apply_theme(
+        plot.theme, fig, list(flat_axes[:n_panels]), owns_fig=owns_fig, is_faceted=True
+    )
 
     apply = getattr(plot.coordinates, "apply_to_axes", None)
     if apply is not None:
@@ -479,6 +494,7 @@ def _render_facets(plot, build_output, layout, subplotspec=None):
             apply(panel_ax)
 
     from .guides import apply_axis_guides, apply_legends
+
     apply_axis_guides(list(flat_axes[:n_panels]), plot)
     apply_legends(fig, list(flat_axes[:n_panels]), plot, build_output)
 
@@ -491,8 +507,10 @@ def _render_facets(plot, build_output, layout, subplotspec=None):
 # Theme application — translates :class:`Theme` elements to matplotlib calls.
 # ---------------------------------------------------------------------------
 
-def _apply_theme(theme, fig, axes_list, *, owns_fig: bool,
-                 is_faceted: bool = False) -> None:
+
+def _apply_theme(
+    theme, fig, axes_list, *, owns_fig: bool, is_faceted: bool = False
+) -> None:
     if theme is None or not theme.elements:
         return
 
@@ -553,7 +571,8 @@ def _apply_grid(theme, ax) -> None:
         ax.grid(False, which="major")
     elif isinstance(elem, element_line):
         ax.grid(
-            True, which="major",
+            True,
+            which="major",
             color=r_color(elem.colour) or "white",
             linewidth=(elem.size or 0.5) * _PT_PER_MM,
             linestyle=r_lty(elem.linetype) if elem.linetype else "-",
@@ -572,7 +591,8 @@ def _apply_grid(theme, ax) -> None:
     # ticks (log/symlog/function scales auto-supply them).
     if isinstance(minor, element_line) and ax.get_xscale() != "linear":
         ax.grid(
-            True, which="minor",
+            True,
+            which="minor",
             color=r_color(minor.colour) or "white",
             linewidth=(minor.size or 0.25) * _PT_PER_MM,
             linestyle=r_lty(minor.linetype) if minor.linetype else "-",
@@ -737,7 +757,9 @@ def _merge_text(base, override):
         hjust=override.hjust if override.hjust is not None else base.hjust,
         vjust=override.vjust if override.vjust is not None else base.vjust,
         angle=override.angle if override.angle is not None else base.angle,
-        lineheight=override.lineheight if override.lineheight is not None else base.lineheight,
+        lineheight=override.lineheight
+        if override.lineheight is not None
+        else base.lineheight,
     )
 
 
@@ -813,7 +835,9 @@ def _draw_right_strip(theme, ax, label: str) -> None:
         edgecolor = r_color(bg.colour) if bg.colour else "none"
         linewidth = (bg.size * _PT_PER_MM) if (bg.colour and bg.size) else 0.0
         rect = Rectangle(
-            (1.0, 0.0), strip_w_axes, 1.0,
+            (1.0, 0.0),
+            strip_w_axes,
+            1.0,
             transform=ax.transAxes,
             facecolor=facecolor,
             edgecolor=edgecolor,
@@ -824,9 +848,13 @@ def _draw_right_strip(theme, ax, label: str) -> None:
         fig.add_artist(rect)
 
     ax.text(
-        1.0 + strip_w_axes / 2.0, 0.5, label,
+        1.0 + strip_w_axes / 2.0,
+        0.5,
+        label,
         transform=ax.transAxes,
-        rotation=-90, ha="center", va="center",
+        rotation=-90,
+        ha="center",
+        va="center",
     )
 
 
@@ -859,7 +887,9 @@ def _apply_strip_background(theme, ax) -> None:
     linewidth = (bg.size * _PT_PER_MM) if (bg.colour and bg.size) else 0.0
 
     rect = Rectangle(
-        (0.0, 1.0), 1.0, strip_h_axes,
+        (0.0, 1.0),
+        1.0,
+        strip_h_axes,
         transform=ax.transAxes,
         facecolor=facecolor,
         edgecolor=edgecolor,
@@ -987,9 +1017,7 @@ def _default_labels(plot, build_output=None):
     # follows this convention too. Users opt back in with
     # ``labs(x="...", y="...")`` — that lands in ``explicit`` and bypasses
     # this branch.
-    is_polar = (
-        type(getattr(plot, "coordinates", None)).__name__ == "CoordPolar"
-    )
+    is_polar = type(getattr(plot, "coordinates", None)).__name__ == "CoordPolar"
 
     # ``labs(x=None)`` is the explicit-suppress form (mirrors ggplot2's
     # ``labs(x = NULL)``); resolve to ``""`` so matplotlib renders nothing.
@@ -1076,13 +1104,20 @@ def _apply_plot_titles(plot, fig, ax_list=None, *, skip_caption: bool = False) -
             sub_anchor_y = 1.0 if not is_faceted else 1.0
             sub_lift_pts = 2.0  # small breathing room above spine/strip
             sub_trans = offset_copy(
-                target_ax.transAxes, fig=fig, x=0, y=sub_lift_pts,
+                target_ax.transAxes,
+                fig=fig,
+                x=0,
+                y=sub_lift_pts,
                 units="points",
             )
             sub_x, sub_ha = _hjust_to_axes_x_ha(sub_loc)
             sub_artist = target_ax.text(
-                sub_x, sub_anchor_y, str(subtitle), transform=sub_trans,
-                ha=sub_ha, va="bottom",
+                sub_x,
+                sub_anchor_y,
+                str(subtitle),
+                transform=sub_trans,
+                ha=sub_ha,
+                va="bottom",
             )
             _apply_text_element(sub_artist, sub_elem)
         else:

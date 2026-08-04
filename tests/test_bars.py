@@ -40,9 +40,7 @@ def test_lme4_bars_matches_R(fx_id: str):
     Lt_ref = mmread(fx / "Lambdat.mtx", spmatrix=False).toarray()
     theta_ref = _load_theta(fx / "theta.csv")
 
-    assert got.Z.shape == Z_ref.shape, (
-        f"Z shape: got {got.Z.shape} want {Z_ref.shape}"
-    )
+    assert got.Z.shape == Z_ref.shape, f"Z shape: got {got.Z.shape} want {Z_ref.shape}"
     assert got.Lambdat.shape == Lt_ref.shape, (
         f"Lambdat shape: got {got.Lambdat.shape} want {Lt_ref.shape}"
     )
@@ -50,10 +48,16 @@ def test_lme4_bars_matches_R(fx_id: str):
         f"theta shape: got {got.theta.shape} want {theta_ref.shape}"
     )
 
-    np.testing.assert_allclose(got.Z, Z_ref, rtol=1e-6, atol=1e-8,
-                               err_msg=f"Z values diverge [{fx_id}]")
+    np.testing.assert_allclose(
+        got.Z, Z_ref, rtol=1e-6, atol=1e-8, err_msg=f"Z values diverge [{fx_id}]"
+    )
     assert np.array_equal(got.Lambdat.astype(int), Lt_ref.astype(int)), (
         f"Lambdat template (int indices) differs [{fx_id}]"
     )
-    np.testing.assert_allclose(got.theta, theta_ref, rtol=1e-6, atol=1e-8,
-                               err_msg=f"theta values diverge [{fx_id}]")
+    np.testing.assert_allclose(
+        got.theta,
+        theta_ref,
+        rtol=1e-6,
+        atol=1e-8,
+        err_msg=f"theta values diverge [{fx_id}]",
+    )

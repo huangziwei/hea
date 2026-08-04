@@ -39,17 +39,18 @@ def _figure() -> Figure:
 # ones. Callers that override the theme should pass an explicit fontsize.
 
 BASE_SIZE_PT = 11.0
-TITLE_SIZE_PT = BASE_SIZE_PT * 1.2          # plot.title — bold, 1.2× base
-SUBTITLE_SIZE_PT = BASE_SIZE_PT             # plot.subtitle — base size, regular weight
-AXIS_TITLE_SIZE_PT = BASE_SIZE_PT           # axis.title
-AXIS_TEXT_SIZE_PT = BASE_SIZE_PT * 0.8      # axis.text
-CAPTION_SIZE_PT = BASE_SIZE_PT * 0.8        # plot.caption
+TITLE_SIZE_PT = BASE_SIZE_PT * 1.2  # plot.title — bold, 1.2× base
+SUBTITLE_SIZE_PT = BASE_SIZE_PT  # plot.subtitle — base size, regular weight
+AXIS_TITLE_SIZE_PT = BASE_SIZE_PT  # axis.title
+AXIS_TEXT_SIZE_PT = BASE_SIZE_PT * 0.8  # axis.text
+CAPTION_SIZE_PT = BASE_SIZE_PT * 0.8  # plot.caption
 LEGEND_TITLE_SIZE_PT = BASE_SIZE_PT
 LEGEND_TEXT_SIZE_PT = BASE_SIZE_PT * 0.8
-STRIP_TEXT_SIZE_PT = BASE_SIZE_PT * 0.8     # facet strip
+STRIP_TEXT_SIZE_PT = BASE_SIZE_PT * 0.8  # facet strip
 
 
 # ---- Primitive: measure a single text artist ------------------------------
+
 
 def text_size_in(
     text: str | None,
@@ -85,6 +86,7 @@ def text_size_in(
 
 # ---- Aggregates -----------------------------------------------------------
 
+
 def text_block_size_in(
     lines: list[str] | tuple[str, ...],
     *,
@@ -100,8 +102,9 @@ def text_block_size_in(
     lines = [s for s in lines if s]
     if not lines:
         return (0.0, 0.0)
-    sizes = [text_size_in(s, fontsize=fontsize, family=family, weight=weight)
-             for s in lines]
+    sizes = [
+        text_size_in(s, fontsize=fontsize, family=family, weight=weight) for s in lines
+    ]
     width = max(w for w, _ in sizes)
     line_h = max(h for _, h in sizes)
     height = line_h * line_spacing * len(lines)
@@ -177,12 +180,7 @@ def colorbar_cell_width_in(
     if not tick_labels:
         return 0.0
     text_w = max_label_width_in(tick_labels, fontsize=fontsize)
-    return (
-        COLORBAR_PANEL_PAD_IN
-        + COLORBAR_BAR_WIDTH_IN
-        + COLORBAR_BAR_PAD_IN
-        + text_w
-    )
+    return COLORBAR_PANEL_PAD_IN + COLORBAR_BAR_WIDTH_IN + COLORBAR_BAR_PAD_IN + text_w
 
 
 def legend_cell_size_in(
@@ -200,12 +198,7 @@ def legend_cell_size_in(
         max_label_height_in(entries, fontsize=text_fontsize),
         LEGEND_KEY_HEIGHT_IN,
     )
-    width = (
-        LEGEND_KEY_WIDTH_IN
-        + LEGEND_KEY_PAD_IN
-        + text_w
-        + 2 * LEGEND_BOX_PAD_IN
-    )
+    width = LEGEND_KEY_WIDTH_IN + LEGEND_KEY_PAD_IN + text_w + 2 * LEGEND_BOX_PAD_IN
     height = line_h * LEGEND_LINE_SPACING * len(entries) + 2 * LEGEND_BOX_PAD_IN
     if title:
         title_w, title_h = text_size_in(title, fontsize=title_fontsize, weight="bold")

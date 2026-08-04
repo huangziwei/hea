@@ -44,7 +44,9 @@ class RLexError(Exception):
     def __init__(self, message: str, span: Span, source: str):
         self.span = span
         self.source = source
-        super().__init__(f"{message} at byte {span[0]}: {source[span[0]:span[1]+1]!r}")
+        super().__init__(
+            f"{message} at byte {span[0]}: {source[span[0] : span[1] + 1]!r}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +63,7 @@ class Token:
 # ---------------------------------------------------------------------------
 # Character classifiers
 # ---------------------------------------------------------------------------
+
 
 # R identifier start: letter or dot (with dot disambiguated against `.5`-style
 # numbers via lookahead in the scanner).
@@ -103,10 +106,26 @@ _CONSTANT_LITS = {
 # Tokens that can legitimately *end* an expression. After one of these,
 # a newline is a statement terminator (TERM). Pending binary operators
 # (anything else, like ``+`` waiting for its rhs) suppress the TERM.
-_EXPR_END_KINDS = frozenset({
-    "NUM", "INT", "COMPLEX", "STR", "BOOL", "NULL", "NA", "INF", "NAN",
-    "IDENT", ")", "]", "]]", "}", "break", "next",
-})
+_EXPR_END_KINDS = frozenset(
+    {
+        "NUM",
+        "INT",
+        "COMPLEX",
+        "STR",
+        "BOOL",
+        "NULL",
+        "NA",
+        "INF",
+        "NAN",
+        "IDENT",
+        ")",
+        "]",
+        "]]",
+        "}",
+        "break",
+        "next",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -180,12 +199,16 @@ class _Lexer:
 
             # Raw strings: r"..."  R"..."  r'...'  R'...' with paren/bracket/
             # brace delimiters, optionally with matching dash padding.
-            if (c == "r" or c == "R") and self.i + 1 < self.n and self.src[self.i + 1] in ("\"", "'"):
+            if (
+                (c == "r" or c == "R")
+                and self.i + 1 < self.n
+                and self.src[self.i + 1] in ('"', "'")
+            ):
                 if self._try_raw_string():
                     continue
 
             # Quoted strings.
-            if c == "\"" or c == "'":
+            if c == '"' or c == "'":
                 self._scan_string(c)
                 continue
 
@@ -195,7 +218,9 @@ class _Lexer:
                 continue
 
             # Numeric literal — leading digit, or ``.`` followed by digit.
-            if c.isdigit() or (c == "." and self.i + 1 < self.n and self.src[self.i + 1].isdigit()):
+            if c.isdigit() or (
+                c == "." and self.i + 1 < self.n and self.src[self.i + 1].isdigit()
+            ):
                 self._scan_number()
                 continue
 
@@ -228,7 +253,11 @@ class _Lexer:
         is_complex = False
 
         # Hex prefix.
-        if self.src[self.i] == "0" and self.i + 1 < self.n and self.src[self.i + 1] in ("x", "X"):
+        if (
+            self.src[self.i] == "0"
+            and self.i + 1 < self.n
+            and self.src[self.i + 1] in ("x", "X")
+        ):
             is_hex = True
             self.i += 2
             while self.i < self.n and self.src[self.i] in "0123456789abcdefABCDEF":
@@ -260,7 +289,7 @@ class _Lexer:
             is_complex = True
             self.i += 1
 
-        text = self.src[start:self.i]
+        text = self.src[start : self.i]
 
         if is_complex:
             # Drop trailing ``i``.
@@ -294,7 +323,9 @@ class _Lexer:
             c = self.src[self.i]
             if c == "\\":
                 if self.i + 1 >= self.n:
-                    raise RLexError("unterminated string escape", (start, self.i), self.src)
+                    raise RLexError(
+                        "unterminated string escape", (start, self.i), self.src
+                    )
                 esc = self.src[self.i + 1]
                 self.i += 2
                 buf.append(_decode_escape(esc, self, start))
@@ -349,10 +380,14 @@ class _Lexer:
         self.i += 1  # opening backtick
         while self.i < self.n and self.src[self.i] != "`":
             if self.src[self.i] == "\n":
-                raise RLexError("unterminated backtick identifier", (start, self.i), self.src)
+                raise RLexError(
+                    "unterminated backtick identifier", (start, self.i), self.src
+                )
             self.i += 1
         if self.i >= self.n:
-            raise RLexError("unterminated backtick identifier", (start, self.i - 1), self.src)
+            raise RLexError(
+                "unterminated backtick identifier", (start, self.i - 1), self.src
+            )
         self.i += 1  # closing backtick
         # Inner text (without backticks) is the identifier name; the kind is
         # IDENT but ``value`` retains the surrounding backticks for round-trip.
@@ -364,7 +399,7 @@ class _Lexer:
         self.i += 1
         while self.i < self.n and _is_id_cont(self.src[self.i]):
             self.i += 1
-        text = self.src[start:self.i]
+        text = self.src[start : self.i]
 
         # Keywords win first.
         if text in _KEYWORDS:
@@ -384,10 +419,14 @@ class _Lexer:
         self.i += 1  # leading %
         while self.i < self.n and self.src[self.i] != "%":
             if self.src[self.i] == "\n":
-                raise RLexError("unterminated %infix% operator", (start, self.i), self.src)
+                raise RLexError(
+                    "unterminated %infix% operator", (start, self.i), self.src
+                )
             self.i += 1
         if self.i >= self.n:
-            raise RLexError("unterminated %infix% operator", (start, self.i - 1), self.src)
+            raise RLexError(
+                "unterminated %infix% operator", (start, self.i - 1), self.src
+            )
         self.i += 1  # trailing %
         self._emit("%infix%", start, self.i)
 
@@ -409,7 +448,7 @@ class _Lexer:
         c = src[i]
 
         # 3-char operators.
-        three = src[i:i+3]
+        three = src[i : i + 3]
         if three == "<<-":
             emit("<<-", 3)
             return True
@@ -421,7 +460,7 @@ class _Lexer:
             return True
 
         # 2-char operators.
-        two = src[i:i+2]
+        two = src[i : i + 2]
         if two == "<-":
             emit("<-", 2)
             return True
@@ -461,11 +500,29 @@ class _Lexer:
 
         # 1-char operators / punctuation.
         SINGLES = {
-            "(": "(", ")": ")", "[": "[", "]": "]", "{": "{", "}": "}",
-            ",": ",", "$": "$", "@": "@", "~": "~", "?": "?",
-            "+": "+", "-": "-", "*": "*", "/": "/", "^": "^",
-            "<": "<", ">": ">", "=": "=", "!": "!",
-            "&": "&", "|": "|", ":": ":",
+            "(": "(",
+            ")": ")",
+            "[": "[",
+            "]": "]",
+            "{": "{",
+            "}": "}",
+            ",": ",",
+            "$": "$",
+            "@": "@",
+            "~": "~",
+            "?": "?",
+            "+": "+",
+            "-": "-",
+            "*": "*",
+            "/": "/",
+            "^": "^",
+            "<": "<",
+            ">": ">",
+            "=": "=",
+            "!": "!",
+            "&": "&",
+            "|": "|",
+            ":": ":",
             "\\": "\\",  # R 4.1+ lambda shorthand
         }
         if c in SINGLES:
@@ -481,8 +538,17 @@ class _Lexer:
 
 
 _SIMPLE_ESCAPES = {
-    "n": "\n", "t": "\t", "r": "\r", "\\": "\\", "\"": "\"",
-    "'": "'", "`": "`", "0": "\0", "a": "\a", "b": "\b", "f": "\f",
+    "n": "\n",
+    "t": "\t",
+    "r": "\r",
+    "\\": "\\",
+    '"': '"',
+    "'": "'",
+    "`": "`",
+    "0": "\0",
+    "a": "\a",
+    "b": "\b",
+    "f": "\f",
     "v": "\v",
 }
 
@@ -512,14 +578,20 @@ def _decode_hex_escape(lex: _Lexer, start: int, *, max_digits: int) -> str:
         braced = True
         lex.i += 1
     digits = []
-    while len(digits) < max_digits and lex.i < lex.n and lex.src[lex.i] in "0123456789abcdefABCDEF":
+    while (
+        len(digits) < max_digits
+        and lex.i < lex.n
+        and lex.src[lex.i] in "0123456789abcdefABCDEF"
+    ):
         digits.append(lex.src[lex.i])
         lex.i += 1
     if not digits:
         raise RLexError("empty hex escape", (start, lex.i), lex.src)
     if braced:
         if lex.i >= lex.n or lex.src[lex.i] != "}":
-            raise RLexError("unterminated brace-form hex escape", (start, lex.i), lex.src)
+            raise RLexError(
+                "unterminated brace-form hex escape", (start, lex.i), lex.src
+            )
         lex.i += 1
     return chr(int("".join(digits), 16))
 

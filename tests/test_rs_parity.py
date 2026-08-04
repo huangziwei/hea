@@ -27,12 +27,13 @@ the large-count/large-shape regime exercise the whole chain).
 Skips when ``hea._rs`` isn't compiled (sdist / no toolchain) or when ``Rscript``
 is absent; off-macOS it relaxes to a tolerance check (the libm floor) not 0-ulp.
 """
+
 import sys
 
 import numpy as np
 import pytest
 
-from conftest import have_rscript, run_rs_r_oracle
+from conftest import have_rscript, r_scalar_values, run_rs_r_oracle
 
 rs = pytest.importorskip("hea._rs")
 
@@ -72,8 +73,9 @@ def _assert_bit_exact(got, exp):
     if not _STRICT:
         # Off-macOS: glibc libm floor → a few-ulp tolerance (NaN/±Inf-aware;
         # atol covers the underflow corner where R rounds to 0).
-        np.testing.assert_allclose(got, exp, rtol=_LINUX_RTOL, atol=1e-300,
-                                   equal_nan=True)
+        np.testing.assert_allclose(
+            got, exp, rtol=_LINUX_RTOL, atol=1e-300, equal_nan=True
+        )
         return
     for g, e in zip(got.ravel(), exp.ravel()):
         if np.isnan(e):
@@ -90,18 +92,81 @@ def _assert_bit_exact(got, exp):
 def _norm_grid() -> np.ndarray:
     # pnorm_both branches: central, mid, far tail, the log_p/tail cutoffs,
     # tiny, zero, non-finite.
-    return np.array([
-        -50.0, -40.0, -38.4674, -8.2924, -5.657, -5.0, -1.0, -0.6744,
-        -1e-8, -1e-300, 0.0, 1e-300, 1e-8, 0.5, 0.6744, 0.67448975, 1.0,
-        5.0, 5.657, 8.2924, 38.0, 40.0, 50.0, 1e170, 1e171,
-        np.inf, -np.inf, np.nan,
-    ], dtype=float)
+    return np.array(
+        [
+            -50.0,
+            -40.0,
+            -38.4674,
+            -8.2924,
+            -5.657,
+            -5.0,
+            -1.0,
+            -0.6744,
+            -1e-8,
+            -1e-300,
+            0.0,
+            1e-300,
+            1e-8,
+            0.5,
+            0.6744,
+            0.67448975,
+            1.0,
+            5.0,
+            5.657,
+            8.2924,
+            38.0,
+            40.0,
+            50.0,
+            1e170,
+            1e171,
+            np.inf,
+            -np.inf,
+            np.nan,
+        ],
+        dtype=float,
+    )
 
 
-_PG_X = np.array([0.5, 0.001, 5.0, 20.0, 50.0, 100.0, 2.0, 1e5, 0.3, 1000.0,
-                  1e-8, 3.0, 15.0, 0.0, np.inf, 1e-300])
-_PG_A = np.array([2.0, 0.5, 20.0, 5.0, 50.0, 2.0, 100.0, 1e4, 0.2, 1000.0,
-                  1.0, 3.0, 7.0, 2.0, 2.0, 0.5])
+_PG_X = np.array(
+    [
+        0.5,
+        0.001,
+        5.0,
+        20.0,
+        50.0,
+        100.0,
+        2.0,
+        1e5,
+        0.3,
+        1000.0,
+        1e-8,
+        3.0,
+        15.0,
+        0.0,
+        np.inf,
+        1e-300,
+    ]
+)
+_PG_A = np.array(
+    [
+        2.0,
+        0.5,
+        20.0,
+        5.0,
+        50.0,
+        2.0,
+        100.0,
+        1e4,
+        0.2,
+        1000.0,
+        1.0,
+        3.0,
+        7.0,
+        2.0,
+        2.0,
+        0.5,
+    ]
+)
 
 
 def _beta_grid():
@@ -139,41 +204,97 @@ def _build_cases():
     C = []
 
     def add(name, fn, arrays, flags=()):
-        C.append((name, fn, [np.asarray(a, dtype=float) for a in arrays],
-                  list(flags)))
+        C.append((name, fn, [np.asarray(a, dtype=float) for a in arrays], list(flags)))
 
     # --- normal: pnorm / qnorm / dnorm ---
     g = _norm_grid()
     for mu, sigma in [(0.0, 1.0), (1.5, 2.0), (-3.0, 0.5)]:
         for lt in (True, False):
             for lp in (True, False):
-                add(f"pnorm_{mu}_{sigma}_{lt}_{lp}", "pnorm",
-                    [g, np.full_like(g, mu), np.full_like(g, sigma)], (lt, lp))
+                add(
+                    f"pnorm_{mu}_{sigma}_{lt}_{lp}",
+                    "pnorm",
+                    [g, np.full_like(g, mu), np.full_like(g, sigma)],
+                    (lt, lp),
+                )
     xd = np.array([-1.0, 0.0, 1.0, 2.0])
     for sig in (0.0, -1.0):
         for lt in (True, False):
             for lp in (True, False):
-                add(f"pnorm_deg_{sig}_{lt}_{lp}", "pnorm",
-                    [xd, np.zeros_like(xd), np.full_like(xd, sig)], (lt, lp))
-    p_log = np.array([-700., -300., -100., -50., -10., -1., -0.5, -1e-3,
-                      -1e-8, np.log(0.5)])
-    p_lin = np.array([1e-300, 1e-50, 1e-10, 1e-4, 0.001, 0.01, 0.1, 0.25, 0.5,
-                      0.75, 0.9, 0.99, 0.999, 1 - 1e-10, 1 - 1e-16, 0.0, 1.0])
+                add(
+                    f"pnorm_deg_{sig}_{lt}_{lp}",
+                    "pnorm",
+                    [xd, np.zeros_like(xd), np.full_like(xd, sig)],
+                    (lt, lp),
+                )
+    p_log = np.array(
+        [-700.0, -300.0, -100.0, -50.0, -10.0, -1.0, -0.5, -1e-3, -1e-8, np.log(0.5)]
+    )
+    p_lin = np.array(
+        [
+            1e-300,
+            1e-50,
+            1e-10,
+            1e-4,
+            0.001,
+            0.01,
+            0.1,
+            0.25,
+            0.5,
+            0.75,
+            0.9,
+            0.99,
+            0.999,
+            1 - 1e-10,
+            1 - 1e-16,
+            0.0,
+            1.0,
+        ]
+    )
     for lt in (True, False):
         for lp in (True, False):
             p = p_log if lp else p_lin
-            add(f"qnorm_{lt}_{lp}", "qnorm",
-                [p, np.zeros_like(p), np.ones_like(p)], (lt, lp))
-    xn = np.array([-40, -6, -5, -1, 0, 0.5, 1, 5, 6, 38, 40,
-                   np.inf, -np.inf, np.nan], dtype=float)
+            add(
+                f"qnorm_{lt}_{lp}",
+                "qnorm",
+                [p, np.zeros_like(p), np.ones_like(p)],
+                (lt, lp),
+            )
+    xn = np.array(
+        [-40, -6, -5, -1, 0, 0.5, 1, 5, 6, 38, 40, np.inf, -np.inf, np.nan], dtype=float
+    )
     for gl in (True, False):
-        add(f"dnorm_{gl}", "dnorm",
-            [xn, np.zeros_like(xn), np.ones_like(xn)], (gl,))
+        add(f"dnorm_{gl}", "dnorm", [xn, np.zeros_like(xn), np.ones_like(xn)], (gl,))
 
     # --- lgamma / gamma ---
-    xg = np.array([-9.3, -2.5, -0.5, -1e-8, 1e-307, 1e-200, 0.1, 0.5, 1.0, 1.5,
-                   2.0, 3.7, 9.99, 10.0, 10.5, 50.0, 100.0, 4934721.0, 1e17,
-                   1e18, 170.0, -170.5, np.nan, np.inf])
+    xg = np.array(
+        [
+            -9.3,
+            -2.5,
+            -0.5,
+            -1e-8,
+            1e-307,
+            1e-200,
+            0.1,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.7,
+            9.99,
+            10.0,
+            10.5,
+            50.0,
+            100.0,
+            4934721.0,
+            1e17,
+            1e18,
+            170.0,
+            -170.5,
+            np.nan,
+            np.inf,
+        ]
+    )
     add("lgammafn", "lgammafn", [xg])
     xg2 = xg[(np.abs(xg) < 171) | ~np.isfinite(xg)]
     add("gammafn", "gammafn", [xg2])
@@ -182,16 +303,24 @@ def _build_cases():
     for scale in (1.0, 2.5):
         for lt in (True, False):
             for lp in (True, False):
-                add(f"pgamma_{scale}_{lt}_{lp}", "pgamma",
-                    [_PG_X, _PG_A, np.full_like(_PG_X, scale)], (lt, lp))
+                add(
+                    f"pgamma_{scale}_{lt}_{lp}",
+                    "pgamma",
+                    [_PG_X, _PG_A, np.full_like(_PG_X, scale)],
+                    (lt, lp),
+                )
     gx = np.array([0.0, 0.5, 1.0, 2.0, 5.0, 0.001, 100.0, 1e-8])
     gsh = np.array([0.5, 2.0, 1.0, 3.0, 0.7, 0.5, 50.0, 2.0])
     for gl in (True, False):
         add(f"dgamma_{gl}", "dgamma", [gx, gsh, np.ones_like(gx)], (gl,))
     qgp = np.array([1e-10, 1e-4, 0.01, 0.1, 0.5, 0.9, 0.99, 0.9999, 1 - 1e-12])
     for alpha in (0.5, 2.0, 50.0, 1e-11):
-        add(f"qgamma_{alpha}", "qgamma",
-            [qgp, np.full_like(qgp, alpha), np.ones_like(qgp)], (True, False))
+        add(
+            f"qgamma_{alpha}",
+            "qgamma",
+            [qgp, np.full_like(qgp, alpha), np.ones_like(qgp)],
+            (True, False),
+        )
 
     # --- beta: pbeta / qbeta / lbeta ---
     Xb, Ab, Bb = _beta_grid()
@@ -199,9 +328,11 @@ def _build_cases():
         for lp in (True, False):
             add(f"pbeta_{lt}_{lp}", "pbeta", [Xb, Ab, Bb], (lt, lp))
     ab = [0.5, 1.0, 2.0, 5.0, 20.0, 100.0, 1000.0]
-    add("lbeta", "lbeta",
-        [np.array([x for x in ab for _ in ab]),
-         np.array([y for _ in ab for y in ab])])
+    add(
+        "lbeta",
+        "lbeta",
+        [np.array([x for x in ab for _ in ab]), np.array([y for _ in ab for y in ab])],
+    )
     ALq, Pq, Qq = _qbeta_grid()
     for lt in (True, False):
         add(f"qbeta_{lt}", "qbeta", [ALq, Pq, Qq], (lt, False))
@@ -230,27 +361,27 @@ def _build_cases():
         add(f"qf_{lt}", "qf", [fp, qf1, qf2], (lt, False))
 
     # --- discrete: ppois / qpois / pbinom / qbinom / dpois / dbinom / dbeta ---
-    px = np.array([0., 1., 2., 5., 10., 50., 3., 7., 0., 100.])
-    pl = np.array([3., 3., 3., 4.5, 10., 40., 0.5, 7., 0., 1e3])
+    px = np.array([0.0, 1.0, 2.0, 5.0, 10.0, 50.0, 3.0, 7.0, 0.0, 100.0])
+    pl = np.array([3.0, 3.0, 3.0, 4.5, 10.0, 40.0, 0.5, 7.0, 0.0, 1e3])
     for lt in (True, False):
         add(f"ppois_{lt}", "ppois", [px, pl], (lt, False))
     qpp = np.array([1e-6, 0.01, 0.1, 0.5, 0.9, 0.99, 0.999, 0.5, 0.3, 1 - 1e-9])
-    qpl = np.array([3., 3., 10., 4.5, 40., 100., 1e3, 0.5, 7., 5.])
+    qpl = np.array([3.0, 3.0, 10.0, 4.5, 40.0, 100.0, 1e3, 0.5, 7.0, 5.0])
     for lt in (True, False):
         add(f"qpois_{lt}", "qpois", [qpp, qpl], (lt, False))
-    bx = np.array([0., 5., 10., 3., 20., 7., 50., 0., 15., 2.])
-    bn = np.array([20., 20., 20., 20., 20., 10., 100., 5., 30., 2.])
-    bp = np.array([.3, .3, .3, .5, 1., .7, .1, .5, .4, .5])
+    bx = np.array([0.0, 5.0, 10.0, 3.0, 20.0, 7.0, 50.0, 0.0, 15.0, 2.0])
+    bn = np.array([20.0, 20.0, 20.0, 20.0, 20.0, 10.0, 100.0, 5.0, 30.0, 2.0])
+    bp = np.array([0.3, 0.3, 0.3, 0.5, 1.0, 0.7, 0.1, 0.5, 0.4, 0.5])
     for lt in (True, False):
         add(f"pbinom_{lt}", "pbinom", [bx, bn, bp], (lt, False))
     qbp = np.array([1e-6, 0.01, 0.1, 0.5, 0.9, 0.99, 0.999, 0.5, 0.3, 1 - 1e-9])
-    qbn = np.array([20., 20., 50., 20., 100., 1000., 500., 10., 30., 5.])
-    qbpr = np.array([.3, .5, .3, .5, .1, .5, .7, .5, .4, .5])
+    qbn = np.array([20.0, 20.0, 50.0, 20.0, 100.0, 1000.0, 500.0, 10.0, 30.0, 5.0])
+    qbpr = np.array([0.3, 0.5, 0.3, 0.5, 0.1, 0.5, 0.7, 0.5, 0.4, 0.5])
     for lt in (True, False):
         add(f"qbinom_{lt}", "qbinom", [qbp, qbn, qbpr], (lt, False))
-    dbex = np.array([0., 0.01, 0.1, 0.5, 0.9, 0.99, 1., 0.3, 0.5, 0.7])
-    dbea = np.array([2., 0.5, 2., 3., 0.7, 5., 2., 1., 3., 0.5])
-    dbeb = np.array([3., 2., 0.5, 3., 2., 1., 0.7, 1., 5., 0.5])
+    dbex = np.array([0.0, 0.01, 0.1, 0.5, 0.9, 0.99, 1.0, 0.3, 0.5, 0.7])
+    dbea = np.array([2.0, 0.5, 2.0, 3.0, 0.7, 5.0, 2.0, 1.0, 3.0, 0.5])
+    dbeb = np.array([3.0, 2.0, 0.5, 3.0, 2.0, 1.0, 0.7, 1.0, 5.0, 0.5])
     for gl in (True, False):
         add(f"dpois_{gl}", "dpois", [px, pl], (gl,))
         add(f"dbinom_{gl}", "dbinom", [bx, bn, bp], (gl,))
@@ -259,20 +390,32 @@ def _build_cases():
     # --- saddlepoint regime (exercises bd0/stirlerr/ebd0/dpois_wrap) ---
     kk = np.arange(120.0, 260.0)
     lams = np.array([2.0, 3.0, 4.0, 5.0, 7.0, 10.0])
-    add("dpois_saddle", "dpois",
-        [np.repeat(kk, lams.size), np.tile(lams, kk.size)], (False,))
+    add(
+        "dpois_saddle",
+        "dpois",
+        [np.repeat(kk, lams.size), np.tile(lams, kk.size)],
+        (False,),
+    )
     xsp = np.linspace(0.5, 400.0, 400)
     for shape in (20.0, 50.0, 100.0, 200.0):
-        add(f"pgamma_saddle_{shape}", "pgamma",
-            [xsp, np.full_like(xsp, shape), np.ones_like(xsp)], (True, False))
+        add(
+            f"pgamma_saddle_{shape}",
+            "pgamma",
+            [xsp, np.full_like(xsp, shape), np.ones_like(xsp)],
+            (True, False),
+        )
     psp = np.linspace(1e-4, 1 - 1e-4, 400)
     for alpha in (50.0, 100.0, 200.0):
-        add(f"qgamma_saddle_{alpha}", "qgamma",
-            [psp, np.full_like(psp, alpha), np.ones_like(psp)], (True, False))
+        add(
+            f"qgamma_saddle_{alpha}",
+            "qgamma",
+            [psp, np.full_like(psp, alpha), np.ones_like(psp)],
+            (True, False),
+        )
 
     # --- exponential (hea/nmath parameterise by scale; R by rate=1/scale) ---
-    xe = np.array([0., 0.1, 1., 5., 20., 0., 2., 100., 0.5, 1e-8])
-    se = np.array([1., 1., 2., 0.5, 1., 3., 1., 2., 0.7, 1.])
+    xe = np.array([0.0, 0.1, 1.0, 5.0, 20.0, 0.0, 2.0, 100.0, 0.5, 1e-8])
+    se = np.array([1.0, 1.0, 2.0, 0.5, 1.0, 3.0, 1.0, 2.0, 0.7, 1.0])
     for gl in (True, False):
         add(f"dexp_{gl}", "dexp", [xe, se], (gl,))
     qpe = np.array([1e-8, 0.01, 0.1, 0.5, 0.9, 0.99, 0.999, 0.3, 0.7, 1 - 1e-9])
@@ -288,82 +431,269 @@ def _build_cases():
     # the exact contraction/symbol; keep them pinned against live R.
     # bpser `z = a*log(x) - betaln(a,b)` — the original traced point, plus
     # bfrac/basym/bgrat census hits at large shapes.
-    add("fma_pbeta_log_upper", "pbeta",
-        [np.array([0.9852216748768474, 0.08636146016681467,
-                   0.2903716807336236]),
-         np.array([2.0, 9.589203880616369, 2855.5232943161823]),
-         np.array([100001.0, 7819.912855463742, 13825.861560595382])],
-        (False, True))
-    add("fma_pbeta_plain", "pbeta",
-        [np.array([0.3678134730867635, 0.6511511075950023]),
-         np.array([8739.554082286646, 1124.8701718194927]),
-         np.array([8682.928425324666, 3.230859039365317])],
-        (True, False))
+    add(
+        "fma_pbeta_log_upper",
+        "pbeta",
+        [
+            np.array([0.9852216748768474, 0.08636146016681467, 0.2903716807336236]),
+            np.array([2.0, 9.589203880616369, 2855.5232943161823]),
+            np.array([100001.0, 7819.912855463742, 13825.861560595382]),
+        ],
+        (False, True),
+    )
+    add(
+        "fma_pbeta_plain",
+        "pbeta",
+        [
+            np.array([0.3678134730867635, 0.6511511075950023]),
+            np.array([8739.554082286646, 1124.8701718194927]),
+            np.array([8682.928425324666, 3.230859039365317]),
+        ],
+        (True, False),
+    )
     # pd_lower_series `sum += term * f` (pgamma.c:498) via the qgamma Newton.
-    add("fma_qgamma_upper", "qgamma",
-        [np.array([0.4355139643795751, 0.39636761591153125,
-                   0.13513636327126444]),
-         np.array([2.6669191376302344, 2.536168158840434,
-                   2.502400760154327]),
-         np.ones(3)], (False, False))
+    add(
+        "fma_qgamma_upper",
+        "qgamma",
+        [
+            np.array([0.4355139643795751, 0.39636761591153125, 0.13513636327126444]),
+            np.array([2.6669191376302344, 2.536168158840434, 2.502400760154327]),
+            np.ones(3),
+        ],
+        (False, False),
+    )
     # gammafn/lgammafn negative x — platform __sinpi (cospi.c HAVE___SINPI).
-    add("fma_gammafn_sinpi", "gammafn",
-        [np.array([-77.24812758594393, -22.139344079349083,
-                   -30.668781877071297, -11.047609531649897])])
-    add("fma_lgammafn_sinpi", "lgammafn",
-        [np.array([-77.24812758594393, -22.139344079349083,
-                   -30.668781877071297, -11.047609531649897])])
+    add(
+        "fma_gammafn_sinpi",
+        "gammafn",
+        [
+            np.array(
+                [
+                    -77.24812758594393,
+                    -22.139344079349083,
+                    -30.668781877071297,
+                    -11.047609531649897,
+                ]
+            )
+        ],
+    )
+    add(
+        "fma_lgammafn_sinpi",
+        "lgammafn",
+        [
+            np.array(
+                [
+                    -77.24812758594393,
+                    -22.139344079349083,
+                    -30.668781877071297,
+                    -11.047609531649897,
+                ]
+            )
+        ],
+    )
     # stirlerr.c:120 libm lgamma (MM2, 1<=n<=5.25) + lgamma1p (n<1), through
     # dgamma's dpois_raw at non-integer shape.
-    add("fma_dgamma_stirlerr", "dgamma",
-        [np.array([0.0160354563943336, 0.13706135587904972]),
-         np.array([2.035706520012819, 0.07697169460569216]),
-         np.ones(2)], (True,))
+    add(
+        "fma_dgamma_stirlerr",
+        "dgamma",
+        [
+            np.array([0.0160354563943336, 0.13706135587904972]),
+            np.array([2.035706520012819, 0.07697169460569216]),
+            np.ones(2),
+        ],
+        (True,),
+    )
     # lbeta.c:76 libm lgamma (p < 1e-306).
-    add("fma_lbeta_tiny", "lbeta",
-        [np.array([1e-307, 5e-307]), np.array([5.0, 2.5])])
+    add("fma_lbeta_tiny", "lbeta", [np.array([1e-307, 5e-307]), np.array([5.0, 2.5])])
     # pt.c `1 + (x/n)*x` / `n + x*x`; pf.c `df2 + df1*x`; dbeta.c lval.
-    add("fma_pt_log_upper", "pt",
-        [np.array([32.590139391805508, 117.24654876041654]),
-         np.array([2088.0050570848925, 1496.6629770688498])],
-        (False, True))
-    add("fma_pf_log_upper", "pf",
-        [np.array([422.04704175918579, 1.306547315051616,
-                   2.4685076649519151]),
-         np.array([4.8002726733580481, 305.1263899607892,
-                   918.50946023950348]),
-         np.array([306.96100608680996, 3.3554946569535344,
-                   0.86639519425105682])],
-        (False, True))
-    add("fma_dbeta_lval", "dbeta",
-        [np.array([0.62571187908681525, 0.13513636327126444]),
-         np.array([0.4617840216011842, 1.9180888552809936]),
-         np.array([0.12184792400934256, 0.74393942619217313])],
-        (False,))
+    add(
+        "fma_pt_log_upper",
+        "pt",
+        [
+            np.array([32.590139391805508, 117.24654876041654]),
+            np.array([2088.0050570848925, 1496.6629770688498]),
+        ],
+        (False, True),
+    )
+    add(
+        "fma_pf_log_upper",
+        "pf",
+        [
+            np.array([422.04704175918579, 1.306547315051616, 2.4685076649519151]),
+            np.array([4.8002726733580481, 305.1263899607892, 918.50946023950348]),
+            np.array([306.96100608680996, 3.3554946569535344, 0.86639519425105682]),
+        ],
+        (False, True),
+    )
+    add(
+        "fma_dbeta_lval",
+        "dbeta",
+        [
+            np.array([0.62571187908681525, 0.13513636327126444]),
+            np.array([0.4617840216011842, 1.9180888552809936]),
+            np.array([0.12184792400934256, 0.74393942619217313]),
+        ],
+        (False,),
+    )
     # qbeta swapped-tail u = R_Log1_Exp(0) — C99 log(±0) = -Inf, no exception.
-    add("fma_qbeta_log1exp_edge", "qbeta",
-        [np.array([0.23074964248420893, 0.5373735010591706]),
-         np.array([0.4617840216011842, 0.18892481378342565]),
-         np.array([0.12184792400934256, 0.11337311528534429])],
-        (True, False))
+    add(
+        "fma_qbeta_log1exp_edge",
+        "qbeta",
+        [
+            np.array([0.23074964248420893, 0.5373735010591706]),
+            np.array([0.4617840216011842, 0.18892481378342565]),
+            np.array([0.12184792400934256, 0.11337311528534429]),
+        ],
+        (True, False),
+    )
     # qt df<1: bisection `(ux-lx)/fabs(nx)` at nx == 0 (C99 Inf, no raise) and
     # the pt overflow lane `fma(x/n, x, 1)` -> Inf during bracket doubling.
-    add("fma_qt_df_lt_1", "qt",
-        [np.array([0.5, 0.9999, 0.13513636327126444]),
-         np.array([0.4, 0.4, 0.9])], (True, False))
+    add(
+        "fma_qt_df_lt_1",
+        "qt",
+        [np.array([0.5, 0.9999, 0.13513636327126444]), np.array([0.4, 0.4, 0.9])],
+        (True, False),
+    )
     # dnorm.c:52 log path `M_LN_SQRT_2PI + 0.5*x*x + log(sigma)` — the outer
     # mul of 0.5*x*x fuses into the add (materialized by the bcg family
     # census; dnorm was not in the original 26-config referee sweep). First
     # point is the traced bcg drift z.
-    add("fma_dnorm_log", "dnorm",
-        [np.array([1.0034637489050912, 0.6294080605981774,
-                   2.3306046596904781, 31.415092653589793]),
-         np.zeros(4), np.ones(4)], (True,))
+    add(
+        "fma_dnorm_log",
+        "dnorm",
+        [
+            np.array(
+                [
+                    1.0034637489050912,
+                    0.6294080605981774,
+                    2.3306046596904781,
+                    31.415092653589793,
+                ]
+            ),
+            np.zeros(4),
+            np.ones(4),
+        ],
+        (True,),
+    )
     # dnorm.c:85 big-x split `(-0.5*x2 - x1)*x2` — fma(-0.5, x2, -x1).
-    add("fma_dnorm_bigx", "dnorm",
-        [np.array([5.7183098861837907, 12.566370614359172,
-                   26.535897932384626]),
-         np.zeros(3), np.ones(3)], (False,))
+    add(
+        "fma_dnorm_bigx",
+        "dnorm",
+        [
+            np.array([5.7183098861837907, 12.566370614359172, 26.535897932384626]),
+            np.zeros(3),
+            np.ones(3),
+        ],
+        (False,),
+    )
+
+    # --- cauchy / logis / lnorm / weibull / geom (closed-form → strict 0-ulp) ---
+    xc = np.array([-1e6, -100.0, -3.0, -1.0, -0.2, 0.0, 0.5, 1.0, 3.0, 100.0, 1e6])
+    for loc, scl in [(0.0, 1.0), (0.5, 2.0), (-2.0, 0.5)]:
+        lo, sc = np.full_like(xc, loc), np.full_like(xc, scl)
+        for lt in (True, False):
+            for lp in (True, False):
+                add(f"pcauchy_{loc}_{scl}_{lt}_{lp}", "pcauchy", [xc, lo, sc], (lt, lp))
+                add(f"plogis_{loc}_{scl}_{lt}_{lp}", "plogis", [xc, lo, sc], (lt, lp))
+        for gl in (True, False):
+            add(f"dcauchy_{loc}_{scl}_{gl}", "dcauchy", [xc, lo, sc], (gl,))
+            add(f"dlogis_{loc}_{scl}_{gl}", "dlogis", [xc, lo, sc], (gl,))
+    pc = np.array([1e-10, 1e-4, 0.01, 0.1, 0.3, 0.5, 0.7, 0.9, 0.99, 0.9999, 1 - 1e-12])
+    for lt in (True, False):
+        for lp in (True, False):
+            pp = np.log(pc) if lp else pc
+            add(
+                f"qcauchy_{lt}_{lp}",
+                "qcauchy",
+                [pp, np.zeros_like(pc), np.ones_like(pc)],
+                (lt, lp),
+            )
+            add(
+                f"qlogis_{lt}_{lp}",
+                "qlogis",
+                [pp, np.zeros_like(pc), np.ones_like(pc)],
+                (lt, lp),
+            )
+    xp = np.array([1e-8, 0.001, 0.1, 0.5, 1.0, 2.0, 5.0, 12.0, 100.0, 1e6])
+    for m, s in [(0.0, 1.0), (0.5, 0.8), (-1.0, 2.0)]:
+        mm, ss = np.full_like(xp, m), np.full_like(xp, s)
+        for lt in (True, False):
+            for lp in (True, False):
+                add(f"plnorm_{m}_{s}_{lt}_{lp}", "plnorm", [xp, mm, ss], (lt, lp))
+        for gl in (True, False):
+            add(f"dlnorm_{m}_{s}_{gl}", "dlnorm", [xp, mm, ss], (gl,))
+    xw = np.array([0.0, 1e-8, 0.001, 0.1, 0.5, 1.0, 2.0, 5.0, 12.0, 100.0])
+    for sh, scl in [(0.5, 1.0), (1.0, 1.3), (2.0, 0.7), (5.0, 2.0)]:
+        shh, scc = np.full_like(xw, sh), np.full_like(xw, scl)
+        for lt in (True, False):
+            for lp in (True, False):
+                add(
+                    f"pweibull_{sh}_{scl}_{lt}_{lp}",
+                    "pweibull",
+                    [xw, shh, scc],
+                    (lt, lp),
+                )
+        for gl in (True, False):
+            add(f"dweibull_{sh}_{scl}_{gl}", "dweibull", [xw, shh, scc], (gl,))
+    for lt in (True, False):
+        for lp in (True, False):
+            pp = np.log(pc) if lp else pc
+            add(
+                f"qlnorm_{lt}_{lp}",
+                "qlnorm",
+                [pp, np.zeros_like(pc), np.ones_like(pc)],
+                (lt, lp),
+            )
+            add(
+                f"qweibull_{lt}_{lp}",
+                "qweibull",
+                [pp, np.full_like(pc, 2.0), np.full_like(pc, 1.3)],
+                (lt, lp),
+            )
+    xk = np.array([0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 50.0, 100.0])
+    for pr in (0.05, 0.3, 0.5, 0.8, 0.99):
+        prr = np.full_like(xk, pr)
+        for lt in (True, False):
+            for lp in (True, False):
+                add(f"pgeom_{pr}_{lt}_{lp}", "pgeom", [xk, prr], (lt, lp))
+        for gl in (True, False):
+            add(f"dgeom_{pr}_{gl}", "dgeom", [xk, prr], (gl,))
+    for lt in (True, False):
+        for lp in (True, False):
+            pp = np.log(pc) if lp else pc
+            add(f"qgeom_{lt}_{lp}", "qgeom", [pp, np.full_like(pc, 0.3)], (lt, lp))
+
+    # --- nbinom (prob + mu) / qhyper (f64 discrete → strict 0-ulp) ---
+    xnb = np.array([0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 40.0, 100.0])
+    for sz, pr in [(1.0, 0.3), (5.0, 0.5), (10.0, 0.7), (0.5, 0.2), (20.0, 0.9)]:
+        szz, prr = np.full_like(xnb, sz), np.full_like(xnb, pr)
+        for lt in (True, False):
+            for lp in (True, False):
+                add(
+                    f"pnbinom_{sz}_{pr}_{lt}_{lp}", "pnbinom", [xnb, szz, prr], (lt, lp)
+                )
+        for gl in (True, False):
+            add(f"dnbinom_{sz}_{pr}_{gl}", "dnbinom", [xnb, szz, prr], (gl,))
+    for sz, m in [(1.0, 2.0), (5.0, 8.0), (10.0, 3.0), (0.5, 20.0)]:
+        szz, mm = np.full_like(xnb, sz), np.full_like(xnb, m)
+        for gl in (True, False):
+            add(f"dnbinom_mu_{sz}_{m}_{gl}", "dnbinom_mu", [xnb, szz, mm], (gl,))
+    for lt in (True, False):
+        for lp in (True, False):
+            pp = np.log(pc) if lp else pc
+            add(
+                f"qnbinom_{lt}_{lp}",
+                "qnbinom",
+                [pp, np.full_like(pc, 5.0), np.full_like(pc, 0.4)],
+                (lt, lp),
+            )
+    m_h = np.array([10.0, 20.0, 5.0, 30.0, 15.0, 8.0, 25.0, 12.0, 40.0, 7.0, 100.0])
+    n_h = np.array([15.0, 25.0, 10.0, 20.0, 12.0, 14.0, 18.0, 22.0, 30.0, 13.0, 50.0])
+    k_h = np.array([8.0, 15.0, 6.0, 25.0, 10.0, 9.0, 20.0, 16.0, 35.0, 11.0, 80.0])
+    for lt in (True, False):
+        for lp in (True, False):
+            pp = np.log(pc) if lp else pc
+            add(f"qhyper_{lt}_{lp}", "qhyper", [pp, m_h, n_h, k_h], (lt, lp))
 
     return C
 
@@ -385,6 +715,180 @@ def test_rs_matches_r(case, r_oracle):
     _assert_bit_exact(got, r_oracle[name])
 
 
+# ---------------------------------------------------------------------------
+# Noncentral / studentized-range / hypergeometric _rs kernels — these
+# accumulate their AS-275 / AS-226 / AS-243 / Copenhaver-Holland series in f64
+# where R uses 80-bit LDOUBLE (Rust std has no 80-bit float). So unlike the
+# strict gate above they match R to a TIGHT TOLERANCE, not 0-ulp; this pins port
+# correctness (catches any O(1) transcription bug or gross regression). The
+# 0-ulp Python reference for these is pinned in test_R.py; per-kernel ulp
+# characterization is documented in the rust-perf plan.
+# ---------------------------------------------------------------------------
+def _grid(*axes):
+    out = [[]]
+    for ax in axes:
+        out = [row + [v] for row in out for v in ax]
+    cols = list(zip(*out))
+    return [np.array(c, dtype=float) for c in cols], out
+
+
+def _build_f64_cases():
+    cases = []
+    # noncentral chi-square (bulk grid)
+    (X, D, N), g = _grid(
+        [0.5, 3.0, 10.0, 30.0, 60.0], [2.0, 5.0, 12.0], [2.0, 8.0, 40.0]
+    )
+    cases.append(
+        (
+            "pnchisq",
+            "pnchisq",
+            (X, D, N),
+            (True, False),
+            [f"pchisq({x},{d},ncp={n})" for x, d, n in g],
+        )
+    )
+    cases.append(
+        (
+            "dnchisq",
+            "dnchisq",
+            (X, D, N),
+            (False,),
+            [f"dchisq({x},{d},ncp={n})" for x, d, n in g],
+        )
+    )
+    (P, D, N), g = _grid([0.1, 0.3, 0.5, 0.7, 0.9], [2.0, 5.0, 12.0], [2.0, 8.0, 40.0])
+    cases.append(
+        (
+            "qnchisq",
+            "qnchisq",
+            (P, D, N),
+            (True, False),
+            [f"qchisq({p},{d},ncp={n})" for p, d, n in g],
+        )
+    )
+    # noncentral t (bulk — extreme far tails excluded; they degrade in f64)
+    (T, D, N), g = _grid(
+        [-2.0, -0.5, 0.5, 2.0, 5.0], [5.0, 12.0, 40.0], [1.0, 3.0, 8.0]
+    )
+    cases.append(
+        (
+            "pnt",
+            "pnt",
+            (T, D, N),
+            (True, False),
+            [f"pt({t},{d},ncp={n})" for t, d, n in g],
+        )
+    )
+    (P, D, N), g = _grid([0.1, 0.3, 0.5, 0.7, 0.9], [5.0, 12.0, 40.0], [1.0, 3.0, 8.0])
+    cases.append(
+        (
+            "qnt",
+            "qnt",
+            (P, D, N),
+            (True, False),
+            [f"qt({p},{d},ncp={n})" for p, d, n in g],
+        )
+    )
+    # noncentral F
+    (X, A, B, N), g = _grid([0.5, 1.0, 2.5], [3.0, 10.0], [5.0, 20.0], [2.0, 8.0])
+    cases.append(
+        (
+            "pnf",
+            "pnf",
+            (X, A, B, N),
+            (True, False),
+            [f"pf({x},{a},{b},ncp={n})" for x, a, b, n in g],
+        )
+    )
+    (P, A, B, N), g = _grid([0.1, 0.5, 0.9], [3.0, 10.0], [5.0, 20.0], [2.0, 8.0])
+    cases.append(
+        (
+            "qnf",
+            "qnf",
+            (P, A, B, N),
+            (True, False),
+            [f"qf({p},{a},{b},ncp={n})" for p, a, b, n in g],
+        )
+    )
+    # noncentral beta
+    (X, A, B, N), g = _grid([0.1, 0.3, 0.6, 0.9], [2.0, 5.0], [2.0, 5.0], [2.0, 20.0])
+    cases.append(
+        (
+            "pnbeta",
+            "pnbeta",
+            (X, A, B, N),
+            (True, False),
+            [f"pbeta({x},{a},{b},ncp={n})" for x, a, b, n in g],
+        )
+    )
+    # studentized range (rr = nranges = 1)
+    (Q, R_, C, D), g = _grid(
+        [2.0, 3.0, 4.0], [1.0], [3.0, 5.0, 10.0], [10.0, 20.0, 60.0]
+    )
+    cases.append(
+        (
+            "ptukey",
+            "ptukey",
+            (Q, R_, C, D),
+            (True, False),
+            [f"ptukey({q},{c},{d})" for q, _r, c, d in g],
+        )
+    )
+    (P, R_, C, D), g = _grid(
+        [0.5, 0.9, 0.95], [1.0], [3.0, 5.0, 10.0], [10.0, 20.0, 60.0]
+    )
+    cases.append(
+        (
+            "qtukey",
+            "qtukey",
+            (P, R_, C, D),
+            (True, False),
+            [f"qtukey({p},{c},{d})" for p, _r, c, d in g],
+        )
+    )
+    # hypergeometric (m=20 red, n=25 black, k=15 drawn)
+    xs = [float(x) for x in range(0, 16)]
+    X = np.array(xs)
+
+    def ones(v):
+        return np.full(len(xs), float(v))
+
+    cases.append(
+        (
+            "dhyper",
+            "dhyper",
+            (X, ones(20), ones(25), ones(15)),
+            (False,),
+            [f"dhyper({int(x)},20,25,15)" for x in xs],
+        )
+    )
+    cases.append(
+        (
+            "phyper",
+            "phyper",
+            (X, ones(20), ones(25), ones(15)),
+            (True, False),
+            [f"phyper({int(x)},20,25,15)" for x in xs],
+        )
+    )
+    return cases
+
+
+_F64_CASES = _build_f64_cases()
+
+
+@pytest.mark.parametrize("case", _F64_CASES, ids=[c[0] for c in _F64_CASES])
+def test_rs_noncentral_f64_matches_r_tol(case):
+    _label, fn, arrays, flags, exprs = case
+    got = np.asarray(
+        getattr(rs, fn)(*[np.ascontiguousarray(a) for a in arrays], *flags), dtype=float
+    )
+    ref = r_scalar_values(exprs)
+    exp = np.array([ref[e] for e in exprs])
+    # f64 accumulators vs R's 80-bit LDOUBLE — tight tolerance, not 0-ulp.
+    np.testing.assert_allclose(got, exp, rtol=1e-6, atol=1e-9, equal_nan=True)
+
+
 _FMA_CASES = [c for c in CASES if c[0].startswith("fma_")]
 
 
@@ -396,16 +900,26 @@ def test_fma_cases_python_matches_rs(case):
     gate this holds bit-for-bit on every platform; it pins the Python twins
     of every contraction site the ``fma_*`` R cases pin for rust."""
     from hea.R import nmath as nm
+
     py_fn = {
-        "pbeta": nm.pbeta, "qbeta": nm.qbeta, "qgamma": nm.qgamma,
-        "dgamma": nm.dgamma, "gammafn": nm.gammafn,
-        "lgammafn": nm._lgammafn, "lbeta": nm.lbeta, "pt": nm.pt,
-        "pf": nm.pf, "dbeta": nm.dbeta, "qt": nm.qt, "dnorm": nm.dnorm5,
+        "pbeta": nm.pbeta,
+        "qbeta": nm.qbeta,
+        "qgamma": nm.qgamma,
+        "dgamma": nm.dgamma,
+        "gammafn": nm.gammafn,
+        "lgammafn": nm._lgammafn,
+        "lbeta": nm.lbeta,
+        "pt": nm.pt,
+        "pf": nm.pf,
+        "dbeta": nm.dbeta,
+        "qt": nm.qt,
+        "dnorm": nm.dnorm5,
     }
     name, fn, arrays, flags = case
     got_rs = np.asarray(getattr(rs, fn)(*arrays, *flags))
-    got_py = np.array([py_fn[fn](*(float(v) for v in args), *flags)
-                       for args in zip(*arrays)])
+    got_py = np.array(
+        [py_fn[fn](*(float(v) for v in args), *flags) for args in zip(*arrays)]
+    )
     assert got_py.shape == got_rs.shape
     for g, e in zip(got_py, got_rs):
         if np.isnan(e):
@@ -447,14 +961,20 @@ def _dqrls_cases():
     b = rng.standard_normal(15)
     return {
         # full-rank well-conditioned
-        "full_rank": (np.c_[np.ones(20), rng.standard_normal((20, 4))],
-                      rng.standard_normal(20)),
+        "full_rank": (
+            np.c_[np.ones(20), rng.standard_normal((20, 4))],
+            rng.standard_normal(20),
+        ),
         # one alias: col3 == 2·col2
-        "rank_def": (np.c_[np.ones(12), a, 2.0 * a, rng.standard_normal(12)],
-                     rng.standard_normal(12)),
+        "rank_def": (
+            np.c_[np.ones(12), a, 2.0 * a, rng.standard_normal(12)],
+            rng.standard_normal(12),
+        ),
         # two aliases: col3 == 3·col2, col5 == col2 − col1  → rank 3 of 5
-        "two_alias": (np.c_[np.ones(15), b, 3.0 * b, rng.standard_normal(15),
-                            b - 1.0], rng.standard_normal(15)),
+        "two_alias": (
+            np.c_[np.ones(15), b, 3.0 * b, rng.standard_normal(15), b - 1.0],
+            rng.standard_normal(15),
+        ),
     }
 
 
@@ -464,9 +984,13 @@ def _r_lmfit(x, y, tmp_path):
     rf.write_text(_DQRLS_R)
     np.savetxt(xf, x, delimiter=",")
     np.savetxt(yf, np.asarray(y), delimiter=",")
-    subprocess.run(["Rscript", str(rf), str(xf), str(yf), str(of)],
-                   check=True, stdin=subprocess.DEVNULL,
-                   capture_output=True, text=True)
+    subprocess.run(
+        ["Rscript", str(rf), str(xf), str(yf), str(of)],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+    )
     res = {}
     for line in of.read_text().splitlines():
         key, _, rest = line.partition(" ")
@@ -484,7 +1008,7 @@ def test_dqrls_3way_parity(name, tmp_path):
     """Rust dqrls ≡ pure-Python dqrls ≡ R .lm.fit (rank/pivot exact; the rest
     within a BLAS tolerance)."""
     x, y = _dqrls_cases()[name]
-    rust = linalg.Cdqrls(x, y)                          # Rust active path
+    rust = linalg.Cdqrls(x, y)  # Rust active path
     qr, coef, rsd, qty, k, jpvt, qraux = linalg.dqrls(x.copy(), y)  # pure-Python oracle
     R = _r_lmfit(x, y, tmp_path)
 
@@ -515,7 +1039,10 @@ def test_dqrls_3way_parity(name, tmp_path):
 # + the degree-2 polynomial null space (powi vs `**`). Sizes ≥256 hit rayon.
 # ---------------------------------------------------------------------------
 from hea.formula import (  # noqa: E402
-    _tp_eta_const, _tp_fast_eta_vec, _tp_gen_poly_powers, _tp_null_space_dim,
+    _tp_eta_const,
+    _tp_fast_eta_vec,
+    _tp_gen_poly_powers,
+    _tp_null_space_dim,
     _tp_T,
 )
 from hea.R._shared import _rfma, _rfma_vec  # noqa: E402
@@ -549,8 +1076,9 @@ def _assert_eta_parity(d, got, want):
     on, so off-darwin the even-d branch uses the shared libm-floor tolerance —
     same ``_STRICT``/``_LINUX_RTOL`` split as :func:`_assert_bit_exact`."""
     if d % 2 == 0 and not _STRICT:
-        np.testing.assert_allclose(got, want, rtol=_LINUX_RTOL, atol=1e-300,
-                                   equal_nan=True)
+        np.testing.assert_allclose(
+            got, want, rtol=_LINUX_RTOL, atol=1e-300, equal_nan=True
+        )
     else:
         np.testing.assert_array_equal(got, want)
 
@@ -563,8 +1091,14 @@ def test_tp_eval_b_bit_exact(d, m):
     eta0 = _tp_eta_const(m, d)
     M = _tp_null_space_dim(d, m)
     pp = np.ascontiguousarray(_tp_gen_poly_powers(M, m, d).astype(np.int64))
-    b_rs = rs.tp_eval_b(np.ascontiguousarray(x_c), np.ascontiguousarray(Xu),
-                        int(m), int(d), float(eta0), pp)
+    b_rs = rs.tp_eval_b(
+        np.ascontiguousarray(x_c),
+        np.ascontiguousarray(Xu),
+        int(m),
+        int(d),
+        float(eta0),
+        pp,
+    )
     diff = x_c[:, None, :] - Xu[None, :, :]
     rsq = _rsq_rfma(diff)
     b_np = np.hstack([_tp_fast_eta_vec(m, d, rsq, eta0), _tp_T(x_c, m, d)])
@@ -609,10 +1143,16 @@ def _rw_matrix_ref(stop, row, weight, X, trans):
     return out if is_mat else out.ravel()
 
 
-@pytest.mark.parametrize("n,p,arstart", [
-    (50, 4, None), (200, 1, None), (30, 3, (10, 21)),
-    (2, 2, None), (1, 5, None),
-])
+@pytest.mark.parametrize(
+    "n,p,arstart",
+    [
+        (50, 4, None),
+        (200, 1, None),
+        (30, 3, (10, 21)),
+        (2, 2, None),
+        (1, 5, None),
+    ],
+)
 @pytest.mark.parametrize("rho", [0.3, 0.7, 0.9])
 @pytest.mark.parametrize("trans", [False, True])
 def test_rw_matrix_bit_exact(n, p, arstart, rho, trans):
@@ -622,13 +1162,14 @@ def test_rw_matrix_bit_exact(n, p, arstart, rho, trans):
     sides to ``fmadd``, x86 leaves both as ``a*b+c``. Separately verified 0-ulp
     to live ``mgcv:::rwMatrix`` on arm64."""
     from hea.models.bam import _ar1_rwmatrix_indices, _rw_matrix
+
     rng = np.random.default_rng(n + p + int(rho * 100))
-    ld = 1.0 / np.sqrt(1.0 - rho ** 2)
+    ld = 1.0 / np.sqrt(1.0 - rho**2)
     sd = -rho * ld
     ar_block = None
     if arstart is not None:
         ar_block = np.zeros(n, dtype=bool)
-        for k in arstart:               # 1-based AR-restart event -> 0-based
+        for k in arstart:  # 1-based AR-restart event -> 0-based
             ar_block[k - 1] = True
     stop, row, weight = _ar1_rwmatrix_indices(n, ld, sd, ar_block)
     X = rng.standard_normal(n) if p == 1 else rng.standard_normal((n, p))
@@ -659,14 +1200,13 @@ def test_coxlpl_kernel_parity(deriv):
     d = (rng.uniform(size=n) < 0.65).astype(int)
     kw = {"d1b": rng.standard_normal((p, 3)) * 0.25} if deriv == 1 else {}
 
-    rust = fam._coxlpl(eta, X, d, time, deriv, **kw)               # rust active
+    rust = fam._coxlpl(eta, X, d, time, deriv, **kw)  # rust active
     saved = (fam._rs_cox_l, fam._rs_cox_lpl0, fam._rs_cox_lpl_d1, fam._rs_cox_d2h)
     fam._rs_cox_l = fam._rs_cox_lpl0 = fam._rs_cox_lpl_d1 = fam._rs_cox_d2h = None
     try:
-        npy = fam._coxlpl(eta, X, d, time, deriv, **kw)           # numpy oracle
+        npy = fam._coxlpl(eta, X, d, time, deriv, **kw)  # numpy oracle
     finally:
-        (fam._rs_cox_l, fam._rs_cox_lpl0,
-         fam._rs_cox_lpl_d1, fam._rs_cox_d2h) = saved
+        (fam._rs_cox_l, fam._rs_cox_lpl0, fam._rs_cox_lpl_d1, fam._rs_cox_d2h) = saved
 
     assert abs(rust["l"] - npy["l"]) < 1e-11
     np.testing.assert_allclose(rust["lb"], npy["lb"], rtol=0, atol=1e-11)
@@ -709,12 +1249,16 @@ def _pls_oracle(X, w, E, z=None, Xtwz=None):
     M = np.sqrt(d2)[:, None] * (Vt @ R)
     Rc = np.linalg.qr(M, mode="r")
     sgn = np.where(np.diag(Rc) < 0, -1.0, 1.0)
-    return beta, Rc * sgn[:, None], (2 * np.sum(np.log(np.abs(diag)))
-                                     + np.sum(np.log(d2)))
+    return (
+        beta,
+        Rc * sgn[:, None],
+        (2 * np.sum(np.log(np.abs(diag))) + np.sum(np.log(d2))),
+    )
 
 
-@pytest.mark.parametrize("n,p,nneg", [(2000, 10, 0), (2000, 10, 200),
-                                      (1500, 14, 700), (1200, 8, 0)])
+@pytest.mark.parametrize(
+    "n,p,nneg", [(2000, 10, 0), (2000, 10, 200), (1500, 14, 700), (1200, 8, 0)]
+)
 @pytest.mark.parametrize("order", ["C", "F"])
 def test_pls_fit1_parity(n, p, nneg, order):
     rng = np.random.default_rng(n + p + nneg)
@@ -725,7 +1269,8 @@ def test_pls_fit1_parity(n, p, nneg, order):
         idx = rng.choice(n, nneg, replace=False)
         w[idx] = -w[idx]
     E = (np.asfortranarray if order == "F" else np.ascontiguousarray)(
-        rng.standard_normal((p, p)) * 0.7)
+        rng.standard_normal((p, p)) * 0.7
+    )
     z = rng.standard_normal(n)
     oracle = _pls_oracle(np.asarray(X), w, np.asarray(E), z=z)
     ok, beta, R, ld = rs.pls_fit1(X, w, E, z, np.empty(0), False)
@@ -803,10 +1348,23 @@ def _r_pls_fit1(X, w, z, E, tmp_path):
     np.savetxt(wf, w, delimiter=",")
     np.savetxt(zf, z, delimiter=",")
     np.savetxt(ef, np.asarray(E), delimiter=",")
-    subprocess.run(["Rscript", str(rf), str(xf), str(wf), str(zf), str(ef),
-                    str(n), str(p), str(of)],
-                   check=True, stdin=subprocess.DEVNULL,
-                   capture_output=True, text=True)
+    subprocess.run(
+        [
+            "Rscript",
+            str(rf),
+            str(xf),
+            str(wf),
+            str(zf),
+            str(ef),
+            str(n),
+            str(p),
+            str(of),
+        ],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+    )
     res = {}
     for line in of.read_text().splitlines():
         key, _, rest = line.partition(" ")
@@ -819,8 +1377,9 @@ def _r_pls_fit1(X, w, z, E, tmp_path):
     return res
 
 
-@pytest.mark.parametrize("n,p,nneg", [(2000, 10, 0), (2000, 10, 200),
-                                      (1500, 14, 700), (200, 6, 40)])
+@pytest.mark.parametrize(
+    "n,p,nneg", [(2000, 10, 0), (2000, 10, 200), (1500, 14, 700), (200, 6, 40)]
+)
 def test_pls_fit1_matches_r(n, p, nneg, tmp_path):
     """Rust ``pls_fit1`` ≡ mgcv's own ``.C(C_pls_fit1)`` (β, penalty) and its
     factor/log-det ≡ R ``chol``/``determinant`` of X'WX+Sλ, at the LAPACK floor.
@@ -836,16 +1395,16 @@ def test_pls_fit1_matches_r(n, p, nneg, tmp_path):
     z = rng.standard_normal(n)
     R = _r_pls_fit1(X, w, z, E, tmp_path)
     ok, beta, Rfac, ld = rs.pls_fit1(X, w, E, z, np.empty(0), False)
-    if R["nsig"] < 0:                       # X'WX+Sλ indefinite
-        assert not ok                       # rust must decline too
+    if R["nsig"] < 0:  # X'WX+Sλ indefinite
+        assert not ok  # rust must decline too
         return
     assert ok
     # β vs mgcv's actual pls_fit1; penalty β'Sλβ = ‖Eβ‖² vs its `penalty` out.
     np.testing.assert_allclose(beta, R["beta"], rtol=0, atol=1e-10)
     pen_rust = float(np.asarray(E) @ beta @ (np.asarray(E) @ beta))
     np.testing.assert_allclose(pen_rust, R["penalty"], rtol=1e-9, atol=1e-12)
-    if R.get("pd"):                         # factor + log-det vs R linear algebra
-        Rc = R["rfac"].reshape(p, p)        # chol(M), positive-diagonal upper
+    if R.get("pd"):  # factor + log-det vs R linear algebra
+        Rc = R["rfac"].reshape(p, p)  # chol(M), positive-diagonal upper
         np.testing.assert_allclose(np.asarray(Rfac), Rc, rtol=0, atol=1e-9)
         np.testing.assert_allclose(ld, R["logdet"], rtol=0, atol=1e-8)
 
@@ -862,12 +1421,12 @@ def test_pls_fit1_matches_r(n, p, nneg, tmp_path):
 def test_gamlss_xwx_parity(n, p):
     rng = np.random.default_rng(n + p)
     Xi = np.ascontiguousarray(rng.standard_normal((n, p)))
-    WXj = np.ascontiguousarray(rng.standard_normal(n)[:, None]
-                               * rng.standard_normal((n, p)))
+    WXj = np.ascontiguousarray(
+        rng.standard_normal(n)[:, None] * rng.standard_normal((n, p))
+    )
     A = np.asarray(rs.gamlss_xwx(Xi, WXj))
     # agrees with the einsum oracle to the summation-order floor
-    np.testing.assert_allclose(A, np.einsum("kr,kc->rc", Xi, WXj),
-                               rtol=0, atol=1e-9)
+    np.testing.assert_allclose(A, np.einsum("kr,kc->rc", Xi, WXj), rtol=0, atol=1e-9)
     # deterministic: identical across runs
     np.testing.assert_array_equal(A, np.asarray(rs.gamlss_xwx(Xi, WXj)))
 
@@ -878,10 +1437,10 @@ def test_gamlss_xwx_row_col_consistent():
     rng = np.random.default_rng(7)
     n, p = 4000, 18
     Xi = np.ascontiguousarray(rng.standard_normal((n, p)))
-    Xi[:, 11] = Xi[:, 4]                       # column 11 ≡ column 4
+    Xi[:, 11] = Xi[:, 4]  # column 11 ≡ column 4
     WXj = np.ascontiguousarray(rng.standard_normal(n)[:, None] * Xi)
     A = np.asarray(rs.gamlss_xwx(Xi, WXj))
-    np.testing.assert_array_equal(A[4], A[11])     # rows bit-identical
+    np.testing.assert_array_equal(A[4], A[11])  # rows bit-identical
     np.testing.assert_array_equal(A[:, 4], A[:, 11])  # cols bit-identical
 
 
@@ -926,7 +1485,7 @@ def test_tweedious_work_rs_matches_py(p, phi):
     rng = np.random.default_rng(int(p * 100) + int(phi * 10))
     y = rng.uniform(0.01, 500.0, 800)
     rho = float(np.log(phi))
-    eth = np.exp(-abs(0.3))       # θ = 0.3 (scalar buffer path)
+    eth = np.exp(-abs(0.3))  # θ = 0.3 (scalar buffer path)
     a, b = 1.001, 1.999
     dpth1 = eth * (b - a) / (1 + eth) ** 2
     dpth2 = ((a - b) * eth + (b - a) * eth * eth) / (1 + eth) ** 3
@@ -940,8 +1499,11 @@ def test_tweedious_work_rs_matches_py(p, phi):
     ev = np.exp(-np.abs(thv))
     pv = np.where(thv > 0, (b + a * ev) / (1 + ev), (b * ev + a) / (ev + 1))
     d1v = ev * (b - a) / (1 + ev) ** 2
-    d2v = np.where(thv > 0, ((a - b) * ev + (b - a) * ev * ev) / (1 + ev) ** 3,
-                   ((a - b) * ev * ev + (b - a) * ev) / (1 + ev) ** 3)
+    d2v = np.where(
+        thv > 0,
+        ((a - b) * ev + (b - a) * ev * ev) / (1 + ev) ** 3,
+        ((a - b) * ev * ev + (b - a) * ev) / (1 + ev) ** 3,
+    )
     pr = _fam._tweedious_work_pv(y, rhv, pv, d1v, d2v)
     pp = _fam._tweedious_work_pv_py(y, rhv, pv, d1v, d2v)
     np.testing.assert_array_equal(pr, pp)
@@ -959,22 +1521,28 @@ def test_tweedie_ldwork_matches_r(theta, rho):
     import subprocess
 
     from hea.R import runif, set_seed
+
     set_seed(abs(int(theta * 100) + int(rho * 10)) + 11)
     y = np.concatenate([[0.0, 0.0], runif(18, 0.1, 60.0)])
     mu = np.concatenate([[0.5, 1.5], runif(18, 0.2, 50.0)])
-    ld = _fam._ld_tweedie_work(y, mu, np.full_like(y, theta),
-                               np.full_like(y, rho), a=1.001, b=1.999)
+    ld = _fam._ld_tweedie_work(
+        y, mu, np.full_like(y, theta), np.full_like(y, rho), a=1.001, b=1.999
+    )
     ys = ",".join(map(repr, y.tolist()))
     mus = ",".join(map(repr, mu.tolist()))
-    src = (f"suppressMessages(library(mgcv)); y<-c({ys}); mu<-c({mus}); "
-           f"M<-ldTweedie(y,mu,rho={rho!r},theta={theta!r},a=1.001,b=1.999,"
-           "all.derivs=TRUE); "
-           "write.table(format(M,digits=17),stdout(),row.names=F,"
-           "col.names=F,quote=F)")
-    out = subprocess.run(["Rscript", "-e", src], capture_output=True,
-                         text=True, check=True).stdout
-    R = np.array([[float(v) for v in ln.split()]
-                  for ln in out.splitlines() if ln.strip()])
+    src = (
+        f"suppressMessages(library(mgcv)); y<-c({ys}); mu<-c({mus}); "
+        f"M<-ldTweedie(y,mu,rho={rho!r},theta={theta!r},a=1.001,b=1.999,"
+        "all.derivs=TRUE); "
+        "write.table(format(M,digits=17),stdout(),row.names=F,"
+        "col.names=F,quote=F)"
+    )
+    out = subprocess.run(
+        ["Rscript", "-e", src], capture_output=True, text=True, check=True
+    ).stdout
+    R = np.array(
+        [[float(v) for v in ln.split()] for ln in out.splitlines() if ln.strip()]
+    )
     # cols 0 (l), 1 (d/dρ), 3 (d/dθ), 6-9 (μ) — libm floor.
     for c in (0, 1, 3, 6, 7, 8, 9):
         np.testing.assert_allclose(ld[:, c], R[:, c], rtol=1e-9, atol=1e-10)
@@ -994,8 +1562,13 @@ def test_psigamma_parity_positive(deriv):
     if _nmath._rs_psigamma is None:
         pytest.skip("hea._rs.psigamma unavailable")
     rng = np.random.default_rng(deriv + 1)
-    x = np.concatenate([rng.uniform(1e-3, 0.5, 200), rng.uniform(0.5, 9.0, 200),
-                        rng.uniform(9.0, 1e4, 200)])
+    x = np.concatenate(
+        [
+            rng.uniform(1e-3, 0.5, 200),
+            rng.uniform(0.5, 9.0, 200),
+            rng.uniform(9.0, 1e4, 200),
+        ]
+    )
     got = _nmath.psigamma_vec(x, deriv)
     orig = _nmath._rs_psigamma
     _nmath._rs_psigamma = None
@@ -1035,11 +1608,13 @@ def test_xwx_smooth_block_parity():
     row; numpy bincounts per (s,t)), so this is a tight tolerance gate, not
     0-ulp. Exercises both a matrix-argument by= tensor and its diagonal."""
     import importlib
+
     _bam = importlib.import_module("hea.models.bam")
     if _bam._rs_xwx_smooth_block is None:
         pytest.skip("hea._rs.xwx_smooth_block unavailable")
     import polars as pl
     from hea.family import Poisson
+
     rng = np.random.default_rng(0)
     nm, mm = 600, 5
     pm10 = rng.uniform(0, 5, (nm, mm))
@@ -1047,8 +1622,9 @@ def test_xwx_smooth_block_parity():
     stim = rng.standard_normal((nm, mm))
     y = rng.poisson(1.0, nm).astype(float)
     df = pl.DataFrame({"y": y, "Lag": lag, "Xc": pm10, "Stim": stim})
-    m = _bam.bam("y ~ te(Lag, Xc, by=Stim, k=c(4,3))", df,
-                 family=Poisson(), discrete=True)
+    m = _bam.bam(
+        "y ~ te(Lag, Xc, by=Stim, k=c(4,3))", df, family=Poisson(), discrete=True
+    )
     d = m._discrete_design
     w = rng.uniform(0.1, 2.0, nm)
     got = _bam.XWXd(d, w)
@@ -1068,21 +1644,25 @@ def test_xwx_smooth_block_largep_indreduce_parity():
     with p≈19 > 15 — the k=c(4,3) case above stays on the small-p factor path, so
     this is the branch the existing parity test does not reach."""
     import importlib
+
     _bam = importlib.import_module("hea.models.bam")
     if _bam._rs_xwx_smooth_block is None:
         pytest.skip("hea._rs.xwx_smooth_block unavailable")
     import polars as pl
     from hea.family import Gaussian
+
     rng = np.random.default_rng(5)
     nm, L = 2500, 5
     grid = np.linspace(0, 5, 70)
-    Xc = grid[rng.integers(0, 70, (nm, L))]      # discretised → bounded grid
+    Xc = grid[rng.integers(0, 70, (nm, L))]  # discretised → bounded grid
     lag = np.tile(np.linspace(0, 1, L), (nm, 1))
     stim = rng.standard_normal((nm, L))
-    df = pl.DataFrame({"y": rng.standard_normal(nm), "Lag": lag,
-                       "Xc": Xc, "Stim": stim})
-    m = _bam.bam("y ~ te(Lag, Xc, by=Stim, k=c(4,20))", df,
-                 family=Gaussian(), discrete=True)
+    df = pl.DataFrame(
+        {"y": rng.standard_normal(nm), "Lag": lag, "Xc": Xc, "Stim": stim}
+    )
+    m = _bam.bam(
+        "y ~ te(Lag, Xc, by=Stim, k=c(4,20))", df, family=Gaussian(), discrete=True
+    )
     d = m._discrete_design
     w = rng.uniform(0.1, 2.0, d.n)
     got = _bam.XWXd(d, w)
@@ -1102,6 +1682,7 @@ def test_wbar_contract_indreduce_dense_branch():
     (``msize > cap``) and small-``p`` cases all fall back to the factor path and
     stay exact. Verifies the dense gate matches across all four regimes."""
     import importlib
+
     _bam = importlib.import_module("hea.models.bam")
     cap = _bam._XWX_DENSE_MSIZE_CAP
 
@@ -1119,17 +1700,15 @@ def test_wbar_contract_indreduce_dense_branch():
         Xim = rng.standard_normal((mim, p))
         Xjm = rng.standard_normal((mjm, p))
         msize = mim * mjm
-        dense = (n > msize
-                 or (min(p, p) > 15 and msize <= cap and msize <= 16 * ss * n))
+        dense = n > msize or (min(p, p) > 15 and msize <= cap and msize <= 16 * ss * n)
         assert dense is expect_dense
         got = _bam._wbar_contract(Ki, Kj, vl, Xim, Xjm)
-        np.testing.assert_allclose(got, brute(Ki, Kj, vl, Xim, Xjm),
-                                   rtol=0, atol=1e-9)
+        np.testing.assert_allclose(got, brute(Ki, Kj, vl, Xim, Xjm), rtol=0, atol=1e-9)
 
-    check(3000, 80, 80, 20, 4, 1, expect_dense=True)     # indReduce dense branch
-    check(400, 150, 150, 20, 1, 2, expect_dense=False)   # n≪msize → factor guard
+    check(3000, 80, 80, 20, 4, 1, expect_dense=True)  # indReduce dense branch
+    check(400, 150, 150, 20, 1, 2, expect_dense=False)  # n≪msize → factor guard
     check(2500, 2100, 2100, 18, 1, 3, expect_dense=False)  # msize>cap → factor
-    check(1000, 40, 40, 10, 3, 4, expect_dense=False)    # !acc_w p≤15 → factor
+    check(1000, 40, 40, 10, 3, 4, expect_dense=False)  # !acc_w p≤15 → factor
 
 
 def test_xwx_smooth_block_ar1_tri_parity():
@@ -1140,6 +1719,7 @@ def test_xwx_smooth_block_ar1_tri_parity():
     ``te()`` (s_i=1, nd_i>1) and a signal-regression ``te(…, by=)`` (s_i·s_j=L²,
     the case the rust pass is meant to win)."""
     import importlib
+
     _bam = importlib.import_module("hea.models.bam")
     if _bam._rs_xwx_smooth_block is None:
         pytest.skip("hea._rs.xwx_smooth_block unavailable")
@@ -1152,7 +1732,7 @@ def test_xwx_smooth_block_ar1_tri_parity():
         d = m._discrete_design
         rng = np.random.default_rng(0)
         w = rng.uniform(0.1, 2.0, d.n)
-        ld = 1.0 / np.sqrt(1 - 0.5 ** 2)
+        ld = 1.0 / np.sqrt(1 - 0.5**2)
         _, _, wt = _ar1_rwmatrix_indices(d.n, ld, -0.5 * ld, None)
         got = _bam.XWXd(d, w, ar_weights=wt)
         orig = _bam._rs_xwx_smooth_block
@@ -1165,16 +1745,30 @@ def test_xwx_smooth_block_ar1_tri_parity():
 
     rng = np.random.default_rng(11)
     n = 800
-    check("y ~ te(x, z, k=c(5,5))",      # plain tensor AR1 (s_i=1, nd_i>1)
-          pl.DataFrame({"y": rng.standard_normal(n),
-                        "x": rng.uniform(0, 1, n), "z": rng.uniform(0, 1, n)}))
-    nm, L = 2000, 6                       # signal-regression AR1 (s_i·s_j=36)
+    check(
+        "y ~ te(x, z, k=c(5,5))",  # plain tensor AR1 (s_i=1, nd_i>1)
+        pl.DataFrame(
+            {
+                "y": rng.standard_normal(n),
+                "x": rng.uniform(0, 1, n),
+                "z": rng.uniform(0, 1, n),
+            }
+        ),
+    )
+    nm, L = 2000, 6  # signal-regression AR1 (s_i·s_j=36)
     grid = np.linspace(0, 5, 50)
     Xc = grid[rng.integers(0, 50, (nm, L))]
-    check("y ~ te(Lag, Xc, by=Stim, k=c(4,5))",
-          pl.DataFrame({"y": rng.standard_normal(nm),
-                        "Lag": np.tile(np.linspace(0, 1, L), (nm, 1)),
-                        "Xc": Xc, "Stim": rng.standard_normal((nm, L))}))
+    check(
+        "y ~ te(Lag, Xc, by=Stim, k=c(4,5))",
+        pl.DataFrame(
+            {
+                "y": rng.standard_normal(nm),
+                "Lag": np.tile(np.linspace(0, 1, L), (nm, 1)),
+                "Xc": Xc,
+                "Stim": rng.standard_normal((nm, L)),
+            }
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1196,8 +1790,7 @@ def test_optif9_rs_python_parity():
             track.append(np.array(x, dtype=float, copy=True))
             v = 0.0
             for i in range(len(x) - 1):
-                v += 100.0 * (x[i + 1] - x[i] * x[i]) ** 2 \
-                     + (1.0 - x[i]) ** 2
+                v += 100.0 * (x[i + 1] - x[i] * x[i]) ** 2 + (1.0 - x[i]) ** 2
             return float(v)
 
         def f_grad(x):
@@ -1208,6 +1801,7 @@ def test_optif9_rs_python_parity():
                 g[i] += -400.0 * x[i] * t - 2.0 * (1.0 - x[i])
                 g[i + 1] += 200.0 * t
             return g
+
         return f_val, f_grad
 
     rng = np.random.default_rng(42)
@@ -1216,24 +1810,58 @@ def test_optif9_rs_python_parity():
             x0 = rng.standard_normal(n) * (1.0 + rep)
             ts = np.abs(rng.standard_normal(n)) + 0.1
             for msg, ndig, smx, stol, ilim in (
-                    (9, 12, 1000.0, 1e-6, 100),
-                    (15, 7, 2.0, 1e-4, 200)):
+                (9, 12, 1000.0, 1e-6, 100),
+                (15, 7, 2.0, 1e-4, 200),
+            ):
                 tr_py, tr_rs = [], []
                 fv, fg = make(tr_py)
-                py = py_optif9(n, x0.copy(), fv, fg, lambda x, a: None,
-                               ts.copy(), 1.0, 1, 1, msg, ndig, ilim,
-                               1, 0, 1.0, 1e-6, smx, stol)
+                py = py_optif9(
+                    n,
+                    x0.copy(),
+                    fv,
+                    fg,
+                    lambda x, a: None,
+                    ts.copy(),
+                    1.0,
+                    1,
+                    1,
+                    msg,
+                    ndig,
+                    ilim,
+                    1,
+                    0,
+                    1.0,
+                    1e-6,
+                    smx,
+                    stol,
+                )
                 fv2, fg2 = make(tr_rs)
-                rs_out = rs.optif9(x0.copy(), fv2, fg2, None, ts.copy(),
-                                   1.0, 1, 1, msg, ndig, ilim, 1, 0,
-                                   1.0, 1e-6, smx, stol)
+                rs_out = rs.optif9(
+                    x0.copy(),
+                    fv2,
+                    fg2,
+                    None,
+                    ts.copy(),
+                    1.0,
+                    1,
+                    1,
+                    msg,
+                    ndig,
+                    ilim,
+                    1,
+                    0,
+                    1.0,
+                    1e-6,
+                    smx,
+                    stol,
+                )
                 assert len(tr_py) == len(tr_rs)
                 for a, b in zip(tr_py, tr_rs):
                     np.testing.assert_array_equal(a, b)
                 np.testing.assert_array_equal(py[0], rs_out[0])  # xpls
-                assert py[1] == rs_out[1]                        # fpls
+                assert py[1] == rs_out[1]  # fpls
                 np.testing.assert_array_equal(py[2], rs_out[2])  # gpls
-                assert py[3:] == tuple(rs_out[3:])   # itrmcd/itncnt/msg
+                assert py[3:] == tuple(rs_out[3:])  # itrmcd/itncnt/msg
 
 
 def test_lbfgsb_rs_python_parity():
@@ -1244,8 +1872,7 @@ def test_lbfgsb_rs_python_parity():
     def f_val(x):
         v = 0.0
         for i in range(len(x) - 1):
-            v += 100.0 * (x[i + 1] - x[i] * x[i]) ** 2 \
-                 + (1.0 - x[i]) ** 2
+            v += 100.0 * (x[i + 1] - x[i] * x[i]) ** 2 + (1.0 - x[i]) ** 2
         return float(v)
 
     def f_grad(x):
@@ -1262,10 +1889,14 @@ def test_lbfgsb_rs_python_parity():
         for rep in range(3):
             x0 = rng.standard_normal(n) * (1 + rep)
             for lo, up, nbd in (
-                    ([-math.inf] * n, [math.inf] * n, [0] * n),
-                    (list(x0 - 0.7), list(x0 + 0.9), [2] * n),
-                    ([-1.0] * n, [math.inf] * n,
-                     [1 if i % 2 == 0 else 0 for i in range(n)])):
+                ([-math.inf] * n, [math.inf] * n, [0] * n),
+                (list(x0 - 0.7), list(x0 + 0.9), [2] * n),
+                (
+                    [-1.0] * n,
+                    [math.inf] * n,
+                    [1 if i % 2 == 0 else 0 for i in range(n)],
+                ),
+            ):
                 m = min(5, n)
                 tr_py, tr_rs = [], []
 
@@ -1277,9 +1908,21 @@ def test_lbfgsb_rs_python_parity():
                     g[:] = f_grad(x)
 
                 xp = np.array(x0, dtype=float)
-                py = py_lbfgsb(n, m, xp, np.array(lo), np.array(up),
-                               np.array(nbd, dtype=np.int64), fminfn,
-                               fmingr, 1e7, 0.0, 100, 0, 10)
+                py = py_lbfgsb(
+                    n,
+                    m,
+                    xp,
+                    np.array(lo),
+                    np.array(up),
+                    np.array(nbd, dtype=np.int64),
+                    fminfn,
+                    fmingr,
+                    1e7,
+                    0.0,
+                    100,
+                    0,
+                    10,
+                )
 
                 def fminfn2(x, tr=tr_rs):
                     tr.append(np.array(x, dtype=float, copy=True))
@@ -1289,9 +1932,18 @@ def test_lbfgsb_rs_python_parity():
                     return f_grad(x)
 
                 xr, val, fail, fnc, grc, msg = rs.lbfgsb_drive(
-                    n, m, np.array(x0, dtype=float), np.array(lo),
-                    np.array(up), np.array(nbd, dtype=np.int64),
-                    fminfn2, gr_ret, 1e7, 0.0, 100)
+                    n,
+                    m,
+                    np.array(x0, dtype=float),
+                    np.array(lo),
+                    np.array(up),
+                    np.array(nbd, dtype=np.int64),
+                    fminfn2,
+                    gr_ret,
+                    1e7,
+                    0.0,
+                    100,
+                )
                 assert len(tr_py) == len(tr_rs)
                 for a, b in zip(tr_py, tr_rs):
                     np.testing.assert_array_equal(a, b)
@@ -1299,3 +1951,65 @@ def test_lbfgsb_rs_python_parity():
                 assert py[0] == val and py[1] == fail
                 assert py[2] == fnc and py[3] == grc
                 assert py[4] == msg
+
+
+# ---------------------------------------------------------------------------
+# FEXACT — Fisher's exact test for r×c tables (network algorithm).
+# rs.fexact == the pure-Python _Fexact port, which tests/test_R.py pins
+# bit-exact to R's fisher.test(x)$p.value. Both sides do scalar-libm f64
+# arithmetic, so this is 0-ulp on the same machine (strict on macOS).
+# ---------------------------------------------------------------------------
+def test_fexact_rs_matches_python():
+    from hea.R import _fexact
+
+    # (table, workspace, mult, expect, percnt, emin)
+    cases = [
+        ([[3, 5, 2], [7, 2, 8], [4, 6, 1]], 200000, 30, -1.0, 100.0, 0.0),
+        ([[1, 9, 3], [8, 2, 4]], 200000, 30, -1.0, 100.0, 0.0),
+        ([[1, 8], [5, 3], [10, 1]], 200000, 30, -1.0, 100.0, 0.0),
+        ([[10, 2, 3], [1, 8, 4], [2, 3, 9], [5, 1, 2]], 200000, 30, -1.0, 100.0, 0.0),
+        ([[0, 3, 2], [5, 1, 4], [2, 2, 6]], 200000, 30, -1.0, 100.0, 0.0),
+        (
+            [[1, 8, 5, 4, 4, 2, 2], [5, 3, 3, 4, 3, 1, 0], [10, 1, 4, 0, 0, 0, 0]],
+            200000,
+            30,
+            -1.0,
+            100.0,
+            0.0,
+        ),
+        (
+            [[1, 2, 1, 0], [3, 3, 6, 1], [10, 10, 14, 9], [6, 7, 12, 11]],
+            200000,
+            30,
+            -1.0,
+            100.0,
+            0.0,
+        ),
+        # a mid-size table at two workspaces / mult — different ldkey, both agree
+        (
+            [[1, 3, 2, 1], [4, 3, 5, 4], [5, 3, 6, 6], [6, 7, 4, 6], [8, 0, 5, 6]],
+            200000,
+            30,
+            -1.0,
+            100.0,
+            0.0,
+        ),
+        (
+            [[1, 3, 2, 1], [4, 3, 5, 4], [5, 3, 6, 6], [6, 7, 4, 6], [8, 0, 5, 6]],
+            2000000,
+            30,
+            -1.0,
+            100.0,
+            0.0,
+        ),
+        ([[3, 5, 2], [7, 2, 8], [4, 6, 1]], 200000, 50, -1.0, 100.0, 0.0),
+        # hybrid asymptotic-χ² path (expect > 0)
+        ([[3, 5, 2], [7, 2, 8], [4, 6, 1]], 200000, 30, 5.0, 80.0, 1.0),
+        ([[12, 5, 3, 2], [1, 9, 4, 3], [0, 2, 8, 6]], 200000, 30, 5.0, 80.0, 1.0),
+    ]
+    for m, ws, mult, expect, percnt, emin in cases:
+        nr, nc = len(m), len(m[0])
+        py = _fexact._Fexact(nr, nc, m, expect, percnt, emin, ws, mult).run()
+        flat = [int(v) for row in m for v in row]
+        got = rs.fexact(nr, nc, flat, expect, percnt, emin, ws, mult)
+        _assert_bit_exact(got, py)

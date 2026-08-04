@@ -22,15 +22,22 @@ import polars as pl
 import pytest
 
 from hea.ggplot import (
-    aes, facet_wrap, geom_point, ggplot, labs,
+    aes,
+    facet_wrap,
+    geom_point,
+    ggplot,
+    labs,
 )
 from hea.ggplot._block import (
-    default_figsize_for, measure_block, render_block,
+    default_figsize_for,
+    measure_block,
+    render_block,
 )
 from hea.ggplot.build import build
 
 
 # ----- Measurement --------------------------------------------------------
+
 
 def _simple_plot(**labs_kw) -> ggplot:
     df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
@@ -95,7 +102,9 @@ def test_measure_blank_xlab_shrinks_bottom_margin():
 
 def test_measure_facet_wrap_panel_grid_dims():
     """A facet_wrap plot's block reports the facet grid dims."""
-    df = pl.DataFrame({"g": ["a", "b", "c"] * 4, "x": list(range(12)), "y": list(range(12))})
+    df = pl.DataFrame(
+        {"g": ["a", "b", "c"] * 4, "x": list(range(12)), "y": list(range(12))}
+    )
     p = ggplot(df, aes("x", "y")) + geom_point() + facet_wrap("g")
     block = measure_block(p, build(p))
     # facet_wrap on 3 unique groups → wrap_dims gives (1, 3).
@@ -109,6 +118,7 @@ def test_measure_no_facet_panel_grid_is_one_one():
 
 
 # ----- Layout / render ----------------------------------------------------
+
 
 def test_render_block_panel_bbox_matches_margins():
     """After render, panel's figure-relative bbox respects block margins."""
@@ -139,7 +149,9 @@ def test_render_block_panel_bbox_matches_margins():
 
 
 def test_render_block_facet_creates_n_panel_axes():
-    df = pl.DataFrame({"g": ["a", "b", "c"] * 4, "x": list(range(12)), "y": list(range(12))})
+    df = pl.DataFrame(
+        {"g": ["a", "b", "c"] * 4, "x": list(range(12)), "y": list(range(12))}
+    )
     p = ggplot(df, aes("x", "y")) + geom_point() + facet_wrap("g")
     bo = build(p)
     block = measure_block(p, bo)
@@ -155,7 +167,6 @@ def test_render_block_facet_creates_n_panel_axes():
             bbox = ax.get_position()
             assert bbox.x0 >= block.margin_left_in / fig_w - 1e-3
             assert bbox.x1 <= 1 - block.margin_right_in / fig_w + 1e-3
-
 
     finally:
         plt.close(fig)

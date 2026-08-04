@@ -31,11 +31,11 @@ def _resolve_trans(t):
         return None
     if isinstance(t, str):
         from ..scales import transformed
+
         cls = _NAMED_TRANS.get(t)
         if cls is None:
             raise ValueError(
-                f"coord_trans: unknown transform {t!r}; "
-                f"valid: {sorted(_NAMED_TRANS)}"
+                f"coord_trans: unknown transform {t!r}; valid: {sorted(_NAMED_TRANS)}"
             )
         return getattr(transformed, cls)()
     if hasattr(t, "matplotlib_scale"):

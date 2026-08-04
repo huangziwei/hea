@@ -40,7 +40,7 @@ class ScaleDiscreteColor(Scale):
     """Maps discrete levels (e.g. species names) to colours via a palette."""
 
     palette: Any = None  # None = default hue_pal; else a callable n -> list[str]
-    values: Any = None    # explicit dict {level: color} — wins over palette
+    values: Any = None  # explicit dict {level: color} — wins over palette
     levels: list | None = field(default=None, init=False, repr=False)
 
     def train(self, data) -> None:
@@ -90,31 +90,49 @@ class ScaleDiscreteColor(Scale):
         return [mapping.get(v) for v in data]
 
 
-def scale_color_manual(*, values, name=_NAME_MISSING, breaks="default", labels="default",
-                      limits=None):
+def scale_color_manual(
+    *, values, name=_NAME_MISSING, breaks="default", labels="default", limits=None
+):
     """Manual qualitative palette. ``values`` may be a list (ordered) or a
     dict ``{level: hex}`` (explicit per-level)."""
     if isinstance(values, dict):
         return ScaleDiscreteColor(
-            aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
-            limits=limits, values=dict(values),
+            aesthetics=("colour",),
+            name=name,
+            breaks=breaks,
+            labels=labels,
+            limits=limits,
+            values=dict(values),
         )
     return ScaleDiscreteColor(
-        aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=manual_pal(values),
+        aesthetics=("colour",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=manual_pal(values),
     )
 
 
-def scale_fill_manual(*, values, name=_NAME_MISSING, breaks="default", labels="default",
-                     limits=None):
+def scale_fill_manual(
+    *, values, name=_NAME_MISSING, breaks="default", labels="default", limits=None
+):
     if isinstance(values, dict):
         return ScaleDiscreteColor(
-            aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
-            limits=limits, values=dict(values),
+            aesthetics=("fill",),
+            name=name,
+            breaks=breaks,
+            labels=labels,
+            limits=limits,
+            values=dict(values),
         )
     return ScaleDiscreteColor(
-        aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=manual_pal(values),
+        aesthetics=("fill",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=manual_pal(values),
     )
 
 
@@ -148,46 +166,91 @@ scale_colour_identity = scale_color_identity
 # Discrete palette factories — viridis_d, brewer
 # ---------------------------------------------------------------------------
 
-def scale_color_viridis_d(*, option="viridis", direction=1, begin=0.0, end=1.0,
-                         name=_NAME_MISSING, breaks="default", labels="default",
-                         limits=None):
+
+def scale_color_viridis_d(
+    *,
+    option="viridis",
+    direction=1,
+    begin=0.0,
+    end=1.0,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     return ScaleDiscreteColor(
-        aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
+        aesthetics=("colour",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
         limits=limits,
-        palette=viridis_pal_discrete(option=option, direction=direction,
-                                      begin=begin, end=end),
+        palette=viridis_pal_discrete(
+            option=option, direction=direction, begin=begin, end=end
+        ),
     )
 
 
-def scale_fill_viridis_d(*, option="viridis", direction=1, begin=0.0, end=1.0,
-                        name=_NAME_MISSING, breaks="default", labels="default",
-                        limits=None):
+def scale_fill_viridis_d(
+    *,
+    option="viridis",
+    direction=1,
+    begin=0.0,
+    end=1.0,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     return ScaleDiscreteColor(
-        aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
+        aesthetics=("fill",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
         limits=limits,
-        palette=viridis_pal_discrete(option=option, direction=direction,
-                                      begin=begin, end=end),
+        palette=viridis_pal_discrete(
+            option=option, direction=direction, begin=begin, end=end
+        ),
     )
 
 
 scale_colour_viridis_d = scale_color_viridis_d
 
 
-def scale_color_brewer(*, palette="Set1", direction=1, name=_NAME_MISSING,
-                      breaks="default", labels="default", limits=None):
+def scale_color_brewer(
+    *,
+    palette="Set1",
+    direction=1,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     """Discrete ColorBrewer palette. Common picks: ``Set1``/``Set2`` (qualitative),
     ``RdBu``/``Spectral`` (diverging), ``Blues``/``YlOrRd`` (sequential)."""
     return ScaleDiscreteColor(
-        aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
+        aesthetics=("colour",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
         limits=limits,
         palette=brewer_pal_discrete(palette=palette, direction=direction),
     )
 
 
-def scale_fill_brewer(*, palette="Set1", direction=1, name=_NAME_MISSING,
-                     breaks="default", labels="default", limits=None):
+def scale_fill_brewer(
+    *,
+    palette="Set1",
+    direction=1,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     return ScaleDiscreteColor(
-        aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
+        aesthetics=("fill",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
         limits=limits,
         palette=brewer_pal_discrete(palette=palette, direction=direction),
     )
@@ -200,23 +263,54 @@ scale_colour_brewer = scale_color_brewer
 # Default qualitative palette — equally-spaced HCL hues (ggplot2's default).
 # ---------------------------------------------------------------------------
 
-def scale_color_hue(*, h=(15, 375), c=100, lightness=65, h_start=0, direction=1,
-                    name=_NAME_MISSING, breaks="default", labels="default", limits=None):
+
+def scale_color_hue(
+    *,
+    h=(15, 375),
+    c=100,
+    lightness=65,
+    h_start=0,
+    direction=1,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     """Equally-spaced HCL hues. ggplot2's default discrete-colour palette;
     explicit form lets you tune chroma / lightness / hue range."""
     return ScaleDiscreteColor(
-        aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
+        aesthetics=("colour",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
         limits=limits,
-        palette=hue_pal(h=h, c=c, lightness=lightness, h_start=h_start, direction=direction),
+        palette=hue_pal(
+            h=h, c=c, lightness=lightness, h_start=h_start, direction=direction
+        ),
     )
 
 
-def scale_fill_hue(*, h=(15, 375), c=100, lightness=65, h_start=0, direction=1,
-                   name=_NAME_MISSING, breaks="default", labels="default", limits=None):
+def scale_fill_hue(
+    *,
+    h=(15, 375),
+    c=100,
+    lightness=65,
+    h_start=0,
+    direction=1,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+):
     return ScaleDiscreteColor(
-        aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
+        aesthetics=("fill",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
         limits=limits,
-        palette=hue_pal(h=h, c=c, lightness=lightness, h_start=h_start, direction=direction),
+        palette=hue_pal(
+            h=h, c=c, lightness=lightness, h_start=h_start, direction=direction
+        ),
     )
 
 
@@ -239,22 +333,33 @@ scale_fill_discrete = scale_fill_hue
 # Colourblind-safe palette (ggthemes' Okabe-Ito).
 # ---------------------------------------------------------------------------
 
-def scale_color_colorblind(*, name=_NAME_MISSING, breaks="default", labels="default",
-                          limits=None):
+
+def scale_color_colorblind(
+    *, name=_NAME_MISSING, breaks="default", labels="default", limits=None
+):
     """ggthemes' ``scale_colour_colorblind`` — Okabe-Ito 8-colour qualitative
     palette designed to remain distinguishable under common colour-vision
     deficiencies. 8 levels max."""
     return ScaleDiscreteColor(
-        aesthetics=("colour",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=colorblind_pal(),
+        aesthetics=("colour",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=colorblind_pal(),
     )
 
 
-def scale_fill_colorblind(*, name=_NAME_MISSING, breaks="default", labels="default",
-                         limits=None):
+def scale_fill_colorblind(
+    *, name=_NAME_MISSING, breaks="default", labels="default", limits=None
+):
     return ScaleDiscreteColor(
-        aesthetics=("fill",), name=name, breaks=breaks, labels=labels,
-        limits=limits, palette=colorblind_pal(),
+        aesthetics=("fill",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
+        limits=limits,
+        palette=colorblind_pal(),
     )
 
 

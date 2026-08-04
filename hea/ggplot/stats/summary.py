@@ -29,6 +29,7 @@ from ...R import distributions as _dist
 # Built-in summary helpers
 # ---------------------------------------------------------------------------
 
+
 def mean_se(x: np.ndarray, mult: float = 1.0) -> dict:
     n = len(x)
     m = float(np.mean(x))
@@ -49,8 +50,9 @@ def mean_cl_normal(x: np.ndarray, conf: float = 0.95) -> dict:
     return {"y": m, "ymin": m - t * se, "ymax": m + t * se}
 
 
-def mean_cl_boot(x: np.ndarray, conf: float = 0.95, B: int = 1000,
-                 seed: int | None = None) -> dict:
+def mean_cl_boot(
+    x: np.ndarray, conf: float = 0.95, B: int = 1000, seed: int | None = None
+) -> dict:
     """Bootstrap CI for the mean. ``seed`` makes results reproducible (pass
     via ``fun_args={"seed": 42}``); without it, each run varies."""
     n = len(x)
@@ -98,8 +100,7 @@ def _resolve_fun(f, *, default=None):
         if f in _NAMED_AGG:
             return _NAMED_AGG[f]
         raise ValueError(
-            f"unknown aggregation function name {f!r}; "
-            f"valid: {sorted(_NAMED_AGG)}"
+            f"unknown aggregation function name {f!r}; valid: {sorted(_NAMED_AGG)}"
         )
     raise TypeError(f"expected callable or string, got {type(f).__name__}")
 
@@ -149,6 +150,7 @@ class StatSummary(Stat):
                     "ymin": float(fmin(y)),
                     "ymax": float(fmax(y)),
                 }
+
             return _componentwise
         # ggplot2's default.
         return mean_se
@@ -194,12 +196,14 @@ class StatSummary(Stat):
             if len(arr) == 0:
                 continue
             summary = fn(arr, **self.fun_args)
-            rows.append({
-                group_col:  grp_val,
-                out_centre: summary["y"],
-                out_min:    summary["ymin"],
-                out_max:    summary["ymax"],
-            })
+            rows.append(
+                {
+                    group_col: grp_val,
+                    out_centre: summary["y"],
+                    out_min: summary["ymin"],
+                    out_max: summary["ymax"],
+                }
+            )
 
         if not rows:
             return pl.DataFrame()
@@ -209,6 +213,7 @@ class StatSummary(Stat):
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
+
 
 def _resolve_summary_geom(geom):
     """Map a ggplot2-style geom name to an instantiated :class:`Geom`.
@@ -227,7 +232,10 @@ def _resolve_summary_geom(geom):
     """
     from ..geoms.bar import GeomBar
     from ..geoms.errorbar import (
-        GeomCrossbar, GeomErrorbar, GeomLinerange, GeomPointrange,
+        GeomCrossbar,
+        GeomErrorbar,
+        GeomLinerange,
+        GeomPointrange,
     )
     from ..geoms.path import GeomPath
     from ..geoms.point import GeomPoint
@@ -239,23 +247,22 @@ def _resolve_summary_geom(geom):
     # (``geom_line`` = ``GeomPath(sort_by_x=True)``, etc.).
     geom_map = {
         "pointrange": GeomPointrange,
-        "errorbar":   GeomErrorbar,
-        "linerange":  GeomLinerange,
-        "crossbar":   GeomCrossbar,
-        "bar":        GeomBar,
-        "point":      GeomPoint,
-        "path":       GeomPath,
-        "line":       lambda: GeomPath(sort_by_x=True),
-        "step":       lambda: GeomPath(sort_by_x=True, step_direction="hv"),
-        "ribbon":     GeomRibbon,
-        "area":       GeomArea,
-        "smooth":     GeomSmooth,
+        "errorbar": GeomErrorbar,
+        "linerange": GeomLinerange,
+        "crossbar": GeomCrossbar,
+        "bar": GeomBar,
+        "point": GeomPoint,
+        "path": GeomPath,
+        "line": lambda: GeomPath(sort_by_x=True),
+        "step": lambda: GeomPath(sort_by_x=True, step_direction="hv"),
+        "ribbon": GeomRibbon,
+        "area": GeomArea,
+        "smooth": GeomSmooth,
     }
     if isinstance(geom, str):
         if geom not in geom_map:
             raise ValueError(
-                f"stat_summary: unknown geom {geom!r}; "
-                f"valid: {sorted(geom_map)}"
+                f"stat_summary: unknown geom {geom!r}; valid: {sorted(geom_map)}"
             )
         return geom_map[geom]()
     if hasattr(geom, "draw_panel"):
@@ -265,10 +272,20 @@ def _resolve_summary_geom(geom):
     )
 
 
-def stat_summary(mapping=None, data=None, *, geom="pointrange",
-                 fun_data=None, fun=None, fun_min=None, fun_max=None,
-                 fun_args=None, orientation="auto", position="identity",
-                 **kwargs):
+def stat_summary(
+    mapping=None,
+    data=None,
+    *,
+    geom="pointrange",
+    fun_data=None,
+    fun=None,
+    fun_min=None,
+    fun_max=None,
+    fun_args=None,
+    orientation="auto",
+    position="identity",
+    **kwargs,
+):
     """Per-x summary of y. ``fun_data`` (preferred) returns ``{y, ymin, ymax}``;
     name a built-in (``"mean_se"``, ``"mean_cl_normal"``, ``"mean_cl_boot"``,
     ``"median_hilow"``) or pass a callable. Componentwise alternative:
@@ -298,7 +315,10 @@ def stat_summary(mapping=None, data=None, *, geom="pointrange",
     return Layer(
         geom=geom_obj,
         stat=StatSummary(
-            fun_data=fun_data, fun=fun, fun_min=fun_min, fun_max=fun_max,
+            fun_data=fun_data,
+            fun=fun,
+            fun_min=fun_min,
+            fun_max=fun_max,
             fun_args=fun_args or {},
             orientation=orientation,
         ),

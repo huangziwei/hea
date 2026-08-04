@@ -89,7 +89,9 @@ class CoordPolar(Coord):
         return data
 
     def rescale_theta(
-        self, df: pl.DataFrame, x_range: tuple[float, float],
+        self,
+        df: pl.DataFrame,
+        x_range: tuple[float, float],
     ) -> pl.DataFrame:
         """Linearly map theta-aesthetic columns from ``x_range`` to ``[0, 2π]``.
 

@@ -42,24 +42,138 @@ pub fn stirlerr(n: f64) -> f64 {
         // 5.25 < n <= 23.5 — asymptotic series, length by threshold
         let nn = n * n;
         if n > 12.8 {
-            return (S[0]-(S[1]-(S[2]-(S[3]-(S[4]-(S[5]-S[6]/nn)/nn)/nn)/nn)/nn)/nn)/n;
+            return (S[0]
+                - (S[1] - (S[2] - (S[3] - (S[4] - (S[5] - S[6] / nn) / nn) / nn) / nn) / nn) / nn)
+                / n;
         }
         if n > 12.3 {
-            return (S[0]-(S[1]-(S[2]-(S[3]-(S[4]-(S[5]-(S[6]-S[7]/nn)/nn)/nn)/nn)/nn)/nn)/nn)/n;
+            return (S[0]
+                - (S[1]
+                    - (S[2] - (S[3] - (S[4] - (S[5] - (S[6] - S[7] / nn) / nn) / nn) / nn) / nn)
+                        / nn)
+                    / nn)
+                / n;
         }
         if n > 8.9 {
-            return (S[0]-(S[1]-(S[2]-(S[3]-(S[4]-(S[5]-(S[6]-(S[7]-S[8]/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/n;
+            return (S[0]
+                - (S[1]
+                    - (S[2]
+                        - (S[3]
+                            - (S[4] - (S[5] - (S[6] - (S[7] - S[8] / nn) / nn) / nn) / nn)
+                                / nn)
+                            / nn)
+                        / nn)
+                    / nn)
+                / n;
         }
         if n > 7.3 {
-            return (S[0]-(S[1]-(S[2]-(S[3]-(S[4]-(S[5]-(S[6]-(S[7]-(S[8]-(S[9]-S[10]/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/n;
+            return (S[0]
+                - (S[1]
+                    - (S[2]
+                        - (S[3]
+                            - (S[4]
+                                - (S[5]
+                                    - (S[6]
+                                        - (S[7] - (S[8] - (S[9] - S[10] / nn) / nn) / nn)
+                                            / nn)
+                                        / nn)
+                                    / nn)
+                                / nn)
+                            / nn)
+                        / nn)
+                    / nn)
+                / n;
         }
         if n > 6.6 {
-            return (S[0]-(S[1]-(S[2]-(S[3]-(S[4]-(S[5]-(S[6]-(S[7]-(S[8]-(S[9]-(S[10]-(S[11]-S[12]/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/n;
+            return (S[0]
+                - (S[1]
+                    - (S[2]
+                        - (S[3]
+                            - (S[4]
+                                - (S[5]
+                                    - (S[6]
+                                        - (S[7]
+                                            - (S[8]
+                                                - (S[9]
+                                                    - (S[10]
+                                                        - (S[11] - S[12] / nn) / nn)
+                                                        / nn)
+                                                    / nn)
+                                                / nn)
+                                            / nn)
+                                        / nn)
+                                    / nn)
+                                / nn)
+                            / nn)
+                        / nn)
+                    / nn)
+                / n;
         }
         if n > 6.1 {
-            return (S[0]-(S[1]-(S[2]-(S[3]-(S[4]-(S[5]-(S[6]-(S[7]-(S[8]-(S[9]-(S[10]-(S[11]-(S[12]-(S[13]-S[14]/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/n;
+            return (S[0]
+                - (S[1]
+                    - (S[2]
+                        - (S[3]
+                            - (S[4]
+                                - (S[5]
+                                    - (S[6]
+                                        - (S[7]
+                                            - (S[8]
+                                                - (S[9]
+                                                    - (S[10]
+                                                        - (S[11]
+                                                            - (S[12]
+                                                                - (S[13]
+                                                                    - S[14] / nn)
+                                                                    / nn)
+                                                                / nn)
+                                                            / nn)
+                                                        / nn)
+                                                    / nn)
+                                                / nn)
+                                            / nn)
+                                        / nn)
+                                    / nn)
+                                / nn)
+                            / nn)
+                        / nn)
+                    / nn)
+                / n;
         }
-        return (S[0]-(S[1]-(S[2]-(S[3]-(S[4]-(S[5]-(S[6]-(S[7]-(S[8]-(S[9]-(S[10]-(S[11]-(S[12]-(S[13]-(S[14]-(S[15]-S[16]/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/nn)/n;
+        return (S[0]
+            - (S[1]
+                - (S[2]
+                    - (S[3]
+                        - (S[4]
+                            - (S[5]
+                                - (S[6]
+                                    - (S[7]
+                                        - (S[8]
+                                            - (S[9]
+                                                - (S[10]
+                                                    - (S[11]
+                                                        - (S[12]
+                                                            - (S[13]
+                                                                - (S[14]
+                                                                    - (S[15]
+                                                                        - S[16]
+                                                                            / nn)
+                                                                        / nn)
+                                                                    / nn)
+                                                                / nn)
+                                                            / nn)
+                                                        / nn)
+                                                    / nn)
+                                                / nn)
+                                            / nn)
+                                        / nn)
+                                    / nn)
+                                / nn)
+                            / nn)
+                        / nn)
+                    / nn)
+                / nn)
+            / n;
     }
     // n > 23.5
     let nn = n * n;
@@ -246,7 +360,11 @@ pub fn dpois_raw(x: f64, lam: f64, give_log: bool) -> f64 {
     let (yh, yl) = ebd0(x, lam);
     let yl_total = yl + stirlerr(x);
     let lrg = x >= X_LRG;
-    let r = if lrg { M_SQRT_2PI * x.sqrt() } else { M_2PI * x };
+    let r = if lrg {
+        M_SQRT_2PI * x.sqrt()
+    } else {
+        M_2PI * x
+    };
     let log_correction = if lrg { r.ln() } else { 0.5 * r.ln() };
     if give_log {
         -yl_total - yh - log_correction
@@ -284,8 +402,7 @@ pub fn dbinom_raw(x: f64, n: f64, p: f64, q: f64, give_log: bool) -> f64 {
         return if give_log { f64::NEG_INFINITY } else { 0.0 };
     }
     // saddlepoint
-    let lc =
-        stirlerr(n) - stirlerr(x) - stirlerr(n - x) - bd0(x, n * p) - bd0(n - x, n * q);
+    let lc = stirlerr(n) - stirlerr(x) - stirlerr(n - x) - bd0(x, n * p) - bd0(n - x, n * q);
     let lf = M_LN_2PI + x.ln() + (-x / n).ln_1p();
     let lr = rfma(-0.5, lf, lc);
     if give_log {
@@ -299,7 +416,10 @@ pub fn dbinom_raw(x: f64, n: f64, p: f64, q: f64, give_log: bool) -> f64 {
 
 #[pyfunction]
 #[pyo3(name = "stirlerr")]
-pub fn py_stirlerr<'py>(py: Python<'py>, n: PyReadonlyArray1<'py, f64>) -> Bound<'py, PyArray1<f64>> {
+pub fn py_stirlerr<'py>(
+    py: Python<'py>,
+    n: PyReadonlyArray1<'py, f64>,
+) -> Bound<'py, PyArray1<f64>> {
     let v = crate::par::map1(py, n.as_slice().unwrap(), stirlerr);
     v.into_pyarray(py)
 }
@@ -334,9 +454,12 @@ pub fn py_dpois_raw<'py>(
     lam: PyReadonlyArray1<'py, f64>,
     give_log: bool,
 ) -> Bound<'py, PyArray1<f64>> {
-    let v = crate::par::map2(py, x.as_slice().unwrap(), lam.as_slice().unwrap(), |x, l| {
-        dpois_raw(x, l, give_log)
-    });
+    let v = crate::par::map2(
+        py,
+        x.as_slice().unwrap(),
+        lam.as_slice().unwrap(),
+        |x, l| dpois_raw(x, l, give_log),
+    );
     v.into_pyarray(py)
 }
 

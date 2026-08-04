@@ -41,10 +41,7 @@ def _strip_preamble(s: str) -> str:
     for round-trip body comparisons it's noise to strip.
     """
     lines = s.split("\n")
-    while lines and (
-        lines[0].startswith("library(")
-        or lines[0].startswith("data(")
-    ):
+    while lines and (lines[0].startswith("library(") or lines[0].startswith("data(")):
         lines.pop(0)
     return "\n".join(lines)
 
@@ -252,10 +249,11 @@ class TestCaseWhen:
         assert out == 'case_when(x > 0 ~ "pos", x < 0 ~ "neg", .default = "zero")'
 
     def test_inside_mutate(self):
-        out = _tr(
-            'df.mutate(label=case_when((col("x") > 0, "pos"), default="zero"))'
+        out = _tr('df.mutate(label=case_when((col("x") > 0, "pos"), default="zero"))')
+        assert (
+            out
+            == 'df |>\n  mutate(label = case_when(x > 0 ~ "pos", .default = "zero"))'
         )
-        assert out == 'df |>\n  mutate(label = case_when(x > 0 ~ "pos", .default = "zero"))'
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +282,9 @@ class TestJoinsReverse:
 
 class TestGgplotReverse:
     def test_root_with_aes(self):
-        out = _tr('penguins.ggplot(x="flipper_length_mm", y="body_mass_g").geom_point()')
+        out = _tr(
+            'penguins.ggplot(x="flipper_length_mm", y="body_mass_g").geom_point()'
+        )
         assert out == (
             "ggplot(penguins, aes(x = flipper_length_mm, y = body_mass_g))"
             " + geom_point()"
@@ -308,8 +308,7 @@ class TestGgplotReverse:
         # ``alpha=0.5`` is a literal — should NOT go in aes().
         out = _tr('d.ggplot(x="x", y="y").geom_point(color="z", alpha=0.5)')
         assert out == (
-            "ggplot(d, aes(x = x, y = y))"
-            " + geom_point(aes(color = z), alpha = 0.5)"
+            "ggplot(d, aes(x = x, y = y)) + geom_point(aes(color = z), alpha = 0.5)"
         )
 
     def test_facet_wrap_formula_string(self):
@@ -412,9 +411,7 @@ class TestPreamble:
 
     def test_tidyverse_plus_patchwork(self):
         # Both — tidyverse first, then patchwork.
-        out = _tr_full(
-            'd.ggplot(x="a").geom_point() + plot_annotation(title="x")'
-        )
+        out = _tr_full('d.ggplot(x="a").geom_point() + plot_annotation(title="x")')
         lines = out.splitlines()
         assert lines[0] == "library(tidyverse)"
         assert lines[1] == "library(patchwork)"
@@ -496,7 +493,7 @@ class TestAutoloadDetection:
 
     def test_excluded_helper_name_skipped(self):
         # ``c`` is a function we never want as an autoload trigger.
-        out = _tr_full('x = c(1, 2, 3)')
+        out = _tr_full("x = c(1, 2, 3)")
         # Only thing in preamble would be from autoload — should be empty.
         assert "library(" not in out
 
@@ -572,7 +569,7 @@ class TestRoundTrip:
     def test_ggplot_full_chain(self):
         r_src = (
             "ggplot(penguins, aes(x = flipper_length_mm, y = body_mass_g)) "
-            '+ geom_point(aes(color = species)) + theme_minimal()'
+            "+ geom_point(aes(color = species)) + theme_minimal()"
         )
         out = self._round_trip(r_src)
         assert _normalize(out) == _normalize(r_src)
@@ -624,12 +621,22 @@ class TestMixedModelsReverse:
         # R capitalizes ``Gamma`` and dots ``inverse.gaussian``.
         g = _tr("hea.models.gmm(formula='y ~ x + (1|g)', data=d, family=Gamma())")
         assert g == 'glmer(formula = "y ~ x + (1|g)", data = d, family = Gamma)'
-        ig = _tr("hea.models.gmm(formula='y ~ x + (1|g)', data=d, family=InverseGaussian())")
-        assert ig == 'glmer(formula = "y ~ x + (1|g)", data = d, family = inverse.gaussian)'
+        ig = _tr(
+            "hea.models.gmm(formula='y ~ x + (1|g)', data=d, family=InverseGaussian())"
+        )
+        assert (
+            ig
+            == 'glmer(formula = "y ~ x + (1|g)", data = d, family = inverse.gaussian)'
+        )
 
     def test_gmm_family_with_link_preserves_link_arg(self):
-        out = _tr("hea.models.gmm(formula='y ~ x + (1|g)', data=d, family=Gamma(link='log'))")
-        assert out == 'glmer(formula = "y ~ x + (1|g)", data = d, family = Gamma(link = "log"))'
+        out = _tr(
+            "hea.models.gmm(formula='y ~ x + (1|g)', data=d, family=Gamma(link='log'))"
+        )
+        assert (
+            out
+            == 'glmer(formula = "y ~ x + (1|g)", data = d, family = Gamma(link = "log"))'
+        )
 
     def test_gmm_explicit_gaussian_to_lmer_drops_family(self):
         out = _tr("hea.models.gmm(formula='y ~ x + (1|g)', data=d, family=Gaussian())")

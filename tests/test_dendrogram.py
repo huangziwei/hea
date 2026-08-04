@@ -12,6 +12,7 @@ coercion re-derives the merge order from a stable height sort, so equal-height
 merges can swap. The oracle is therefore R's *own* round-trip, not the original
 ``hclust`` — verified to agree bit-for-bit below.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -97,8 +98,9 @@ def test_as_dendrogram_preorder_members_and_midpoints():
     # pinned from R as.dendrogram(hclust(dist(X),"complete"))
     assert members == [6, 3, 2, 3, 2]
     assert midpoints == [2.25, 0.75, 0.5, 0.75, 0.5]
-    _assert_close(heights, [7.810249675906654, 1.4142135623730951, 1.0,
-                            1.4142135623730951, 1.0])
+    _assert_close(
+        heights, [7.810249675906654, 1.4142135623730951, 1.0, 1.4142135623730951, 1.0]
+    )
 
 
 def test_order_and_labels_dendrogram():
@@ -131,11 +133,11 @@ def test_leaf_is_leaf_and_int():
 def test_as_hclust_dendrogram_roundtrip_pins():
     dd = _dd_X()
     h2 = as_hclust(dd)
-    assert h2.merge.ravel(order="F").tolist() == [
-        -4, -1, -6, -3, 4, -5, -2, 1, 2, 3]
+    assert h2.merge.ravel(order="F").tolist() == [-4, -1, -6, -3, 4, -5, -2, 1, 2, 3]
     assert h2.order.tolist() == [3, 1, 2, 6, 4, 5]
-    _assert_close(h2.height, [1.0, 1.0, 1.4142135623730951,
-                              1.4142135623730951, 7.810249675906654])
+    _assert_close(
+        h2.height, [1.0, 1.0, 1.4142135623730951, 1.4142135623730951, 7.810249675906654]
+    )
     assert h2.method is None  # NA in R
 
 
@@ -200,11 +202,23 @@ def test_cophenetic_dendrogram_pins():
     dd = as_dendrogram(h)
     cd = cophenetic(dd)
     # leaf order is [c,a,b,f,d,e]; distances pinned from R cophenetic(dd)
-    exp = [1.4142135623730951, 1.4142135623730951, 7.810249675906654,
-           7.810249675906654, 7.810249675906654, 1.0, 7.810249675906654,
-           7.810249675906654, 7.810249675906654, 7.810249675906654,
-           7.810249675906654, 7.810249675906654, 1.4142135623730951,
-           1.4142135623730951, 1.0]
+    exp = [
+        1.4142135623730951,
+        1.4142135623730951,
+        7.810249675906654,
+        7.810249675906654,
+        7.810249675906654,
+        1.0,
+        7.810249675906654,
+        7.810249675906654,
+        7.810249675906654,
+        7.810249675906654,
+        7.810249675906654,
+        7.810249675906654,
+        1.4142135623730951,
+        1.4142135623730951,
+        1.0,
+    ]
     _assert_close(np.asarray(cd), exp)
     assert cd.Labels == ["c", "a", "b", "f", "d", "e"]
 
@@ -240,8 +254,9 @@ def test_dendrapply_can_transform_attrs():
 
     def bump(node):
         if not is_leaf(node):
-            node = Dendrogram(children=node.children, value=node.value,
-                              attrs=dict(node.attrs))
+            node = Dendrogram(
+                children=node.children, value=node.value, attrs=dict(node.attrs)
+            )
             node.attrs["height"] = node.attrs["height"] + 100.0
         return node
 
@@ -285,14 +300,14 @@ def _r_dend_diff(d, method):
     """Build the same hclust->dendrogram in R; return its accessors."""
     elems = ",".join(float(v).hex() for v in d.data)
     rexpr = (
-        f'd<-structure(c({elems}),Size={d.Size}L,Diag=FALSE,Upper=FALSE,'
+        f"d<-structure(c({elems}),Size={d.Size}L,Diag=FALSE,Upper=FALSE,"
         f'method="euclidean",class="dist");h<-hclust(d,method="{method}");'
-        'dd<-as.dendrogram(h);'
+        "dd<-as.dendrogram(h);"
         'cat(order.dendrogram(dd),sep=" ");cat("\\n##\\n");'
         'h2<-as.hclust(dd);cat(as.vector(h2$merge),sep=" ");cat("\\n##\\n");'
         'cat(sprintf("%.17g",h2$height),sep=" ");cat("\\n##\\n");'
         'cat(h2$order,sep=" ");cat("\\n##\\n");'
-        'ct<-cut(dd,h=stats::median(h$height));'
+        "ct<-cut(dd,h=stats::median(h$height));"
         'cat(attr(ct$upper,"members"),length(ct$lower),sep=" ");cat("\\n##\\n");'
         'cat(sapply(ct$lower,function(z)attr(z,"members")),sep=" ");cat("\\n##\\n");'
         'cat(order.dendrogram(reorder(dd,as.double(1:attr(dd,"members")))),sep=" ");'
@@ -300,8 +315,12 @@ def _r_dend_diff(d, method):
         'cat(sprintf("%.17g",as.vector(cophenetic(dd))),sep=" ")'
     )
     out = subprocess.run(
-        ["Rscript", "-e", rexpr], stdin=subprocess.DEVNULL, check=True,
-        capture_output=True, text=True, timeout=120,
+        ["Rscript", "-e", rexpr],
+        stdin=subprocess.DEVNULL,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
     ).stdout
     return out.split("\n##\n")
 
@@ -314,8 +333,9 @@ def test_dendrogram_vs_live_R(method):
     d = dist(x)
     h = hclust(d, method=method)
     dd = as_dendrogram(h)
-    (r_ord, r_merge, r_height, r_rtord, r_cut, r_lowmem,
-     r_reord, r_coph) = _r_dend_diff(d, method)
+    (r_ord, r_merge, r_height, r_rtord, r_cut, r_lowmem, r_reord, r_coph) = (
+        _r_dend_diff(d, method)
+    )
 
     # order.dendrogram
     assert order_dendrogram(dd).tolist() == [int(v) for v in r_ord.split()]
@@ -331,13 +351,15 @@ def test_dendrogram_vs_live_R(method):
     up_mem, n_low = (int(v) for v in r_cut.split())
     assert ct["upper"].attrs["members"] == up_mem
     assert len(ct["lower"]) == n_low
-    assert [low.attrs["members"] for low in ct["lower"]] == \
-        [int(v) for v in r_lowmem.split()]
+    assert [low.attrs["members"] for low in ct["lower"]] == [
+        int(v) for v in r_lowmem.split()
+    ]
 
     # reorder by leaf index weights
     wts = np.arange(1, h.merge.shape[0] + 2, dtype=float)
-    assert order_dendrogram(reorder(dd, wts)).tolist() == \
-        [int(v) for v in r_reord.split()]
+    assert order_dendrogram(reorder(dd, wts)).tolist() == [
+        int(v) for v in r_reord.split()
+    ]
 
     # cophenetic.dendrogram
     _assert_close(np.asarray(cophenetic(dd)), [float(v) for v in r_coph.split()])
@@ -355,18 +377,22 @@ def test_merge_dendrogram_vs_live_R():
     ea = ",".join(float(v).hex() for v in dist(xa).data)
     eb = ",".join(float(v).hex() for v in dist(xb).data)
     rexpr = (
-        f'da<-as.dendrogram(hclust(structure(c({ea}),Size=5L,Diag=FALSE,'
+        f"da<-as.dendrogram(hclust(structure(c({ea}),Size=5L,Diag=FALSE,"
         'Upper=FALSE,method="euclidean",class="dist")));'
-        f'db<-as.dendrogram(hclust(structure(c({eb}),Size=4L,Diag=FALSE,'
+        f"db<-as.dendrogram(hclust(structure(c({eb}),Size=4L,Diag=FALSE,"
         'Upper=FALSE,method="euclidean",class="dist")));'
-        'm<-merge(da,db);'
+        "m<-merge(da,db);"
         'cat(attr(m,"members"),sep=" ");cat("\\n##\\n");'
         'cat(sprintf("%.17g",attr(m,"height")));cat("\\n##\\n");'
         'cat(order.dendrogram(m),sep=" ");cat("\\n##\\n");cat(unlist(m),sep=" ")'
     )
     out = subprocess.run(
-        ["Rscript", "-e", rexpr], stdin=subprocess.DEVNULL, check=True,
-        capture_output=True, text=True, timeout=120,
+        ["Rscript", "-e", rexpr],
+        stdin=subprocess.DEVNULL,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
     ).stdout
     mem, hgt, ordr, unl = out.split("\n##\n")
     assert m.attrs["members"] == int(mem)

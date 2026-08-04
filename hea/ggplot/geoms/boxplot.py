@@ -27,14 +27,16 @@ class GeomBoxplot(Geom):
     # Mirrors ggplot2's ``GeomBoxplot$default_aes`` (R/geom-boxplot.R):
     # ``colour = col_mix(ink, paper, 0.2)`` ≈ ``"grey20"`` (the dark-grey
     # box outline that R uses by default — NOT pure black).
-    default_aes: dict = field(default_factory=lambda: {
-        "colour": "grey20",
-        "fill": "white",
-        "size": 0.5,
-        "linetype": "solid",
-        "alpha": 1.0,
-        "shape": "o",
-    })
+    default_aes: dict = field(
+        default_factory=lambda: {
+            "colour": "grey20",
+            "fill": "white",
+            "size": 0.5,
+            "linetype": "solid",
+            "alpha": 1.0,
+            "shape": "o",
+        }
+    )
     required_aes: tuple = ("x", "lower", "middle", "upper", "ymin", "ymax")
     key_glyph: str = "polygon"
 
@@ -52,10 +54,7 @@ class GeomBoxplot(Geom):
 
         # ``flipped_aes=True`` rows come from ``aes(x=…)`` (no y) and carry
         # x-prefixed stat columns; the cross-axis position is in ``y``.
-        flipped = (
-            "flipped_aes" in data.columns
-            and bool(data["flipped_aes"].any())
-        )
+        flipped = "flipped_aes" in data.columns and bool(data["flipped_aes"].any())
         if flipped:
             pos_col = "y"
             stat_cols = ("xmiddle", "xlower", "xupper", "xmin", "xmax")
@@ -73,7 +72,12 @@ class GeomBoxplot(Geom):
         # first-appearance order, which can leave the axis labelled
         # ``Adelie, Gentoo, Chinstrap`` instead of the expected sorted run.
         pos_series = data[pos_col]
-        pos_is_discrete = pos_series.dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean)
+        pos_is_discrete = pos_series.dtype in (
+            pl.Utf8,
+            pl.Categorical,
+            pl.Enum,
+            pl.Boolean,
+        )
         pos_axis = ax.yaxis if flipped else ax.xaxis
         convert = ax.convert_yunits if flipped else ax.convert_xunits
         if pos_is_discrete:
@@ -110,8 +114,9 @@ class GeomBoxplot(Geom):
             edge = r_color(row.get("colour") or "black")
             alpha = float(row.get("alpha") or 1.0)
             flier_color = r_color(self.outlier_colour or edge)
-            flier_alpha = (self.outlier_alpha
-                            if self.outlier_alpha is not None else alpha)
+            flier_alpha = (
+                self.outlier_alpha if self.outlier_alpha is not None else alpha
+            )
 
             ax.bxp(
                 [box_dict],
@@ -134,9 +139,19 @@ class GeomBoxplot(Geom):
             )
 
 
-def geom_boxplot(mapping=None, data=None, *, stat="boxplot", position="dodge2",
-                 outlier_size=1.5, outlier_colour=None, outlier_alpha=None,
-                 coef=1.5, width=None, **kwargs):
+def geom_boxplot(
+    mapping=None,
+    data=None,
+    *,
+    stat="boxplot",
+    position="dodge2",
+    outlier_size=1.5,
+    outlier_colour=None,
+    outlier_alpha=None,
+    coef=1.5,
+    width=None,
+    **kwargs,
+):
     from ..layer import Layer
     from ..positions import resolve_position
     from ..stats import resolve_stat
@@ -152,9 +167,11 @@ def geom_boxplot(mapping=None, data=None, *, stat="boxplot", position="dodge2",
     aes_params, geom_params = split_layer_kwargs(kwargs)
 
     return Layer(
-        geom=GeomBoxplot(outlier_size=outlier_size,
-                         outlier_colour=outlier_colour,
-                         outlier_alpha=outlier_alpha),
+        geom=GeomBoxplot(
+            outlier_size=outlier_size,
+            outlier_colour=outlier_colour,
+            outlier_alpha=outlier_alpha,
+        ),
         stat=stat_obj,
         position=resolve_position(position),
         mapping=mapping,

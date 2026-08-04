@@ -46,21 +46,31 @@ class ScalesList:
             return sc
         if aesthetic in ("x", "y"):
             import polars as pl
-            dtype = data.dtype if (data is not None and isinstance(data, pl.Series)) else None
+
+            dtype = (
+                data.dtype
+                if (data is not None and isinstance(data, pl.Series))
+                else None
+            )
             if dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean):
                 from .ordinal import ScaleOrdinal
+
                 sc = ScaleOrdinal(aesthetics=(aesthetic,))
             elif dtype == pl.Date:
                 from .temporal import ScaleDate
+
                 sc = ScaleDate(aesthetics=(aesthetic,))
             elif isinstance(dtype, pl.Datetime):
                 from .temporal import ScaleDatetime
+
                 sc = ScaleDatetime(aesthetics=(aesthetic,))
             elif isinstance(dtype, pl.Time) or dtype == pl.Time:
                 from .temporal import ScaleTime
+
                 sc = ScaleTime(aesthetics=(aesthetic,))
             else:
                 from .continuous import ScaleContinuous
+
                 sc = ScaleContinuous(aesthetics=(aesthetic,))
             self._by_aes[aesthetic] = sc
             return sc
@@ -119,7 +129,8 @@ class ScalesList:
                 from .color_continuous import ScaleContinuousColor
 
                 sc = ScaleContinuousColor(
-                    aesthetics=(aesthetic,), palette=gradient_pal(),
+                    aesthetics=(aesthetic,),
+                    palette=gradient_pal(),
                 )
             else:
                 return None
@@ -133,7 +144,8 @@ class ScalesList:
 
             if is_numeric:
                 sc = ScaleContinuousColor(
-                    aesthetics=("size",), palette=rescale_pal((1.0, 6.0)),
+                    aesthetics=("size",),
+                    palette=rescale_pal((1.0, 6.0)),
                 )
             elif is_discrete:
                 # ggplot2 4.0 area-maps discrete size: per-level radii are
@@ -156,7 +168,8 @@ class ScalesList:
 
             if is_numeric:
                 sc = ScaleContinuousColor(
-                    aesthetics=("alpha",), palette=alpha_pal((0.1, 1.0)),
+                    aesthetics=("alpha",),
+                    palette=alpha_pal((0.1, 1.0)),
                 )
             elif is_discrete:
                 # ggplot2 ``scale_alpha_ordinal``: ``seq(0.1, 1, length.out=n)``.
@@ -195,7 +208,8 @@ class ScalesList:
                 from .discrete import ScaleDiscreteColor
 
                 sc = ScaleDiscreteColor(
-                    aesthetics=("linetype",), palette=linetype_pal(),
+                    aesthetics=("linetype",),
+                    palette=linetype_pal(),
                 )
                 self._by_aes[aesthetic] = sc
                 return sc

@@ -64,7 +64,7 @@ def _R_pow_di(x: float, n: int) -> float:
         return x
     if n != 0:
         if not math.isfinite(x):
-            return x ** float(n)        # R: R_pow(x, (double)n)
+            return x ** float(n)  # R: R_pow(x, (double)n)
         is_neg = n < 0
         if is_neg:
             n = -n
@@ -80,6 +80,7 @@ def _R_pow_di(x: float, n: int) -> float:
             pow_ = 1.0 / pow_
     return pow_
 
+
 # Period parameters (RNG.c:646-650).
 _N = 624
 _M = 397
@@ -94,33 +95,73 @@ _I2_32M1 = 2.328306437080797e-10
 # rbeta (rbeta.c) overflow guard: expmax = DBL_MAX_EXP * M_LN2, and DBL_MAX.
 _EXPMAX = 1024 * 0.6931471805599453
 _DBL_MAX = 1.7976931348623157e308
+_INT_MAX = 2147483647  # C INT_MAX — rhyper's large-n threshold
 
 # qnorm5 — R's normal quantile (nmath/qnorm.c, Wichura 1988 AS-241): the exact
 # rational-approx coefficients + Horner nesting R uses. norm_rand's Inversion
 # case calls this on the combined-uniform argument, so a bit-exact port (not
 # SciPy's ndtri, which differs ~1e-12) makes rnorm 0-ulp to R. Three branches
 # keyed on |p-0.5|: central, near-tail (r<=5), far-tail.
-_QN_A = (2509.0809287301226727, 33430.575583588128105, 67265.770927008700853,
-         45921.953931549871457, 13731.693765509461125, 1971.5909503065514427,
-         133.14166789178437745, 3.387132872796366608)
-_QN_B = (5226.495278852854561, 28729.085735721942674, 39307.89580009271061,
-         21213.794301586595867, 5394.1960214247511077, 687.1870074920579083,
-         42.313330701600911252, 1.0)
-_QN_C = (7.7454501427834140764e-4, 0.0227238449892691845833,
-         0.24178072517745061177, 1.27045825245236838258, 3.64784832476320460504,
-         5.7694972214606914055, 4.6303378461565452959, 1.42343711074968357734)
-_QN_D = (1.05075007164441684324e-9, 5.475938084995344946e-4,
-         0.0151986665636164571966, 0.14810397642748007459,
-         0.68976733498510000455, 1.6763848301838038494, 2.05319162663775882187,
-         1.0)
-_QN_E = (2.01033439929228813265e-7, 2.71155556874348757815e-5,
-         0.0012426609473880784386, 0.026532189526576123093,
-         0.29656057182850489123, 1.7848265399172913358, 5.4637849111641143699,
-         6.6579046435011037772)
-_QN_F = (2.04426310338993978564e-15, 1.4215117583164458887e-7,
-         1.8463183175100546818e-5, 7.868691311456132591e-4,
-         0.0148753612908506148525, 0.13692988092273580531,
-         0.59983220655588793769, 1.0)
+_QN_A = (
+    2509.0809287301226727,
+    33430.575583588128105,
+    67265.770927008700853,
+    45921.953931549871457,
+    13731.693765509461125,
+    1971.5909503065514427,
+    133.14166789178437745,
+    3.387132872796366608,
+)
+_QN_B = (
+    5226.495278852854561,
+    28729.085735721942674,
+    39307.89580009271061,
+    21213.794301586595867,
+    5394.1960214247511077,
+    687.1870074920579083,
+    42.313330701600911252,
+    1.0,
+)
+_QN_C = (
+    7.7454501427834140764e-4,
+    0.0227238449892691845833,
+    0.24178072517745061177,
+    1.27045825245236838258,
+    3.64784832476320460504,
+    5.7694972214606914055,
+    4.6303378461565452959,
+    1.42343711074968357734,
+)
+_QN_D = (
+    1.05075007164441684324e-9,
+    5.475938084995344946e-4,
+    0.0151986665636164571966,
+    0.14810397642748007459,
+    0.68976733498510000455,
+    1.6763848301838038494,
+    2.05319162663775882187,
+    1.0,
+)
+_QN_E = (
+    2.01033439929228813265e-7,
+    2.71155556874348757815e-5,
+    0.0012426609473880784386,
+    0.026532189526576123093,
+    0.29656057182850489123,
+    1.7848265399172913358,
+    5.4637849111641143699,
+    6.6579046435011037772,
+)
+_QN_F = (
+    2.04426310338993978564e-15,
+    1.4215117583164458887e-7,
+    1.8463183175100546818e-5,
+    7.868691311456132591e-4,
+    0.0148753612908506148525,
+    0.13692988092273580531,
+    0.59983220655588793769,
+    1.0,
+)
 
 
 def _qn_horner(r, c, fma=_rfma):
@@ -174,9 +215,11 @@ def _qnorm5_vec(p: np.ndarray) -> np.ndarray:
     rt = np.sqrt(-np.log(np.where(q > 0.0, 1.0 - p, p)))
     rn = rt - 1.6
     rf = rt - 5.0
-    val_t = np.where(rt <= 5.0,
-                     _qn_horner(rn, _QN_C, _rfma_vec) / _qn_horner(rn, _QN_D, _rfma_vec),
-                     _qn_horner(rf, _QN_E, _rfma_vec) / _qn_horner(rf, _QN_F, _rfma_vec))
+    val_t = np.where(
+        rt <= 5.0,
+        _qn_horner(rn, _QN_C, _rfma_vec) / _qn_horner(rn, _QN_D, _rfma_vec),
+        _qn_horner(rf, _QN_E, _rfma_vec) / _qn_horner(rf, _QN_F, _rfma_vec),
+    )
     val_t = np.where(q < 0.0, -val_t, val_t)
     return np.where(np.abs(q) <= 0.425, val_c, val_t)
 
@@ -201,7 +244,7 @@ def _revsort(a: np.ndarray, ib: np.ndarray) -> None:
     n = len(a)
     if n <= 1:
         return
-    A = [0.0] + list(a)                       # 1-based: A[1..n]
+    A = [0.0] + list(a)  # 1-based: A[1..n]
     B = [0] + [int(x) for x in ib]
     lo = (n >> 1) + 1
     ir = n
@@ -259,10 +302,40 @@ def _mroot_chol(V: np.ndarray) -> np.ndarray:
     U = np.triu(c[:p, :p])
     r = int(rank)
     if r < p:
-        U[r:p, r:p] = 0.0                 # mroot: zero the trailing block
-    oo = np.argsort(piv, kind="stable")   # order(attr(L, "pivot")), 0-based
-    Lp = U[:, oo]                         # un-pivot columns: t(Lp) Lp == V
-    return Lp.T.copy()                    # t(L[1:rank,]) with rank == ncol(V)
+        U[r:p, r:p] = 0.0  # mroot: zero the trailing block
+    oo = np.argsort(piv, kind="stable")  # order(attr(L, "pivot")), 0-based
+    Lp = U[:, oo]  # un-pivot columns: t(Lp) Lp == V
+    return Lp.T.copy()  # t(L[1:rank,]) with rank == ncol(V)
+
+
+# log(sqrt(2*pi)) — R's M_LN_SQRT_2PI, used by rhyper's Stirling afc().
+_M_LN_SQRT_2PI = 0.918938533204672741780329736406
+
+# ln(i!) table for i = 0..7 (rhyper.c `afc`), exact to the printed digits.
+_AFC_AL = (
+    0.0,
+    0.0,
+    0.69314718055994530941723212145817,
+    1.79175946922805500081247735838070,
+    3.17805383034794561964694160129705,
+    4.78749174278204599424770093452324,
+    6.57925121201010099506017829290394,
+    8.52516136106541430016553103634712,
+)
+
+
+def _afc(i: int) -> float:
+    """``afc(i) = ln(i!)`` (rhyper.c) — table lookup for i <= 7, else Stirling."""
+    if i <= 7:
+        return _AFC_AL[i]
+    di = float(i)
+    i2 = di * di
+    return (
+        (di + 0.5) * math.log(di)
+        - di
+        + _M_LN_SQRT_2PI
+        + (0.0833333333333333 - 0.00277777777777778 / i2) / di
+    )
 
 
 class RMersenneTwister:
@@ -308,15 +381,13 @@ class RMersenneTwister:
         # old mt[623] with the freshly updated mt[0] (the C loop has
         # already overwritten it by then).
         mt = self._mt
-        y = (mt[:_N - 1] & _UPPER) | (mt[1:] & _LOWER)
+        y = (mt[: _N - 1] & _UPPER) | (mt[1:] & _LOWER)
         mag = np.where((y & np.uint32(1)) != 0, _MATRIX_A, np.uint32(0))
         yshift = (y >> np.uint32(1)) ^ mag
         new = np.empty(_N, dtype=np.uint32)
-        new[:_N - _M] = mt[_M:] ^ yshift[:_N - _M]
-        new[_N - _M:2 * (_N - _M)] = (new[:_N - _M]
-                                      ^ yshift[_N - _M:2 * (_N - _M)])
-        new[2 * (_N - _M):_N - 1] = (new[_N - _M:_M - 1]
-                                     ^ yshift[2 * (_N - _M):])
+        new[: _N - _M] = mt[_M:] ^ yshift[: _N - _M]
+        new[_N - _M : 2 * (_N - _M)] = new[: _N - _M] ^ yshift[_N - _M : 2 * (_N - _M)]
+        new[2 * (_N - _M) : _N - 1] = new[_N - _M : _M - 1] ^ yshift[2 * (_N - _M) :]
         y_last = (mt[_N - 1] & _UPPER) | (new[0] & _LOWER)
         mag_last = _MATRIX_A if (int(y_last) & 1) else np.uint32(0)
         new[_N - 1] = new[_M - 1] ^ (y_last >> np.uint32(1)) ^ mag_last
@@ -337,8 +408,9 @@ class RMersenneTwister:
         """R's ``runif`` stream: one draw (``n=None``) or a length-``n``
         array — consuming the identical sequence either way."""
         if self._impl is not None:
-            return (self._impl.unif_rand() if n is None
-                    else self._impl.unif_rand_n(int(n)))
+            return (
+                self._impl.unif_rand() if n is None else self._impl.unif_rand_n(int(n))
+            )
         if n is None:
             if self._pos >= self._buf.size:
                 self._refill()
@@ -355,7 +427,7 @@ class RMersenneTwister:
             if self._pos >= self._buf.size:
                 self._refill()
             take = min(n - filled, self._buf.size - self._pos)
-            out[filled:filled + take] = self._buf[self._pos:self._pos + take]
+            out[filled : filled + take] = self._buf[self._pos : self._pos + take]
             self._pos += take
             filled += take
         return out
@@ -467,11 +539,21 @@ class RMersenneTwister:
 
     # cumulative ln(2)^k / k! — R sexp.c
     _EXP_Q = (
-        0.6931471805599453, 0.9333736875190459, 0.9888777961838675,
-        0.9984959252914960040, 0.9998292811061389, 0.9999833164100727,
-        0.9999985691438767, 0.9999998906925558, 0.9999999924734159,
-        0.9999999995283275, 0.9999999999728814, 0.9999999999985598,
-        0.9999999999999289, 0.9999999999999968, 0.9999999999999999,
+        0.6931471805599453,
+        0.9333736875190459,
+        0.9888777961838675,
+        0.9984959252914960040,
+        0.9998292811061389,
+        0.9999833164100727,
+        0.9999985691438767,
+        0.9999998906925558,
+        0.9999999924734159,
+        0.9999999995283275,
+        0.9999999999728814,
+        0.9999999999985598,
+        0.9999999999999289,
+        0.9999999999999968,
+        0.9999999999999999,
         1.0000000000000000,
     )
 
@@ -511,7 +593,7 @@ class RMersenneTwister:
             return self._impl.rpois(float(mu))
         if mu <= 0.0:
             return 0.0
-        if mu < 10.0:                      # inversion (consumes 1 uniform)
+        if mu < 10.0:  # inversion (consumes 1 uniform)
             u = self.unif_rand()
             p = q = p0 = math.exp(-mu)
             if u <= p0:
@@ -534,9 +616,12 @@ class RMersenneTwister:
         M_1_SQRT_2PI = 0.398942280401432677939946059934
         a0, a1, a2, a3 = -0.5, 0.3333333, -0.2500068, 0.2000118
         a4, a5, a6, a7 = -0.1661269, 0.1421878, -0.1384794, 0.1250060
-        fact = (1., 1., 2., 6., 24., 120., 720., 5040., 40320., 362880.)
-        one_7, one_12, one_24 = (0.1428571428571428571,
-                                 0.0833333333333333333, 0.0416666666666666667)
+        fact = (1.0, 1.0, 2.0, 6.0, 24.0, 120.0, 720.0, 5040.0, 40320.0, 362880.0)
+        one_7, one_12, one_24 = (
+            0.1428571428571428571,
+            0.0833333333333333333,
+            0.0416666666666666667,
+        )
         s = math.sqrt(mu)
         d = 6.0 * mu * mu
         big_l = math.floor(mu - 1.1484)
@@ -552,14 +637,30 @@ class RMersenneTwister:
         def step_f(pois, fk, difmuk):
             if pois < 10:
                 px = -mu
-                py = mu ** pois / fact[int(pois)]
+                py = mu**pois / fact[int(pois)]
             else:
                 del_ = one_12 / fk
                 del_ = del_ * (1.0 - 4.8 * del_ * del_)
                 v = difmuk / fk
                 if abs(v) <= 0.25:
-                    px = fk * v * v * (((((((a7 * v + a6) * v + a5) * v + a4) * v
-                          + a3) * v + a2) * v + a1) * v + a0) - del_
+                    px = (
+                        fk
+                        * v
+                        * v
+                        * (
+                            (
+                                (
+                                    ((((a7 * v + a6) * v + a5) * v + a4) * v + a3) * v
+                                    + a2
+                                )
+                                * v
+                                + a1
+                            )
+                            * v
+                            + a0
+                        )
+                        - del_
+                    )
                 else:
                     px = fk * math.log(1.0 + v) - difmuk - del_
                 py = M_1_SQRT_2PI / math.sqrt(fk)
@@ -610,8 +711,8 @@ class RMersenneTwister:
         p = min(prob, 1.0 - prob)
         q = 1.0 - p
         np_ = n * p
-        if np_ < 30.0:                     # inversion (BINV)
-            qn = _R_pow_di(q, n)           # R_pow_di, NOT q**n (libm pow); see helper
+        if np_ < 30.0:  # inversion (BINV)
+            qn = _R_pow_di(q, n)  # R_pow_di, NOT q**n (libm pow); see helper
             r = p / q
             g = r * (n + 1)
             while True:
@@ -625,7 +726,7 @@ class RMersenneTwister:
                         break
                     u -= f
                     ix += 1
-                    f *= (g / ix - r)
+                    f *= g / ix - r
         # BTPE (Kachitvichyanukul & Schmeiser)
         ffm = np_ + p
         m = int(ffm)
@@ -672,10 +773,10 @@ class RMersenneTwister:
                 g = (n + 1) * r
                 if m < ix:
                     for i in range(m + 1, ix + 1):
-                        f *= (g / i - r)
+                        f *= g / i - r
                 elif m > ix:
                     for i in range(ix + 1, m + 1):
-                        f /= (g / i - r)
+                        f /= g / i - r
                 if v <= f:
                     return float(ix if prob <= 0.5 else n - ix)
                 continue
@@ -694,30 +795,55 @@ class RMersenneTwister:
             x2 = x1 * x1
             f2 = f1 * f1
             w2 = w * w
-            t = (xm * math.log(f1 / x1) + (n - m + 0.5) * math.log(z / w)
-                 + (ix - m) * math.log(w * p / (x1 * q))
-                 + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / f2) / f2) / f2) / f2) / f1 / 166320.0
-                 + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / z2) / z2) / z2) / z2) / z / 166320.0
-                 + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / x2) / x2) / x2) / x2) / x1 / 166320.0
-                 + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / w2) / w2) / w2) / w2) / w / 166320.0)
+            t = (
+                xm * math.log(f1 / x1)
+                + (n - m + 0.5) * math.log(z / w)
+                + (ix - m) * math.log(w * p / (x1 * q))
+                + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / f2) / f2) / f2) / f2)
+                / f1
+                / 166320.0
+                + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / z2) / z2) / z2) / z2)
+                / z
+                / 166320.0
+                + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / x2) / x2) / x2) / x2)
+                / x1
+                / 166320.0
+                + (13860.0 - (462.0 - (132.0 - (99.0 - 140.0 / w2) / w2) / w2) / w2)
+                / w
+                / 166320.0
+            )
             if alv <= t:
                 return float(ix if prob <= 0.5 else n - ix)
 
     # rgamma coefficients (R rgamma.c)
-    _GA_Q = (0.04166669, 0.02083148, 0.00801191, 0.00144121,
-             -7.388e-5, 2.4511e-4, 2.424e-4)
-    _GA_A = (0.3333333, -0.250003, 0.2000062, -0.1662921,
-             0.1423657, -0.1367177, 0.1233795)
+    _GA_Q = (
+        0.04166669,
+        0.02083148,
+        0.00801191,
+        0.00144121,
+        -7.388e-5,
+        2.4511e-4,
+        2.424e-4,
+    )
+    _GA_A = (
+        0.3333333,
+        -0.250003,
+        0.2000062,
+        -0.1662921,
+        0.1423657,
+        -0.1367177,
+        0.1233795,
+    )
 
     def rgamma(self, shape: float, scale: float = 1.0) -> float:
         """R's ``rgamma(shape, scale=)`` — rgamma.c (GD for a>=1, GS for a<1)."""
         if self._impl is not None:
             return self._impl.rgamma(float(shape), float(scale))
         a = float(shape)
-        if a < 1.0:                        # GS algorithm
+        if a < 1.0:  # GS algorithm
             if a == 0.0:
                 return 0.0
-            e1 = 0.36787944117144232159    # exp(-1)
+            e1 = 0.36787944117144232159  # exp(-1)
             e = _rfma(e1, a, 1.0)
             while True:
                 p = e * self.unif_rand()
@@ -764,8 +890,9 @@ class RMersenneTwister:
             if abs(v) <= 0.25:
                 qq = _rfma(0.5 * t * t * _qn_horner(v, aa[::-1]), v, q0)
             else:
-                qq = _rfma(s2 + s2, math.log(1.0 + v),
-                           _rfma(0.25 * t, t, _rfma(-s, t, q0)))
+                qq = _rfma(
+                    s2 + s2, math.log(1.0 + v), _rfma(0.25 * t, t, _rfma(-s, t, q0))
+                )
             if math.log(1.0 - u) <= qq:
                 return scale * ret
         while True:
@@ -779,8 +906,9 @@ class RMersenneTwister:
                 if abs(v) <= 0.25:
                     qq = _rfma(0.5 * t * t * _qn_horner(v, aa[::-1]), v, q0)
                 else:
-                    qq = _rfma(s2 + s2, math.log(1.0 + v),
-                               _rfma(0.25 * t, t, _rfma(-s, t, q0)))
+                    qq = _rfma(
+                        s2 + s2, math.log(1.0 + v), _rfma(0.25 * t, t, _rfma(-s, t, q0))
+                    )
                 if qq > 0.0:
                     w = math.expm1(qq)
                     if c * abs(u) <= w * math.exp(_rfma(-(0.5 * t), t, e)):
@@ -845,10 +973,10 @@ class RMersenneTwister:
             raise ValueError("rbeta: shapes must be >= 0")
         if aa == 0.0 and bb == 0.0:
             return 0.0 if self.unif_rand() < 0.5 else 1.0
-        a = aa if aa < bb else bb            # min(aa, bb)
-        b = bb if aa < bb else aa            # max(aa, bb)
+        a = aa if aa < bb else bb  # min(aa, bb)
+        b = bb if aa < bb else aa  # max(aa, bb)
         alpha = a + b
-        if a <= 1.0:                         # --- Algorithm BC ---
+        if a <= 1.0:  # --- Algorithm BC ---
             beta = 1.0 / a
             delta = 1.0 + b - a
             k1 = delta * (0.0138889 + 0.0416667 * a) / (b * beta - 0.777778)
@@ -891,6 +1019,399 @@ class RMersenneTwister:
                 break
         return b / (b + w) if aa != a else w / (b + w)
 
+    def rnbinom_prob(self, size: float, prob: float) -> float:
+        """R's ``rnbinom(size, prob)`` — Poisson-Gamma mixture
+        ``rpois(rgamma(size, (1-prob)/prob))`` (rnbinom.c). The mu-parameterised
+        variant is :meth:`rnbinom`."""
+        if (
+            not math.isfinite(prob)
+            or math.isnan(size)
+            or size <= 0.0
+            or prob <= 0.0
+            or prob > 1.0
+        ):
+            return math.nan
+        if not math.isfinite(size):
+            size = _DBL_MAX / 2.0
+        if prob == 1.0:
+            return 0.0
+        return self.rpois(self.rgamma(size, scale=(1.0 - prob) / prob))
+
+    # ------------------------------------------------------------------
+    # Rank-statistic + hypergeometric + multinomial variates — ports of R's
+    # rsignrank/rwilcox (signrank.c/wilcox.c), rhyper (rhyper.c, H2PE) and
+    # rmultinom (rmultinom.c). Each consumes the uniform stream in the same
+    # order as the C code (via the primitive draws above), so set.seed() is
+    # bit-exact. No _impl branch: the primitives already route through Rust.
+    # ------------------------------------------------------------------
+
+    def rsignrank(self, n: float) -> float:
+        """R's ``rsignrank(nn)`` — one Wilcoxon signed-rank variate,
+        ``sum_{i=1}^{n} i * floor(unif_rand() + 0.5)`` (signrank.c)."""
+        if math.isnan(n):
+            return n
+        n = float(np.rint(n))
+        if n < 0.0:
+            return math.nan
+        if n == 0.0:
+            return 0.0
+        r = 0.0
+        for i in range(1, int(n) + 1):
+            r += i * math.floor(self.unif_rand() + 0.5)
+        return r
+
+    def rwilcox(self, m: float, n: float) -> float:
+        """R's ``rwilcox(m, n)`` — one Wilcoxon rank-sum variate via a partial
+        Fisher-Yates draw of ``n`` ranks from ``0..m+n-1`` (wilcox.c)."""
+        if math.isnan(m) or math.isnan(n):
+            return m + n
+        m = float(np.rint(m))
+        n = float(np.rint(n))
+        if m < 0.0 or n < 0.0:
+            return math.nan
+        if m == 0.0 or n == 0.0:
+            return 0.0
+        r = 0.0
+        k = int(m + n)
+        x = list(range(k))
+        nn = int(n)
+        for _ in range(nn):
+            j = self.unif_index(k)
+            r += x[j]
+            k -= 1
+            x[j] = x[k]
+        return r - n * (n - 1.0) / 2.0
+
+    def rmultinom(self, n: int, size: int, prob) -> np.ndarray:
+        """R's ``rmultinom(n, size, prob)`` — a (K x n) integer matrix whose
+        columns are independent Multinomial(size, prob) draws (rmultinom.c).
+        ``prob`` is normalised via ``FixupProb`` (plain-double sum of the
+        positive entries), then each column fills the first K-1 cells with
+        sequential ``rbinom`` on the shrinking remainder."""
+        p = np.asarray(prob, dtype=float).ravel()
+        K = p.size
+        s = 0.0  # FixupProb: sum only p[i] > 0
+        for x in p:
+            if not math.isfinite(x):
+                raise ValueError("NA in probability vector")
+            if x < 0.0:
+                raise ValueError("negative probability")
+            if x > 0.0:
+                s += x
+        if s == 0.0:
+            raise ValueError("no positive probabilities")
+        p = p / s
+        nn = int(n)
+        out = np.zeros((K, nn), dtype=np.int64)
+        for col in range(nn):
+            out[:, col] = self._rmultinom_col(int(size), p, K)
+        return out
+
+    def _rmultinom_col(self, size: int, prob: np.ndarray, K: int) -> np.ndarray:
+        """One Multinomial column: rN[0:K], sum == size (rmultinom.c inner)."""
+        rN = [0] * K
+        p_tot = np.longdouble(0.0)  # R accumulates in LDOUBLE
+        for k in range(K):
+            p_tot += np.longdouble(prob[k])
+        n = size
+        if n == 0:
+            return np.array(rN, dtype=np.int64)
+        if K == 1 and p_tot == 0.0:
+            return np.array(rN, dtype=np.int64)
+        for k in range(K - 1):
+            if prob[k] != 0.0:
+                pp = float(np.longdouble(prob[k]) / p_tot)
+                rN[k] = n if pp >= 1.0 else int(self.rbinom(n, pp))
+                n -= rN[k]
+            else:
+                rN[k] = 0
+            if n <= 0:  # all drawn
+                return np.array(rN, dtype=np.int64)
+            p_tot -= np.longdouble(prob[k])
+        rN[K - 1] = n
+        return np.array(rN, dtype=np.int64)
+
+    def rhyper(self, nn1in: float, nn2in: float, kkin: float) -> float:
+        """R's ``rhyper(m, n, k)`` — number of white balls when ``k`` are drawn
+        from an urn of ``m`` white + ``n`` black (rhyper.c, Kachitvichyanukul-
+        Schmeiser H2PE). Consumes the uniform stream in the same order as C."""
+        if not (math.isfinite(nn1in) and math.isfinite(nn2in) and math.isfinite(kkin)):
+            return math.nan
+        nn1in = float(np.rint(nn1in))
+        nn2in = float(np.rint(nn2in))
+        kkin = float(np.rint(kkin))
+        if nn1in < 0 or nn2in < 0 or kkin < 0 or kkin > nn1in + nn2in:
+            return math.nan
+        if nn1in >= _INT_MAX or nn2in >= _INT_MAX or kkin >= _INT_MAX:
+            # large n: evade int overflow / inappropriate algorithms
+            if kkin == 1.0:
+                return self.rbinom(kkin, nn1in / (nn1in + nn2in))
+            from . import nmath as _nm
+
+            return _nm.qhyper(self.unif_rand(), nn1in, nn2in, kkin, False, False)
+
+        nn1 = int(nn1in)
+        nn2 = int(nn2in)
+        kk = int(kkin)
+        # --- setup (always, on fresh parameters) ---
+        N = nn1 + float(nn2)
+        if nn1 <= nn2:
+            n1, n2 = nn1, nn2
+        else:
+            n1, n2 = nn2, nn1
+        k = int(N - kk) if (kk + kk >= N) else kk  # now k < N/2
+        m = int((k + 1.0) * (n1 + 1.0) / (N + 2.0))  # floor(adjusted mean)
+        minjx = max(0, k - n2)
+        maxjx = min(n1, k)
+
+        if minjx == maxjx:  # I: degenerate
+            ix = maxjx
+        elif m - minjx < 10:  # II: scaled HIN inverse
+            con = 57.5646273248511421
+            scale = 1e25
+            if k < n2:
+                lw = _afc(n2) + _afc(n1 + n2 - k) - _afc(n2 - k) - _afc(n1 + n2)
+            else:
+                lw = _afc(n1) + _afc(k) - _afc(k - n2) - _afc(n1 + n2)
+            w = math.exp(lw + con)
+            while True:  # L10
+                p = w
+                ix = minjx
+                u = self.unif_rand() * scale
+                resample = False
+                while u > p:
+                    u -= p
+                    p *= (float(n1) - ix) * (k - ix)
+                    ix += 1
+                    p = p / ix / (n2 - k + ix)
+                    if ix > maxjx:
+                        resample = True
+                        break
+                if not resample:
+                    break
+        else:  # III: H2PE
+            s = math.sqrt((N - k) * k * n1 * n2 / (N - 1) / N / N)
+            d = float(int(1.5 * s)) + 0.5
+            xl = m - d + 0.5
+            xr = m + d + 0.5
+            a = _afc(m) + _afc(n1 - m) + _afc(k - m) + _afc(n2 - k + m)
+            kl = math.exp(
+                a
+                - _afc(int(xl))
+                - _afc(int(n1 - xl))
+                - _afc(int(k - xl))
+                - _afc(int(n2 - k + xl))
+            )
+            kr = math.exp(
+                a
+                - _afc(int(xr - 1))
+                - _afc(int(n1 - xr + 1))
+                - _afc(int(k - xr + 1))
+                - _afc(int(n2 - k + xr - 1))
+            )
+            lamdl = -math.log(xl * (n2 - k + xl) / (n1 - xl + 1) / (k - xl + 1))
+            lamdr = -math.log((n1 - xr + 1) * (k - xr + 1) / xr / (n2 - k + xr))
+            p1 = d + d
+            p2 = p1 + kl / lamdl
+            p3 = p2 + kr / lamdr
+            n_uv = 0
+            while True:  # L30: accept/reject
+                u = self.unif_rand() * p3
+                v = self.unif_rand()
+                n_uv += 1
+                if n_uv >= 10000:
+                    return math.nan
+                if u < p1:  # rectangular
+                    ix = int(xl + u)
+                elif u <= p2:  # left tail
+                    ix = int(xl + math.log(v) / lamdl)
+                    if ix < minjx:
+                        continue
+                    v = v * (u - p1) * lamdl
+                else:  # right tail
+                    ix = int(xr - math.log(v) / lamdr)
+                    if ix > maxjx:
+                        continue
+                    v = v * (u - p2) * lamdr
+                if m < 100 or ix <= 50:  # explicit evaluation
+                    f = 1.0
+                    if m < ix:
+                        for i in range(m + 1, ix + 1):
+                            f = f * (n1 - i + 1) * (k - i + 1) / (n2 - k + i) / i
+                    elif m > ix:
+                        for i in range(ix + 1, m + 1):
+                            f = f * i * (n2 - k + i) / (n1 - i + 1) / (k - i + 1)
+                    if v <= f:
+                        break
+                    continue
+                # squeeze using upper and lower bounds
+                deltal = 0.0078
+                deltau = 0.0034
+                y = float(ix)
+                y1 = y + 1.0
+                ym = y - m
+                yn = n1 - y + 1.0
+                yk = k - y + 1.0
+                nk = n2 - k + y1
+                r = -ym / y1
+                sq = ym / yn
+                t = ym / yk
+                e = -ym / nk
+                g = yn * yk / (y1 * nk) - 1.0
+                dg = 1.0 + g if g < 0.0 else 1.0
+                gu = g * (1.0 + g * (-0.5 + g / 3.0))
+                gl = gu - 0.25 * (g * g * g * g) / dg
+                xm = m + 0.5
+                xn = n1 - m + 0.5
+                xk = k - m + 0.5
+                nm = n2 - k + xm
+                ub = (
+                    y * gu
+                    - m * gl
+                    + deltau
+                    + xm * r * (1.0 + r * (-0.5 + r / 3.0))
+                    + xn * sq * (1.0 + sq * (-0.5 + sq / 3.0))
+                    + xk * t * (1.0 + t * (-0.5 + t / 3.0))
+                    + nm * e * (1.0 + e * (-0.5 + e / 3.0))
+                )
+                alv = math.log(v)
+                if alv > ub:  # test upper bound
+                    continue
+                dr = xm * (r * r * r * r)
+                if r < 0.0:
+                    dr /= 1.0 + r
+                ds = xn * (sq * sq * sq * sq)
+                if sq < 0.0:
+                    ds /= 1.0 + sq
+                dt = xk * (t * t * t * t)
+                if t < 0.0:
+                    dt /= 1.0 + t
+                de = nm * (e * e * e * e)
+                if e < 0.0:
+                    de /= 1.0 + e
+                if alv < ub - 0.25 * (dr + ds + dt + de) + (y + m) * (gl - gu) - deltal:
+                    break  # test lower bound
+                # Stirling to machine accuracy
+                if alv <= (
+                    a - _afc(ix) - _afc(n1 - ix) - _afc(k - ix) - _afc(n2 - k + ix)
+                ):
+                    break
+                # else reject → redraw
+
+        # --- L_finis: map ix back to the original parameterisation ---
+        if kk + kk >= N:
+            ix = (kk - nn2 + ix) if (nn1 > nn2) else (nn1 - ix)
+        elif nn1 > nn2:
+            ix = kk - ix
+        return float(ix)
+
+    # ------------------------------------------------------------------
+    # Multivariate variates: rcont2 (AS 159, backs r2dtable) and the
+    # standardized Wishart Bartlett factor (backs rWishart). ``fact`` (the
+    # log-factorial table) is supplied by the caller so this stays nmath-free.
+    # ------------------------------------------------------------------
+
+    def rcont2(self, nrowt, ncolt, ntotal, fact):
+        """R's ``rcont2`` (rcont.c, AS 159) — one random 2-way table with the
+        given row/column margins. ``fact[i] = lgamma(i+1)``. Returns an
+        nrow×ncol integer matrix; consumes the uniform stream as the C code."""
+        nrowt = [int(v) for v in nrowt]
+        ncolt = [int(v) for v in ncolt]
+        nrow = len(nrowt)
+        ncol = len(ncolt)
+        nr_1 = nrow - 1
+        nc_1 = ncol - 1
+        jwork = [0] * ncol
+        for j in range(nc_1):
+            jwork[j] = ncolt[j]
+        matrix = [[0] * ncol for _ in range(nrow)]
+        ib = 0
+        jc = ntotal
+        for lr in range(nr_1):  # rows 0..nrow-2
+            ia = nrowt[lr]
+            ic = jc
+            jc -= ia
+            for m in range(nc_1):
+                id_ = jwork[m]
+                ie = ic
+                ib = ie - ia
+                ii = ib - id_
+                ic -= id_
+                if ie == 0:  # row full → zero the rest
+                    for j in range(m, nc_1):
+                        matrix[lr][j] = 0
+                    ia = 0
+                    break
+                u = self.unif_rand()
+                nlm = self._rcont2_cell(ia, id_, ie, ii, ib, ic, u, fact)
+                matrix[lr][m] = nlm
+                ia -= nlm
+                jwork[m] -= nlm
+            matrix[lr][nc_1] = ia  # last column of row lr
+        for m in range(nc_1):  # last row = leftover margins
+            matrix[nr_1][m] = jwork[m]
+        matrix[nr_1][nc_1] = ib - matrix[nr_1][nc_1 - 1]
+        return matrix
+
+    def _rcont2_cell(self, ia, id_, ie, ii, ib, ic, u, fact):
+        """The AS 159 inner search for one cell value (rcont.c 'Outer Loop')."""
+        while True:  # (A) outer loop
+            nlm = int(ia * (id_ / float(ie)) + 0.5)
+            x = math.exp(
+                fact[ia]
+                + fact[ib]
+                + fact[ic]
+                + fact[id_]
+                - fact[ie]
+                - fact[nlm]
+                - fact[id_ - nlm]
+                - fact[ia - nlm]
+                - fact[ii + nlm]
+            )
+            if x >= u:
+                return nlm
+            if x == 0.0:
+                raise RuntimeError("rcont2: exp underflow to 0; algorithm failure")
+            sumprb = x
+            y = x
+            nll = nlm
+            lsp = False
+            while not lsp:  # (B) do..while(!lsp)
+                j = (id_ - nlm) * float(ia - nlm)
+                lsp = (nlm == ia) or (nlm == id_)
+                if not lsp:
+                    nlm += 1
+                    x *= j / (float(nlm) * (ii + nlm))
+                    sumprb += x
+                    if sumprb >= u:
+                        return nlm
+                lsm = False
+                while not lsm:  # (C) do..while(!lsm)
+                    j = nll * float(ii + nll)
+                    lsm = nll == 0
+                    if not lsm:
+                        nll -= 1
+                        y *= j / (float(id_ - nll) * (ia - nll))
+                        sumprb += y
+                        if sumprb >= u:
+                            return nll  # nlm = nll; goto L160
+                        if not lsp:
+                            break  # back to (B) condition
+            u = sumprb * self.unif_rand()
+
+    def std_rwishart_factor(self, nu: float, p: int) -> np.ndarray:
+        """R's ``std_rWishart_factor(nu, p, upper=1)`` (rWishart.c) — a p×p
+        upper-triangular Bartlett factor: diagonal ``sqrt(rchisq(nu-j))``,
+        strict-upper ``norm_rand()``. Draw order matches the C column sweep."""
+        if nu < float(p) or p <= 0:
+            raise ValueError("inconsistent degrees of freedom and dimension")
+        ans = np.zeros((p, p), dtype=float)  # column-major (i, j) → ans[i, j]
+        for j in range(p):  # jth column
+            ans[j, j] = math.sqrt(self.rchisq(nu - float(j)))
+            for i in range(j):
+                ans[i, j] = self.norm_rand()  # upper triangle
+        return ans
+
     # ------------------------------------------------------------------
     # Batch samplers — the whole per-element loop runs in one call (Rust when
     # available, else a Python list-comp), saving n Python↔Rust crossings for
@@ -909,16 +1430,18 @@ class RMersenneTwister:
         prob = np.ascontiguousarray(prob, dtype=float)
         if self._impl is not None:
             return self._impl.rbinom_n(size, prob)
-        return np.array([self.rbinom(int(round(float(s))), float(p))
-                         for s, p in zip(size, prob)])
+        return np.array(
+            [self.rbinom(int(round(float(s))), float(p)) for s, p in zip(size, prob)]
+        )
 
     def rgamma_n(self, shape, scale) -> np.ndarray:
         shape = np.ascontiguousarray(shape, dtype=float)
         scale = np.ascontiguousarray(scale, dtype=float)
         if self._impl is not None:
             return self._impl.rgamma_n(shape, scale)
-        return np.array([self.rgamma(float(a), scale=float(c))
-                         for a, c in zip(shape, scale)])
+        return np.array(
+            [self.rgamma(float(a), scale=float(c)) for a, c in zip(shape, scale)]
+        )
 
     def rt_n(self, df) -> np.ndarray:
         df = np.ascontiguousarray(df, dtype=float)
@@ -938,16 +1461,14 @@ class RMersenneTwister:
         ncp = np.ascontiguousarray(ncp, dtype=float)
         if self._impl is not None:
             return self._impl.rchisq_n(df, ncp)
-        return np.array([self.rchisq(float(d), float(c))
-                         for d, c in zip(df, ncp)])
+        return np.array([self.rchisq(float(d), float(c)) for d, c in zip(df, ncp)])
 
     def rnbinom_n(self, size, mu) -> np.ndarray:
         size = np.ascontiguousarray(size, dtype=float)
         mu = np.ascontiguousarray(mu, dtype=float)
         if self._impl is not None:
             return self._impl.rnbinom_n(size, mu)
-        return np.array([self.rnbinom(float(s), float(m))
-                         for s, m in zip(size, mu)])
+        return np.array([self.rnbinom(float(s), float(m)) for s, m in zip(size, mu)])
 
     def rbeta_n(self, aa, bb) -> np.ndarray:
         aa = np.ascontiguousarray(aa, dtype=float)
@@ -1024,8 +1545,8 @@ class RMersenneTwister:
         q = np.empty(n)
         a = np.zeros(n, dtype=np.int64)
         HL = np.empty(n, dtype=np.int64)
-        hpos = -1          # H = HL-1; ``*++H`` fills HL[0..] (low, q<1)
-        lpos = n           # L = HL+n; ``*--L`` fills HL[n-1..] (high, q>=1)
+        hpos = -1  # H = HL-1; ``*++H`` fills HL[0..] (low, q<1)
+        lpos = n  # L = HL+n; ``*--L`` fills HL[n-1..] (high, q>=1)
         for i in range(n):
             q[i] = p[i] * n
             if q[i] < 1.0:
@@ -1093,7 +1614,7 @@ def _rgen_resolve(size, *params):
     if size is None:
         b = np.broadcast(*arrs)
         n = b.size
-        scalar = (b.ndim == 0)
+        scalar = b.ndim == 0
     else:
         n = int(size)
         scalar = False
@@ -1118,12 +1639,15 @@ class RGenerator:
     __slots__ = ("mt",)
 
     def __init__(self, seed_or_mt):
-        self.mt = (seed_or_mt if isinstance(seed_or_mt, RMersenneTwister)
-                   else RMersenneTwister(int(seed_or_mt)))
+        self.mt = (
+            seed_or_mt
+            if isinstance(seed_or_mt, RMersenneTwister)
+            else RMersenneTwister(int(seed_or_mt))
+        )
 
     def normal(self, loc=0.0, scale=1.0, size=None):
         n, scalar, (loc, scale) = _rgen_resolve(size, loc, scale)
-        z = self.mt.rnorm(n)            # vectorized standard normals
+        z = self.mt.rnorm(n)  # vectorized standard normals
         out = loc + scale * z
         return float(out[0]) if scalar else out
 
@@ -1139,7 +1663,7 @@ class RGenerator:
 
     def binomial(self, n, p, size=None):
         m, scalar, (nt, pp) = _rgen_resolve(size, n, p)
-        out = self.mt.rbinom_n(nt, pp)              # rounds size per-element
+        out = self.mt.rbinom_n(nt, pp)  # rounds size per-element
         return float(out[0]) if scalar else out
 
     def standard_t(self, df, size=None):

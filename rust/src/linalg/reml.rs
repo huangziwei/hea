@@ -63,7 +63,5 @@ pub fn reml_pmmult<'py>(
             c[i * n + j] = acc;
         }
     }
-    Array2::from_shape_vec((m, n), c)
-        .unwrap()
-        .into_pyarray(py)
+    Array2::from_shape_vec((m, n), c).unwrap().into_pyarray(py)
 }

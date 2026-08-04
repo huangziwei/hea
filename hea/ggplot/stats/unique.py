@@ -19,8 +19,9 @@ class StatUnique(Stat):
         return data.unique(maintain_order=True)
 
 
-def stat_unique(mapping=None, data=None, *, geom="point",
-                position="identity", **kwargs):
+def stat_unique(
+    mapping=None, data=None, *, geom="point", position="identity", **kwargs
+):
     from ..geoms.point import GeomPoint
     from ..layer import Layer
     from ..positions import resolve_position

@@ -77,8 +77,11 @@ def _apply_date_axis(scale, ax, axis: str, *, view_limits) -> None:
 
     # Optional explicit ``labels=[...]`` overrides the formatter (used
     # when the user wants completely custom strings, not strftime).
-    if not (isinstance(scale.labels, str) and scale.labels == "default") \
-            and scale.labels is not None and not callable(scale.labels):
+    if (
+        not (isinstance(scale.labels, str) and scale.labels == "default")
+        and scale.labels is not None
+        and not callable(scale.labels)
+    ):
         try:
             ticks = target_axis.get_major_locator()()
             target_axis.set_major_formatter(
@@ -139,55 +142,115 @@ def _resolve_date_format(date_format, date_labels):
     return date_format
 
 
-def scale_x_date(*, name=_NAME_MISSING, breaks="default", labels="default",
-                 limits=None, date_format=None, date_labels=None):
+def scale_x_date(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    date_format=None,
+    date_labels=None,
+):
     return ScaleDate(
-        aesthetics=("x",), name=name, breaks=breaks, labels=labels,
+        aesthetics=("x",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
         limits=limits,
         date_format=_resolve_date_format(date_format, date_labels),
     )
 
 
-def scale_y_date(*, name=_NAME_MISSING, breaks="default", labels="default",
-                 limits=None, date_format=None, date_labels=None):
+def scale_y_date(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    date_format=None,
+    date_labels=None,
+):
     return ScaleDate(
-        aesthetics=("y",), name=name, breaks=breaks, labels=labels,
+        aesthetics=("y",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
         limits=limits,
         date_format=_resolve_date_format(date_format, date_labels),
     )
 
 
-def scale_x_datetime(*, name=_NAME_MISSING, breaks="default", labels="default",
-                     limits=None, date_format=None, date_labels=None):
+def scale_x_datetime(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    date_format=None,
+    date_labels=None,
+):
     return ScaleDatetime(
-        aesthetics=("x",), name=name, breaks=breaks, labels=labels,
+        aesthetics=("x",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
         limits=limits,
         date_format=_resolve_date_format(date_format, date_labels),
     )
 
 
-def scale_y_datetime(*, name=_NAME_MISSING, breaks="default", labels="default",
-                     limits=None, date_format=None, date_labels=None):
+def scale_y_datetime(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    date_format=None,
+    date_labels=None,
+):
     return ScaleDatetime(
-        aesthetics=("y",), name=name, breaks=breaks, labels=labels,
+        aesthetics=("y",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
         limits=limits,
         date_format=_resolve_date_format(date_format, date_labels),
     )
 
 
-def scale_x_time(*, name=_NAME_MISSING, breaks="default", labels="default",
-                 limits=None, date_format=None, date_labels=None):
+def scale_x_time(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    date_format=None,
+    date_labels=None,
+):
     return ScaleTime(
-        aesthetics=("x",), name=name, breaks=breaks, labels=labels,
+        aesthetics=("x",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
         limits=limits,
         date_format=_resolve_date_format(date_format, date_labels),
     )
 
 
-def scale_y_time(*, name=_NAME_MISSING, breaks="default", labels="default",
-                 limits=None, date_format=None, date_labels=None):
+def scale_y_time(
+    *,
+    name=_NAME_MISSING,
+    breaks="default",
+    labels="default",
+    limits=None,
+    date_format=None,
+    date_labels=None,
+):
     return ScaleTime(
-        aesthetics=("y",), name=name, breaks=breaks, labels=labels,
+        aesthetics=("y",),
+        name=name,
+        breaks=breaks,
+        labels=labels,
         limits=limits,
         date_format=_resolve_date_format(date_format, date_labels),
     )

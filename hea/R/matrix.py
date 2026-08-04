@@ -2,6 +2,7 @@
 ``rbind`` / ``cbind`` / ``sweep`` / ``expand.grid`` / ``matrix`` / ``rep``,
 plus the renamed ``R_range`` / ``R_round`` (Python-builtin clashes).
 """
+
 from __future__ import annotations
 
 import itertools
@@ -92,7 +93,10 @@ def cbind(*args):
         arrs.append(arr)
     # Broadcast scalars to longest column
     max_rows = max(a.shape[0] for a in arrs)
-    arrs = [np.broadcast_to(a, (max_rows, a.shape[1])) if a.shape[0] == 1 else a for a in arrs]
+    arrs = [
+        np.broadcast_to(a, (max_rows, a.shape[1])) if a.shape[0] == 1 else a
+        for a in arrs
+    ]
     return np.hstack(arrs)
 
 

@@ -15,6 +15,7 @@ translates R's ``g |> fct_infreq() |> fct_rev()``. Aggregators
 (``fct_reorder`` / ``fct_reorder2`` / ``fct_infreq``) need the original
 column for grouping and only accept a column name.
 """
+
 from __future__ import annotations
 
 from typing import Callable, Union
@@ -79,6 +80,7 @@ def fct_reorder(col: str, by: str, fn="median", *, desc: bool = False) -> Callab
     callable ``Series -> scalar``. ``desc=True`` reverses the order so
     the largest aggregate appears first.
     """
+
     def reorder(data: pl.DataFrame) -> pl.Series:
         if isinstance(fn, str):
             agg_expr = getattr(pl.col(by), fn)()
@@ -124,6 +126,7 @@ def fct_reorder2(col: str, x: str, y: str, *, desc: bool = True) -> Callable:
     the right of the plot. ``desc=True`` (default, like forcats) puts
     the highest end-value first.
     """
+
     def reorder(data: pl.DataFrame) -> pl.Series:
         ordered = (
             data.lazy()
@@ -151,6 +154,7 @@ def fct_rev(col: ColInput) -> Callable:
     descending — symmetric with the ascending order ScaleOrdinal would
     otherwise pick.
     """
+
     def rev(data: pl.DataFrame) -> pl.Series:
         s = _resolve_col_input(col, data)
         if isinstance(s.dtype, pl.Enum):
@@ -196,6 +200,7 @@ def fct_infreq(col: str) -> Callable:
     Mirrors R's ``forcats::fct_infreq``. Most-common level first;
     ties broken by first-encountered order in the data.
     """
+
     def infreq(data: pl.DataFrame) -> pl.Series:
         # ``.lazy()`` routes through polars' native group_by API; hea's
         # subclassed DataFrame has its own group_by signature.
@@ -253,8 +258,7 @@ def fct_recode(col: str, **renames) -> Callable:
             for lvl in old:
                 if not isinstance(lvl, str):
                     raise TypeError(
-                        f"fct_recode(): {new!r} list contains non-string "
-                        f"{lvl!r}."
+                        f"fct_recode(): {new!r} list contains non-string {lvl!r}."
                     )
                 old_to_new[lvl] = new
         else:
@@ -364,12 +368,7 @@ def fct_lump_n(col: str, n: int, *, other_level: str = "Other") -> Callable:
         old_levels = _input_levels(s)
         # Per-level counts. value_counts() honors null; we drop nulls so
         # null doesn't compete for a top-n slot.
-        vc = (
-            s.cast(pl.Utf8)
-            .drop_nulls()
-            .value_counts()
-            .sort("count", descending=True)
-        )
+        vc = s.cast(pl.Utf8).drop_nulls().value_counts().sort("count", descending=True)
         present = vc.height
         if present <= n:
             return s.cast(pl.Utf8).cast(pl.Enum(old_levels))
@@ -394,15 +393,11 @@ def fct_lump_lowfreq(col: str, *, other_level: str = "Other") -> Callable:
     source). Once that fails, every smaller level gets lumped. Kept
     levels preserve their original factor-level order.
     """
+
     def lump(data: pl.DataFrame) -> pl.Series:
         s = data[col]
         old_levels = _input_levels(s)
-        vc = (
-            s.cast(pl.Utf8)
-            .drop_nulls()
-            .value_counts()
-            .sort("count", descending=True)
-        )
+        vc = s.cast(pl.Utf8).drop_nulls().value_counts().sort("count", descending=True)
         names = [str(v) for v in vc[s.name].to_list()]
         counts = vc["count"].to_list()
         # forcats::lump_cutoff — index where lumping starts (Python 0-based).
@@ -419,5 +414,3 @@ def fct_lump_lowfreq(col: str, *, other_level: str = "Other") -> Callable:
         return _lump_apply(s, lumped, kept_in_order, other_level)
 
     return _label_callable(lump, col)
-
-

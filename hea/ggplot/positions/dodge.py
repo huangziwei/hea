@@ -68,14 +68,14 @@ class PositionDodge(Position):
         # Offset = (rank - (n-1)/2) * slot_width; slot_width = base_width/n.
         unique_xg = unique_xg.with_columns(
             _offset=pl.when(pl.col("_n_at_x") > 1)
-                      .then(
-                          (pl.col("_rank_at_x") - (pl.col("_n_at_x") - 1) / 2)
-                          * (base_width / pl.col("_n_at_x"))
-                      )
-                      .otherwise(pl.lit(0.0)),
+            .then(
+                (pl.col("_rank_at_x") - (pl.col("_n_at_x") - 1) / 2)
+                * (base_width / pl.col("_n_at_x"))
+            )
+            .otherwise(pl.lit(0.0)),
             _slot_width=pl.when(pl.col("_n_at_x") > 1)
-                          .then(base_width / pl.col("_n_at_x"))
-                          .otherwise(pl.lit(None, dtype=pl.Float64)),
+            .then(base_width / pl.col("_n_at_x"))
+            .otherwise(pl.lit(None, dtype=pl.Float64)),
         ).select(["x", "group", "_offset", "_slot_width"])
 
         result = data.join(unique_xg, on=["x", "group"], how="left")
@@ -83,8 +83,8 @@ class PositionDodge(Position):
         if "width" in result.columns:
             result = result.with_columns(
                 width=pl.when(pl.col("_slot_width").is_not_null())
-                        .then(pl.col("_slot_width"))
-                        .otherwise(pl.col("width")),
+                .then(pl.col("_slot_width"))
+                .otherwise(pl.col("width")),
             )
         return result.drop("_offset", "_slot_width")
 

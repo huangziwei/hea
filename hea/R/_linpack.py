@@ -53,6 +53,7 @@ Fortran; matrix arguments are ``(n, n)``-indexed ``[row, col]`` (numpy
 views of a larger array are fine — that reproduces Fortran leading-
 dimension submatrix calls).
 """
+
 from __future__ import annotations
 
 import math
@@ -107,8 +108,7 @@ def _daxpy(n, da, dx, dy, ox=0, oy=0):
     if n <= 0 or da == 0.0:
         return
     for i in range(n):
-        dy[oy + i] = _rfma(float(da), float(dx[ox + i]),
-                           float(dy[oy + i]))
+        dy[oy + i] = _rfma(float(da), float(dx[ox + i]), float(dy[oy + i]))
 
 
 def _dcopy(n, dx, dy, ox=0, oy=0):
@@ -161,8 +161,7 @@ def _dtrsl(t, n, b, job):
         for jj in range(2, n + 1):
             j = n - jj + 1
             # b(j) -= ddot(jj-1, t(j+1, j), 1, b(j+1), 1)
-            b[j - 1] = float(b[j - 1]) - _ddot(jj - 1, t[:, j - 1], b,
-                                               ox=j, oy=j)
+            b[j - 1] = float(b[j - 1]) - _ddot(jj - 1, t[:, j - 1], b, ox=j, oy=j)
             b[j - 1] = float(b[j - 1]) / float(t[j - 1, j - 1])
     else:
         # solve trans(t)*x=b, t upper triangular
@@ -186,8 +185,7 @@ def _dpofa(a, n):
         s = 0.0
         for k in range(1, j):
             # t = a(k,j) - ddot(k-1, a(1,k), 1, a(1,j), 1)
-            t = (float(a[k - 1, j - 1])
-                 - _ddot(k - 1, a[:, k - 1], a[:, j - 1]))
+            t = float(a[k - 1, j - 1]) - _ddot(k - 1, a[:, k - 1], a[:, j - 1])
             t /= float(a[k - 1, k - 1])
             a[k - 1, j - 1] = t
             s = _rfma(t, t, s)

@@ -2,6 +2,7 @@
 ``ncol`` / ``dim`` / ``length``, ``names`` / ``colnames``, ``summary``,
 ``complete.cases``, ``na.omit``.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -81,22 +82,21 @@ def summary(x, **kwargs):
     ``summary(rem$contrasts, infer=TRUE, adjust="bonferroni")`` works
     without the caller knowing which package the table came from.
     """
-    if isinstance(x, pl.DataFrame) and {"contrast", "estimate", "t.ratio"} <= set(x.columns):
+    if isinstance(x, pl.DataFrame) and {"contrast", "estimate", "t.ratio"} <= set(
+        x.columns
+    ):
         from .emmeans import summary_emmgrid_contrasts
+
         return summary_emmgrid_contrasts(x, **kwargs)
     if hasattr(x, "summary"):
         return x.summary(**kwargs)
-    raise TypeError(
-        f"summary(): {type(x).__name__} has no .summary() method"
-    )
+    raise TypeError(f"summary(): {type(x).__name__} has no .summary() method")
 
 
 def complete_cases(df):
     """R: boolean vector — True for rows with no NA / null."""
     if isinstance(df, pl.DataFrame):
-        return ~df.select(
-            pl.any_horizontal(pl.all().is_null())
-        ).to_series()
+        return ~df.select(pl.any_horizontal(pl.all().is_null())).to_series()
     if isinstance(df, pl.Series):
         return ~df.is_null()
     arr = np.asarray(df)
