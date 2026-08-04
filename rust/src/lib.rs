@@ -59,6 +59,7 @@ mod nmath;
 mod optimize;
 mod par;
 mod rng;
+mod sparse;
 mod tprs;
 
 #[pymodule]
@@ -73,5 +74,6 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     discrete::register(m)?;
     optimize::register(m)?;
     fexact::register(m)?;
+    sparse::register(m)?;
     Ok(())
 }
