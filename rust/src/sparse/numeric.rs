@@ -25,6 +25,8 @@
 //! `Int_max` appears is [`grow_l`]'s clamp, which no reachable problem size
 //! comes near.
 
+use crate::nmath::util::rfma;
+
 use super::symbolic::{ptranspose, Ordering, Sparse, Symbolic};
 use super::ws::{Work, WorkRef, Ws, EMPTY};
 
@@ -1093,19 +1095,18 @@ fn subtree(
 /// is the whole gap between an un-fused port and upstream — not a rounding
 /// footnote.
 ///
-/// The `cfg` is what keeps that true per target instead of only on this one:
-/// where the C compiler has an FMA to contract into, so does this; where it
-/// does not — baseline x86-64, whose codegen for the same line is `mulsd` +
-/// `subsd` — neither does this. Calling `mul_add` unconditionally would be
-/// worse than wrong there, because without the instruction it lowers to a libm
-/// `fma()` call per entry of `L`.
+/// Which is why this defers to [`rfma`], the crate's one contraction policy:
+/// fuse on `aarch64`, stay plain everywhere else. That policy was set for R's
+/// nmath and holds here for the same reason — the reference build is a `clang
+/// -O2` with no `-ffp-contract` flag, so it fuses exactly where the ISA has a
+/// baseline FMA. Keying on `target_feature = "fma"` instead would be *less*
+/// faithful, not more: it fires only when someone builds with `-C
+/// target-cpu=native`, and the CHOLMOD they are being compared against is a
+/// baseline x86-64 build that does not fuse.
 #[inline(always)]
 fn mulsub(x: f64, a: f64, b: f64) -> f64 {
-    if cfg!(any(target_arch = "aarch64", target_feature = "fma")) {
-        (-a).mul_add(b, x)
-    } else {
-        x - a * b
-    }
+    /* negating a is exact, so this is `x - a*b` under one rounding */
+    rfma(-a, b, x)
 }
 
 /// `for (p++ ; p < pend ; p++) W [Li [p]] -= Lx [p] * y`, the inner loop of the
