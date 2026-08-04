@@ -2650,41 +2650,30 @@ def _khatri_rao(blocks: list[_NumBlock]) -> _NumBlock:
     return _NumBlock(values=cur_values, suffixes=cur_names, label="")
 
 
-def _encode_term(
+def _encode_term_marginals(
     term: Term,
     data: pl.DataFrame,
     covered: set["Term"],
     cache: dict | None = None,
-) -> _NumBlock:
-    """Encode a single term to its numeric column block.
+) -> list[_NumBlock]:
+    """The term's per-atom column blocks, before the row-tensor product.
 
-    Factor coding follows R's ``model.matrix`` marginality rule, driven by a
-    running set of **covered margins** (``covered``). For each factor atom, its
-    "hole" (this term minus that atom) is checked: if the hole is already
-    covered the factor is REDUCED (k-1 contrast columns); otherwise it is FULL
-    (k dummy columns) and the hole *becomes* covered. The caller seeds
-    ``covered`` with the empty term iff the model has an intercept, and adds the
-    whole term to ``covered`` after this returns. Consequences:
+    :func:`_encode_term` is exactly ``_khatri_rao`` of this list; the factors
+    are exposed separately because ``bam(discrete=True)`` stores a parametric
+    term as its sequence of marginal model matrices rather than their product
+    (mgcv ``terms2tensor``, bam.r:2091-2174). Blocks come back in atom order,
+    which ``_khatri_rao`` treats as fastest-varying first.
 
-      * intercept models: `~ a` reduces `a` (hole ∅ covered by the intercept);
-        `~ a:b` promotes both factors (neither {a} nor {b} covered) → full 2×3.
-      * no-intercept models: `~ a + b - 1` codes `a` FULL (covering ∅), then
-        `b` REDUCED (∅ now covered) — a full-rank X matching R, not the
-        rank-deficient both-full coding. Likewise `~ a:b + b:c - 1` reduces `c`
-        because a:b's full `a` already covered {b}.
-
-    Holes within one term are distinct (one per factor), so mutating ``covered``
-    mid-loop is order-independent.
-
-    `cache` is forwarded to `_eval_atom` so an outer loop (e.g. `materialize`)
-    can memoize per-atom encoding across sibling terms in interaction-heavy
-    formulas like `A*B*C*D`.
+    See :func:`_encode_term` for the factor-coding (marginality) rule; this is
+    where it is applied, and ``covered`` is mutated here.
     """
     if not term.atoms:
         # Intercept
-        return _NumBlock(
-            values=np.ones((len(data), 1)), suffixes=["(Intercept)"], label=""
-        )
+        return [
+            _NumBlock(
+                values=np.ones((len(data), 1)), suffixes=["(Intercept)"], label=""
+            )
+        ]
 
     atom_blocks: list[_NumBlock | _FactorBlock] = [
         _eval_atom(a, data, cache) for a in term.atoms
@@ -2718,8 +2707,40 @@ def _encode_term(
                 encoded_blocks.append(_encode_factor(blk, reduced=reduced))
         else:
             encoded_blocks.append(blk)
+    return encoded_blocks
 
-    return _khatri_rao(encoded_blocks)
+
+def _encode_term(
+    term: Term,
+    data: pl.DataFrame,
+    covered: set["Term"],
+    cache: dict | None = None,
+) -> _NumBlock:
+    """Encode a single term to its numeric column block.
+
+    Factor coding follows R's ``model.matrix`` marginality rule, driven by a
+    running set of **covered margins** (``covered``). For each factor atom, its
+    "hole" (this term minus that atom) is checked: if the hole is already
+    covered the factor is REDUCED (k-1 contrast columns); otherwise it is FULL
+    (k dummy columns) and the hole *becomes* covered. The caller seeds
+    ``covered`` with the empty term iff the model has an intercept, and adds the
+    whole term to ``covered`` after this returns. Consequences:
+
+      * intercept models: `~ a` reduces `a` (hole ∅ covered by the intercept);
+        `~ a:b` promotes both factors (neither {a} nor {b} covered) → full 2×3.
+      * no-intercept models: `~ a + b - 1` codes `a` FULL (covering ∅), then
+        `b` REDUCED (∅ now covered) — a full-rank X matching R, not the
+        rank-deficient both-full coding. Likewise `~ a:b + b:c - 1` reduces `c`
+        because a:b's full `a` already covered {b}.
+
+    Holes within one term are distinct (one per factor), so mutating ``covered``
+    mid-loop is order-independent.
+
+    `cache` is forwarded to `_eval_atom` so an outer loop (e.g. `materialize`)
+    can memoize per-atom encoding across sibling terms in interaction-heavy
+    formulas like `A*B*C*D`.
+    """
+    return _khatri_rao(_encode_term_marginals(term, data, covered, cache))
 
 
 def _collect_names(node, names: set[str]) -> None:

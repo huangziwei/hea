@@ -67,9 +67,12 @@ from ..family import (
 )
 from ..formula import (
     BasisSpec,
+    Name,
     SmoothBlock,
+    Term,
     _apply_smooth_arg_exprs,
     _collect_name_idents,
+    _encode_term_marginals,
     _eval_atom,
     _factor_levels,
     _LinearTransformRawBasis,
@@ -1980,6 +1983,13 @@ class _PirlsQR:
     wt: np.ndarray  # length-n PIRLS weights (Fisher form)
     z: np.ndarray  # length-n working response (offset-stripped)
     dev: float  # Σ family.dev_resids(y, μ, w_prior)
+    # X'WX / X'Wz as accumulated, when the build formed them directly rather
+    # than by accumulating (R, f). mgcv ``bgam.fitd`` hands exactly these to
+    # ``Sl.initial.repara``/``Sl.fitChol`` (bam.r:657-665); recovering them as
+    # ``R'R``/``R'f`` from a Cholesky factor is a lossy detour. ``None`` on the
+    # chunked rails, where (R, f) IS what mgcv accumulates.
+    XX: Optional[np.ndarray] = None
+    Xy: Optional[np.ndarray] = None
 
 
 def _build_qr_chunked_pirls(
@@ -2325,6 +2335,8 @@ def _build_qr_discrete_pirls(
         wt=w_full,
         z=z_full,
         dev=dev_total,
+        XX=XWX,
+        Xy=Xy,
     )
 
 
@@ -2930,6 +2942,12 @@ class bam(gam):
         self._discrete = bool(discrete)
         self._discrete_m = discrete_m
         self._discrete_design: Optional[DiscreteDesign] = None
+        # mgcv ``terms2tensor`` split of the parametric part, replayed at
+        # predict time so the new design's term/coef layout matches the fit's.
+        self._param_tensor: Optional[list[_ParamBlock]] = None
+        # mgcv ``dinfo$pmf.names`` (bam.r:2568) — the parametric variables
+        # ``discrete.mf`` compresses, replayed on newdata at predict.
+        self._pmf_names: list[str] = []
         self._discrete_frame: Optional[DiscretizedFrame] = None
         # PIRLS augmented-QR LAPACK workspace (mirror gam.__init__): bam's own
         # discrete/QR fit path never uses it, but the inherited gam derivative
@@ -2972,6 +2990,12 @@ class bam(gam):
         # weights fold below.
         _binom_trials = _cbind_family_stash(_cbind_kind, d, self.family)
         X_param_full = X_param_df.to_numpy().astype(float)
+        if X_param_full.shape[1] == 0:
+            # 0-column polars frame → to_numpy() collapses to (0, 0); keep
+            # the row count (pure-smooth no-intercept models, `y ~ s(x)-1`).
+            # Same guard gam.__init__ carries (gam.py:8533-8536); without it
+            # `n` came out 0 and every length-n array downstream mis-shaped.
+            X_param_full = np.zeros((y_full.shape[0], 0))
         n, p_param = X_param_full.shape
 
         off = (
@@ -3007,24 +3031,11 @@ class bam(gam):
                     d.expanded,
                     self.data,
                 )
-                # mgcv's ``pmf.names = names(model.frame(parametric_formula,
-                # data))``, which *includes the response label* (because R's
-                # ``model.frame(y ~ x)`` evaluates the LHS into a column).
-                # ``discrete.mf`` then loops over those names and runs
-                # ``compress.df`` on each — including y. Skipping the
-                # response leaves the RNG state desynced by the unique-value
-                # count of y at the pad loop, breaking bit-exact parity.
-                # Build mgcv's ``pmf.names`` order: response first, then
-                # parametric data covariates (skipping the synthetic
-                # ``(Intercept)`` column).
-                names_pmf: list[str] = []
-                if d.response and d.response not in names_pmf:
-                    names_pmf.append(d.response)
-                for col in X_param_df.columns:
-                    if col == "(Intercept)" or col in names_pmf:
-                        continue
-                    if col in self.data.columns:
-                        names_pmf.append(col)
+                # mgcv keeps pmf.names on the fitted object (bam.r:2568) and
+                # replays it at predict, where `discrete.mf` drops the names
+                # newdata lacks (bam.r:244) — usually just the response.
+                names_pmf = _pmf_names(d.expanded, d.response, self.data.columns)
+                self._pmf_names = list(names_pmf)
                 # Ensure the evaluated response is available as a column on
                 # the data frame passed to ``discrete_mf``. For a bare
                 # ``y ~ ...`` formula this is a no-op; for ``log(y) ~ ...``
@@ -3423,11 +3434,19 @@ class bam(gam):
         # ``build_discrete_design`` to assemble the per-marginal Xd table.
         if self._discrete:
             assert self._discrete_frame is not None
+            self._param_tensor = param_tensor_blocks(
+                d.expanded,
+                self._param_assign,
+                X_param_full,
+                self._discrete_frame,
+                {nm: j for j, nm in enumerate(self._discrete_frame.names)},
+            )
             self._discrete_design = build_discrete_design(
                 blocks,
                 X_param_full,
                 self._discrete_frame,
                 data=self.data,
+                param_tensor=self._param_tensor,
             )
 
         # ---- family-independent post-setup --------------------------------
@@ -3942,17 +3961,14 @@ class bam(gam):
         specs: list[dict] = []
         for d in ds:
             specs.extend(_smooth_specs_from_expanded(d.expanded, data_m))
+        # mgcv unions each formula's pmf.names, response first (bam.r:2296-2307).
         names_pmf: list[str] = []
-        if ds[0].response:
-            names_pmf.append(ds[0].response)
-        for d in ds:
-            for col in d.X.columns:
-                if (
-                    col != "(Intercept)"
-                    and col in data_m.columns
-                    and col not in names_pmf
-                ):
-                    names_pmf.append(col)
+        for j_d, d in enumerate(ds):
+            for nm in _pmf_names(
+                d.expanded, ds[0].response if j_d == 0 else None, data_m.columns
+            ):
+                if nm not in names_pmf:
+                    names_pmf.append(nm)
         data_for_discrete = data_m
         if ds[0].response and ds[0].response not in data_m.columns:
             data_for_discrete = data_m.with_columns(
@@ -4085,7 +4101,16 @@ class bam(gam):
                 r0 += nr_j
                 c0 += nc_j
 
-        design, lpid = build_discrete_design_lps(lp_parts, dframe)
+        var_index_lp = {nm: jv for jv, nm in enumerate(dframe.names)}
+        self._param_tensor = [
+            param_tensor_blocks(
+                d.expanded, d.param_assign or [], Xp, dframe, var_index_lp
+            )
+            for d, (Xp, _blocks) in zip(ds, lp_parts)
+        ]
+        design, lpid = build_discrete_design_lps(
+            lp_parts, dframe, param_tensors=self._param_tensor
+        )
         assert design.p == p, (design.p, p)
         self._discrete_frame = dframe
         self._discrete_design = design
@@ -4401,10 +4426,8 @@ class bam(gam):
             newdata = _apply_smooth_arg_exprs(newdata, expr_map)
         # Parametric design on newdata — response-free, the same call
         # gam.predict uses, and coded on the fit's xlevels so a frame missing a
-        # factor level keeps the fit's column count. ``build_discrete_design``
-        # stores these columns directly (identity gather), so the parametric
-        # part is exact (matching the fitter's ``X_param_full`` handling), not
-        # re-binned.
+        # factor level keeps the fit's column count. It backs any block the
+        # ``terms2tensor`` split below could not discretise (identity gather).
         X_param = (
             materialize(
                 self._expanded, newdata, basis_state=getattr(self, "_basis_state", None)
@@ -4412,15 +4435,23 @@ class bam(gam):
             .to_numpy()
             .astype(float)
         )
-        # Discretise the smooth covariates at the default resolution.
+        # Discretise the smooth covariates at the default resolution, plus the
+        # fit's parametric variables (mgcv replays ``dinfo$pmf.names``,
+        # bam.r:1847, dropping the ones newdata lacks).
         specs = _smooth_specs_from_expanded(self._expanded, newdata)
-        names_pmf = [
-            c
-            for c in self.parametric_columns
-            if c != "(Intercept)" and c in newdata.columns
-        ]
+        names_pmf = [c for c in self._pmf_names if c in newdata.columns]
         frame = discrete_mf(specs, newdata, names_pmf=names_pmf, m=None)
-        design = build_discrete_design(self._blocks, X_param, frame, data=newdata)
+        # mgcv re-runs terms2tensor on the prediction frame (bam.r:1854).
+        param_tensor = param_tensor_blocks(
+            self._expanded,
+            self._param_assign,
+            X_param,
+            frame,
+            {nm: j for j, nm in enumerate(frame.names)},
+        )
+        design = build_discrete_design(
+            self._blocks, X_param, frame, data=newdata, param_tensor=param_tensor
+        )
         off_new = np.zeros(newdata.height)
         for off_node in self._expanded.offsets:
             blk = _eval_atom(off_node, newdata)
@@ -4551,15 +4582,24 @@ class bam(gam):
                 X_param = np.zeros((newdata.height, 0))
             lp_parts.append((X_param, lp.blocks))
             specs.extend(_smooth_specs_from_expanded(lp.expanded, newdata))
-            for col in Xp_df.columns:
-                if (
-                    col != "(Intercept)"
-                    and col in newdata.columns
-                    and col not in names_pmf
-                ):
-                    names_pmf.append(col)
+            for nm in _pmf_names(lp.expanded, None, newdata.columns):
+                if nm not in names_pmf:
+                    names_pmf.append(nm)
         dframe = discrete_mf(specs, newdata, names_pmf=names_pmf, m=None)
-        design, lpid_new = build_discrete_design_lps(lp_parts, dframe)
+        var_index_new = {nm: j for j, nm in enumerate(dframe.names)}
+        param_tensors = [
+            param_tensor_blocks(
+                lp.expanded,
+                getattr(lp, "param_assign", None) or [],
+                Xp,
+                dframe,
+                var_index_new,
+            )
+            for lp, (Xp, _blk) in zip(md.lps, lp_parts)
+        ]
+        design, lpid_new = build_discrete_design_lps(
+            lp_parts, dframe, param_tensors=param_tensors
+        )
         # Same blocks, same LP order ⇒ the term→LP map must reproduce the
         # fit's lpid (build_discrete_design_lps is deterministic in the
         # lp_parts structure); guard against silent drift.
@@ -6249,8 +6289,23 @@ class bam(gam):
                 # ``_dw_deta`` / ``_d2w_deta2`` overrides return ``zeros(p)``,
                 # which matches "Gaussian-on-(R, f)" exactly: at the PIRLS-
                 # converged β̂ the inner score sees a constant-W problem.
-                self._XtX = qr.R.T @ qr.R
-                self._Xty = qr.R.T @ qr.f
+                #
+                # X'WX and X'Wz come from the accumulation itself when the
+                # build formed them (the discrete rail): mgcv ``bgam.fitd``
+                # assigns ``qrx$R <- XWXd(...)``/``qrx$f <- XWyd(...)`` and
+                # reparameterises THOSE into ``qrx$XX``/``qrx$Xy`` for
+                # ``Sl.fitChol`` (bam.r:657-665) — it never factorises them
+                # into an R first. Reconstructing them as ``R'R``/``R'f``
+                # instead costs a pivoted Cholesky's worth of accuracy in the
+                # ill-conditioned directions, and with ``cond(X'WX) ~ 1e10``
+                # (an intercept + factor + by-level smooths fit) that is
+                # enough to make the fREML outer Newton chase rounding: the
+                # SBM fit at n=438k took 200 PIRLS builds without converging,
+                # and 38 with the raw pair. The chunked rails accumulate
+                # (R, f) directly, as mgcv's ``bgam.fit`` does, and keep the
+                # identity form.
+                self._XtX = qr.R.T @ qr.R if qr.XX is None else qr.XX
+                self._Xty = qr.R.T @ qr.f if qr.Xy is None else qr.Xy
                 self._yty = float(qr.y_norm2)
                 self._X_full = qr.R
                 self._wt_full = qr.wt
@@ -7695,6 +7750,33 @@ def check_term(term: Sequence[str], rec: dict) -> int:
     return 0
 
 
+def _pmf_names(expanded, response: Optional[str], data_columns) -> list[str]:
+    """mgcv's ``pmf.names``: ``names(model.frame(parametric_formula, data))``
+    (bam.r:2314-2318), the list :func:`discrete_mf` compresses one variable at
+    a time.
+
+    Response first — R's ``model.frame(y ~ x)`` evaluates the LHS into a
+    column, so ``compress.df`` runs on it too and its shuffle consumes RNG
+    draws the pad loop's stream depends on. Then the parametric terms'
+    VARIABLES, in first-appearance order: a factor contributes its own name,
+    not the contrast-column names its ``model.matrix`` block expands to, so
+    it gets discretised to its levels exactly as mgcv does.
+
+    A variable R would materialise under a deparsed name (``log(z)``,
+    ``I(x^2)``) has no column in hea's frame to compress and is skipped; mgcv
+    discretises it, since there ``names.pmf %in% names(mf)`` holds (bam.r:244).
+    """
+    cols = set(data_columns)
+    names: list[str] = []
+    if response:
+        names.append(response)
+    for t in expanded.terms:
+        for a in t.atoms:
+            if isinstance(a, Name) and a.ident in cols and a.ident not in names:
+                names.append(a.ident)
+    return names
+
+
 def discrete_mf(
     smooth_specs: list[dict],
     mf: pl.DataFrame,
@@ -8039,6 +8121,122 @@ class DiscreteDesign:
     _T_cache: object = None
 
 
+@dataclass(slots=True)
+class _ParamBlock:
+    """One block of mgcv's parametric ``terms2tensor`` decomposition.
+
+    ``Xd_list``/``k_cols`` present ⇒ the block is stored discretised, exactly
+    like a smooth: a row tensor of per-variable marginal model matrices indexed
+    through ``k`` (bam.r:2436-2451). ``Xd_list is None`` ⇒ the block keeps its
+    un-discretised ``n``-row columns ``X_param_full[:, col_start:col_stop]``.
+    """
+
+    label: str
+    col_start: int
+    col_stop: int
+    Xd_list: Optional[list[np.ndarray]] = None
+    k_cols: Optional[list[tuple[int, int]]] = None
+
+
+def param_tensor_blocks(
+    expanded,
+    param_assign: Sequence[int],
+    X_param_full: Optional[np.ndarray],
+    dframe: DiscretizedFrame,
+    var_index: dict[str, int],
+) -> list[_ParamBlock]:
+    """Split the parametric model matrix into mgcv's sequence of marginal
+    model matrices — ``terms2tensor`` (bam.r:2091-2174) evaluated on the
+    discretised model frame, then truncated to ``nr`` rows (bam.r:2442).
+
+    mgcv stores the parametric part as ordinary discrete terms: the intercept
+    becomes a 1×1 marginal read through the all-ones ``k`` column
+    (terms2tensor:2115-2122), a main effect becomes that variable's
+    ``model.matrix`` on its ``nr`` unique values, and an interaction becomes
+    one marginal per variable in REVERSE order (:2150, "to conform with
+    model.matrix called directly"), which is hea's ``_khatri_rao`` convention
+    read backwards — the row tensor takes its FIRST marginal as slowest-varying
+    (``tensorXj``, discrete.c:301) where ``_khatri_rao`` takes the first atom as
+    fastest.
+
+    A block is only discretised when every atom is a bare data column that
+    :func:`discrete_mf` compressed, and when the resulting marginal widths
+    multiply out to the width the dense design actually emitted. The first
+    block that fails leaves it — and every later block — dense: the factor
+    coding of a term depends on which margins earlier terms already covered
+    (``_encode_term_marginals`` mutates ``covered``), so once a term is skipped
+    that bookkeeping can no longer be trusted. The intercept is atom-free and
+    always decomposes, which is the case that matters: it turns the ``n×p_par``
+    weighted product in every parametric×smooth block into mgcv's single
+    scatter pass over one ``k`` column.
+    """
+    assign = np.asarray(param_assign, dtype=int) if len(param_assign) else None
+    if assign is None or X_param_full is None or X_param_full.shape[1] == 0:
+        return []
+    # Emission order of `_build_design_impl`: intercept (assign 0) if present,
+    # then `expanded.terms` in order (assign i+1).
+    groups: list[tuple[int, Term]] = []
+    if getattr(expanded, "intercept", False):
+        groups.append((0, Term(())))
+    groups += [(i + 1, t) for i, t in enumerate(expanded.terms)]
+
+    mf_dict = {
+        nm: arr
+        for nm, arr in dframe.mf.items()
+        if nm != "(Intercept)" and np.asarray(arr).ndim == 1
+    }
+    mf0 = pl.DataFrame(mf_dict) if mf_dict else pl.DataFrame()
+
+    covered: set = {Term(())} if getattr(expanded, "intercept", False) else set()
+    out: list[_ParamBlock] = []
+    dense_from_here = False
+    for gid, term in groups:
+        cols = np.flatnonzero(assign == gid)
+        if cols.size == 0:
+            continue
+        c0, c1 = int(cols[0]), int(cols[-1]) + 1
+        if c1 - c0 != cols.size:
+            # Non-contiguous assign group: the design was not emitted block by
+            # block, so a per-block coefficient slice is meaningless.
+            dense_from_here = True
+        label = term.label
+        if dense_from_here:
+            out.append(_ParamBlock(label, c0, c1))
+            continue
+        if not term.atoms:
+            # Intercept: the literal 1×1 matrix (terms2tensor:2117), on the
+            # all-ones index column discrete.mf appends (bam.r:376-380).
+            xnames = ["(Intercept)"]
+            values = [np.ones((1, 1))]
+        else:
+            names = [a.ident for a in term.atoms if isinstance(a, Name)]
+            if len(names) != len(term.atoms) or any(
+                nm not in var_index or nm not in mf0.columns for nm in names
+            ):
+                dense_from_here = True
+                out.append(_ParamBlock(label, c0, c1))
+                continue
+            margs = _encode_term_marginals(term, mf0, covered)
+            covered.add(term)
+            # mgcv's reverse marginal order (terms2tensor:2150).
+            xnames = names[::-1]
+            values = [np.asarray(b.values, dtype=float) for b in margs[::-1]]
+        Xd_list = [
+            np.ascontiguousarray(v[: int(dframe.nr[var_index[nm]])])
+            for v, nm in zip(values, xnames)
+        ]
+        if int(np.prod([X.shape[1] for X in Xd_list])) != c1 - c0:
+            dense_from_here = True
+            out.append(_ParamBlock(label, c0, c1))
+            continue
+        k_cols = [
+            (int(dframe.ks[var_index[nm], 0]), int(dframe.ks[var_index[nm], 1]))
+            for nm in xnames
+        ]
+        out.append(_ParamBlock(label, c0, c1, Xd_list, k_cols))
+    return out
+
+
 def build_discrete_design(
     blocks: list[SmoothBlock],
     X_param_full: np.ndarray,
@@ -8046,6 +8244,7 @@ def build_discrete_design(
     *,
     param_terms: Sequence[str] = ("(Intercept)",),
     data: Optional[pl.DataFrame] = None,
+    param_tensor: Optional[list[_ParamBlock]] = None,
 ) -> DiscreteDesign:
     """Build :class:`DiscreteDesign` from a fitted set of
     :class:`SmoothBlock` plus a discretised model frame.
@@ -8060,23 +8259,28 @@ def build_discrete_design(
         per margin), giving a list of ``Xd_j`` of shape ``(nr_j, p_j_raw)``.
       * Capture the term's ``by`` / ``absorb`` / ``keep_cols`` so the
         kernels can apply them on the row-tensor product at compute time.
-      * For parametric columns, store the un-discretised columns of
-        ``X_param_full`` directly (no compression) — equivalent to a
-        single-marginal "term" with ``Xd = X_param_full`` and ``k =
-        identity``.
+      * For parametric columns, store one term per block of
+        ``param_tensor`` (:func:`param_tensor_blocks`, mgcv's
+        ``terms2tensor``); blocks it could not decompose keep the
+        un-discretised columns of ``X_param_full`` as a single-marginal
+        "term" with ``Xd = X_param_full`` and ``k = identity``. With no
+        ``param_tensor`` the whole parametric part stays un-discretised.
 
     Constraint Householder vectors (mgcv ``v``/``qc``) are *not* yet
     extracted from ``absorb`` — for now we apply absorb post-hoc as a
     column transform on the materialised row-tensor. A future
     optimisation can switch to Householder for ``te`` smooths.
     """
-    design, _lpid = _build_discrete_design_parts([(X_param_full, blocks)], dframe)
+    design, _lpid = _build_discrete_design_parts(
+        [(X_param_full, blocks)], dframe, param_tensors=[param_tensor]
+    )
     return design
 
 
 def build_discrete_design_lps(
     lp_parts: list[tuple[Optional[np.ndarray], list[SmoothBlock]]],
     dframe: DiscretizedFrame,
+    param_tensors: Optional[list[Optional[list[_ParamBlock]]]] = None,
 ) -> tuple[DiscreteDesign, list[list[int]]]:
     """Multi-linear-predictor :class:`DiscreteDesign` + mgcv's ``lpid``.
 
@@ -8091,13 +8295,17 @@ def build_discrete_design_lps(
     equivalent). Returns ``(design, lpid)`` where ``lpid[j]`` lists LP
     j's term indices in ascending coefficient order (mgcv sorts lpid the
     same way, bam.r:2550-2553).
+
+    ``param_tensors[j]`` is LP j's :func:`param_tensor_blocks` decomposition
+    (``None`` ⇒ keep that LP's parametric part un-discretised).
     """
-    return _build_discrete_design_parts(lp_parts, dframe)
+    return _build_discrete_design_parts(lp_parts, dframe, param_tensors=param_tensors)
 
 
 def _build_discrete_design_parts(
     lp_parts: list[tuple[Optional[np.ndarray], list[SmoothBlock]]],
     dframe: DiscretizedFrame,
+    param_tensors: Optional[list[Optional[list[_ParamBlock]]]] = None,
 ) -> tuple[DiscreteDesign, list[list[int]]]:
     var_index = {nm: j for j, nm in enumerate(dframe.names)}
     terms: list[_DiscreteTerm] = []
@@ -8106,28 +8314,52 @@ def _build_discrete_design_parts(
 
     for j_lp, (X_param_full, blocks) in enumerate(lp_parts):
         lp_terms: list[int] = []
-        # Parametric columns: treat each parametric column-group as a single
-        # "term". For now we keep them as one big block — index into
-        # X_param_full via a synthetic identity ``k`` column. The simplest
-        # representation just stores the full param matrix as a single Xd
-        # with k-col = -1 (signal: identity gather). The kernels handle this
-        # via a special-case branch.
+        # Parametric part: one discrete term per mgcv ``terms2tensor`` block
+        # (bam.r:2436-2451). A block the decomposition could not reach keeps
+        # its un-discretised ``n``-row columns as a single Xd with k-col = -1
+        # (sentinel: the gather is the identity); the kernels branch on
+        # ``kind == "param"`` for those.
         if X_param_full is not None and X_param_full.shape[1] > 0:
             p_par = X_param_full.shape[1]
             # Multi-LP labels get mgcv's ".j" suffix (bam.r:2304/2429
             # appends ".", j-1 to later formulae's term labels).
-            plabel = "(parametric)" if j_lp == 0 else f"(parametric).{j_lp}"
-            lp_terms.append(len(terms))
-            terms.append(
-                _DiscreteTerm(
-                    kind="param",
-                    Xd_list=[np.asarray(X_param_full, dtype=float)],
-                    k_cols=[(-1, -1)],  # sentinel: gather is identity
-                    coef_slice=slice(p_total, p_total + p_par),
-                    label=plabel,
-                )
+            suffix = "" if j_lp == 0 else f".{j_lp}"
+            pblocks = (
+                param_tensors[j_lp]
+                if param_tensors is not None and j_lp < len(param_tensors)
+                else None
             )
-            p_total += p_par
+            if not pblocks:
+                pblocks = [_ParamBlock("(parametric)", 0, p_par)]
+            for pb in pblocks:
+                width = pb.col_stop - pb.col_start
+                lp_terms.append(len(terms))
+                if pb.Xd_list is None:
+                    terms.append(
+                        _DiscreteTerm(
+                            kind="param",
+                            Xd_list=[
+                                np.ascontiguousarray(
+                                    X_param_full[:, pb.col_start : pb.col_stop],
+                                    dtype=float,
+                                )
+                            ],
+                            k_cols=[(-1, -1)],
+                            coef_slice=slice(p_total, p_total + width),
+                            label=pb.label + suffix,
+                        )
+                    )
+                else:
+                    terms.append(
+                        _DiscreteTerm(
+                            kind="single" if len(pb.Xd_list) == 1 else "tensor",
+                            Xd_list=pb.Xd_list,
+                            k_cols=pb.k_cols,
+                            coef_slice=slice(p_total, p_total + width),
+                            label=pb.label + suffix,
+                        )
+                    )
+                p_total += width
 
         # Discretised model frame as a polars DataFrame with each column
         # length = nr[var] (no padding here — we feed only the unique values

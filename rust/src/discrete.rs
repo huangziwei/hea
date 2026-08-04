@@ -335,6 +335,27 @@ fn bin_accum<'py>(
     }
     let out = py.allow_threads(|| {
         let mut wb = vec![0.0f64; m];
+        if m == 1 {
+            // Single bin ⇒ every row lands on `wb[0]`. Written as a scatter
+            // (the general branch below) the accumulator round-trips through
+            // memory each row, so the loop runs at store-to-load-forward +
+            // FP-add latency instead of FP-add latency alone — measured 2×
+            // at n = 110k, and the intercept marginal hits it on every fit.
+            // A register accumulator adds the SAME values in the SAME
+            // row-ascending order, so the result is bit-identical.
+            let mut s = 0.0f64;
+            if u_f.is_empty() {
+                for row in 0..n {
+                    s += v_f[row];
+                }
+            } else {
+                for row in 0..n {
+                    s += v_f[row] * u_f[row];
+                }
+            }
+            wb[0] = s;
+            return wb;
+        }
         // SAFETY: `indices_in_range` proved every k < m, and the length check
         // above covers v/u. Accumulation stays row-ascending, as in mgcv.
         unsafe {

@@ -967,6 +967,196 @@ def test_bam_discrete_matrix_by_scatter_matches_dense():
     np.testing.assert_allclose(XWyd(d, w, yv), X.T @ (w * yv), rtol=0, atol=1e-10)
 
 
+def test_bam_discrete_parametric_terms2tensor_shapes():
+    """mgcv stores the parametric part as ordinary discrete terms, one per
+    ``terms2tensor`` block (bam.r:2091-2174 → 2436-2451): the intercept is a
+    1x1 marginal read through the all-ones ``k`` column, a factor main effect
+    is its contrast matrix on the factor's ``nr`` levels, and an interaction is
+    one marginal per variable in REVERSE order (terms2tensor:2150).
+
+    Verified against R for ``y ~ fb + z + s(x, k=10)``, where
+    ``bam(..., discrete=TRUE, fit=FALSE)`` reports Xd dims 1x1, 3x2, 954x1,
+    951x9 with ``ts = 1 2 3 4``, ``dt = 1 1 1 1``.
+    """
+    rng = np.random.default_rng(11)
+    n = 3000
+    x = rng.uniform(0, 1, n)
+    fb = np.asarray(["a", "b", "c"])[rng.integers(0, 3, n)]
+    yv = 2 + np.sin(2 * np.pi * x) + rng.standard_normal(n) * 0.3
+    m = hea.models.bam(
+        "y ~ fb + s(x, k=10)", {"y": yv, "x": x, "fb": fb}, discrete=True
+    )
+    terms = m._discrete_design.terms
+    assert [t.label for t in terms] == ["(Intercept)", "fb", "s(x)"]
+    assert [t.kind for t in terms] == ["single", "single", "single"]
+    # Intercept: the literal 1x1 matrix, on discrete_mf's appended ones column.
+    np.testing.assert_array_equal(terms[0].Xd_list[0], np.ones((1, 1)))
+    assert terms[0].k_cols[0] == (
+        int(m._discrete_frame.ks[-1, 0]),
+        int(m._discrete_frame.ks[-1, 1]),
+    )
+    assert np.all(m._discrete_frame.k[:, terms[0].k_cols[0][0]] == 0)
+    # Factor: discretised to its 3 levels, 2 treatment-contrast columns.
+    assert terms[1].Xd_list[0].shape == (3, 2)
+
+
+def test_bam_discrete_parametric_interaction_marginal_order():
+    """An interaction's marginals go in REVERSE variable order — the row
+    tensor takes its FIRST marginal as slowest-varying (``tensorXj``,
+    discrete.c:301) where hea's dense ``_khatri_rao`` takes the first atom as
+    fastest — so the discrete columns land in the dense design's order. A
+    parametric atom that is not a bare discretised column (``I(x^2)``) leaves
+    its block, and every later block, un-discretised."""
+    from hea.models.bam import design_full_X
+
+    rng = np.random.default_rng(12)
+    n = 1200
+    x = rng.uniform(0, 1, n)
+    a = np.asarray(["p", "q", "r"])[rng.integers(0, 3, n)]
+    b = np.asarray(["u", "v"])[rng.integers(0, 2, n)]
+    yv = rng.standard_normal(n)
+    data = {"y": yv, "x": x, "a": a, "b": b}
+
+    m = hea.models.bam("y ~ a*b + s(x, k=8)", data, discrete=True)
+    terms = m._discrete_design.terms
+    assert [t.label for t in terms] == ["(Intercept)", "a", "b", "a:b", "s(x)"]
+    # a:b — marginals reversed (b then a), so p = 1*2 matches the dense block.
+    assert [Xd.shape for Xd in terms[3].Xd_list] == [(2, 1), (3, 2)]
+    from hea.formula import materialize
+
+    Xf = design_full_X(m._discrete_design)
+    Xdense = materialize(m._expanded, m.data).to_numpy().astype(float)
+    np.testing.assert_array_equal(Xf[:, :6], Xdense)
+
+    m2 = hea.models.bam("y ~ I(x^2) + a + s(x, k=8)", data, discrete=True)
+    kinds = {t.label: t.kind for t in m2._discrete_design.terms}
+    assert kinds["(Intercept)"] == "single"
+    assert kinds["I(x^2)"] == "param"  # no column to compress
+    assert kinds["a"] == "param"  # and the covered-margin chain stops there
+
+
+def test_bam_discrete_parametric_split_is_numerically_exact():
+    """Splitting the parametric part into marginals must not move the design:
+    the materialised ``X`` is bit-identical to the un-split store and ``X'WX``
+    differs only by summation reassociation."""
+    import sys
+
+    from hea.models.bam import XWXd, design_full_X, param_tensor_blocks
+
+    bam_mod = sys.modules["hea.models.bam"]
+    rng = np.random.default_rng(13)
+    n = 2500
+    x = rng.uniform(0, 1, n)
+    fb = np.asarray(["a", "b", "c", "d"])[rng.integers(0, 4, n)]
+    yv = rng.poisson(2.0, n).astype(float)
+    data = {"y": yv, "x": x, "fb": fb}
+    f = "y ~ fb + s(x, k=8, by=fb)"
+
+    m_split = hea.models.bam(f, data, family=Poisson(), discrete=True, sp=np.ones(4))
+    real = bam_mod.param_tensor_blocks
+    bam_mod.param_tensor_blocks = lambda *a, **kw: []
+    try:
+        m_flat = hea.models.bam(f, data, family=Poisson(), discrete=True, sp=np.ones(4))
+    finally:
+        bam_mod.param_tensor_blocks = real
+    assert param_tensor_blocks is real
+
+    d1, d0 = m_split._discrete_design, m_flat._discrete_design
+    assert d1.p == d0.p
+    assert [t.kind for t in d0.terms][0] == "param"
+    np.testing.assert_array_equal(design_full_X(d1), design_full_X(d0))
+    w = rng.uniform(0.1, 2.0, n)
+    A1, A0 = XWXd(d1, w), XWXd(d0, w)
+    np.testing.assert_allclose(A1, A0, rtol=0, atol=1e-9 * np.abs(A0).max())
+
+
+def test_bin_accum_single_bin_is_the_sequential_sum():
+    """``m == 1`` takes a register accumulator instead of the scatter, so the
+    intercept marginal is not bound by store-to-load forwarding. It must fold
+    the SAME values in the SAME row-ascending order mgcv's
+    ``wb[K[kk]] += w[kk]`` (discrete.c:1775) does — bit for bit."""
+    from hea.models.bam import _bin_accum
+
+    rng = np.random.default_rng(14)
+    for n in (1, 7, 5000):
+        for scale in (1.0, 1e6, 1e-6):
+            v = rng.standard_normal(n) * scale
+            u = rng.standard_normal(n)
+            k0 = np.zeros(n, dtype=np.int64)
+            seq = 0.0
+            for t in v:
+                seq += t
+            assert _bin_accum(k0, v, 1)[0].hex() == float(seq).hex()
+            sequ = 0.0
+            for t, s in zip(v, u):
+                sequ += t * s
+            assert _bin_accum(k0, v, 1, u=u)[0].hex() == float(sequ).hex()
+
+
+@pytest.mark.skipif(not have_rscript(), reason="Rscript not on PATH (install R)")
+def test_bam_discrete_bins_parametric_covariates_like_mgcv(tmp_path):
+    """``bam(discrete=TRUE)`` puts the parametric covariates through
+    ``compress.df`` too (bam.r:321-350), so a continuous parametric term is
+    fitted on its BINNED values — bamT and bamF genuinely differ, exactly as
+    they do for a continuous ``by=``. hea must land on bamT, not bamF: storing
+    the parametric columns un-binned gave a third answer that matched neither
+    (b_z 1.666667 against mgcv's 1.666635 / 1.666775)."""
+    rng = np.random.default_rng(21)
+    n = 2500
+    x = rng.uniform(0, 1, n)
+    z = rng.uniform(0, 1, n)
+    yv = np.sin(6 * x) + 1.7 * z + rng.standard_normal(n) * 0.3
+    csv_path = tmp_path / "d.csv"
+    with open(csv_path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["y", "x", "z"])
+        for i in range(n):
+            w.writerow([repr(float(yv[i])), repr(float(x[i])), repr(float(z[i]))])
+    rexpr = (
+        f'suppressMessages(library(mgcv));d<-read.csv("{csv_path}");'
+        'mT<-bam(y~z+s(x,k=10),data=d,discrete=TRUE,method="fREML");'
+        'mF<-bam(y~z+s(x,k=10),data=d,discrete=FALSE,method="fREML");'
+        'cat(sprintf("%.17g %.17g %.17g %.17g",'
+        "coef(mT)[2],mT$deviance,coef(mF)[2],mF$deviance))"
+    )
+    r_bT, r_devT, r_bF, r_devF = (
+        float(v)
+        for v in subprocess.run(
+            ["Rscript", "-e", rexpr],
+            stdin=subprocess.DEVNULL,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        ).stdout.split()
+    )
+    # The two mgcv rails must actually differ, or the test proves nothing.
+    assert abs(r_bT - r_bF) > 1e-6
+
+    data = {"y": yv, "x": x, "z": z}
+    mT = hea.models.bam("y ~ z + s(x, k=10)", data, discrete=True, method="fREML")
+    mF = hea.models.bam("y ~ z + s(x, k=10)", data, discrete=False, method="fREML")
+    assert abs(float(np.asarray(mT.coef)[1]) - r_bT) < 1e-10
+    assert abs(float(mT.deviance) - r_devT) < 1e-8 * (abs(r_devT) + 1.0)
+    assert abs(float(np.asarray(mF.coef)[1]) - r_bF) < 1e-10
+    assert abs(float(mF.deviance) - r_devF) < 1e-8 * (abs(r_devF) + 1.0)
+
+
+def test_bam_no_parametric_columns():
+    """``y ~ s(x) - 1`` has a zero-column parametric design; polars collapses
+    that to ``(0, 0)``, so the row count has to come from the response (the
+    guard gam.__init__ already carries)."""
+    rng = np.random.default_rng(15)
+    n = 1500
+    x = rng.uniform(0, 1, n)
+    yv = 2 + np.sin(6 * x) + rng.standard_normal(n) * 0.3
+    for disc in (False, True):
+        m = hea.models.bam("y ~ s(x, k=8) - 1", {"y": yv, "x": x}, discrete=disc)
+        assert m.n == n
+        assert m.fitted_values.shape == (n,)
+        assert np.isfinite(m.deviance)
+
+
 def test_distinct_exceeds_1d_exact_vs_npunique():
     """RF1a-R5: the early-exit ``>threshold distinct?`` predicate must be
     EXACTLY ``np.unique(a).size > threshold`` (it drives compress.df's round
