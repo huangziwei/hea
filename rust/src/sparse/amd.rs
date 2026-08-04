@@ -52,6 +52,27 @@ impl Ws {
         // SAFETY: `Ws` is `#[repr(transparent)]` over `[i64]`.
         unsafe { &*(s as *const [i64] as *const Ws) }
     }
+
+    /// `self[lo..hi]`, for the column loops that the C writes as
+    /// `for (p = Ap[j] ; p < pend ; p++) { i = Ai[p] ; ... }`.
+    ///
+    /// Handing the loop a slice is what makes it a pointer walk. Indexing
+    /// `Ai[p]` per iteration instead costs a scaled-index load plus a separate
+    /// increment and compare, where clang strength-reduces the same C into a
+    /// post-indexed load and a countdown — 6 instructions per skipped entry
+    /// against 5, which measured as the whole of this stage's gap.
+    #[inline(always)]
+    fn range(&self, lo: i64, hi: i64) -> &[i64] {
+        debug_assert!(
+            lo >= 0 && hi >= lo && (hi as usize) <= self.0.len(),
+            "Ws range {lo}..{hi} out of order or out of range for len {}",
+            self.0.len()
+        );
+        // SAFETY: `hi >= lo` holds because `validate_csc` rejects a
+        // non-monotone `indptr`, and `hi <= len` because it rejects an
+        // `indptr[n]` past the end of `indices`.
+        unsafe { self.0.get_unchecked(lo as usize..hi as usize) }
+    }
 }
 
 /// `i64` is how the C spells a subscript; `usize` is how the loop counters
@@ -901,7 +922,7 @@ pub fn amd_2(
                             deg += dext;
                             iw[pn as usize] = e;
                             pn += 1;
-                            hash = hash.wrapping_add(e as u64) & hash_mask;
+                            hash = hash.wrapping_add(e as u64);
                         } else {
                             /* external degree of e is zero, absorb e into me*/
                             pe[e as usize] = flip(me);
@@ -919,7 +940,7 @@ pub fn amd_2(
                         deg += dext;
                         iw[pn as usize] = e;
                         pn += 1;
-                        hash = hash.wrapping_add(e as u64) & hash_mask;
+                        hash = hash.wrapping_add(e as u64);
                     }
                 }
             }
@@ -945,7 +966,7 @@ pub fn amd_2(
                     deg += nvj;
                     iw[pn as usize] = j;
                     pn += 1;
-                    hash = hash.wrapping_add(j as u64) & hash_mask;
+                    hash = hash.wrapping_add(j as u64);
                 }
             }
 
@@ -1001,7 +1022,16 @@ pub fn amd_2(
                  * standard does not define a % b when a and/or b are negative.
                  * That's why hash is defined as an unsigned Int, to avoid this
                  * problem. */
-                let hash = (hash % (n as u64)) as i64;
+
+                /* The C accumulates `hash` in `UInt`, so each `hash += e`
+                 * wraps at the build's width. Truncating once here is the same
+                 * value: addition is congruence-preserving, and the mask is a
+                 * power of two dividing 2^64, so
+                 * `(Σe mod 2^64) mod 2^w == Σe mod 2^w`. Doing it here instead
+                 * keeps the mask — whose width is only known at run time, so
+                 * `& u64::MAX` cannot fold away — out of the three
+                 * accumulation loops, two of which are the hottest in AMD. */
+                let hash = ((hash & hash_mask) % (n as u64)) as i64;
 
                 /* if the Hhead array is not used: */
                 let j = head[hash as usize];
@@ -1430,22 +1460,7 @@ pub fn copy_sym_to_unsym(
 
     let mut wj_buf = vec![0i64; n];
     let wj = Ws::new(&mut wj_buf);
-    let mut cnz: usize = 0;
-
-    for j in 0..n as i64 {
-        for p in a_indptr[j]..a_indptr[j + 1] {
-            let i = a_indices[p];
-            if i == j {
-                /* diagonal entry A(i,i): ignore_diag is always true here */
-                continue;
-            } else if (up && i < j) || (lo && i > j) {
-                /* A(i,j) is placed in both upper and lower part of C */
-                wj[j] += 1;
-                wj[i] += 1;
-                cnz += 2;
-            }
-        }
-    }
+    let cnz = count_cols(n, a_indptr, a_indices, up, lo, wj);
 
     /* ------------------------------------------------------------------ */
     /* allocate C with mode == -2 elbow room */
@@ -1473,28 +1488,73 @@ pub fn copy_sym_to_unsym(
 
     let mut ci = vec![0i64; cnzmax];
     let cw = Ws::new(&mut ci);
+
+    if up {
+        build_cols::<true>(n, a_indptr, a_indices, wj, cw);
+    } else {
+        build_cols::<false>(n, a_indptr, a_indices, wj, cw);
+    }
+
+    Ok((cp, ci, cnzmax))
+}
+
+/// The counting pass of `cholmod_copy`'s symmetric→unsymmetric branch
+/// (`t_cholmod_copy.c:215-243`), filling `Wj` with per-column counts and
+/// returning `nnz(C)`.
+///
+/// Not specialized on `stype`: upstream tests `up`/`lo` per entry here, unlike
+/// the fill pass. Kept that way so the two stay comparable line for line.
+fn count_cols(n: usize, a_indptr: &Ws, a_indices: &Ws, up: bool, lo: bool, wj: &mut Ws) -> usize {
+    let mut cnz: usize = 0;
     for j in 0..n as i64 {
-        for p in a_indptr[j]..a_indptr[j + 1] {
-            let i = a_indices[p];
+        for &i in a_indices.range(a_indptr[j], a_indptr[j + 1]) {
+            if i == j {
+                /* diagonal entry A(i,i): ignore_diag is always true here */
+                continue;
+            } else if (up && i < j) || (lo && i > j) {
+                /* A(i,j) is placed in both upper and lower part of C */
+                wj[j] += 1;
+                wj[i] += 1;
+                cnz += 2;
+            }
+        }
+    }
+    cnz
+}
+
+/// The fill pass of `cholmod_copy`'s symmetric→unsymmetric branch
+/// (`t_cholmod_copy_worker.c:78-135`).
+///
+/// The worker is two separate loops, one per `stype`, not one loop that
+/// re-tests `stype` per entry: the template body is instantiated under
+/// `if (A->stype > 0) ... else ...`, so inside each the only test on `i` is the
+/// single comparison against `j`. `UP` is const so this monomorphizes into that
+/// same pair of loops rather than reintroducing the test.
+fn build_cols<const UP: bool>(n: usize, a_indptr: &Ws, a_indices: &Ws, wj: &mut Ws, ci: &mut Ws) {
+    for j in 0..n as i64 {
+        /* get A(i,j) for p in Ap[j]..pend */
+        for &i in a_indices.range(a_indptr[j], a_indptr[j + 1]) {
             /* skip entries in the half that isn't stored */
-            if (up && i > j) || (lo && i < j) {
+            if UP {
+                if i > j {
+                    continue;
+                }
+            } else if i < j {
                 continue;
             }
-            /* the diagonal is dropped: `keep_diag` is false for mode -2 */
             if i == j {
+                /* the diagonal is dropped: keep_diag is false for mode -2 */
                 continue;
             }
             /* place A(i,j) in C(:,j) and A(i,j)' in C(:,i) */
             let q = wj[j];
             wj[j] += 1;
-            cw[q] = i;
+            ci[q] = i;
             let q = wj[i];
             wj[i] += 1;
-            cw[q] = j;
+            ci[q] = j;
         }
     }
-
-    Ok((cp, ci, cnzmax))
 }
 
 /// `cholmod_amd` (`Cholesky/cholmod_amd.c:44-194`) for a symmetric `A`.
@@ -1719,6 +1779,30 @@ mod tests {
 
     fn widths() -> [IntWidth; 2] {
         [IntWidth::I32, IntWidth::I64]
+    }
+
+    /// The C accumulates `hash` in `UInt`, so it wraps at the build's width on
+    /// every `hash += e`; the port accumulates in `u64` and truncates once, at
+    /// the `% n`. Those agree, but only because addition is congruence-
+    /// preserving — and no corpus matrix is remotely large enough to push
+    /// `hash` past 2^32 and show it, so check the identity directly.
+    #[test]
+    fn truncating_hash_once_matches_wrapping_every_step() {
+        for &mask in &[u32::MAX as u64, u64::MAX] {
+            for seed in 0..8u64 {
+                let mut rng = Lcg(seed);
+                let (mut every_step, mut once) = (0u64, 0u64);
+                for _ in 0..2000 {
+                    /* `e` is a row index, so it fits in `Int`; 2000 of them
+                     * overflow 32 bits many times over */
+                    let e = (rng.next_u32() >> 1) as u64;
+                    every_step = every_step.wrapping_add(e) & mask;
+                    once = once.wrapping_add(e);
+                }
+                assert!(every_step > 0, "the test values never accumulated");
+                assert_eq!(every_step, once & mask, "mask {mask:#x}, seed {seed}");
+            }
+        }
     }
 
     /// The corpus below is only evidence if the check it relies on is live in
