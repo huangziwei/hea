@@ -1,4 +1,4 @@
-"""AMD ordering parity — hea's Rust port vs SuiteSparse 7.6.0.
+"""Sparse symbolic parity — hea's Rust port vs SuiteSparse 7.6.0.
 
 The port targets SuiteSparse **7.6.0** (AMD 3.3.1), the version R's ``Matrix``
 ships and therefore the one ``lme4`` factorizes with. The references below were
@@ -352,3 +352,337 @@ def test_amd_is_deterministic():
     first = amd_order(M)[0]
     for _ in range(3):
         np.testing.assert_array_equal(amd_order(M)[0], first)
+
+
+# ---------------------------------------------------------------------------
+# cholmod_analyze
+# ---------------------------------------------------------------------------
+#
+# From here on ``scikit-sparse``'s ``F.perm`` *is* the right comparison: it is
+# exactly what ``analyze`` returns, because the weighted postorder has now been
+# composed in. The pins below were taken from ``cholmod_l_analyze`` driven the
+# way the port drives it (``supernodal = CHOLMOD_SIMPLICIAL``, ``nmethods = 1``
+# with ``method[0].ordering = CHOLMOD_AMD``) and each one was cross-checked
+# against ``sksparse.cho_factor(A, order="amd")`` before being written down.
+#
+# The six upstream files this stage ports are byte-identical between v7.6.0 and
+# v7.12.2 apart from ``cholmod_analyze.c`` saving and restoring
+# ``Common->try_catch`` rather than clearing it, which is error-reporting state.
+# So a system CHOLMOD at either tag is a valid oracle here.
+
+
+@dataclass(frozen=True)
+class _RefAnalyze:
+    n: int
+    head: list[int]
+    perm_sha: str
+    colcount_sha: str
+    lnz: float
+    fl: float
+    anz: float
+    default_ordering: int
+
+
+REF_ANALYZE: dict[str, _RefAnalyze] = {
+    "banded-50-2": _RefAnalyze(
+        n=50,
+        head=[49, 48, 47, 46, 45, 44, 43, 42],
+        perm_sha="5b5995cd8af354d2",
+        colcount_sha="865156499aecbf3d",
+        lnz=147.0,
+        fl=437.0,
+        anz=147.0,
+        default_ordering=2,  # 2 = AMD, 3 = METIS
+    ),
+    "banded-200-3": _RefAnalyze(
+        n=200,
+        head=[199, 198, 197, 196, 195, 194, 193, 192],
+        perm_sha="fa55878c26c425f1",
+        colcount_sha="4c586cf3222672ae",
+        lnz=794.0,
+        fl=3166.0,
+        anz=794.0,
+        default_ordering=2,  # 2 = AMD, 3 = METIS
+    ),
+    "random-60": _RefAnalyze(
+        n=60,
+        head=[11, 41, 46, 9, 18, 0, 44, 35],
+        perm_sha="567be1e4d0ed6b6e",
+        colcount_sha="c0b682d588e71da7",
+        lnz=824.0,
+        fl=14874.0,
+        anz=336.0,
+        default_ordering=2,  # 2 = AMD, 3 = METIS
+    ),
+    "random-300": _RefAnalyze(
+        n=300,
+        head=[195, 283, 67, 80, 237, 258, 101, 253],
+        perm_sha="e6107fb72caac2e5",
+        colcount_sha="92aea86e3f8a50b6",
+        lnz=23541.0,
+        fl=2915559.0,
+        anz=2951.0,
+        default_ordering=2,  # 2 = AMD, 3 = METIS
+    ),
+    "random-400": _RefAnalyze(
+        n=400,
+        head=[56, 91, 295, 245, 287, 332, 383, 97],
+        perm_sha="ca152a6905c228eb",
+        colcount_sha="fc3a5493740ce535",
+        lnz=36946.0,
+        fl=5776108.0,
+        anz=3544.0,
+        default_ordering=2,  # 2 = AMD, 3 = METIS
+    ),
+    "block-diagonal": _RefAnalyze(
+        n=55,
+        head=[5, 4, 0, 1, 2, 6, 3, 18],
+        perm_sha="ff67a2c26e8233af",
+        colcount_sha="6f6a0e55b43fff0e",
+        lnz=289.0,
+        fl=2157.0,
+        anz=234.0,
+        default_ordering=2,  # 2 = AMD, 3 = METIS
+    ),
+    "arrow-300": _RefAnalyze(
+        n=300,
+        head=[1, 2, 3, 4, 5, 6, 7, 8],
+        perm_sha="0f35f3f8609dfdc2",
+        colcount_sha="5a05756d08f2e75e",
+        lnz=599.0,
+        fl=1197.0,
+        anz=599.0,
+        default_ordering=2,  # 2 = AMD, 3 = METIS
+    ),
+    "tridiagonal-200": _RefAnalyze(
+        n=200,
+        head=[199, 198, 197, 196, 195, 194, 193, 192],
+        perm_sha="5385aa30ea848768",
+        colcount_sha="643b7fb9515a8a78",
+        lnz=399.0,
+        fl=797.0,
+        anz=399.0,
+        default_ordering=2,  # 2 = AMD, 3 = METIS
+    ),
+    "diagonal-32": _RefAnalyze(
+        n=32,
+        head=[0, 1, 2, 3, 4, 5, 6, 7],
+        perm_sha="bcc9bcfc670935c6",
+        colcount_sha="6ba64591dc5d5fa6",
+        lnz=32.0,
+        fl=32.0,
+        anz=32.0,
+        default_ordering=2,  # 2 = AMD, 3 = METIS
+    ),
+    "kron-duplicate-rows-120": _RefAnalyze(
+        n=120,
+        head=[52, 53, 54, 55, 84, 85, 86, 87],
+        perm_sha="dca8001383725e4e",
+        colcount_sha="5ee6d99e18ede87a",
+        lnz=6544.0,
+        fl=451344.0,
+        anz=5350.0,
+        default_ordering=2,  # 2 = AMD, 3 = METIS
+    ),
+    "laplacian3d-23": _RefAnalyze(
+        n=12167,
+        head=[8750, 5416, 8562, 7968, 7990, 7460, 5852, 6382],
+        perm_sha="a2311e8879e91519",
+        colcount_sha="397ac515c1b90c0b",
+        lnz=1523945.0,
+        fl=716240133.0,
+        anz=47081.0,
+        default_ordering=2,  # 2 = AMD, 3 = METIS
+    ),
+    "laplacian3d-24": _RefAnalyze(
+        n=13824,
+        head=[4932, 3205, 6759, 6757, 7357, 7359, 6230, 6782],
+        perm_sha="8f5d6ea77ecb78fc",
+        colcount_sha="c7bfdc80bb3737c4",
+        lnz=1874559.0,
+        fl=969172461.0,
+        anz=53568.0,
+        default_ordering=3,  # 2 = AMD, 3 = METIS
+    ),
+}
+
+
+def laplacian3d(m: int) -> sp.csc_array:
+    """7-point Laplacian on an ``m**3`` grid — the shape where nested
+    dissection beats minimum degree, and the only one in this file that makes
+    CHOLMOD's default strategy go past AMD."""
+    n = m * m * m
+    idx = np.arange(n).reshape(m, m, m)
+    r: list[np.ndarray] = []
+    c: list[np.ndarray] = []
+    for ax in range(3):
+        a = np.take(idx, range(m - 1), axis=ax).ravel()
+        b = np.take(idx, range(1, m), axis=ax).ravel()
+        r += [a, b]
+        c += [b, a]
+    rr = np.concatenate(r + [np.arange(n)])
+    cc = np.concatenate(c + [np.arange(n)])
+    v = np.concatenate([-np.ones(len(rr) - n), np.full(n, 7.0)])
+    return sp.csc_array(sp.coo_array((v, (rr, cc)), shape=(n, n)).tocsc())
+
+
+ANALYZE_CORPUS = CORPUS + [
+    ("laplacian3d-23", laplacian3d(23)),
+    ("laplacian3d-24", laplacian3d(24)),
+]
+
+
+def analyze(M, stype: int = 1, **kw):
+    M = sp.csc_array(M)
+    tri = sp.triu(M) if stype > 0 else sp.tril(M)
+    T = sp.csc_array(tri.tocsc())
+    return _rs.analyze(
+        T.shape[0], T.indptr.astype(np.int64), T.indices.astype(np.int64), stype, **kw
+    )
+
+
+@pytest.mark.parametrize("name,M", ANALYZE_CORPUS, ids=[n for n, _ in ANALYZE_CORPUS])
+@pytest.mark.parametrize("stype", [1, -1])
+def test_analyze_matches_cholmod(name, M, stype):
+    """``Perm`` and the per-column nnz of ``L``, bit-exact to CHOLMOD.
+
+    ``stype`` picks which triangle is passed, not which matrix it is, so both
+    readings have to give the same analysis.
+    """
+    ref = REF_ANALYZE[name]
+    got = analyze(M, stype=stype)
+    perm = np.asarray(got["perm"])
+    colcount = np.asarray(got["colcount"])
+
+    assert perm.shape == (ref.n,)
+    np.testing.assert_array_equal(np.sort(perm), np.arange(ref.n))
+    np.testing.assert_array_equal(perm[: len(ref.head)], ref.head)
+    assert hashlib.sha256(perm.tobytes()).hexdigest()[:16] == ref.perm_sha
+    assert hashlib.sha256(colcount.tobytes()).hexdigest()[:16] == ref.colcount_sha
+
+    # Common->lnz, ->fl and ->anz as cholmod_rowcolcounts leaves them: the
+    # exact counts, not AMD's upper bounds
+    assert got["lnz"] == ref.lnz
+    assert got["fl"] == ref.fl
+    assert got["anz"] == ref.anz
+
+
+@pytest.mark.parametrize("name,M", ANALYZE_CORPUS, ids=[n for n, _ in ANALYZE_CORPUS])
+def test_analyze_lnz_and_fl_are_the_column_count_moments(name, M):
+    """``cholmod_rowcolcounts.c:517-524`` — ``lnz`` is the sum of the column
+    counts and ``fl`` the sum of their squares. Both are read back by
+    ``cholmod_analyze``: ``fl/lnz`` is what picks supernodal over simplicial."""
+    got = analyze(M)
+    cc = np.asarray(got["colcount"], dtype=np.float64)
+    assert got["lnz"] == cc.sum()
+    assert got["fl"] == (cc * cc).sum()
+
+
+@pytest.mark.parametrize("name,M", ANALYZE_CORPUS, ids=[n for n, _ in ANALYZE_CORPUS])
+def test_analyze_leaves_a_postordered_tree(name, M):
+    """After the composition every node's parent is above it and each column of
+    ``L`` fits below the diagonal. A left-to-right numeric sweep depends on
+    both, so a composition that permuted ``Lparent`` inconsistently with
+    ``Lperm`` would show up here."""
+    got = analyze(M)
+    parent = np.asarray(got["parent"])
+    cc = np.asarray(got["colcount"])
+    n = len(parent)
+    j = np.arange(n)
+    assert np.all((parent == -1) | (parent > j)), f"{name}: parent points down"
+    assert np.all(parent < n)
+    assert np.all(cc >= 1) and np.all(cc <= n - j)
+
+
+@pytest.mark.parametrize("name,M", ANALYZE_CORPUS, ids=[n for n, _ in ANALYZE_CORPUS])
+def test_analyze_natural_ordering_is_the_weighted_postorder(name, M):
+    """With no fill-reducing ordering the composition has nothing to compose
+    with, so ``Lperm`` is the weighted postorder itself — which is why upstream
+    relabels the result ``CHOLMOD_POSTORDERED`` (``cholmod_analyze.c:875-878``)
+    rather than leaving it ``CHOLMOD_NATURAL``."""
+    got = analyze(M, ordering="natural", default_strategy=False)
+    np.testing.assert_array_equal(got["perm"], got["post"])
+    assert got["ordering"] == "postordered"
+    assert got["metis_would_be_tried"] is False
+
+
+def test_analyze_composition_actually_moves_the_amd_ordering():
+    """Guard against the weighted postorder degenerating into a no-op and this
+    file testing nothing. It *is* the identity on banded/tridiagonal/arrow
+    shapes — that is why AMD-level values must not be pinned from ``F.perm``
+    (see the module docstring) — so require a corpus matrix where it is not."""
+    moved = [
+        name
+        for name, M in ANALYZE_CORPUS
+        if not np.array_equal(analyze(M)["perm"], amd_order(M)[0])
+    ]
+    assert moved, "the weighted postorder was the identity on every matrix"
+
+
+@pytest.mark.parametrize("name,M", ANALYZE_CORPUS, ids=[n for n, _ in ANALYZE_CORPUS])
+def test_analyze_reports_when_cholmod_would_try_metis(name, M):
+    """The one place this port can diverge from a CHOLMOD built with the
+    Partition module, reported rather than hidden.
+
+    With ``Common->nmethods == 0`` upstream runs AMD and then breaks out of the
+    method loop if ``fl < 500*lnz`` or ``lnz < 5*anz`` on AMD's own estimates
+    (``cholmod_analyze.c:767-781``). When it breaks, METIS is never called and
+    this port's answer is CHOLMOD's by construction. When it does not, METIS is
+    tried and may win. ``laplacian3d-24`` is the case where it does: CHOLMOD
+    selects METIS there and gets nnz(L) 1.87M against AMD's 2.30M, while
+    ``laplacian3d-23``, one grid step smaller, still breaks out.
+    """
+    ref = REF_ANALYZE[name]
+    got = analyze(M)
+    assert got["ordering"] == "amd"
+    assert got["metis_would_be_tried"] == (ref.default_ordering != 2)
+
+    fl, lnz, anz = got["amd_fl"], got["amd_lnz"], got["amd_anz"]
+    assert got["metis_would_be_tried"] == (not (fl < 500 * lnz or lnz < 5 * anz))
+
+
+@pytest.mark.parametrize("name,M", ANALYZE_CORPUS, ids=[n for n, _ in ANALYZE_CORPUS])
+def test_analyze_agrees_with_scikit_sparse(name, M):
+    """The same claim as ``test_analyze_matches_cholmod``, against a live
+    CHOLMOD rather than pinned literals — so a stale pin cannot pass both.
+    ``order="amd"`` pins the method, because the default strategy tries METIS
+    on ``laplacian3d-24`` and this port has no METIS."""
+    cholmod = pytest.importorskip("sksparse.cholmod")
+    got = analyze(M)
+    F = cholmod.cho_factor(sp.csc_array(M), order="amd")
+    np.testing.assert_array_equal(got["perm"], np.asarray(F.perm))
+    np.testing.assert_array_equal(got["colcount"], np.diff(F.L.tocsc().indptr))
+
+
+def test_analyze_empty_and_singleton():
+    for arr in ("perm", "colcount", "parent", "post"):
+        assert np.asarray(analyze(sp.csc_array((0, 0)))[arr]).shape == (0,)
+    got = analyze(sp.csc_array(sp.eye_array(1)))
+    np.testing.assert_array_equal(got["perm"], [0])
+    np.testing.assert_array_equal(got["colcount"], [1])
+    np.testing.assert_array_equal(got["parent"], [-1])
+
+
+def test_analyze_rejects_bad_input():
+    """Same precondition as ``amd_order``'s, on the same grounds — plus the
+    ``stype == 0`` case, which is a real ``cholmod_analyze`` mode (``LL' =
+    AA'``) that this port does not implement and must not silently mis-answer."""
+    M = sp.csc_array(sp.eye_array(5).tocsc())
+    indptr = M.indptr.astype(np.int64)
+    indices = M.indices.astype(np.int64)
+
+    with pytest.raises(ValueError, match="stype must be nonzero"):
+        _rs.analyze(5, indptr, indices, 0)
+    with pytest.raises(ValueError, match="ordering must be"):
+        _rs.analyze(5, indptr, indices, 1, "metis")
+    with pytest.raises(ValueError, match="indptr has length"):
+        _rs.analyze(6, indptr, indices, 1)
+
+    bad = indices.copy()
+    bad[0] = 99
+    with pytest.raises(ValueError, match="out of range"):
+        _rs.analyze(5, indptr, bad, 1)
+    bad = indptr.copy()
+    bad[2] = 0
+    with pytest.raises(ValueError, match="non-decreasing"):
+        _rs.analyze(5, bad, indices, 1)
