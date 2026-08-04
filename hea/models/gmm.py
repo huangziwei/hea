@@ -81,6 +81,12 @@ __all__ = ["gmm", "Profile"]
 #   * ``half_log_det()`` — ``½·log|det M|``
 #   * ``L`` — sparse Cholesky factor. sksparse returns it directly; the
 #     splu fallback computes via dense Cholesky on first access.
+#   * ``P`` — the fill-reducing permutation ``p`` behind that factor, so that
+#     ``L Lᵀ == M[p][:, p]``. Needed by every consumer that solves against
+#     ``L`` directly rather than through ``solve()``: CHOLMOD's ``L`` is in
+#     the permuted ordering, so ``L⁻ᵀL⁻¹ = P M⁻¹ Pᵀ ≠ M⁻¹`` whenever
+#     ``p != arange(q)``. The splu fallback factors ``M`` itself, so ``p``
+#     is the identity there.
 # ---------------------------------------------------------------------------
 
 try:
@@ -129,6 +135,10 @@ class _SksparseFactor:
     def L(self):
         return self._F.L
 
+    @property
+    def P(self) -> np.ndarray:
+        return np.asarray(self._F.perm, dtype=np.intp)
+
 
 class _SpluFactor:
     """``scipy.sparse.linalg.splu`` fallback — sparse LU on SPD matrices."""
@@ -172,6 +182,12 @@ class _SpluFactor:
             L_dense = _scipy_cholesky(M_dense, lower=True)
             self._L_cache = csc_array(L_dense)
         return self._L_cache
+
+    @property
+    def P(self) -> np.ndarray:
+        # ``L`` above is the Cholesky of ``M`` itself, not of a permuted
+        # copy, so the permutation this factor's ``L`` lives in is trivial.
+        return np.arange(self._M.shape[0], dtype=np.intp)
 
 
 _SKSPARSE_WARNED = False
@@ -5771,13 +5787,18 @@ class gmm:
             self._chol_factor.factorize(M)
         F = self._chol_factor
 
-        # Snapshot Λ and L at the MLE as dense ndarrays (matches m.Z's
-        # convention). profile()/_ranef() re-factorize _chol_factor at
-        # non-MLE θ, so freezing copies here detaches us from those.
-        # L is in CHOLMOD's permuted ordering — lower triangular by
+        # Snapshot Λ and L at the MLE. profile()/_ranef() re-factorize
+        # _chol_factor at non-MLE θ, so freezing copies here detaches us from
+        # those. L is in CHOLMOD's permuted ordering — lower triangular by
         # construction; that's also the ordering Bates' Fig 2.4 shows.
+        # ``_L_perm`` is that ordering, needed by anything that solves
+        # against ``L`` directly (``L Lᵀ == M[p][:, p]``). L stays sparse,
+        # as lme4's ``getME("L")`` (a ``dCHMsimpl``) does: it is banded for
+        # scalar bars, so a dense q×q snapshot is quadratic in q for a
+        # linear amount of data.
         self.Lambda = Lt.T.toarray()
-        self.L = F.L.toarray()
+        self.L = csc_array(F.L)
+        self._L_perm = F.P
 
         # Use the offset-stripped response so this final β̂/û recompute is
         # consistent with the cached Xty/yty the optimizer ran on.
@@ -6287,9 +6308,10 @@ class gmm:
 
         # Snapshot Λ and L at θ̂ — same shapes as the Gaussian path so
         # downstream code (profile/ranef/plot_design) works unchanged.
-        # ``Lambda`` is dense q×q; ``L`` is the lower CHOLMOD factor.
+        # ``Lambda`` is dense q×q; ``L`` is the sparse lower CHOLMOD factor.
         self.Lambda = pred.lambdat_sp.T.toarray()
-        self.L = pred.chol_factor.L.toarray()
+        self.L = csc_array(pred.chol_factor.L)
+        self._L_perm = pred.chol_factor.P
         # ``_u`` = spherical RE at the converged state. ``pred.beta0`` and
         # ``pred.u0`` are still zero (lme4 never installPars during the
         # outer loop), so u(1) = delu.
@@ -9085,7 +9107,8 @@ class gmm:
         if name == "Lambdat":
             return np.asarray(self.Lambda, dtype=float).T
         if name == "L":
-            return np.asarray(self.L, dtype=float)
+            # sparse, as lme4's dCHMsimpl is
+            return csc_array(self.L)
         if name == "sigma":
             return float(self.sigma)
         if name == "lower":
@@ -9215,10 +9238,42 @@ class gmm:
             out.append((key, mm))
         return out
 
+    def _L_dense(self) -> np.ndarray:
+        """``self.L`` as a dense lower-triangular array.
+
+        The snapshot is kept sparse (``getME("L")``'s contract, and q×q dense
+        is quadratic for a banded factor), but the two consumers that solve
+        against it want LAPACK's ``dtrsm``: both produce a dense q×n / q×p
+        result anyway, so densifying here costs nothing they weren't already
+        paying, and it keeps the summation order identical to lme4's."""
+        L = self.L
+        return np.asarray(L.toarray() if hasattr(L, "toarray") else L, dtype=float)
+
+    def _apply_L_perm(self, B: np.ndarray) -> np.ndarray:
+        """``P·B`` — CHOLMOD's ``solve(L, B, system="P")``.
+
+        ``self.L`` is the factor of the *permuted* matrix, ``L Lᵀ = P M Pᵀ``,
+        so a forward solve against it is only ``M``'s factor once the
+        right-hand side has been permuted into the same ordering. lme4
+        applies this as the inner half of ``solve(L, solve(L, ., system="P"),
+        system="L")`` (``lme4:::hatvalues.merMod``). ``P`` is the identity for
+        the splu fallback and for models whose AMD ordering happens to be
+        trivial, so this is a no-op exactly when it should be."""
+        p = getattr(self, "_L_perm", None)
+        if p is None:
+            return B
+        p = np.asarray(p, dtype=np.intp)
+        if p.shape[0] != B.shape[0]:
+            raise ValueError(
+                f"Cholesky permutation has length {p.shape[0]}, "
+                f"right-hand side has {B.shape[0]} rows"
+            )
+        return B[p]
+
     def _getme_rx_rzx(self):
         """``RX`` (``p×p`` upper-tri fixed-effect Cholesky, basis-invariant —
-        matches lme4) and ``RZX`` (``q×p`` cross factor ``L⁻¹(ZΛ)ᵀX`` in hea's
-        Cholesky basis; ``RXᵀRX + RZXᵀRZX = XᵀX``). LMM path only."""
+        matches lme4) and ``RZX`` (``q×p`` cross factor ``L⁻¹P(ZΛ)ᵀX``;
+        ``RXᵀRX + RZXᵀRZX = XᵀX``). LMM path only."""
         if not hasattr(self, "_X_solve"):
             raise ValueError(
                 "getME('RX'/'RZX') is currently implemented for the LMM (lmer) "
@@ -9226,7 +9281,7 @@ class gmm:
             )
         ZL = self._Z_sp_solve @ self.Lambda
         ZLtX = np.asarray(ZL.T @ self._X_solve)
-        RZX = solve_triangular(self.L, ZLtX, lower=True)
+        RZX = solve_triangular(self._L_dense(), self._apply_L_perm(ZLtX), lower=True)
         XtX_eff = self._XtX - RZX.T @ RZX
         RX = np.linalg.cholesky(XtX_eff).T  # upper-tri (lme4 RX)
         return RX, RZX
@@ -9234,7 +9289,7 @@ class gmm:
     def _getme_devcomp(self) -> dict:
         """``devcomp`` — lme4's deviance-component list (``cmp`` + ``dims``)."""
         n, p, q = int(self.n), int(self.p), int(self.q)
-        ldL2 = 2.0 * float(np.log(np.abs(np.diag(self.L))).sum())
+        ldL2 = 2.0 * float(np.log(np.abs(self.L.diagonal())).sum())
         RX, _ = self._getme_rx_rzx() if hasattr(self, "_X_solve") else (None, None)
         ldRX2 = (
             2.0 * float(np.log(np.abs(np.diag(RX))).sum())
@@ -9391,7 +9446,9 @@ class gmm:
             )
         ZLt = np.asarray(self._Z_sp_solve @ self.Lambda).T  # Λᵀ Zᵀ√W (q×n)
         Xs = np.asarray(self._X_solve, dtype=float)  # √W X (n×p)
-        CL = solve_triangular(self.L, ZLt, lower=True)  # q×n
+        CL = solve_triangular(
+            self._L_dense(), self._apply_L_perm(ZLt), lower=True
+        )  # q×n
         RX, RZX = self._getme_rx_rzx()
         CR = solve_triangular(RX.T, Xs.T - RZX.T @ CL, lower=True)  # p×n
         if fullHatMatrix:
@@ -9593,6 +9650,7 @@ class gmm:
         )
 
         def _show(ax, M, *, aspect=None):
+            M = M.toarray() if hasattr(M, "toarray") else M
             vmax = float(np.abs(M).max() or 1.0)
             norm = PowerNorm(gamma=gamma, vmin=0.0, vmax=vmax)
             kwargs = {"cmap": cmap, "interpolation": "nearest", "norm": norm}

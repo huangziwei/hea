@@ -1708,6 +1708,95 @@ def test_influence_family_matches_lme4(sleepstudy_data):
     np.testing.assert_allclose(R.cooks_distance(infg), infg.cooks_distance())
 
 
+def test_chol_permutation_is_applied_before_triangular_solves(fm04ML):
+    """``L`` factors the *permuted* ``M`` (``L Lᵀ = M[p][:, p]``), so every
+    consumer that solves against ``L`` directly must permute its right-hand
+    side first — lme4's ``solve(L, solve(L, ., system="P"), system="L")``.
+
+    ``Pastes`` is the detector: its AMD ordering genuinely reorders ``M``, so
+    dropping the permutation makes ``XᵀX − RZXᵀRZX`` indefinite and the ``RX``
+    Cholesky fails outright. ``Penicillin``'s ordering is an automorphism of
+    ``M`` (``M[p][:, p] == M`` exactly) and ``sleepstudy``/``Dyestuff`` order
+    to the identity, so none of those three can see the difference.
+    """
+    from scipy.linalg import solve_triangular
+
+    p = np.asarray(fm04ML._L_perm)
+    L = fm04ML._L_dense()
+    q = L.shape[0]
+
+    # This model is a real detector, not a P == I / automorphism freebie.
+    assert not np.array_equal(p, np.arange(q))
+    M_perm = L @ L.T  # P M Pᵀ
+    M = np.empty_like(M_perm)
+    M[np.ix_(p, p)] = M_perm
+    assert np.abs(M_perm - M).max() > 1.0
+
+    # lme4 2.0.1 / Matrix 1.7-5:
+    #   fm <- lmer(strength ~ 1 + (1|sample) + (1|batch), Pastes, REML=FALSE)
+    h = fm04ML.hatvalues()
+    np.testing.assert_allclose(h[:4], [0.483008256986] * 4, atol=1e-6)
+    np.testing.assert_allclose(h.sum(), 28.9804954191, atol=1e-6)
+    RX, RZX = fm04ML._getme_rx_rzx()
+    # RZX is in CHOLMOD's ordering, so this pin is permutation-sensitive
+    # elementwise — an invariant like RXᵀRX + RZXᵀRZX = XᵀX is not, and holds
+    # by construction here whether or not the permutation was applied.
+    np.testing.assert_allclose(RZX[:3, 0], [1.38661956586] * 3, atol=1e-6)
+    np.testing.assert_allclose((RZX**2).sum(), 58.3557147663, atol=1e-6)
+    np.testing.assert_allclose(RX.ravel(), [1.28229685866], atol=1e-6)
+    cmp = fm04ML.getME("devcomp")["cmp"]
+    np.testing.assert_allclose(cmp["ldL2"], 101.038133994, atol=1e-6)
+    np.testing.assert_allclose(cmp["ldRX2"], 0.497305781419, atol=1e-6)
+    np.testing.assert_allclose(
+        fm04ML.cooks_distance()[:4],
+        [0.0838821144297, 0.00136121670933, 3.11212355395, 3.34006765633],
+        atol=1e-6,
+    )
+
+    # Without the permutation the Schur complement is not positive definite —
+    # the pre-fix failure mode, pinned so a silent regression can't pass.
+    ZLtX = np.asarray((fm04ML._Z_sp_solve @ fm04ML.Lambda).T @ fm04ML._X_solve)
+    RZX_bad = solve_triangular(L, ZLtX, lower=True)
+    with pytest.raises(np.linalg.LinAlgError):
+        np.linalg.cholesky(fm04ML._XtX - RZX_bad.T @ RZX_bad)
+
+
+def test_L_snapshot_stays_sparse(fm04ML, fm06ML):
+    """``L`` is kept sparse — ``getME("L")``'s lme4 counterpart is a sparse
+    ``dCHMsimpl``, and the factor of a scalar-bar model is banded, so a dense
+    q×q snapshot grows quadratically for a linear amount of data (at q=4000 it
+    is 122 MB of array holding 6000 nonzeros)."""
+    from scipy.sparse import issparse
+
+    for fm in (fm04ML, fm06ML):
+        assert issparse(fm.L)
+        assert issparse(fm.getME("L"))
+        assert fm.L.shape == (fm.q, fm.q)
+        assert fm.L.nnz < fm.q * fm.q
+        Ld = fm._L_dense()
+        assert Ld.shape == (fm.q, fm.q)
+        # lower triangular, and it factors the permuted M
+        np.testing.assert_array_equal(np.triu(Ld, 1), 0.0)
+        np.testing.assert_allclose(np.abs(Ld).sum(), np.abs(fm.L).sum())
+
+
+def test_splu_fallback_reports_identity_permutation():
+    """The splu fallback factors ``M`` itself rather than a permuted copy, so
+    its ``P`` must be the identity — otherwise ``_apply_L_perm`` would scramble
+    right-hand sides on the no-SuiteSparse path."""
+    from scipy.sparse import csc_array
+
+    from hea.models.gmm import _SpluFactor
+
+    rng = np.random.default_rng(0)
+    A = rng.standard_normal((8, 8))
+    M = csc_array(A @ A.T + 8.0 * np.eye(8))
+    F = _SpluFactor(M)
+    np.testing.assert_array_equal(F.P, np.arange(8))
+    Ld = F.L.toarray()
+    np.testing.assert_allclose(Ld @ Ld.T, M.toarray(), atol=1e-10)
+
+
 def test_lmer_rejects_glmer_keys_and_wires_optinfo(sleepstudy_data):
     """#6 remainder: lmerControl() rejects glmer-only inner-loop keys; the LMM
     fit now populates m.optinfo via calc.derivs (the post-fit gradient/Hessian
