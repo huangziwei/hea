@@ -1,6 +1,6 @@
 [package]
 name = "hea-rs"
-version = "0.1.5"
+version = "0.1.8"
 edition = "2021"
 description = "Bit-exact, vectorized Rust ports of hea's R-parity numeric kernels"
 license = "GPL-3.0-or-later"

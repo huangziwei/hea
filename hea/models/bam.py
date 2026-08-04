@@ -132,6 +132,10 @@ __all__ = ["bam"]
 # ``None`` when the extension is unavailable — the numpy oracle then runs.
 _rs_xwx_smooth_block = rs_fn("xwx_smooth_block")
 
+# Rust accelerator for the weighted bin accumulation (mgcv discrete.c:1786/327).
+# ``None`` when unavailable — :func:`_bin_accum` then falls back to np.bincount.
+_rs_bin_accum = rs_fn("bin_accum")
+
 # Rust accelerator for ``rwMatrix`` (mgcv misc.c:710-748) — the AR1 row-recombine.
 # ``None`` when unavailable — :func:`_rw_matrix` then runs the numpy fallback.
 _rs_rw_matrix = rs_fn("rw_matrix")
@@ -7753,7 +7757,13 @@ def discrete_mf(
 
     # Bookkeeping. ``k`` will grow with extra columns when matrix-arg
     # smooths are encountered (each matrix column becomes one ``k`` column).
-    k = np.zeros((n, nk), dtype=np.int64)
+    #
+    # Column-major, as mgcv's ``kd`` is: every kernel reads whole index
+    # COLUMNS (``Ki = k + (ks[im]+s)*n``, discrete.c:1838) and never a row, so
+    # F order makes each ``k[:, q]`` a contiguous view. In C order it is a
+    # strided slice that every consumer has to copy — ~0.9 MB per access at
+    # n = 110k, several times per block.
+    k = np.zeros((n, nk), dtype=np.int64, order="F")
     ks = np.full((nk, 2), -1, dtype=np.int64)
     nr = np.zeros(nk, dtype=np.int64)
     var_order: list[str] = []
@@ -7942,7 +7952,8 @@ def discrete_mf(
         # k was extended for matrix args; ensure size matches.
         pass
     # Append the intercept column (all 0 → unique row 0 = the constant 1).
-    k = np.concatenate([k, np.zeros((n, 1), dtype=np.int64)], axis=1)
+    # ``asfortranarray`` because concatenate returns C order regardless.
+    k = np.asfortranarray(np.concatenate([k, np.zeros((n, 1), dtype=np.int64)], axis=1))
     ks_final = np.concatenate(
         [ks[:ik], np.array([[k.shape[1] - 1, k.shape[1]]], dtype=np.int64)],
         axis=0,
@@ -8195,6 +8206,30 @@ def _append_smooth_discrete_term(
     # as the authoritative post-transform width.
     p_term = block.X.shape[1]
 
+    # Deliberate deviation from mgcv: the marginal goes in RAW and the
+    # constraint stays post-hoc (:func:`_term_constraint_T`).
+    #
+    # mgcv folds it. For a non-tensor smooth bam.r:2523-2531 stores
+    # `G$X[,first.para:last.para]` — the already-centred basis — and sets
+    # `v[[kb]] <- rep(0,0)`, `qc[kb] <- 0`; only tensor margins go in raw with
+    # the constraint deferred to `v`/`qc` (:2505-2515). Folding is exact
+    # (gathering commutes with the linear column map: `Xd_raw[K,:] @ T ==
+    # (Xd_raw @ T)[K,:]`) and shrinks every kernel — `s(x,k=10)` becomes a
+    # 9-column marginal instead of 10, and the `T_i' B_raw T_j` sandwich in
+    # XWXd/XWyd disappears. Measured: XWXd 5.19 → 4.71 ms on a 4-smooth
+    # n=110k fit.
+    #
+    # It is NOT applied because it triples the outer iteration count on the
+    # factor-`by` Poisson fit in dev/emsyns: `_build_qr_discrete_pirls` runs
+    # 36 → 121 times at n=438k, so the fit goes 6.8 → 17.6 s despite each
+    # iteration being ~2x faster. Both spellings are numerically right (same
+    # deviance to 1e-12, same sp to 3e-6) — folding merely reassociates the
+    # rounding, and this fit is sensitive enough to it to take a different
+    # fREML path. That sensitivity is a lead about hea's outer loop, not a
+    # property of the fold, and it is NOT yet traced: see the memory note
+    # `discrete-kernel-perf`. Re-enable only alongside a fix for it, and
+    # re-run dev/emsyns/bench.py at reps=16 before believing a win.
+
     # by= is the FIRST marginal of the term (mgcv discrete.mf:261-269 +
     # fit-side bam.r:2469-2483): an ``m_by × 1`` basis — the discretised
     # unique by-values (numeric) or a factor-level indicator
@@ -8436,9 +8471,9 @@ def _term_Xty_raw(
         Xd = term.Xd_list[0]
         m = Xd.shape[0]
         ks_lo, ks_hi = term.k_cols[0]
-        temp = np.bincount(k[:, ks_lo], weights=wy, minlength=m)
+        temp = _bin_accum(k[:, ks_lo], wy, m)
         for q in range(ks_lo + 1, ks_hi):
-            temp += np.bincount(k[:, q], weights=wy, minlength=m)
+            temp += _bin_accum(k[:, q], wy, m)
         return Xd.T @ temp
 
     return _tensor_Xty_raw(term, wy, k, n)
@@ -8482,7 +8517,7 @@ def _tensor_Xty_raw(
                 div //= Xd_list[j].shape[1]
                 col, jp = divmod(jp, div)
                 work = work * Xd_list[j][k[:, term.k_cols[j][0] + q], col]
-            temp = np.bincount(k[:, ks_final + q], weights=work, minlength=m_final)
+            temp = _bin_accum(k[:, ks_final + q], work, m_final)
             Xy[i * pd : (i + 1) * pd] += M_final.T @ temp
     return Xy
 
@@ -8526,6 +8561,29 @@ _XWX_DENSE_MSIZE_CAP = 4_000_000
 # Empty ``woff`` sentinel for the rust ``xwx_smooth_block`` kernel: non-AR1 blocks
 # pass it to signal the plain ``diag(w)`` weight (no tridiagonal super/sub).
 _XWX_EMPTY_F64 = np.empty(0, dtype=float)
+
+
+def _bin_accum(
+    kcol: np.ndarray, v: np.ndarray, m: int, u: Optional[np.ndarray] = None
+) -> np.ndarray:
+    """``wb[K[row]] += v[row]`` (times ``u[row]`` when given), the weighted bin
+    accumulation mgcv writes as a plain loop (``wb[K[kk]] += w[kk]``,
+    discrete.c:1786; ``singleXty``, :327).
+
+    The rust kernel fuses the ``v·u`` product into the scatter and skips the
+    per-row bounds check; ``np.bincount`` can do neither, and measured 0.118 ms
+    against 0.04 ms at ``n = 110k``. Falls back to bincount when the extension
+    is unavailable. Both fold rows in ascending order, so the results agree to
+    the last bit.
+    """
+    if _rs_bin_accum is not None:
+        return _rs_bin_accum(
+            np.ascontiguousarray(kcol, dtype=np.int64),
+            np.ascontiguousarray(v, dtype=float),
+            _XWX_EMPTY_F64 if u is None else np.ascontiguousarray(u, dtype=float),
+            m,
+        )
+    return np.bincount(kcol, weights=v if u is None else v * u, minlength=m)
 
 
 def _wbar_contract(
@@ -8716,18 +8774,16 @@ def _smooth_smooth_block(
     use_rust = _rs_xwx_smooth_block is not None and not (
         diag_term and si == 1 and not ar1
     )
-    # A singleton's truncated row-tensor is all ones. Only materialise it for
-    # the paths that actually read it: the numpy spec and the diagonal
-    # shortcut. The rust kernel is told "no tensor" and drops the factor.
-    need_tt = not use_rust
-    TTi = (
-        [_truncated_tensor(ti, s, k, n) for s in range(si)]
-        if (tens_i or need_tt)
-        else []
-    )
+    # A singleton's truncated row-tensor is identically 1, so it is never
+    # materialised — the rust kernel is told "no tensor" and drops the factor,
+    # and the numpy paths below branch on ``tens_i``/``tens_j`` exactly as mgcv
+    # branches on ``dt[i]>1`` (the diagonal shortcut, discrete.c:1783-1787) and
+    # on ``tensi``/``tensj`` (the general case, :1927-1962). Building an
+    # ``(n, 1)`` ones array and multiplying by it is pure loss.
+    TTi = [_truncated_tensor(ti, s, k, n) for s in range(si)] if tens_i else []
     if diag_term:
         TTj = TTi
-    elif tens_j or need_tt:
+    elif tens_j:
         TTj = [_truncated_tensor(tj, t, k, n) for t in range(sj)]
     else:
         TTj = []
@@ -8789,9 +8845,12 @@ def _smooth_smooth_block(
                 # m_im×m_jm table (mgcv simple branch, discrete.c:1742-1792).
                 # (The AR1 ``tri`` super/sub couplings break this — w_off path
                 # routes through the general three-scatter contraction.)
-                wb = np.bincount(
-                    k[:, ks_im], weights=w * TTi[0][:, r] * TTj[0][:, c], minlength=mim
-                )
+                # mgcv splits tensor from singleton here (discrete.c:1783-1787):
+                # a singleton's dXi·dXj is identically 1, so the weight is `w`.
+                if tens_i:
+                    wb = _bin_accum(k[:, ks_im], w * TTi[0][:, r], mim, u=TTj[0][:, c])
+                else:
+                    wb = _bin_accum(k[:, ks_im], w, mim)
                 sub = (Xim * wb[:, None]).T @ Xjm
             else:
                 Ki_list = []
@@ -8799,22 +8858,32 @@ def _smooth_smooth_block(
                 vals_list = []
                 for s in range(si):
                     Ki = Ki_all[s]
-                    dXi = TTi[s][:, r]
+                    dXi = TTi[s][:, r] if tens_i else None
                     for t in range(sj):
                         Kj = Kj_all[t]
-                        dXj = TTj[t][:, c]
+                        dXj = TTj[t][:, c] if tens_j else None
                         Ki_list.append(Ki)
                         Kj_list.append(Kj)
-                        vals_list.append(w * dXi * dXj)
+                        # mgcv's four (tensi, tensj) branches (:1927-1962)
+                        if dXi is None and dXj is None:
+                            vals_list.append(w)
+                        elif dXj is None:
+                            vals_list.append(w * dXi)
+                        elif dXi is None:
+                            vals_list.append(w * dXj)
+                        else:
+                            vals_list.append(w * dXi * dXj)
                         if w_off is not None:
                             # super: (K_i[l], K_j[l+1]) += w_off·dXi[l]·dXj[l+1]
                             Ki_list.append(Ki[:-1])
                             Kj_list.append(Kj[1:])
-                            vals_list.append(w_off * dXi[:-1] * dXj[1:])
+                            v = w_off if dXi is None else w_off * dXi[:-1]
+                            vals_list.append(v if dXj is None else v * dXj[1:])
                             # sub: (K_i[l+1], K_j[l]) += w_off·dXi[l+1]·dXj[l]
                             Ki_list.append(Ki[1:])
                             Kj_list.append(Kj[:-1])
-                            vals_list.append(w_off * dXi[1:] * dXj[:-1])
+                            v = w_off if dXi is None else w_off * dXi[1:]
+                            vals_list.append(v if dXj is None else v * dXj[:-1])
                 sub = _wbar_contract(Ki_list, Kj_list, vals_list, Xim, Xjm)
             block[r * pim : (r + 1) * pim, c * pjm : (c + 1) * pjm] = sub
             if diag_term and c > r:

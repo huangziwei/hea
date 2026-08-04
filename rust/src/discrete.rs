@@ -63,6 +63,33 @@ struct Acc<'a> {
     tri: bool,
 }
 
+impl<'a> Acc<'a> {
+    /// Term i's `s`th index row and its `r`th truncated row-tensor column
+    /// (empty ⇒ mgcv `tensi == 0`).
+    #[inline]
+    fn rows_i(&self, s: usize, r: usize) -> (&'a [i64], &'a [f64]) {
+        let n = self.n;
+        let tt = if self.tti.is_empty() {
+            &[][..]
+        } else {
+            &self.tti[(s * self.ndi + r) * n..(s * self.ndi + r) * n + n]
+        };
+        (&self.ki[s * n..s * n + n], tt)
+    }
+
+    /// Term j's `t`th index row and its `c`th truncated row-tensor column.
+    #[inline]
+    fn rows_j(&self, t: usize, c: usize) -> (&'a [i64], &'a [f64]) {
+        let n = self.n;
+        let tt = if self.ttj.is_empty() {
+            &[][..]
+        } else {
+            &self.ttj[(t * self.ndj + c) * n..(t * self.ndj + c) * n + n]
+        };
+        (&self.kj[t * n..t * n + n], tt)
+    }
+}
+
 /// Deposit every W̄ entry the `(r,c)` sub-block needs: the diagonal weight `w`
 /// for every row, plus — when `tri` — the AR1 super/sub couplings `w_off` (mgcv
 /// XWXijs tri branches, discrete.c:1843-1880; super then sub then diag per row
@@ -158,6 +185,188 @@ fn scatter<D: FnMut(usize, usize, f64), W: Fn(usize) -> f64>(
     }
 }
 
+/// mgcv's direct factor accumulation, column-outer / row-inner
+/// (discrete.c:1925-1963 for `C`, :1965-2005 for `D`) — the non-`tri` case.
+///
+/// `fac` is the `m_dst × p` factor in COLUMN-major order and `xsrc` the source
+/// marginal likewise, so the inner loop is exactly mgcv's
+/// `Cq[*Kik] += *p0 * Xj[*Kjk]`: one contiguous `m`-length column of each is
+/// live per pass (8 KB apiece at `m = 1000`), against a row-major layout's
+/// `p`-wide read-modify-write at a random `a` spanning the whole `m·p` array.
+/// Ordering is untouched — for a fixed `(a, q)` the rows still accumulate in
+/// `(s, t, row)`-ascending order — so this is bit-for-bit the row-major result.
+///
+/// `kd`/`ks` are the destination/source index rows, `tt_d`/`tt_s` the
+/// corresponding truncated row-tensor columns (empty ⇒ mgcv `tens* == 0`).
+/// # Safety
+///
+/// Every `kd[row] < m_dst` and `ks_[row] < m_src` for `row < n`, and `w`,
+/// `tt_d`/`tt_s` (when non-empty) are all at least `n` long. `xwx_smooth_block`
+/// establishes this once per call via [`indices_in_range`], before the loop —
+/// the indices are data (bin numbers), so the check cannot be hoisted by the
+/// compiler and would otherwise cost two compare-and-branches per row, per
+/// pass. That is the whole gap against mgcv's C on this loop.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+unsafe fn direct_factor(
+    fac: &mut [f64],
+    xsrc_cm: &[f64],
+    m_dst: usize,
+    m_src: usize,
+    p: usize,
+    n: usize,
+    kd: &[i64],
+    ks_: &[i64],
+    w: &[f64],
+    tt_d: &[f64],
+    tt_s: &[f64],
+) {
+    debug_assert_eq!(fac.len(), m_dst * p);
+    debug_assert_eq!(xsrc_cm.len(), m_src * p);
+    debug_assert!(w.len() >= n);
+    debug_assert!(kd.len() >= n && ks_.len() >= n);
+    let tens_d = !tt_d.is_empty();
+    let tens_s = !tt_s.is_empty();
+    debug_assert!(!tens_d || tt_d.len() >= n);
+    debug_assert!(!tens_s || tt_s.len() >= n);
+    for q in 0..p {
+        let cq = &mut fac[q * m_dst..q * m_dst + m_dst];
+        let xq = &xsrc_cm[q * m_src..q * m_src + m_src];
+        // SAFETY: caller's contract — indices in range, buffers ≥ n.
+        // The four mgcv `(tensi, tensj)` branches, monomorphised: a singleton's
+        // truncated row-tensor is identically 1 and drops out entirely.
+        unsafe {
+            match (tens_d, tens_s) {
+                (true, true) => {
+                    for row in 0..n {
+                        let v = *w.get_unchecked(row)
+                            * *tt_d.get_unchecked(row)
+                            * *tt_s.get_unchecked(row)
+                            * *xq.get_unchecked(*ks_.get_unchecked(row) as usize);
+                        *cq.get_unchecked_mut(*kd.get_unchecked(row) as usize) += v;
+                    }
+                }
+                (true, false) => {
+                    for row in 0..n {
+                        let v = *w.get_unchecked(row)
+                            * *tt_d.get_unchecked(row)
+                            * *xq.get_unchecked(*ks_.get_unchecked(row) as usize);
+                        *cq.get_unchecked_mut(*kd.get_unchecked(row) as usize) += v;
+                    }
+                }
+                (false, true) => {
+                    for row in 0..n {
+                        let v = *w.get_unchecked(row)
+                            * *tt_s.get_unchecked(row)
+                            * *xq.get_unchecked(*ks_.get_unchecked(row) as usize);
+                        *cq.get_unchecked_mut(*kd.get_unchecked(row) as usize) += v;
+                    }
+                }
+                (false, false) => {
+                    for row in 0..n {
+                        let v = *w.get_unchecked(row)
+                            * *xq.get_unchecked(*ks_.get_unchecked(row) as usize);
+                        *cq.get_unchecked_mut(*kd.get_unchecked(row) as usize) += v;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// True when every entry of `idx` is in `0..m` — the one-shot bounds proof for
+/// [`direct_factor`]. Vacuously true for an empty row (a term with no summation
+/// sets contributes no rows to scan).
+fn indices_in_range(idx: &[i64], m: usize) -> bool {
+    let hi = m as i64;
+    idx.iter().all(|&v| v >= 0 && v < hi)
+}
+
+/// Borrow a C-contiguous numpy buffer, copying only if it is not (the caller
+/// passes `np.ascontiguousarray`, so the copy is a correctness fallback, never
+/// the hot path).
+///
+/// This is not a micro-optimisation: `ki`/`kj`/`w` are `n`-long, so eagerly
+/// collecting them cost ~2.6 MB of copying per block at `n = 110k` — measured
+/// at 0.53 ms of the 0.99 ms a block took, i.e. more than the arithmetic. mgcv
+/// reads `k` and `w` straight out of the caller's arrays (`Ki = k + (ks[im]+s)*n`),
+/// and so must this.
+macro_rules! borrow_flat {
+    ($arr:expr, $ty:ty) => {
+        match $arr.as_slice() {
+            Ok(s) => std::borrow::Cow::Borrowed(s),
+            Err(_) => {
+                std::borrow::Cow::Owned($arr.as_array().iter().copied().collect::<Vec<$ty>>())
+            }
+        }
+    };
+}
+
+/// `wb[K[row]] += v[row]` (or `+= v[row]·u[row]`) in one fused pass — mgcv's
+/// weighted bin accumulation, used by the `XWXijs` simple diagonal branch
+/// (`wb[K[kk]] += w[kk]`, discrete.c:1786) and by `singleXty` (:327).
+///
+/// The numpy spelling is `np.bincount(K, weights=v, minlength=m)`, which costs
+/// 0.118 ms at `n = 110k` against 0.04 ms here: bincount cannot fuse the `v·u`
+/// product (forcing an `n`-long temporary) and pays a bounds check per row that
+/// the one-shot [`indices_in_range`] proof removes.
+#[pyfunction]
+#[pyo3(name = "bin_accum")]
+fn bin_accum<'py>(
+    py: Python<'py>,
+    k: PyReadonlyArray1<'py, i64>,
+    v: PyReadonlyArray1<'py, f64>,
+    u: PyReadonlyArray1<'py, f64>,
+    m: usize,
+) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
+    let k_f = borrow_flat!(k, i64);
+    let v_f = borrow_flat!(v, f64);
+    let u_f = borrow_flat!(u, f64);
+    let n = k_f.len();
+    if v_f.len() < n || (!u_f.is_empty() && u_f.len() < n) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "bin_accum: weight arrays shorter than the index array",
+        ));
+    }
+    if !indices_in_range(&k_f, m) {
+        return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+            "bin_accum: index out of range for {m} bins"
+        )));
+    }
+    let out = py.allow_threads(|| {
+        let mut wb = vec![0.0f64; m];
+        // SAFETY: `indices_in_range` proved every k < m, and the length check
+        // above covers v/u. Accumulation stays row-ascending, as in mgcv.
+        unsafe {
+            if u_f.is_empty() {
+                for row in 0..n {
+                    *wb.get_unchecked_mut(*k_f.get_unchecked(row) as usize) +=
+                        *v_f.get_unchecked(row);
+                }
+            } else {
+                for row in 0..n {
+                    *wb.get_unchecked_mut(*k_f.get_unchecked(row) as usize) +=
+                        *v_f.get_unchecked(row) * *u_f.get_unchecked(row);
+                }
+            }
+        }
+        wb
+    });
+    Ok(numpy::PyArray1::from_vec(py, out))
+}
+
+/// Column-major (`m`, `p`) copy of a row-major buffer — the layout mgcv's
+/// marginal bases already have (`Xj = X + off[jm] + q * mjm`).
+fn to_col_major(src: &[f64], m: usize, p: usize) -> Vec<f64> {
+    let mut out = vec![0.0f64; m * p];
+    for a in 0..m {
+        for q in 0..p {
+            out[q * m + a] = src[a * p + q];
+        }
+    }
+    out
+}
+
 #[pyfunction]
 #[pyo3(name = "xwx_smooth_block")]
 fn xwx_smooth_block<'py>(
@@ -171,7 +380,7 @@ fn xwx_smooth_block<'py>(
     w: PyReadonlyArray1<'py, f64>,
     woff: PyReadonlyArray1<'py, f64>,
     diag_term: bool,
-) -> Bound<'py, PyArray2<f64>> {
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let mim = xim.shape()[0];
     let pim = xim.shape()[1];
     let mjm = xjm.shape()[0];
@@ -182,16 +391,17 @@ fn xwx_smooth_block<'py>(
     let ndi = tti.shape()[1];
     let ndj = ttj.shape()[1];
 
-    // Logical-order flat copies → unit-stride inner loops regardless of layout.
-    let xim_f: Vec<f64> = xim.as_array().iter().copied().collect(); // (mim, pim)
-    let xjm_f: Vec<f64> = xjm.as_array().iter().copied().collect(); // (mjm, pjm)
-    let ki_f: Vec<i64> = ki.as_array().iter().copied().collect(); // (si, n)
-    let kj_f: Vec<i64> = kj.as_array().iter().copied().collect(); // (sj, n)
-    let tti_f: Vec<f64> = tti.as_array().iter().copied().collect(); // (si, ndi, n)
-    let ttj_f: Vec<f64> = ttj.as_array().iter().copied().collect(); // (sj, ndj, n)
-    let w_f: Vec<f64> = w.as_array().iter().copied().collect();
+    // Borrowed in logical order → unit-stride inner loops, no per-call copy of
+    // the n-long index/weight rows.
+    let xim_f = borrow_flat!(xim, f64); // (mim, pim)
+    let xjm_f = borrow_flat!(xjm, f64); // (mjm, pjm)
+    let ki_f = borrow_flat!(ki, i64); // (si, n)
+    let kj_f = borrow_flat!(kj, i64); // (sj, n)
+    let tti_f = borrow_flat!(tti, f64); // (si, ndi, n)
+    let ttj_f = borrow_flat!(ttj, f64); // (sj, ndj, n)
+    let w_f = borrow_flat!(w, f64);
     // AR1 tridiagonal off-diagonal (length n-1); empty ⇒ plain diag(w) weight.
-    let woff_f: Vec<f64> = woff.as_array().iter().copied().collect();
+    let woff_f = borrow_flat!(woff, f64);
     let tri = !woff_f.is_empty();
 
     let msize = mim * mjm;
@@ -211,6 +421,29 @@ fn xwx_smooth_block<'py>(
     let rfac = pjm <= pim; // form C (m_im×p_jm) else D (m_jm×p_im)
     let nrow = ndi * pim;
     let ncol = ndj * pjm;
+    // Column-major marginals for the direct-factor branches: mgcv's own layout
+    // (`Xj = X + off[jm] + q*mjm`), so one contiguous m-length column is live
+    // per accumulation pass. Skipped on the dense branch, which reads xjm/xim
+    // row-major.
+    let (xim_cm, xjm_cm) = if dense {
+        (Vec::new(), Vec::new())
+    } else {
+        (
+            to_col_major(&xim_f, mim, pim),
+            to_col_major(&xjm_f, mjm, pjm),
+        )
+    };
+    // One-shot bounds proof for `direct_factor`'s unchecked gathers/scatters:
+    // the indices are bin numbers and get re-scanned once per marginal column,
+    // so checking here rather than per access removes two compare-and-branches
+    // from every row of every pass. Violation is a caller bug (mgcv's C would
+    // simply read out of bounds); surface it as a Python exception instead.
+    if !dense && !(indices_in_range(&ki_f, mim) && indices_in_range(&kj_f, mjm)) {
+        return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+            "xwx_smooth_block: discrete index out of range for marginals \
+             ({mim}, {mjm}) — k columns and Xd are inconsistent"
+        )));
+    }
 
     // One sub-block (r,c) → its p_im×p_jm cross-product, row-major. Read-only
     // over the shared flat inputs ⇒ the (r,c) map is embarrassingly parallel.
@@ -258,51 +491,80 @@ fn xwx_smooth_block<'py>(
                 }
             }
         } else if rfac {
-            // Row-outer / column-inner. mgcv instead hoists the column loop
-            // above the rows (discrete.c:1925) so each pass walks one m-length
-            // column of C and of Xjm; that is bit-for-bit the same result (for
-            // a fixed (a,q) the rows still accumulate in ascending order) but
-            // re-streams Ki/Kj once per column, and measured SLOWER here
-            // (1.69 vs 1.34 ms on a 979-bin, p=9 block) — this machine's L1
-            // already holds both m·p accumulators, so mgcv's locality trade
-            // buys nothing and the extra index traffic is pure cost.
+            // C = W̄ Xjm, m_im×p_jm, COLUMN-major — mgcv discrete.c:1925-1963.
             let mut cfac = vec![0.0f64; mim * pjm];
-            accumulate_wbar(&acc, r, c, |a, b, v| {
-                let dst = &mut cfac[a * pjm..a * pjm + pjm];
-                let src = &xjm_f[b * pjm..b * pjm + pjm];
-                for bj in 0..pjm {
-                    dst[bj] += v * src[bj];
-                }
-            });
-            for a in 0..mim {
-                for ai in 0..pim {
-                    let xv = xim_f[a * pim + ai];
-                    if xv != 0.0 {
-                        for bj in 0..pjm {
-                            sub[ai * pjm + bj] += xv * cfac[a * pjm + bj];
+            if tri {
+                // AR1 keeps the generic three-scatter row pass; `tri` is rare
+                // and the row-major-style deposit is dwarfed by the scatters.
+                accumulate_wbar(&acc, r, c, |a, b, v| {
+                    for bj in 0..pjm {
+                        cfac[bj * mim + a] += v * xjm_cm[bj * mjm + b];
+                    }
+                });
+            } else {
+                for s in 0..si {
+                    let (ki_s, tti_sr) = acc.rows_i(s, r);
+                    for t in 0..sj {
+                        let (kj_t, ttj_tc) = acc.rows_j(t, c);
+                        // SAFETY: `unchecked_ok` verified ki < mim and
+                        // kj < mjm above; w/tt rows are all length n.
+                        unsafe {
+                            direct_factor(
+                                &mut cfac, &xjm_cm, mim, mjm, pjm, n, ki_s, kj_t, &w_f, tti_sr,
+                                ttj_tc,
+                            );
                         }
                     }
                 }
             }
-        } else {
-            // Mirror image of the C branch (mgcv :1965), same loop-order note.
-            let mut dfac = vec![0.0f64; mjm * pim];
-            accumulate_wbar(&acc, r, c, |a, b, v| {
-                let dst = &mut dfac[b * pim..b * pim + pim];
-                let src = &xim_f[a * pim..a * pim + pim];
+            // sub = Xim' C, both column-major ⇒ contiguous dot products, and
+            // each sub[ai,bj] still folds over `a` ascending as before.
+            for bj in 0..pjm {
+                let cq = &cfac[bj * mim..bj * mim + mim];
                 for ai in 0..pim {
-                    dst[ai] += v * src[ai];
+                    let xi = &xim_cm[ai * mim..ai * mim + mim];
+                    let mut x = 0.0;
+                    for a in 0..mim {
+                        x += xi[a] * cq[a];
+                    }
+                    sub[ai * pjm + bj] = x;
                 }
-            });
-            // sub = D' Xjm  (D is m_jm×p_im)
-            for b in 0..mjm {
-                for ai in 0..pim {
-                    let dv = dfac[b * pim + ai];
-                    if dv != 0.0 {
-                        for bj in 0..pjm {
-                            sub[ai * pjm + bj] += dv * xjm_f[b * pjm + bj];
+            }
+        } else {
+            // Mirror image: D = W̄' Xim, m_jm×p_im, column-major (mgcv :1965).
+            let mut dfac = vec![0.0f64; mjm * pim];
+            if tri {
+                accumulate_wbar(&acc, r, c, |a, b, v| {
+                    for ai in 0..pim {
+                        dfac[ai * mjm + b] += v * xim_cm[ai * mim + a];
+                    }
+                });
+            } else {
+                for s in 0..si {
+                    let (ki_s, tti_sr) = acc.rows_i(s, r);
+                    for t in 0..sj {
+                        let (kj_t, ttj_tc) = acc.rows_j(t, c);
+                        // destination is indexed by K_j, source read at K_i
+                        // SAFETY: as above, with the roles swapped.
+                        unsafe {
+                            direct_factor(
+                                &mut dfac, &xim_cm, mjm, mim, pim, n, kj_t, ki_s, &w_f, ttj_tc,
+                                tti_sr,
+                            );
                         }
                     }
+                }
+            }
+            // sub = D' Xjm
+            for ai in 0..pim {
+                let dq = &dfac[ai * mjm..ai * mjm + mjm];
+                for bj in 0..pjm {
+                    let xj = &xjm_cm[bj * mjm..bj * mjm + mjm];
+                    let mut x = 0.0;
+                    for b in 0..mjm {
+                        x += dq[b] * xj[b];
+                    }
+                    sub[ai * pjm + bj] = x;
                 }
             }
         }
@@ -342,9 +604,9 @@ fn xwx_smooth_block<'py>(
         }
         block
     });
-    Array2::from_shape_vec((nrow, ncol), block)
+    Ok(Array2::from_shape_vec((nrow, ncol), block)
         .unwrap()
-        .into_pyarray(py)
+        .into_pyarray(py))
 }
 
 /// `rwMatrix` (src/misc.c:710-748; R wrapper bam.r:18-29) — recombine the rows of
@@ -410,6 +672,7 @@ fn rw_matrix<'py>(
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(xwx_smooth_block, m)?)?;
+    m.add_function(wrap_pyfunction!(bin_accum, m)?)?;
     m.add_function(wrap_pyfunction!(rw_matrix, m)?)?;
     Ok(())
 }
