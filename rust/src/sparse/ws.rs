@@ -113,6 +113,20 @@ ws_index!(usize);
 /// `cholmod_internal.h` / `amd_internal.h` — `EMPTY` is `(-1)`.
 pub const EMPTY: i64 = -1;
 
+/// `cholmod_clear_flag` (`t_cholmod_clear_flag.c:34-49`), taking the two pieces
+/// of [`Work`] it touches rather than the whole of one.
+///
+/// [`super::super_symbolic`] needs it while `Head` is spoken for as the
+/// fundamental supernode list, so it cannot go through a [`WorkRef`].
+#[inline]
+pub(super) fn clear_flag(flag: &mut Ws, mark: &mut i64) {
+    *mark += 1;
+    if *mark <= 0 {
+        *mark = 0;
+        flag.fill(EMPTY);
+    }
+}
+
 /// `Common`'s persistent workspace — `cholmod_alloc_work`
 /// (`Utility/t_cholmod_alloc_work.c:50-90`).
 ///
@@ -204,6 +218,40 @@ impl Work {
         };
         (w, first, level)
     }
+
+    /// `cholmod_allocate_work (n, len, 0, Common)` where `n` is unchanged —
+    /// grow `Iwork` if it is short, and leave it alone otherwise
+    /// (`t_cholmod_alloc_work.c:81`). The supernodal numeric factorization
+    /// needs `2n + 5*nsuper`, which exceeds the `6n` [`Work::new`] starts with
+    /// once `nsuper > 4n/5`.
+    ///
+    /// Growing *discards* the contents, as `alloc_work`'s free-then-malloc
+    /// does — which is why `cholmod_super_numeric` fills `SuperMap` only after
+    /// calling it (`:266-287`) and says so at
+    /// `t_cholmod_super_numeric_worker.c:204-208`.
+    pub(super) fn ensure_iwork(&mut self, len: usize) {
+        if self.iwork.len() < len {
+            self.iwork = vec![0; len];
+        }
+    }
+
+    /// `Common->mark = EMPTY ; CLEAR_FLAG (Common)` — the unconditional reset
+    /// a kernel that used `Flag` as something other than a mark array owes its
+    /// successor (`cholmod_super_numeric.c:331-332`).
+    pub(super) fn reset_flag(&mut self) {
+        self.all().reset_flag();
+    }
+
+    /// The between-users invariant every kernel here promises to restore:
+    /// `Flag [i] < mark` for all `i`, `Head` all `EMPTY`, `Xwork` all zero
+    /// (`cholmod_internal.h:225-238`). Upstream checks it with
+    /// `cholmod_dump_work`, under `#ifndef NDEBUG` — same idea, same build.
+    #[cfg(test)]
+    pub(super) fn is_pristine(&self) -> bool {
+        self.flag.iter().all(|&f| f < self.mark)
+            && self.head.iter().all(|&h| h == EMPTY)
+            && self.xwork.iter().all(|&x| x == 0.0)
+    }
 }
 
 /// A borrowed [`Work`] — what the kernels take, so that a caller holding a
@@ -227,11 +275,7 @@ impl WorkRef<'_> {
     /// rewrite `Flag` only if that overflowed.
     #[inline]
     pub(super) fn clear_flag(&mut self) {
-        *self.mark += 1;
-        if *self.mark <= 0 {
-            *self.mark = 0;
-            self.flag.fill(EMPTY);
-        }
+        clear_flag(Ws::new(self.flag), self.mark);
     }
 
     /// `Common->mark = EMPTY ; CLEAR_FLAG (Common)`, the two lines that

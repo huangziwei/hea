@@ -14,9 +14,12 @@
 //! coincides when that postorder is the identity.
 
 pub mod amd;
+pub mod dense;
 pub mod numeric;
 pub mod py;
 pub mod solve;
+pub mod super_numeric;
+pub mod super_symbolic;
 pub mod symbolic;
 #[cfg(test)]
 pub mod testcorpus;
@@ -276,10 +279,176 @@ fn factorize(
     Ok(d.unbind())
 }
 
+/// `cholmod_analyze` followed by its supernodal branch
+/// (`cholmod_analyze.c:886-901`) — the supernodal *symbolic* factor.
+///
+/// `indptr`/`indices` are a CSC pattern and `stype` selects the stored half.
+/// Returns `L`'s supernodal fields (`nsuper`, `super`, `pi`, `px`, `s`,
+/// `ssize`, `xsize`, `maxcsize`, `maxesize`) alongside `Perm`, plus
+/// `auto_supernodal`: whether upstream's default `CHOLMOD_AUTO` would have
+/// taken this branch at all, which the caller forces here either way.
+#[pyfunction]
+#[pyo3(signature = (n, indptr, indices, stype, ordering="amd"))]
+fn super_analyze(
+    py: Python<'_>,
+    n: usize,
+    indptr: PyReadonlyArray1<'_, i64>,
+    indices: PyReadonlyArray1<'_, i64>,
+    stype: i32,
+    ordering: &str,
+) -> PyResult<Py<PyDict>> {
+    let indptr = indptr.as_slice()?;
+    let indices = indices.as_slice()?;
+    let order = match ordering {
+        "amd" => symbolic::Ordering::Amd,
+        "natural" => symbolic::Ordering::Natural,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "ordering must be 'amd' or 'natural', not {other:?}"
+            )));
+        }
+    };
+    let (s, ss) = py
+        .allow_threads(|| -> Result<_, String> {
+            let nz = ws::validate_csc(n, indptr, indices).map_err(|e| e.to_string())?;
+            let a = symbolic::Sparse {
+                n,
+                p: indptr[..n + 1].to_vec(),
+                i: indices[..nz].to_vec(),
+                x: Vec::new(),
+                numeric: false,
+                stype,
+                sorted: ws::columns_are_sorted(n, indptr, indices),
+            };
+            let s = symbolic::analyze_sparse(&a, order, true, IntWidth::I64)
+                .map_err(|e| e.to_string())?;
+            let mut work = ws::Work::new(n);
+            /* the supernodal branch permutes A a second time, for pattern
+             * only: `permute_matrices (..., FALSE, ...)` */
+            let a2 = symbolic::permute_sym(&a, s.ordering, &s.perm, false, false, &mut work.all());
+            let sup = a2.as_ref().unwrap_or(&a);
+            let ss = super_symbolic::super_symbolic(
+                sup,
+                &s.parent,
+                &s.colcount,
+                &super_symbolic::Relax::default(),
+                &mut work,
+            )
+            .map_err(|e| e.to_string())?;
+            Ok((s, ss))
+        })
+        .map_err(PyValueError::new_err)?;
+
+    let d = PyDict::new(py);
+    d.set_item("perm", s.perm.into_pyarray(py))?;
+    d.set_item("parent", s.parent.into_pyarray(py))?;
+    d.set_item("colcount", s.colcount.into_pyarray(py))?;
+    d.set_item(
+        "auto_supernodal",
+        super_symbolic::auto_supernodal(s.fl, s.lnz, super_symbolic::DEFAULT_SUPERNODAL_SWITCH),
+    )?;
+    d.set_item("n", ss.n)?;
+    d.set_item("nsuper", ss.nsuper)?;
+    d.set_item("super", ss.sup.into_pyarray(py))?;
+    d.set_item("pi", ss.pi.into_pyarray(py))?;
+    d.set_item("px", ss.px.into_pyarray(py))?;
+    d.set_item("s", ss.s.into_pyarray(py))?;
+    d.set_item("ssize", ss.ssize)?;
+    d.set_item("xsize", ss.xsize)?;
+    d.set_item("maxcsize", ss.maxcsize)?;
+    d.set_item("maxesize", ss.maxesize)?;
+    Ok(d.unbind())
+}
+
+/// `cholmod_analyze` + `cholmod_factorize` with the supernodal path forced —
+/// the supernodal `LL'` of `beta*I + P A P'`.
+///
+/// Returns the supernodal factor whole: the pattern (as `super_analyze` does)
+/// plus `L->x`, the concatenation of every supernode's dense
+/// `nsrow`-by-`nscol` column-major block, and `minor`.
+#[pyfunction]
+#[pyo3(signature = (n, indptr, indices, data, stype, beta=0.0, ordering="amd"))]
+#[allow(clippy::too_many_arguments)]
+fn super_factorize(
+    py: Python<'_>,
+    n: usize,
+    indptr: PyReadonlyArray1<'_, i64>,
+    indices: PyReadonlyArray1<'_, i64>,
+    data: PyReadonlyArray1<'_, f64>,
+    stype: i32,
+    beta: f64,
+    ordering: &str,
+) -> PyResult<Py<PyDict>> {
+    let indptr = indptr.as_slice()?;
+    let indices = indices.as_slice()?;
+    let data = data.as_slice()?;
+    let order = match ordering {
+        "amd" => symbolic::Ordering::Amd,
+        "natural" => symbolic::Ordering::Natural,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "ordering must be 'amd' or 'natural', not {other:?}"
+            )));
+        }
+    };
+    let l = py
+        .allow_threads(|| -> Result<_, String> {
+            let nz = ws::validate_csc(n, indptr, indices).map_err(|e| e.to_string())?;
+            if data.len() < nz {
+                return Err(format!(
+                    "data has length {}, expected at least indptr[n] = {nz}",
+                    data.len()
+                ));
+            }
+            let a = symbolic::Sparse {
+                n,
+                p: indptr[..n + 1].to_vec(),
+                i: indices[..nz].to_vec(),
+                x: data[..nz].to_vec(),
+                numeric: true,
+                stype,
+                sorted: ws::columns_are_sorted(n, indptr, indices),
+            };
+            let s = symbolic::analyze_sparse(&a, order, true, IntWidth::I64)
+                .map_err(|e| e.to_string())?;
+            let mut work = ws::Work::new(n);
+            let a2 = symbolic::permute_sym(&a, s.ordering, &s.perm, false, false, &mut work.all());
+            let sym = super_symbolic::super_symbolic(
+                a2.as_ref().unwrap_or(&a),
+                &s.parent,
+                &s.colcount,
+                &super_symbolic::Relax::default(),
+                &mut work,
+            )
+            .map_err(|e| e.to_string())?;
+            let mut l = super_numeric::SuperFactor::new(&s, sym);
+            let mut cwork = super_numeric::SuperWork::new();
+            super_numeric::super_factorize(&a, beta, &mut l, &mut work, &mut cwork)
+                .map_err(|e| e.to_string())?;
+            Ok(l)
+        })
+        .map_err(PyValueError::new_err)?;
+
+    let d = PyDict::new(py);
+    d.set_item("perm", l.perm.into_pyarray(py))?;
+    d.set_item("colcount", l.colcount.into_pyarray(py))?;
+    d.set_item("nsuper", l.sym.nsuper)?;
+    d.set_item("super", l.sym.sup.into_pyarray(py))?;
+    d.set_item("pi", l.sym.pi.into_pyarray(py))?;
+    d.set_item("px", l.sym.px.into_pyarray(py))?;
+    d.set_item("s", l.sym.s.into_pyarray(py))?;
+    d.set_item("xsize", l.sym.xsize)?;
+    d.set_item("Lx", l.x.into_pyarray(py))?;
+    d.set_item("minor", l.minor)?;
+    Ok(d.unbind())
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(amd_order, m)?)?;
     m.add_function(wrap_pyfunction!(analyze, m)?)?;
     m.add_function(wrap_pyfunction!(factorize, m)?)?;
+    m.add_function(wrap_pyfunction!(super_analyze, m)?)?;
+    m.add_function(wrap_pyfunction!(super_factorize, m)?)?;
     m.add_class::<py::CholFactor>()?;
     Ok(())
 }

@@ -27,7 +27,7 @@
 
 use crate::nmath::util::rfma;
 
-use super::symbolic::{ptranspose, Ordering, Sparse, Symbolic};
+use super::symbolic::{permute_sym, Ordering, Sparse, Symbolic};
 use super::ws::{Work, WorkRef, Ws, EMPTY};
 
 /// Why a factorization could not be performed. Not positive definite is *not*
@@ -1158,30 +1158,9 @@ pub fn factorize(
     /* Permute the input matrix A if necessary.  cholmod_rowfac requires
      * triu(A) in column form for the symmetric case. */
     const VALUES: bool = true;
-    let (a1, a2);
-    let s: &Sparse = {
-        let mut w = work.all();
-        if l.ordering == Ordering::Natural {
-            if a.stype > 0 {
-                /* F is not needed, S = A */
-                a
-            } else {
-                /* F is not needed, S = A' */
-                a2 = ptranspose(a, VALUES, None, &mut w);
-                &a2
-            }
-        } else if a.stype > 0 {
-            /* F = tril (A (p,p)') ; A2 = triu (F') */
-            a1 = ptranspose(a, VALUES, Some(&l.perm), &mut w);
-            a2 = ptranspose(&a1, VALUES, None, &mut w);
-            &a2
-        } else {
-            /* A2 = triu (A (p,p)'), F not needed.  This is the fastest way to
-             * factorize a matrix using the simplicial routine. */
-            a2 = ptranspose(a, VALUES, Some(&l.perm), &mut w);
-            &a2
-        }
-    };
+    const UPPER: bool = false;
+    let a2 = permute_sym(a, l.ordering, &l.perm, VALUES, UPPER, &mut work.all());
+    let s: &Sparse = a2.as_ref().unwrap_or(a);
 
     /* factorize beta*I+S */
     let mut facparams = *params;

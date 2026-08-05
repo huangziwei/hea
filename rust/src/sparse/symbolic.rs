@@ -332,6 +332,63 @@ pub fn ptranspose(
     transpose_sym(a, values, perm, work)
 }
 
+/// `permute_matrices` (`cholmod_analyze.c:161-286`) for a symmetric `A`,
+/// returning only `S`.
+///
+/// `S` is the permuted matrix `P A P'` with one triangle stored, in column
+/// form. Every consumer needs it and they do not agree on which triangle:
+/// `cholmod_rowfac` and `cholmod_super_symbolic` want `triu`, the supernodal
+/// numeric factorization wants `tril` (`cholmod_factorize.c:216-238`), so
+/// `lower` picks. Getting there costs one `ptranspose` or two, because a
+/// transpose flips the stored triangle *and* is the only thing that applies the
+/// permutation:
+///
+/// | | natural | permuted |
+/// |---|---|---|
+/// | already the wanted triangle | `S = A` | 1 |
+/// | the other triangle | 1 | 2 |
+///
+/// `None` means `S` is `A` itself, which upstream expresses by aliasing the
+/// pointer and leaving `A1`/`A2` `NULL`.
+///
+/// `F` is not returned. In the symmetric case it is used only by
+/// `cholmod_rowcolcounts` — the `do_rowcolcounts` argument exists to skip
+/// building it (`:167-169`) — and [`analyze`] holds its own.
+///
+/// `values` covers both of upstream's numeric modes: the simplicial branch
+/// asks for `ptranspose (A, 1, ...)` and the supernodal one for
+/// `ptranspose (A, 2, ...)`, and mode 2 only differs by conjugating, which for
+/// `CHOLMOD_REAL` is nothing.
+pub fn permute_sym(
+    a: &Sparse,
+    ordering: Ordering,
+    perm: &[i64],
+    values: bool,
+    lower: bool,
+    work: &mut WorkRef<'_>,
+) -> Option<Sparse> {
+    /* `A` is stored in the wanted triangle already iff (stype > 0) != lower */
+    let as_wanted = (a.stype > 0) != lower;
+    if ordering == Ordering::Natural {
+        if as_wanted {
+            /* S = A */
+            None
+        } else {
+            /* S = A' */
+            Some(ptranspose(a, values, None, work))
+        }
+    } else if as_wanted {
+        /* the permuted transpose lands in the other triangle, so transpose
+         * once more to come back: F = A (p,p)' and S = F' */
+        let f = ptranspose(a, values, Some(perm), work);
+        Some(ptranspose(&f, values, None, work))
+    } else {
+        /* one transpose both permutes and lands in the wanted triangle.  This
+         * is the fastest option for factorizing a permuted matrix. */
+        Some(ptranspose(a, values, Some(perm), work))
+    }
+}
+
 /* ========================================================================= */
 /* === cholmod_etree ======================================================= */
 /* ========================================================================= */
