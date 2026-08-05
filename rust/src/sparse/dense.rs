@@ -63,11 +63,43 @@ use super::ws::Ws;
 /// triangle is overwritten rather than accumulated into. Parts of the strict
 /// upper triangle are overwritten too, which a real `dsyrk ("L", ...)` would
 /// not do — see the block comment below for why that is sound here.
+///
+/// The factorization reaches this through [`syrk_ln_strip`], which is the same
+/// call over a range of block columns. This is the whole-matrix name the `dsyrk`
+/// mapping above refers to, and what the parity harness's `dsyrk_` exports.
+#[allow(dead_code)]
 pub fn syrk_ln(n: usize, k: usize, a: &[f64], lda: usize, c: &mut [f64], ldc: usize) {
-    debug_assert!(k == 0 || a.len() >= (k - 1) * lda + n);
     debug_assert!(n == 0 || c.len() >= (n - 1) * ldc + n);
+    syrk_ln_strip(n, k, a, lda, c, ldc, 0, n);
+}
 
-    /* `C (j0:n-1, j0:j0+NB-1)` is a plain `A * A'`, so a block column of the
+/// [`syrk_ln`]'s block width. A strip that starts on a multiple of it decomposes
+/// into the same blocks the whole call would use.
+pub const SYRK_NB: usize = 8;
+
+/// Block columns `j0 .. j0+jn` of [`syrk_ln`], with `c` the strip of `C` that
+/// starts at column `j0` — its own contiguous `jn * ldc` slice, so a caller can
+/// hand several strips to several threads without any of them aliasing.
+///
+/// `j0` must be a multiple of [`SYRK_NB`]. Then the strip's blocks are exactly
+/// the blocks the unsplit call makes, every element is still one `gemm_nt`
+/// entry accumulated over `l` ascending, and splitting is a scheduling decision
+/// rather than a numerical one.
+#[allow(clippy::too_many_arguments)]
+pub fn syrk_ln_strip(
+    n: usize,
+    k: usize,
+    a: &[f64],
+    lda: usize,
+    c: &mut [f64],
+    ldc: usize,
+    j0: usize,
+    jn: usize,
+) {
+    debug_assert!(k == 0 || a.len() >= (k - 1) * lda + n);
+    debug_assert!(j0.is_multiple_of(SYRK_NB) && j0 + jn <= n);
+
+    /* `C (jb:n-1, jb:jb+NB-1)` is a plain `A * A'`, so a block column of the
      * lower triangle goes straight through [`gemm_nt`]'s register-blocked
      * kernel — including its diagonal `NB`-by-`NB` square, computed whole
      * rather than as a triangle.
@@ -79,22 +111,21 @@ pub fn syrk_ln(n: usize, k: usize, a: &[f64], lda: usize, c: &mut [f64], ldc: us
      * `dgemm` that fills the rest of `C` starts at row `ndrow1`. The waste is
      * `NB(NB-1)/2` extra dot products per block column, i.e. `~NB/(2n)` of the
      * work, in exchange for the whole kernel being the vectorized one. */
-    const NB: usize = 8;
-    let mut j0 = 0;
-    while j0 < n {
-        let jn = NB.min(n - j0);
+    let mut jb = j0;
+    while jb < j0 + jn {
+        let jbn = SYRK_NB.min(j0 + jn - jb);
         gemm_nt(
-            n - j0,
-            jn,
+            n - jb,
+            jbn,
             k,
-            &a[j0..],
+            &a[jb..],
             lda,
-            &a[j0..],
+            &a[jb..],
             lda,
-            &mut c[j0 + j0 * ldc..],
+            &mut c[(jb - j0) * ldc + jb..],
             ldc,
         );
-        j0 += jn;
+        jb += jbn;
     }
 }
 
@@ -207,6 +238,122 @@ pub fn gemm_nt(
     }
 }
 
+/// One `MR`-by-`NR` tile of `C -= A * B'`, where `A`, `B` and `C` are three
+/// disjoint sub-blocks of the *same* array.
+///
+/// This is the shape [`potrf_l`] and [`trsm_rlt`] are blocked around, and it is
+/// the one configuration in this file that upstream never calls: LAPACK's
+/// `dpotrf` and the reference `dtrsm` do the equivalent work as a long rank-1
+/// ladder, one source column at a time. That ladder is load-bound — it reloads
+/// its destination strip every few sources — and it is why those two ran at
+/// well under half [`gemm_nt`]'s rate.
+///
+/// The destination is loaded into the accumulators *before* the loop, and each
+/// source is subtracted in turn, `l` ascending. That is the same rounding
+/// sequence [`strip_sub`] produces, so blocking moves work between the two
+/// without moving a rounding: a destination entry still sees
+/// `(((c - a₀b₀) - a₁b₁) - …)` over all its sources in index order, whether the
+/// early ones arrive here and the late ones in the panel or not.
+///
+/// One array rather than three because that is how the callers hold it — a
+/// supernode's diagonal block and the rows under it share one `L->x` and one
+/// leading dimension, and no `&mut` split expresses that.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn tile_sub<const MR: usize, const NR: usize>(
+    k: usize,
+    x: &mut Ws<f64>,
+    ia: usize,
+    lda: usize,
+    jb: usize,
+    ldb: usize,
+    ic: usize,
+    ldc: usize,
+) {
+    let mut acc = [[0.0f64; MR]; NR];
+    for (jj, accj) in acc.iter_mut().enumerate() {
+        for (ii, v) in accj.iter_mut().enumerate() {
+            *v = x[ic + ii + jj * ldc];
+        }
+    }
+    for l in 0..k {
+        let (ao, bo) = (ia + l * lda, jb + l * ldb);
+        for (jj, accj) in acc.iter_mut().enumerate() {
+            let bv = x[bo + jj];
+            for (ii, v) in accj.iter_mut().enumerate() {
+                *v -= bv * x[ao + ii];
+            }
+        }
+    }
+    for (jj, accj) in acc.iter().enumerate() {
+        for (ii, &v) in accj.iter().enumerate() {
+            x[ic + ii + jj * ldc] = v;
+        }
+    }
+}
+
+/// The `m` direction of one `NR`-wide column block of [`tile_sub`], tiled
+/// 8/4/2/1.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn cols_sub<const NR: usize>(
+    m: usize,
+    k: usize,
+    x: &mut Ws<f64>,
+    ia0: usize,
+    lda: usize,
+    jb: usize,
+    ldb: usize,
+    ic0: usize,
+    ldc: usize,
+) {
+    let mut i = 0;
+    while i + 8 <= m {
+        tile_sub::<8, NR>(k, x, ia0 + i, lda, jb, ldb, ic0 + i, ldc);
+        i += 8;
+    }
+    if i + 4 <= m {
+        tile_sub::<4, NR>(k, x, ia0 + i, lda, jb, ldb, ic0 + i, ldc);
+        i += 4;
+    }
+    if i + 2 <= m {
+        tile_sub::<2, NR>(k, x, ia0 + i, lda, jb, ldb, ic0 + i, ldc);
+        i += 2;
+    }
+    if i < m {
+        tile_sub::<1, NR>(k, x, ia0 + i, lda, jb, ldb, ic0 + i, ldc);
+    }
+}
+
+/// `C -= A * B'` for three sub-blocks of one array: `A` is `m`-by-`k` at `ia`,
+/// `B` is `n`-by-`k` at `jb`, `C` is `m`-by-`n` at `ic`.
+#[allow(clippy::too_many_arguments)]
+fn gemm_sub(
+    m: usize,
+    n: usize,
+    k: usize,
+    x: &mut Ws<f64>,
+    ia: usize,
+    lda: usize,
+    jb: usize,
+    ldb: usize,
+    ic: usize,
+    ldc: usize,
+) {
+    let mut j = 0;
+    while j + 4 <= n {
+        cols_sub::<4>(m, k, x, ia, lda, jb + j, ldb, ic + j * ldc, ldc);
+        j += 4;
+    }
+    if j + 2 <= n {
+        cols_sub::<2>(m, k, x, ia, lda, jb + j, ldb, ic + j * ldc, ldc);
+        j += 2;
+    }
+    if j < n {
+        cols_sub::<1>(m, k, x, ia, lda, jb + j, ldb, ic + j * ldc, ldc);
+    }
+}
+
 /// `x [yo .. yo+m] -= Σ_q t[q] * x [xo[q] .. xo[q]+m]`, for `q` ascending.
 ///
 /// The rank-`LR` form of the rank-1 update both [`potrf_l`] and [`trsm_rlt`]
@@ -264,55 +411,114 @@ fn strip_sub<const LR: usize>(
 /// 1` and `nscol_new = info - 1` (`:1093,1114`) — so its base and its
 /// "non-positive" test are part of the contract, not an implementation detail.
 ///
-/// This is the unblocked left-looking `dpotf2 ("L")`: column `j` is completed
-/// from the `j-1` columns to its left before it is used.
+/// This is `dpotrf ("L")`'s blocking around the unblocked left-looking
+/// [`potf2_panel`]: the columns to the left of a panel arrive through one
+/// [`gemm_sub`], and only the panel's own columns go through the rank-1 ladder.
+/// A destination entry still sees every source once, `l` ascending, so the
+/// blocking is a scheduling change and `L` is unchanged entry for entry.
 pub fn potrf_l(n: usize, a: &mut [f64], lda: usize) -> i64 {
     debug_assert!(n == 0 || a.len() >= (n - 1) * lda + n);
     let a = Ws::new(a);
 
+    let mut save = [0.0f64; POTRF_NB * (POTRF_NB - 1) / 2];
+    let mut j0 = 0;
+    while j0 < n {
+        let nb = POTRF_NB.min(n - j0);
+        if j0 > 0 {
+            /* `gemm_sub` writes whole rectangles, so it also covers the strict
+             * upper triangle of this panel's diagonal square — which `dpotrf
+             * ("L")` promises not to touch, and which the supernodal worker
+             * relies on staying at the zero it left there. Nothing reads it
+             * (`potf2_panel` and every later panel take the lower triangle
+             * only), but `L` is compared against upstream's entry for entry, so
+             * it is put back rather than argued about. */
+            let mut q = 0;
+            for j in 1..nb {
+                for i in 0..j {
+                    save[q] = a[j0 + i + (j0 + j) * lda];
+                    q += 1;
+                }
+            }
+
+            /* A (j0:n-1, j0:j0+nb-1) -= A (j0:n-1, 0:j0-1) * A (j0:j0+nb-1, 0:j0-1)' */
+            gemm_sub(n - j0, nb, j0, a, j0, lda, j0, lda, j0 + j0 * lda, lda);
+
+            let mut q = 0;
+            for j in 1..nb {
+                for i in 0..j {
+                    a[j0 + i + (j0 + j) * lda] = save[q];
+                    q += 1;
+                }
+            }
+        }
+        let info = potf2_panel(n - j0, nb, a, j0 + j0 * lda, lda);
+        if info != 0 {
+            return j0 as i64 + info;
+        }
+        j0 += nb;
+    }
+    0
+}
+
+/// [`potrf_l`]'s panel width — how many columns go through the rank-1 ladder
+/// before the next [`gemm_sub`] catches the rest up.
+const POTRF_NB: usize = 8;
+
+/// The unblocked `dpotf2 ("L")` on an `m`-by-`n` panel whose leading `n` rows
+/// are its diagonal block, using only the panel's own columns as sources.
+///
+/// Returns `dpotf2`'s `info`, 1-based *within the panel*; [`potrf_l`] adds the
+/// panel's offset, which is what `dpotrf` does.
+fn potf2_panel(m: usize, n: usize, a: &mut Ws<f64>, off: usize, lda: usize) -> i64 {
     for j in 0..n {
         /* ajj = A (j,j) - A (j, 0:j-1) * A (j, 0:j-1)' */
-        let mut ajj = a[j + j * lda];
+        let mut ajj = a[off + j + j * lda];
         for l in 0..j {
-            let x = a[j + l * lda];
+            let x = a[off + j + l * lda];
             ajj -= x * x;
         }
         if !(ajj > 0.0) {
             /* also catches NaN, as dpotf2's `.LE. ZERO .OR. DISNAN` does */
-            a[j + j * lda] = ajj;
+            a[off + j + j * lda] = ajj;
             return j as i64 + 1;
         }
         let ajj = ajj.sqrt();
-        a[j + j * lda] = ajj;
+        a[off + j + j * lda] = ajj;
 
-        if j + 1 < n {
-            /* A (j+1:n-1, j) -= A (j+1:n-1, 0:j-1) * A (j, 0:j-1)' */
-            let (m, yo) = (n - (j + 1), (j + 1) + j * lda);
+        if j + 1 < m {
+            /* A (j+1:m-1, j) -= A (j+1:m-1, 0:j-1) * A (j, 0:j-1)' */
+            let (mm, yo) = (m - (j + 1), off + (j + 1) + j * lda);
             let mut l = 0;
             while l + 4 <= j {
                 let t = [
-                    a[j + l * lda],
-                    a[j + (l + 1) * lda],
-                    a[j + (l + 2) * lda],
-                    a[j + (l + 3) * lda],
+                    a[off + j + l * lda],
+                    a[off + j + (l + 1) * lda],
+                    a[off + j + (l + 2) * lda],
+                    a[off + j + (l + 3) * lda],
                 ];
                 let xo = [
-                    (j + 1) + l * lda,
-                    (j + 1) + (l + 1) * lda,
-                    (j + 1) + (l + 2) * lda,
-                    (j + 1) + (l + 3) * lda,
+                    off + (j + 1) + l * lda,
+                    off + (j + 1) + (l + 1) * lda,
+                    off + (j + 1) + (l + 2) * lda,
+                    off + (j + 1) + (l + 3) * lda,
                 ];
-                strip_sub::<4>(m, a, yo, &t, &xo);
+                strip_sub::<4>(mm, a, yo, &t, &xo);
                 l += 4;
             }
             while l < j {
-                strip_sub::<1>(m, a, yo, &[a[j + l * lda]], &[(j + 1) + l * lda]);
+                strip_sub::<1>(
+                    mm,
+                    a,
+                    yo,
+                    &[a[off + j + l * lda]],
+                    &[off + (j + 1) + l * lda],
+                );
                 l += 1;
             }
-            /* A (j+1:n-1, j) /= ajj */
+            /* A (j+1:m-1, j) /= ajj */
             let r = 1.0 / ajj;
-            for i in j + 1..n {
-                a[i + j * lda] *= r;
+            for i in j + 1..m {
+                a[off + i + j * lda] *= r;
             }
         }
     }
@@ -327,6 +533,11 @@ pub fn potrf_l(n: usize, a: &mut [f64], lda: usize) -> i64 {
 /// and `b` the `m` rows directly below it at the same leading dimension
 /// (`Lx + psx` and `Lx + psx + nscol2`, both with `LDA = LDB = nsrow`,
 /// `:1210-1216`) — so that is the signature: one block, split by row.
+///
+/// Blocked the same way [`potrf_l`] is, and for the same reason: the columns to
+/// the left of a panel arrive through one [`gemm_sub`], the panel's own through
+/// the rank-1 ladder, and every destination entry still sees its sources once
+/// in index order.
 pub fn trsm_rlt(m: usize, n: usize, x: &mut [f64], ld: usize) {
     debug_assert!(n == 0 || x.len() >= (n - 1) * ld + n + m);
     let x = Ws::new(x);
@@ -337,35 +548,47 @@ pub fn trsm_rlt(m: usize, n: usize, x: &mut [f64], ld: usize) {
      * That is not done here: it is a data-dependent branch in the hot loop for
      * a case the supernodal factorization does not produce, and it changes
      * nothing numerically unless the other operand is an infinity or a NaN. */
-    for j in 0..n {
-        let yo = n + j * ld;
-        let mut l = 0;
-        while l + 4 <= j {
-            let t = [
-                x[j + l * ld],
-                x[j + (l + 1) * ld],
-                x[j + (l + 2) * ld],
-                x[j + (l + 3) * ld],
-            ];
-            let xo = [
-                n + l * ld,
-                n + (l + 1) * ld,
-                n + (l + 2) * ld,
-                n + (l + 3) * ld,
-            ];
-            strip_sub::<4>(m, x, yo, &t, &xo);
-            l += 4;
+    let mut j0 = 0;
+    while j0 < n {
+        let nb = TRSM_NB.min(n - j0);
+        if j0 > 0 {
+            /* B (:, j0:j0+nb-1) -= B (:, 0:j0-1) * A (j0:j0+nb-1, 0:j0-1)' */
+            gemm_sub(m, nb, j0, x, n, ld, j0, ld, n + j0 * ld, ld);
         }
-        while l < j {
-            strip_sub::<1>(m, x, yo, &[x[j + l * ld]], &[n + l * ld]);
-            l += 1;
+        for j in j0..j0 + nb {
+            let yo = n + j * ld;
+            let mut l = j0;
+            while l + 4 <= j {
+                let t = [
+                    x[j + l * ld],
+                    x[j + (l + 1) * ld],
+                    x[j + (l + 2) * ld],
+                    x[j + (l + 3) * ld],
+                ];
+                let xo = [
+                    n + l * ld,
+                    n + (l + 1) * ld,
+                    n + (l + 2) * ld,
+                    n + (l + 3) * ld,
+                ];
+                strip_sub::<4>(m, x, yo, &t, &xo);
+                l += 4;
+            }
+            while l < j {
+                strip_sub::<1>(m, x, yo, &[x[j + l * ld]], &[n + l * ld]);
+                l += 1;
+            }
+            let r = 1.0 / x[j + j * ld];
+            for i in 0..m {
+                x[n + i + j * ld] *= r;
+            }
         }
-        let r = 1.0 / x[j + j * ld];
-        for i in 0..m {
-            x[n + i + j * ld] *= r;
-        }
+        j0 += nb;
     }
 }
+
+/// [`trsm_rlt`]'s panel width, the counterpart of [`POTRF_NB`].
+const TRSM_NB: usize = 8;
 
 /* ========================================================================= */
 /* === the solve kernels =================================================== */

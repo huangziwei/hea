@@ -544,7 +544,7 @@ fn supernodal_solve(
                     .map_err(|e| e.to_string())?;
                 best = best.min(t0.elapsed().as_secs_f64() * 1e3);
             }
-            Ok((x, l.minor, best))
+            Ok((x, l.minor, if solve_reps == 0 { 0.0 } else { best }))
         })
         .map_err(PyValueError::new_err)?;
 

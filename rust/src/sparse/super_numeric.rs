@@ -30,7 +30,9 @@
 //! `D` and no `dbound`, and a non-positive pivot is a failure rather than
 //! something to clamp.
 
-use super::dense::{gemm_nt, potrf_l, syrk_ln, trsm_rlt};
+use rayon::prelude::*;
+
+use super::dense::{gemm_nt, potrf_l, syrk_ln_strip, trsm_rlt, SYRK_NB};
 use super::numeric::NumericError;
 use super::super_symbolic::SuperSymbolic;
 use super::symbolic::{permute_sym, Ordering, Sparse, Symbolic};
@@ -80,19 +82,53 @@ impl SuperFactor {
 }
 
 /// The `cholmod_dense *C` workspace `cholmod_super_numeric` allocates per call
-/// (`:245`), kept across calls instead.
+/// (`:245`), kept across calls instead — plus the extra copies of it the
+/// batched update path needs.
 ///
-/// It is `L->maxcsize` doubles, which is a property of the *symbolic* factor —
+/// `c` is `L->maxcsize` doubles, which is a property of the *symbolic* factor —
 /// so a caller refactorizing the same pattern repeatedly should hold one of
-/// these, exactly as it holds one [`Work`].
-#[derive(Debug, Default)]
+/// these, exactly as it holds one [`Work`]. `pool` is the same buffer once per
+/// concurrently-computed descendant; see [`apply_updates`].
+#[derive(Debug)]
 pub struct SuperWork {
     c: Vec<f64>,
+    pool: Vec<Vec<f64>>,
+    descs: Vec<Desc>,
+    /// The batch size, in flops, at which the updates go wide — [`PAR_FLOPS`],
+    /// except in [`SuperWork::with_par_flops`].
+    par_flops: f64,
+    /// How many updates the last factorization computed on the batched arm, so
+    /// that "the parallel path ran" is a number rather than an assumption.
+    wide: usize,
+}
+
+impl Default for SuperWork {
+    fn default() -> SuperWork {
+        SuperWork {
+            c: Vec::new(),
+            pool: Vec::new(),
+            descs: Vec::new(),
+            par_flops: PAR_FLOPS,
+            wide: 0,
+        }
+    }
 }
 
 impl SuperWork {
     pub fn new() -> SuperWork {
-        SuperWork { c: Vec::new() }
+        SuperWork::default()
+    }
+
+    /// The same workspace with the batching threshold overridden, which is how
+    /// the corpus test drives both arms of [`apply_updates`]: `f64::INFINITY`
+    /// forces the one-at-a-time loop and `0.0` forces the batched one, and the
+    /// two have to agree bit for bit.
+    #[cfg(test)]
+    pub(super) fn with_par_flops(par_flops: f64) -> SuperWork {
+        SuperWork {
+            par_flops,
+            ..SuperWork::default()
+        }
     }
 
     /// Grow to `maxcsize`, never shrink — `cholmod_allocate_dense` is a fresh
@@ -101,6 +137,237 @@ impl SuperWork {
         if self.c.len() < maxcsize {
             self.c.resize(maxcsize, 0.0);
         }
+    }
+}
+
+/// One pending descendant update of the supernode being factorized, read out of
+/// the link list before any of them is computed.
+///
+/// The geometry is a function of `Lpos [d]` at the moment `s` is reached, and
+/// the same walk that reads it advances it — so upstream's one fused loop can
+/// never have more than one update in flight. Separating the walk from the
+/// arithmetic is what makes a batch available. It is the *only* thing that
+/// changes: the two kernel calls are the same calls with the same arguments,
+/// and the order the results are assembled into `L` is still the link list's.
+#[derive(Clone, Copy, Debug)]
+struct Desc {
+    /// `pdx1` — the first row of `d` that affects `s`, in `L->x`.
+    pdx1: i64,
+    /// `pdi1` — the same row, in `L->s`.
+    pdi1: i64,
+    /// `ndrow` — supernode `d`'s leading dimension.
+    ndrow: i64,
+    /// `ndcol` — the columns of `d`, i.e. the update's `K`.
+    ndcol: i64,
+    /// `C` is `ndrow2`-by-`ndrow1`, its first `ndrow1` rows triangular.
+    ndrow1: i64,
+    ndrow2: i64,
+}
+
+impl Desc {
+    /// The `C` this update writes into.
+    #[inline]
+    fn csize(&self) -> usize {
+        (self.ndrow2 * self.ndrow1) as usize
+    }
+
+    /// What the two kernels will do, for the batching decision only — not a
+    /// flop count anyone reports.
+    #[inline]
+    fn flops(&self) -> f64 {
+        2.0 * self.ndrow2 as f64 * self.ndrow1 as f64 * self.ndcol as f64
+    }
+}
+
+/// At most this many `C` buffers are live at once, and at most this many
+/// doubles across them. The batch is bounded by its scratch, not only by the
+/// thread count: a wide batch of wide updates would otherwise hold tens of
+/// megabytes that the serial path never allocates.
+const BATCH_MAX: usize = 64;
+const BATCH_DOUBLES: usize = 4 << 20;
+
+/// Below this, a batch is not worth a fork and a join.
+///
+/// The kernels run at tens of GF/s, so this is tens of microseconds of work
+/// against a join that costs a few — and it has to be a *batch* total rather
+/// than a per-update one, because the batch is what rayon splits.
+const PAR_FLOPS: f64 = 5.0e5;
+
+/// Roughly what one strip of one update should be worth. Small enough that the
+/// largest update in a batch is not the batch's floor, large enough that the
+/// strip is worth being a task.
+const STRIP_FLOPS: f64 = 1.0e5;
+
+/// How many columns of one update's `C` go in a strip — [`STRIP_FLOPS`] worth,
+/// rounded up to [`SYRK_NB`] so the strip's block columns are the ones the
+/// unsplit call would use.
+fn strip_width(g: &Desc) -> usize {
+    let per_col = 2.0 * g.ndrow2 as f64 * g.ndcol as f64;
+    let cols = (STRIP_FLOPS / per_col).ceil().max(1.0) as usize;
+    cols.div_ceil(SYRK_NB) * SYRK_NB
+}
+
+/// Columns `j0 .. j0+jn` of `C1 = L1*L1'` stacked over `C2 = L2*L1'` —
+/// `:1002-1035`, restricted to a strip.
+///
+/// `lx` is `L->x` truncated at `psx`. Every descendant of `s` is stored below
+/// that point, so the truncation is what lets a batch read `L` while the
+/// assembly writes the supernode: the two halves are disjoint slices of one
+/// array rather than an aliasing argument. `c` is likewise the strip's own
+/// slice — a column of `C` is contiguous, so the strips of one `C` are disjoint
+/// slices too, and neither split needs an aliasing argument to be sound.
+///
+/// A strip changes which thread computes an entry and nothing else: the `gemm`
+/// calls are the same calls on the same block columns, so every entry is still
+/// accumulated over `l` ascending in one place.
+fn update_strip(lx: &[f64], g: &Desc, j0: usize, jn: usize, c: &mut [f64]) {
+    let (pdx1, ndrow, ndcol) = (g.pdx1 as usize, g.ndrow as usize, g.ndcol as usize);
+    let (ndrow1, ndrow2) = (g.ndrow1 as usize, g.ndrow2 as usize);
+
+    /* C1 = L1*L1' */
+    syrk_ln_strip(
+        ndrow1, /* N: L1 is ndrow1-by-ndcol */
+        ndcol,  /* K */
+        &lx[pdx1..],
+        ndrow, /* A, LDA: L1, ndrow */
+        c,
+        ndrow2, /* C, LDC: C1 */
+        j0,
+        jn,
+    );
+
+    /* C2 = L2*L1' */
+    if ndrow2 > ndrow1 {
+        gemm_nt(
+            ndrow2 - ndrow1, /* M */
+            jn,              /* N */
+            ndcol,           /* K */
+            &lx[pdx1 + ndrow1..],
+            ndrow, /* A, LDA: L2 */
+            &lx[pdx1 + j0..],
+            ndrow, /* B, LDB: L1 */
+            &mut c[ndrow1..],
+            ndrow2, /* C, LDC: C2 */
+        );
+    }
+}
+
+/// The whole of one descendant's `C`, i.e. [`update_strip`] over every column.
+fn update_c(lx: &[f64], g: &Desc, c: &mut [f64]) {
+    update_strip(lx, g, 0, g.ndrow1 as usize, c);
+}
+
+/// The relative map and the scatter of one `C` into the supernode — `:1037-1050`.
+///
+/// `sx` is `L->x` from `psx` on, so upstream's `psx + RelativeMap [j] * nsrow`
+/// loses its `psx`.
+fn assemble(
+    g: &Desc,
+    c: &[f64],
+    sx: &mut [f64],
+    nsrow: i64,
+    ls: &Ws,
+    map: &Ws,
+    relative_map: &mut Ws,
+) {
+    /* construct relative map to supernode s */
+    for i in 0..g.ndrow2 {
+        relative_map[i] = map[ls[g.pdi1 + i]];
+        debug_assert!(relative_map[i] >= 0 && relative_map[i] < nsrow);
+    }
+
+    let sx = Ws::new(sx);
+    let cw = Ws::new_ref(c);
+    for j in 0..g.ndrow1 {
+        /* cols k1:k2-1 */
+        let px = relative_map[j] * nsrow;
+        for i in j..g.ndrow2 {
+            /* rows k1:n-1 */
+            let q = px + relative_map[i];
+            sx[q] -= cw[i + g.ndrow2 * j];
+        }
+    }
+}
+
+/// Apply every pending update of one supernode, in the link list's order.
+///
+/// The updates are independent — each reads a different descendant's block of
+/// `L` and writes its own `C` — but their assemblies are not, because two
+/// descendants can hit the same entry of the supernode. So `C` is what goes
+/// wide and the assembly stays serial and in order, which is what keeps `L->x`
+/// bit-for-bit what the one-at-a-time loop produces. It is also why the batch
+/// is a batch: the buffers are live simultaneously, so their total size is
+/// capped.
+///
+/// The parallel and serial arms differ only in *which* `C` buffer each update
+/// gets. Both call [`update_c`] and [`assemble`] with the same arguments.
+#[allow(clippy::too_many_arguments)]
+fn apply_updates(
+    descs: &[Desc],
+    lower: &[f64],
+    sx: &mut [f64],
+    nsrow: i64,
+    c: &mut [f64],
+    pool: &mut Vec<Vec<f64>>,
+    par_flops: f64,
+    wide: &mut usize,
+    ls: &Ws,
+    map: &Ws,
+    relative_map: &mut Ws,
+) {
+    let mut i0 = 0;
+    while i0 < descs.len() {
+        let (mut i1, mut size, mut flops) = (i0, 0usize, 0.0);
+        while i1 < descs.len() && i1 - i0 < BATCH_MAX && size < BATCH_DOUBLES {
+            size += descs[i1].csize();
+            flops += descs[i1].flops();
+            i1 += 1;
+        }
+        let batch = &descs[i0..i1];
+
+        if batch.len() > 1 && flops >= par_flops {
+            if pool.len() < batch.len() {
+                pool.resize_with(batch.len(), Vec::new);
+            }
+            for (buf, g) in pool.iter_mut().zip(batch) {
+                if buf.len() < g.csize() {
+                    buf.resize(g.csize(), 0.0);
+                }
+            }
+            {
+                /* One task per strip rather than per descendant: a supernode's
+                 * descendants differ in size by orders of magnitude, and a
+                 * batch cannot finish before its largest member does. */
+                let mut tasks: Vec<(Desc, usize, usize, &mut [f64])> = Vec::new();
+                for (buf, g) in pool[..batch.len()].iter_mut().zip(batch) {
+                    let (ndrow1, ndrow2) = (g.ndrow1 as usize, g.ndrow2 as usize);
+                    let width = strip_width(g);
+                    let mut rest = &mut buf[..ndrow1 * ndrow2];
+                    let mut j0 = 0;
+                    while j0 < ndrow1 {
+                        let jn = width.min(ndrow1 - j0);
+                        let (strip, tail) = rest.split_at_mut(jn * ndrow2);
+                        tasks.push((*g, j0, jn, strip));
+                        rest = tail;
+                        j0 += jn;
+                    }
+                }
+                tasks
+                    .par_iter_mut()
+                    .for_each(|(g, j0, jn, c)| update_strip(lower, g, *j0, *jn, c));
+            }
+            *wide += batch.len();
+            for (buf, g) in pool.iter().zip(batch) {
+                assemble(g, buf, sx, nsrow, ls, map, relative_map);
+            }
+        } else {
+            for g in batch {
+                debug_assert!(c.len() >= g.csize());
+                update_c(lower, g, c);
+                assemble(g, c, sx, nsrow, ls, map, relative_map);
+            }
+        }
+        i0 = i1;
     }
 }
 
@@ -118,7 +385,7 @@ fn worker(
     a: &Sparse,
     beta: f64,
     l: &mut SuperFactor,
-    c: &mut [f64],
+    cwork: &mut SuperWork,
     supermap: &mut Ws,
     relative_map: &mut Ws,
     next: &mut Ws,
@@ -131,6 +398,16 @@ fn worker(
 ) {
     let nsuper = l.sym.nsuper;
     let n = l.n;
+
+    let SuperWork {
+        c,
+        pool,
+        descs,
+        par_flops,
+        wide,
+    } = cwork;
+    let par_flops = *par_flops;
+    *wide = 0;
 
     let ap = Ws::new_ref(&a.p);
     let ai = Ws::new_ref(&a.i);
@@ -255,6 +532,14 @@ fn worker(
         // update supernode s with each pending descendant d
         //----------------------------------------------------------------------
 
+        /* Upstream walks the link list and does the arithmetic in one loop.
+         * Here the walk comes first and only records what each update is, so
+         * that the updates — which are independent, unlike the walk, which
+         * advances Lpos and re-links d as it goes — can be computed together.
+         * Nothing in the walk depends on the arithmetic: the geometry is read
+         * before Lpos [d] is advanced, exactly as it is upstream, and the
+         * ancestor a descendant is re-linked into is always past s. */
+        descs.clear();
         let mut dnext = head[s];
         while dnext != EMPTY {
             let d = dnext;
@@ -287,10 +572,6 @@ fn worker(
              * affects s, this set cannot be empty. */
             debug_assert!(pdi1 < pdi2 && pdi2 <= pdend);
 
-            //------------------------------------------------------------------
-            // construct the update matrix C for this supernode d
-            //------------------------------------------------------------------
-
             /* C = L (k1:n-1, kd1:kd2-1) * L (k1:k2-1, kd1:kd2-1)', except that
              * k1:n-1 refers to all of the rows in L, but many of the rows are
              * all zero.  Supernode d holds columns kd1 to kd2-1 of L.  Nonzero
@@ -304,55 +585,16 @@ fn worker(
              * needs to be computed since C1 is symmetric. */
 
             debug_assert!(ndrow2 * ndrow1 <= l.sym.maxcsize as i64);
+            debug_assert!(ndrow2 - ndrow1 >= 0);
 
-            let ndrow3 = ndrow2 - ndrow1; /* number of rows of C2 */
-            debug_assert!(ndrow3 >= 0);
-
-            /* C1 = L1*L1' */
-            syrk_ln(
-                ndrow1 as usize, /* N: L1 is ndrow1-by-ndcol */
-                ndcol as usize,  /* K */
-                &l.x[pdx1 as usize..],
-                ndrow as usize, /* A, LDA: L1, ndrow */
-                c,
-                ndrow2 as usize, /* C, LDC: C1 */
-            );
-
-            /* C2 = L2*L1' */
-            if ndrow3 > 0 {
-                gemm_nt(
-                    ndrow3 as usize, /* M */
-                    ndrow1 as usize, /* N */
-                    ndcol as usize,  /* K */
-                    &l.x[(pdx1 + ndrow1) as usize..],
-                    ndrow as usize, /* A, LDA: L2 */
-                    &l.x[pdx1 as usize..],
-                    ndrow as usize, /* B, LDB: L1 */
-                    &mut c[ndrow1 as usize..],
-                    ndrow2 as usize, /* C, LDC: C2 */
-                );
-            }
-
-            /* construct relative map to supernode s */
-            for i in 0..ndrow2 {
-                relative_map[i] = map[ls[pdi1 + i]];
-                debug_assert!(relative_map[i] >= 0 && relative_map[i] < nsrow);
-            }
-
-            /* assemble C into supernode s using the relative map */
-            {
-                let lx = Ws::new(&mut l.x);
-                let cw = Ws::new_ref(c);
-                for j in 0..ndrow1 {
-                    /* cols k1:k2-1 */
-                    let px = psx + relative_map[j] * nsrow;
-                    for i in j..ndrow2 {
-                        /* rows k1:n-1 */
-                        let q = px + relative_map[i];
-                        lx[q] -= cw[i + ndrow2 * j];
-                    }
-                }
-            }
+            descs.push(Desc {
+                pdx1,
+                pdi1,
+                ndrow,
+                ndcol,
+                ndrow1,
+                ndrow2,
+            });
 
             /* prepare this supernode d for its next ancestor */
             dnext = next[d];
@@ -371,6 +613,25 @@ fn worker(
                     head[dancestor] = d;
                 }
             }
+        }
+
+        {
+            /* Every descendant of s lives below psx in L->x, so the split is
+             * what lets the updates read L while the assembly writes s. */
+            let (lower, sx) = l.x.split_at_mut(psx as usize);
+            apply_updates(
+                descs,
+                lower,
+                sx,
+                nsrow,
+                c,
+                pool,
+                par_flops,
+                wide,
+                ls,
+                map,
+                relative_map,
+            );
         }
 
         //----------------------------------------------------------------------
@@ -554,7 +815,7 @@ pub fn super_numeric(
         a,
         beta,
         l,
-        &mut cwork.c,
+        cwork,
         supermap,
         Ws::new(relative_map),
         Ws::new(next),
@@ -606,4 +867,80 @@ pub fn super_factorize(
     const LOWER: bool = true;
     let s = permute_sym(a, l.ordering, &l.perm, VALUES, LOWER, &mut work.all());
     super_numeric(s.as_ref().unwrap_or(a), beta, l, work, cwork)
+}
+
+/* ========================================================================= */
+
+#[cfg(test)]
+mod tests {
+    use super::super::amd::IntWidth;
+    use super::super::super_symbolic::{super_symbolic, Relax};
+    use super::super::symbolic::{analyze_sparse, permute_sym, Sparse};
+    use super::super::testcorpus::{corpus, spd_triangle};
+    use super::super::ws::{columns_are_sorted, Work};
+    use super::*;
+
+    /// One corpus matrix, factorized supernodally with the batching threshold
+    /// pinned, the way `mod.rs` drives it. Returns the factor and how many
+    /// updates took the batched arm.
+    fn factor(
+        n: usize,
+        edges: &[(usize, usize)],
+        ordering: Ordering,
+        par_flops: f64,
+    ) -> (SuperFactor, usize) {
+        let (p, i, v) = spd_triangle(n, edges, false);
+        let a = Sparse {
+            n,
+            p: p.clone(),
+            i: i.clone(),
+            x: v.clone(),
+            numeric: true,
+            stype: 1,
+            sorted: columns_are_sorted(n, &p, &i),
+        };
+        let s = analyze_sparse(&a, ordering, true, IntWidth::I64).unwrap();
+        let mut w = Work::new(n);
+        let a2 = permute_sym(&a, s.ordering, &s.perm, false, false, &mut w.all());
+        let sym = super_symbolic(
+            a2.as_ref().unwrap_or(&a),
+            &s.parent,
+            &s.colcount,
+            &Relax::default(),
+            &mut w,
+        )
+        .unwrap();
+        let mut l = SuperFactor::new(&s, sym);
+        let mut cw = SuperWork::with_par_flops(par_flops);
+        super_factorize(&a, 0.0, &mut l, &mut w, &mut cw).unwrap();
+        (l, cw.wide)
+    }
+
+    /// The two arms of [`apply_updates`] have to produce the same `L->x`, entry
+    /// for entry — not to a tolerance.
+    ///
+    /// That is the whole claim the batching rests on: computing several `C`s at
+    /// once reorders nothing, because each one reads a different descendant and
+    /// they are assembled into the supernode in the link list's order either
+    /// way. `f64::INFINITY` pins the one-at-a-time loop and `0.0` pins the
+    /// batched one, so both are exercised on every corpus matrix rather than
+    /// whichever one the default threshold happens to select.
+    #[test]
+    fn batching_the_updates_does_not_move_a_rounding() {
+        let mut batched = 0;
+        for (name, n, edges) in corpus() {
+            for ordering in [Ordering::Amd, Ordering::Natural] {
+                let (serial, none) = factor(n, &edges, ordering, f64::INFINITY);
+                let (wide, some) = factor(n, &edges, ordering, 0.0);
+                assert_eq!(none, 0, "{name} went wide with the batching disabled");
+                assert_eq!(serial.minor, wide.minor, "{name} minor");
+                assert_eq!(serial.x, wide.x, "{name} L->x");
+                batched += some;
+            }
+        }
+        assert!(
+            batched > 0,
+            "the batched arm never ran: the test proves nothing"
+        );
+    }
 }
