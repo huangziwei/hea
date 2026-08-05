@@ -448,7 +448,7 @@ fn simplicial_solver(sys: Sys, l: &Factor, x: &mut [f64], nk: usize) {
 ///
 /// `perm` is `None` for the identity, which is what `cholmod_solve` passes
 /// whenever `L->ordering == CHOLMOD_NATURAL` (`cholmod_solve.c:262-267`).
-fn perm(
+pub(super) fn perm(
     b: &[f64],
     p: Option<&[i64]>,
     k1: usize,
@@ -468,7 +468,7 @@ fn perm(
 }
 
 /// `t_cholmod_psolve_worker.c:251-305` — `X (P (1:n), k1:k2-1) = Y`.
-fn iperm(
+pub(super) fn iperm(
     y: &[f64],
     p: Option<&[i64]>,
     k1: usize,

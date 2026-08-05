@@ -19,6 +19,7 @@ pub mod numeric;
 pub mod py;
 pub mod solve;
 pub mod super_numeric;
+pub mod super_solve;
 pub mod super_symbolic;
 pub mod symbolic;
 #[cfg(test)]
@@ -443,12 +444,124 @@ fn super_factorize(
     Ok(d.unbind())
 }
 
+/// `cholmod_analyze` + `cholmod_factorize` + `cholmod_solve`, supernodal.
+///
+/// `b` is `n`-by-`nrhs` column-major; the solution comes back in the same
+/// layout. `sys` names the system in the spelling `cholmod.h` uses — `"A"`,
+/// `"LDLt"`, `"L"`, `"LD"`, `"Lt"`, `"DLt"`, `"D"`, `"P"`, `"Pt"` — so each
+/// half of the solve can be exercised on its own.
+///
+/// `solve_reps > 0` also returns `solve_ms`, the best of that many solves
+/// against the one factor, reusing the workspace as a caller holding a factor
+/// would. The solve is a few percent of analyze+factorize, so it cannot be
+/// measured by differencing two whole-pipeline timings.
+#[pyfunction]
+#[pyo3(name = "super_solve")]
+#[pyo3(signature = (n, indptr, indices, data, b, nrhs, stype, sys="A", beta=0.0,
+                    ordering="amd", solve_reps=0))]
+#[allow(clippy::too_many_arguments)]
+fn supernodal_solve(
+    py: Python<'_>,
+    n: usize,
+    indptr: PyReadonlyArray1<'_, i64>,
+    indices: PyReadonlyArray1<'_, i64>,
+    data: PyReadonlyArray1<'_, f64>,
+    b: PyReadonlyArray1<'_, f64>,
+    nrhs: usize,
+    stype: i32,
+    sys: &str,
+    beta: f64,
+    ordering: &str,
+    solve_reps: usize,
+) -> PyResult<Py<PyDict>> {
+    let indptr = indptr.as_slice()?;
+    let indices = indices.as_slice()?;
+    let data = data.as_slice()?;
+    let b = b.as_slice()?;
+    let order = match ordering {
+        "amd" => symbolic::Ordering::Amd,
+        "natural" => symbolic::Ordering::Natural,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "ordering must be 'amd' or 'natural', not {other:?}"
+            )));
+        }
+    };
+    let sys = match sys {
+        "A" => solve::Sys::A,
+        "LDLt" => solve::Sys::LDLt,
+        "LD" => solve::Sys::LD,
+        "DLt" => solve::Sys::DLt,
+        "L" => solve::Sys::L,
+        "Lt" => solve::Sys::Lt,
+        "D" => solve::Sys::D,
+        "P" => solve::Sys::P,
+        "Pt" => solve::Sys::Pt,
+        other => return Err(PyValueError::new_err(format!("unknown system {other:?}"))),
+    };
+    let (x, minor, solve_ms) = py
+        .allow_threads(|| -> Result<_, String> {
+            let nz = ws::validate_csc(n, indptr, indices).map_err(|e| e.to_string())?;
+            if data.len() < nz {
+                return Err(format!("data has {} entries, need {nz}", data.len()));
+            }
+            if b.len() < n * nrhs {
+                return Err(format!("b has {} entries, need {}", b.len(), n * nrhs));
+            }
+            let a = symbolic::Sparse {
+                n,
+                p: indptr[..n + 1].to_vec(),
+                i: indices[..nz].to_vec(),
+                x: data[..nz].to_vec(),
+                numeric: true,
+                stype,
+                sorted: ws::columns_are_sorted(n, indptr, indices),
+            };
+            let s = symbolic::analyze_sparse(&a, order, true, IntWidth::I64)
+                .map_err(|e| e.to_string())?;
+            let mut work = ws::Work::new(n);
+            let a2 = symbolic::permute_sym(&a, s.ordering, &s.perm, false, false, &mut work.all());
+            let sym = super_symbolic::super_symbolic(
+                a2.as_ref().unwrap_or(&a),
+                &s.parent,
+                &s.colcount,
+                &super_symbolic::Relax::default(),
+                &mut work,
+            )
+            .map_err(|e| e.to_string())?;
+            let mut l = super_numeric::SuperFactor::new(&s, sym);
+            let mut cwork = super_numeric::SuperWork::new();
+            super_numeric::super_factorize(&a, beta, &mut l, &mut work, &mut cwork)
+                .map_err(|e| e.to_string())?;
+            let mut x = vec![0.0f64; n * nrhs];
+            let mut swork = super_solve::SuperSolveWork::new();
+            super_solve::super_solve(sys, &l, &b[..n * nrhs], nrhs, &mut x, &mut swork)
+                .map_err(|e| e.to_string())?;
+            let mut best = f64::INFINITY;
+            for _ in 0..solve_reps {
+                let t0 = std::time::Instant::now();
+                super_solve::super_solve(sys, &l, &b[..n * nrhs], nrhs, &mut x, &mut swork)
+                    .map_err(|e| e.to_string())?;
+                best = best.min(t0.elapsed().as_secs_f64() * 1e3);
+            }
+            Ok((x, l.minor, best))
+        })
+        .map_err(PyValueError::new_err)?;
+
+    let d = PyDict::new(py);
+    d.set_item("X", x.into_pyarray(py))?;
+    d.set_item("minor", minor)?;
+    d.set_item("solve_ms", solve_ms)?;
+    Ok(d.unbind())
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(amd_order, m)?)?;
     m.add_function(wrap_pyfunction!(analyze, m)?)?;
     m.add_function(wrap_pyfunction!(factorize, m)?)?;
     m.add_function(wrap_pyfunction!(super_analyze, m)?)?;
     m.add_function(wrap_pyfunction!(super_factorize, m)?)?;
+    m.add_function(wrap_pyfunction!(supernodal_solve, m)?)?;
     m.add_class::<py::CholFactor>()?;
     Ok(())
 }

@@ -38,6 +38,16 @@ impl<T> Ws<T> {
         unsafe { &*(s as *const [T] as *const Ws<T>) }
     }
 
+    /// `set_empty (X, n)` / `memset` — the whole-array reset the mark trick
+    /// falls back to on overflow.
+    #[inline]
+    pub(super) fn fill(&mut self, v: T)
+    where
+        T: Copy,
+    {
+        self.0.fill(v);
+    }
+
     /// `self[lo..hi]`, for the column loops that the C writes as
     /// `for (p = Ap[j] ; p < pend ; p++) { i = Ai[p] ; ... }`.
     ///
@@ -50,16 +60,6 @@ impl<T> Ws<T> {
     /// Only applicable where the loop does not also *write* the array it walks:
     /// where it does, the C is scaled-index-bound too and there is nothing to
     /// win.
-    /// `set_empty (X, n)` / `memset` — the whole-array reset the mark trick
-    /// falls back to on overflow.
-    #[inline]
-    pub(super) fn fill(&mut self, v: T)
-    where
-        T: Copy,
-    {
-        self.0.fill(v);
-    }
-
     #[inline(always)]
     pub(super) fn range(&self, lo: i64, hi: i64) -> &[T] {
         debug_assert!(
