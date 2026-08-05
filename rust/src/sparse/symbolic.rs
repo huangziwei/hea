@@ -896,6 +896,44 @@ pub enum Ordering {
     Postordered,
 }
 
+/// Which orderings [`analyze`] tries — upstream's `Common->nmethods` together
+/// with the `Common->method[]` it implies (`cholmod_analyze.c:432-472`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Method {
+    /// `Common->nmethods == 0`, CHOLMOD's own default: try every ordering in
+    /// [`DEFAULT_METHODS`] and keep the one with the smallest `lnz`.
+    #[default]
+    Default,
+    /// `Common->nmethods == 1` — this ordering and no other. Upstream's
+    /// `default_strategy` is then false, so the METIS break check at
+    /// `cholmod_analyze.c:767-781` never runs and
+    /// [`Symbolic::metis_would_be_tried`] stays false.
+    Pinned(Ordering),
+}
+
+/// The default strategy's method list, and **the one place this port
+/// deliberately departs from upstream's**.
+///
+/// `cholmod_analyze.c:452-455` sets `{CHOLMOD_GIVEN, CHOLMOD_AMD,
+/// CHOLMOD_METIS}` (or `NESDIS` for `Common->default_nesdis`). Of those:
+///
+/// * `CHOLMOD_GIVEN` is skipped whenever `UserPerm` is `NULL` (`:609-613`), and
+///   this port has no user-permutation argument, so it has nothing to port.
+/// * `CHOLMOD_METIS` needs the Partition module. This port has no METIS, and
+///   the slot is filled with `CHOLMOD_NATURAL` instead.
+///
+/// Substituting rather than leaving the slot empty is worth stating plainly:
+/// it means hea can select an ordering CHOLMOD's default never would. It is a
+/// deviation in the *candidate set*, not in the rule — selection is still
+/// smallest `lnz` (`:736`) and the break check that decides whether a third
+/// method runs at all is still AMD's (`:767-781`), so a matrix on which
+/// upstream would not have looked past AMD does not get looked past here
+/// either. Natural earns the slot: on the crossed random-effects matrices
+/// `hea.models.gmm` factorizes hundreds of times per fit it beats AMD outright,
+/// and on the matrices where it is hopeless — banded, Laplacian — AMD's break
+/// check has already fired and it is never tried.
+pub const DEFAULT_METHODS: [Ordering; 2] = [Ordering::Amd, Ordering::Natural];
+
 /// What `permute_matrices` hands back (`cholmod_analyze.c:172-176`).
 ///
 /// Upstream fills four out-parameters, but only `A1` and `A2` are matrices it
@@ -1039,15 +1077,19 @@ pub struct Symbolic {
     /// `Common->anz` — nnz of the stored triangle of the permuted `A`,
     /// diagonal included.
     pub anz: f64,
-    /// The ordering that produced `perm`, after upstream's relabel of
-    /// [`Ordering::Natural`] to [`Ordering::Postordered`].
+    /// The ordering the trial loop selected, after upstream's relabel of
+    /// [`Ordering::Natural`] to [`Ordering::Postordered`] — `L->ordering`.
     pub ordering: Ordering,
-    /// AMD's own statistics, when [`Ordering::Amd`] was used.
+    /// AMD's own statistics, whenever AMD *ran* — which under
+    /// [`Method::Default`] is always, even on a matrix where another method
+    /// won. They are the estimates the METIS break check is taken on, and
+    /// deliberately not the exact counts in `fl`/`lnz`.
     pub amd: Option<AmdInfo>,
-    /// Whether upstream's default strategy would have gone on to try METIS —
+    /// Whether the default strategy went on past AMD —
     /// `!((fl < 500*lnz) || (lnz < 5*anz))` on AMD's estimates
-    /// (`cholmod_analyze.c:767-781`), which is the one place this port can
-    /// diverge from a CHOLMOD built with the Partition module. False whenever
+    /// (`cholmod_analyze.c:767-781`). Upstream's third method is METIS and this
+    /// port's is natural ([`DEFAULT_METHODS`]), so this doubles as the flag for
+    /// where the two candidate sets can differ. False whenever
     /// `Common->nmethods` is 1, i.e. whenever the caller pinned the ordering.
     pub metis_would_be_tried: bool,
 }
@@ -1062,19 +1104,15 @@ pub struct Symbolic {
 /// [`Symbolic::perm`] comparable to `scikit-sparse`'s `F.perm` where
 /// [`amd::cholmod_amd`]'s is not.
 ///
-/// The upstream method loop is reduced to the single requested ordering here.
-/// With `Common->nmethods == 0` (the default) upstream tries AMD and then
-/// stops if AMD's fill estimate is good enough, trying METIS otherwise; the
-/// stop is reproduced exactly and reported as
-/// [`Symbolic::metis_would_be_tried`] rather than guessed at. `CHOLMOD_GIVEN`
-/// with a `NULL` `UserPerm` is skipped upstream and has nothing to port.
+/// `method` is upstream's `Common->nmethods`: [`Method::Default`] runs the
+/// trial loop over [`DEFAULT_METHODS`] and keeps the smallest `lnz`,
+/// [`Method::Pinned`] runs exactly one ordering.
 pub fn analyze(
     n: usize,
     indptr: &[i64],
     indices: &[i64],
     stype: i32,
-    ordering: Ordering,
-    default_strategy: bool,
+    method: Method,
     width: IntWidth,
 ) -> Result<Symbolic, SymbolicError> {
     if stype == 0 {
@@ -1090,7 +1128,7 @@ pub fn analyze(
         stype,
         sorted: true,
     };
-    analyze_sparse(&a, ordering, default_strategy, width)
+    analyze_sparse(&a, method, width)
 }
 
 /// [`analyze`] for a matrix the caller already holds.
@@ -1100,8 +1138,7 @@ pub fn analyze(
 /// takes the same `cholmod_sparse *A` that `cholmod_factorize` does.
 pub fn analyze_sparse(
     a: &Sparse,
-    ordering: Ordering,
-    default_strategy: bool,
+    method: Method,
     width: IntWidth,
 ) -> Result<Symbolic, SymbolicError> {
     if a.stype == 0 {
@@ -1113,61 +1150,185 @@ pub fn analyze_sparse(
      * that routines called by cholmod_analyze do not reallocate the space. */
     let mut work = Work::new(n);
 
-    /* find the fill-reducing permutation.  The ordering routines may use all
-     * 6n of Iwork, since nothing else's contents are needed across them. */
-    let (mut lperm, amd_info) = match ordering {
-        Ordering::Natural | Ordering::Postordered => ((0..n as i64).collect::<Vec<i64>>(), None),
-        Ordering::Amd => {
-            let (perm, info) = amd::cholmod_amd(
-                n,
-                &a.p,
-                &a.i,
-                a.stype,
-                DEFAULT_DENSE,
-                DEFAULT_AGGRESSIVE,
-                width,
-                &mut work.all(),
-            )?;
-            (perm, Some(info))
-        }
-    };
+    /* Upstream carves First and Level out of the last 4n Ints of Iwork because
+     * the kernels below use only the first 2n (`:515-520`).  The ordering
+     * routines may use all 6n, and here they run *inside* the method loop, so
+     * these get buffers of their own instead — strictly more workspace, and
+     * trivially disjoint from what the kernels scratch in. */
+    let mut first = vec![0i64; n];
+    let mut level = vec![0i64; n];
 
-    /* determine if METIS is to be skipped.  AMD found an ordering with less
-     * than 500 flops per nonzero in L, or one with a fill-in ratio of less
-     * than 5?  Then it is unlikely METIS will do better and upstream breaks
-     * out of the method loop.  Both terms come from cholmod_amd, which is the
-     * only thing that has run at this point. */
-    let metis_would_be_tried = match (default_strategy, amd_info) {
-        (true, Some(info)) => {
-            let (fl, lnz) = (info.fl(n), info.lnz(n));
-            !((fl < 500.0 * lnz) || (lnz < 5.0 * info.anz))
-        }
-        _ => false,
-    };
-
-    let mut lparent = vec![EMPTY; n];
+    /* the candidate the loop is working on: upstream's Perm/Parent/ColCount
+     * workspace, against the Lperm/Lparent/Lcolcount that hold the best so
+     * far.  Post is workspace for both — the composition below recomputes it
+     * from the winner's tree. */
+    let mut perm = vec![0i64; n];
+    let mut parent = vec![EMPTY; n];
+    let mut colcount = vec![0i64; n];
     let mut post = vec![0i64; n];
-    let mut lcolcount = vec![0i64; n];
-    /* Use the last 4n Ints in Iwork for First and Level, since the routines
-     * below use the first 2n.  (Upstream keeps Parent and Post there too; both
-     * are outputs here, so they are their own buffers.) */
-    let (mut w, first, level) = work.split_analyze(n);
 
-    let counts = analyze_ordering(
-        a,
-        ordering,
-        &lperm,
-        &mut lparent,
-        &mut post,
-        &mut lcolcount,
-        first,
-        level,
-        &mut w,
-    )?;
+    let mut lperm = vec![0i64; n];
+    let mut lparent = vec![EMPTY; n];
+    let mut lcolcount = vec![0i64; n];
+
+    let default_strategy = matches!(method, Method::Default);
+    let pinned: [Ordering; 1];
+    let methods: &[Ordering] = match method {
+        Method::Default => &DEFAULT_METHODS,
+        Method::Pinned(o) => {
+            pinned = [o];
+            &pinned
+        }
+    };
+
+    /* Common->selected, Common->method[].fl/lnz and lnz_best.  amd_ran is not
+     * upstream's — it keeps AMD's estimates reportable even when another
+     * method wins, since they are what the break check was taken on. */
+    let mut selected = None;
+    let mut lnz_best = 0.0;
+    let mut skip_best = false;
+    let mut best_ordering = Ordering::Natural;
+    let mut best_fl = 0.0;
+    let mut amd_ran = None;
+    let mut anz = 0.0;
+    let mut metis_would_be_tried = false;
+    let mut failure = None;
+
+    /* try all the requested ordering options — cholmod_analyze.c:554-782.
+     * Upstream's trailing `method == nmethods` iteration is the AMD backup, and
+     * it is unreachable here: it needs `amd_backup`, which the default strategy
+     * clears at `:456` and which a pinned AMD or NATURAL leaves false at
+     * `:467-471`. */
+    for (m, &ordering) in methods.iter().enumerate() {
+        let mut skip_analysis = false;
+
+        /* find the fill-reducing permutation.  The ordering routines may use
+         * all 6n of Iwork, since nothing else's contents are needed across
+         * them. */
+        match ordering {
+            Ordering::Natural | Ordering::Postordered => {
+                for (k, p) in perm.iter_mut().enumerate() {
+                    *p = k as i64;
+                }
+            }
+            Ordering::Amd => {
+                match amd::cholmod_amd(
+                    n,
+                    &a.p,
+                    &a.i,
+                    a.stype,
+                    DEFAULT_DENSE,
+                    DEFAULT_AGGRESSIVE,
+                    width,
+                    &mut work.all(),
+                ) {
+                    Ok((p, info)) => {
+                        perm.copy_from_slice(&p);
+                        anz = info.anz;
+                        amd_ran = Some(info);
+                    }
+                    Err(e) => {
+                        /* method failed; clear status and try the next
+                         * (`:703-709`) */
+                        failure.get_or_insert(SymbolicError::from(e));
+                        continue;
+                    }
+                }
+                skip_analysis = true;
+            }
+        }
+
+        /* analyze the ordering.  AMD is exempt: cholmod_amd has already left
+         * its own fl/lnz estimates in Common, and the exact counts are wanted
+         * only for the ordering that wins (`:715-725`, `:814-822`). */
+        let (fl, lnz) = if skip_analysis {
+            let info = amd_ran.expect("cholmod_amd sets its Info before returning");
+            (info.fl(n), info.lnz(n))
+        } else {
+            match analyze_ordering(
+                a,
+                ordering,
+                &perm,
+                &mut parent,
+                &mut post,
+                &mut colcount,
+                &mut first,
+                &mut level,
+                &mut work.all(),
+            ) {
+                Ok(counts) => {
+                    anz = counts.anz;
+                    (counts.fl, counts.lnz)
+                }
+                Err(e) => {
+                    failure.get_or_insert(e);
+                    continue;
+                }
+            }
+        };
+
+        /* pick the best method — fl.pt. compare, but lnz can never be NaN
+         * (`:731-761`) */
+        if selected.is_none() || lnz < lnz_best {
+            selected = Some(m);
+            best_ordering = ordering;
+            lnz_best = lnz;
+            best_fl = fl;
+            lperm.copy_from_slice(&perm);
+            /* save the results of analyze_ordering, if it was called */
+            skip_best = skip_analysis;
+            if !skip_analysis {
+                lcolcount.copy_from_slice(&colcount);
+                lparent.copy_from_slice(&parent);
+            }
+        }
+
+        /* determine if the third method is to be skipped (`:763-781`).  AMD
+         * found an ordering with less than 500 flops per nonzero in L, or one
+         * with a fill-in ratio of less than 5?  Then it is unlikely another
+         * method will do better.  All three terms are AMD's own, cholmod_amd
+         * being the only thing that has run. */
+        if default_strategy && ordering == Ordering::Amd {
+            metis_would_be_tried = !((fl < 500.0 * lnz) || (lnz < 5.0 * anz));
+            if !metis_would_be_tried {
+                break;
+            }
+        }
+    }
+
+    if selected.is_none() {
+        /* all methods failed (`:787-804`).  Upstream reports the worst status
+         * any of them set; the only method it can skip *without* an error is
+         * CHOLMOD_GIVEN with a NULL UserPerm, which this port does not have,
+         * so something always recorded a reason. */
+        return Err(failure.expect("a method was skipped without recording why"));
+    }
+
+    /* do the analysis for AMD, if skipped (`:806-822`).  This overwrites
+     * Common->fl and Common->lnz with the exact counts, so the supernodal
+     * switch downstream never sees AMD's estimate. */
+    let mut ordering = best_ordering;
+    if skip_best {
+        let counts = analyze_ordering(
+            a,
+            ordering,
+            &lperm,
+            &mut lparent,
+            &mut post,
+            &mut lcolcount,
+            &mut first,
+            &mut level,
+            &mut work.all(),
+        )?;
+        anz = counts.anz;
+        best_fl = counts.fl;
+        lnz_best = counts.lnz;
+    }
 
     /* postorder the etree, weighted by the column counts, and combine the
      * fill-reducing ordering with it */
-    let mut ordering = ordering;
+    let mut w = work.all();
+    let (first, level) = (&mut first[..], &mut level[..]);
     let k = postorder(&lparent, n, Some(&lcolcount), &mut post, &mut w);
     if k == n {
         /* use First and Level as workspace */
@@ -1210,11 +1371,11 @@ pub fn analyze_sparse(
         colcount: lcolcount,
         parent: lparent,
         post,
-        fl: counts.fl,
-        lnz: counts.lnz,
-        anz: counts.anz,
+        fl: best_fl,
+        lnz: lnz_best,
+        anz,
         ordering,
-        amd: amd_info,
+        amd: amd_ran,
         metis_would_be_tried,
     })
 }
@@ -1233,9 +1394,13 @@ mod tests {
     use crate::sparse::testcorpus::{corpus, triangle_csc};
 
     fn analyzed(n: usize, edges: &[(usize, usize)], lower: bool, o: Ordering) -> Symbolic {
+        by_method(n, edges, lower, Method::Pinned(o))
+    }
+
+    fn by_method(n: usize, edges: &[(usize, usize)], lower: bool, m: Method) -> Symbolic {
         let (indptr, indices) = triangle_csc(n, edges, lower);
         let stype = if lower { -1 } else { 1 };
-        analyze(n, &indptr, &indices, stype, o, true, IntWidth::I64)
+        analyze(n, &indptr, &indices, stype, m, IntWidth::I64)
             .unwrap_or_else(|e| panic!("n = {n}, stype {stype}: {e}"))
     }
 
@@ -1297,6 +1462,62 @@ mod tests {
                 );
                 assert_eq!(lo.parent, up.parent, "{name}: parent differs by stype");
                 assert_eq!(lo.anz, up.anz, "{name}: anz differs by stype");
+            }
+        }
+    }
+
+    /// The trial loop selects, it does not invent: whatever it returns is
+    /// exactly what pinning the ordering it reports would have returned, and
+    /// it is never worse than pinning AMD.
+    ///
+    /// The two halves are one claim each. `metis_would_be_tried` decides
+    /// whether the loop looked past AMD at all, so when it is false the answer
+    /// must be AMD's *bit for bit* — that is what keeps the default cheap on
+    /// the matrices upstream would not have looked past AMD on either. When it
+    /// is true, natural was tried, and the selection rule is smallest `lnz`.
+    #[test]
+    fn the_trial_loop_selects_and_never_invents() {
+        for (name, n, edges) in corpus() {
+            let best = by_method(n, &edges, true, Method::Default);
+            let amd = analyzed(n, &edges, true, Ordering::Amd);
+
+            let same_as = match best.ordering {
+                Ordering::Amd => &amd,
+                /* natural is relabelled postordered on the way out */
+                Ordering::Postordered => &analyzed(n, &edges, true, Ordering::Natural),
+                Ordering::Natural => panic!("{name}: natural was not relabelled"),
+            };
+            assert_eq!(best.perm, same_as.perm, "{name}: perm is not the winner's");
+            assert_eq!(best.colcount, same_as.colcount, "{name}: colcount");
+            assert_eq!(best.parent, same_as.parent, "{name}: parent");
+            assert_eq!(best.lnz, same_as.lnz, "{name}: lnz");
+
+            if best.metis_would_be_tried {
+                assert!(
+                    best.lnz <= amd.lnz,
+                    "{name}: selected lnz {} is worse than AMD's {}",
+                    best.lnz,
+                    amd.lnz
+                );
+            } else {
+                assert_eq!(
+                    best.ordering,
+                    Ordering::Amd,
+                    "{name}: the loop broke after AMD but did not select it"
+                );
+            }
+        }
+    }
+
+    /// Pinning is `Common->nmethods == 1`, and upstream takes the break check
+    /// only under the default strategy (`cholmod_analyze.c:767`) — so a pinned
+    /// run reports no verdict on it rather than a stale one.
+    #[test]
+    fn pinning_an_ordering_takes_no_metis_decision() {
+        for (name, n, edges) in corpus() {
+            for o in [Ordering::Natural, Ordering::Amd] {
+                let s = analyzed(n, &edges, true, o);
+                assert!(!s.metis_would_be_tried, "{name}: pinned {o:?} took one");
             }
         }
     }
@@ -1405,7 +1626,14 @@ mod tests {
     #[test]
     fn unsupported_stypes_are_rejected() {
         assert!(matches!(
-            analyze(1, &[0, 1], &[0], 0, Ordering::Amd, true, IntWidth::I64),
+            analyze(
+                1,
+                &[0, 1],
+                &[0],
+                0,
+                Method::Pinned(Ordering::Amd),
+                IntWidth::I64
+            ),
             Err(SymbolicError::Unsymmetric)
         ));
         let lower = Sparse {

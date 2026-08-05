@@ -294,7 +294,7 @@ mod tests {
     use super::super::amd::IntWidth;
     use super::super::super_numeric::{super_factorize, SuperWork};
     use super::super::super_symbolic::{super_symbolic, Relax};
-    use super::super::symbolic::{analyze_sparse, permute_sym, Sparse};
+    use super::super::symbolic::{analyze_sparse, permute_sym, Method, Sparse};
     use super::super::testcorpus::{corpus, spd_triangle};
     use super::super::ws::{columns_are_sorted, Work};
     use super::*;
@@ -312,7 +312,7 @@ mod tests {
             stype: 1,
             sorted: columns_are_sorted(n, &p, &i),
         };
-        let s = analyze_sparse(&a, ordering, true, IntWidth::I64).unwrap();
+        let s = analyze_sparse(&a, Method::Pinned(ordering), IntWidth::I64).unwrap();
         let mut w = Work::new(n);
         let a2 = permute_sym(&a, s.ordering, &s.perm, false, false, &mut w.all());
         let sym = super_symbolic(

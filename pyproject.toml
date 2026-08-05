@@ -1,5 +1,10 @@
 [tool.pytest.ini_options]
 pythonpath = [".", "tests"]
+# The suite is tests/. dev/ is untracked scratch — benchmark harnesses and
+# vendored oracle builds (a pinned scikit-sparse sdist among them, which ships
+# its own test module) — and collecting it turns a stray checkout into a
+# collection error.
+testpaths = ["tests"]
 
 [build-system]
 requires = ["maturin>=1.7,<2"]

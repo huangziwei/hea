@@ -635,7 +635,7 @@ pub fn solve(
 
 #[cfg(test)]
 mod tests {
-    use super::super::symbolic::{analyze_sparse, Ordering, Sparse};
+    use super::super::symbolic::{analyze_sparse, Method, Ordering, Sparse};
     use super::super::testcorpus::spd_triangle;
     use super::super::ws::{columns_are_sorted, Work};
     use super::super::{numeric, testcorpus};
@@ -653,7 +653,12 @@ mod tests {
             stype: 1,
             sorted: columns_are_sorted(n, &p, &i),
         };
-        let s = analyze_sparse(&a, Ordering::Amd, true, super::super::amd::IntWidth::I64).unwrap();
+        let s = analyze_sparse(
+            &a,
+            Method::Pinned(Ordering::Amd),
+            super::super::amd::IntWidth::I64,
+        )
+        .unwrap();
         let mut l = Factor::from_symbolic(&s);
         let params = numeric::Params {
             final_ll: ll,
@@ -776,7 +781,12 @@ mod tests {
             stype: 1,
             sorted: columns_are_sorted(4, &p, &i),
         };
-        let s = analyze_sparse(&a, Ordering::Amd, true, super::super::amd::IntWidth::I64).unwrap();
+        let s = analyze_sparse(
+            &a,
+            Method::Pinned(Ordering::Amd),
+            super::super::amd::IntWidth::I64,
+        )
+        .unwrap();
         let l = Factor::from_symbolic(&s);
         let mut w = SolveWork::new();
         assert!(solve(Sys::A, &l, &[0.0; 4], 1, &mut [0.0; 4], &mut w).is_err());

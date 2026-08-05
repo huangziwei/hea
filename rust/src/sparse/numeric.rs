@@ -1183,15 +1183,22 @@ pub fn factorize(
 mod tests {
     use super::*;
     use crate::sparse::amd::IntWidth;
-    use crate::sparse::symbolic::{analyze, Symbolic};
+    use crate::sparse::symbolic::{analyze, Method, Symbolic};
     use crate::sparse::testcorpus::{corpus, spd_triangle, Lcg};
     use crate::sparse::ws::Work;
 
     /// `A`, its symbolic analysis, and the factor it produces.
     fn setup(n: usize, edges: &[(usize, usize)], stype: i32) -> (Sparse, Symbolic) {
         let (p, i, x) = spd_triangle(n, edges, stype < 0);
-        let s = analyze(n, &p, &i, stype, Ordering::Amd, true, IntWidth::I64)
-            .expect("the corpus is well-formed");
+        let s = analyze(
+            n,
+            &p,
+            &i,
+            stype,
+            Method::Pinned(Ordering::Amd),
+            IntWidth::I64,
+        )
+        .expect("the corpus is well-formed");
         (
             Sparse {
                 n,
@@ -1325,7 +1332,15 @@ mod tests {
             let sparse_edges: Vec<(usize, usize)> =
                 edges.iter().copied().step_by(3).collect::<Vec<_>>();
             let (thin_p, thin_i, _) = spd_triangle(n, &sparse_edges, false);
-            let s = analyze(n, &thin_p, &thin_i, 1, Ordering::Amd, true, IntWidth::I64).unwrap();
+            let s = analyze(
+                n,
+                &thin_p,
+                &thin_i,
+                1,
+                Method::Pinned(Ordering::Amd),
+                IntWidth::I64,
+            )
+            .unwrap();
             let (a, _) = setup(n, &edges, 1);
             let mut l = Factor::from_symbolic(&s);
             let mut work = Work::new(n);
@@ -1393,7 +1408,15 @@ mod tests {
             stype: 1,
             sorted: true,
         };
-        let s = analyze(2, &a.p, &a.i, 1, Ordering::Natural, true, IntWidth::I64).unwrap();
+        let s = analyze(
+            2,
+            &a.p,
+            &a.i,
+            1,
+            Method::Pinned(Ordering::Natural),
+            IntWidth::I64,
+        )
+        .unwrap();
         let mut l = Factor::from_symbolic(&s);
         let mut work = Work::new(2);
         /* LDL' only fails on an exactly zero pivot, so this one succeeds with a
@@ -1443,7 +1466,15 @@ mod tests {
             stype: 1,
             sorted: true,
         };
-        let s = analyze(1, &[0, 1], &[0], 1, Ordering::Natural, true, IntWidth::I64).unwrap();
+        let s = analyze(
+            1,
+            &[0, 1],
+            &[0],
+            1,
+            Method::Pinned(Ordering::Natural),
+            IntWidth::I64,
+        )
+        .unwrap();
         let mut l = Factor::from_symbolic(&s);
         assert!(matches!(
             rowfac(

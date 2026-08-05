@@ -534,6 +534,14 @@ ANALYZE_CORPUS = CORPUS + [
 
 
 def analyze(M, stype: int = 1, **kw):
+    """``cholmod_analyze``, **pinned to AMD** unless told otherwise.
+
+    Every reference in this file was produced with ``nmethods = 1`` and
+    ``method[0].ordering = CHOLMOD_AMD``, so pinning is what makes them the
+    right oracle. The extension itself defaults to ``ordering="best"``, the
+    trial loop; pass it explicitly to exercise that.
+    """
+    kw.setdefault("ordering", "amd")
     M = sp.csc_array(M)
     tri = sp.triu(M) if stype > 0 else sp.tril(M)
     T = sp.csc_array(tri.tocsc())
@@ -601,7 +609,7 @@ def test_analyze_natural_ordering_is_the_weighted_postorder(name, M):
     with, so ``Lperm`` is the weighted postorder itself — which is why upstream
     relabels the result ``CHOLMOD_POSTORDERED`` (``cholmod_analyze.c:875-878``)
     rather than leaving it ``CHOLMOD_NATURAL``."""
-    got = analyze(M, ordering="natural", default_strategy=False)
+    got = analyze(M, ordering="natural")
     np.testing.assert_array_equal(got["perm"], got["post"])
     assert got["ordering"] == "postordered"
     assert got["metis_would_be_tried"] is False
@@ -622,24 +630,48 @@ def test_analyze_composition_actually_moves_the_amd_ordering():
 
 @pytest.mark.parametrize("name,M", ANALYZE_CORPUS, ids=[n for n, _ in ANALYZE_CORPUS])
 def test_analyze_reports_when_cholmod_would_try_metis(name, M):
-    """The one place this port can diverge from a CHOLMOD built with the
-    Partition module, reported rather than hidden.
+    """The one place this port's *candidate set* can diverge from a CHOLMOD
+    built with the Partition module, reported rather than hidden.
 
     With ``Common->nmethods == 0`` upstream runs AMD and then breaks out of the
     method loop if ``fl < 500*lnz`` or ``lnz < 5*anz`` on AMD's own estimates
-    (``cholmod_analyze.c:767-781``). When it breaks, METIS is never called and
-    this port's answer is CHOLMOD's by construction. When it does not, METIS is
-    tried and may win. ``laplacian3d-24`` is the case where it does: CHOLMOD
-    selects METIS there and gets nnz(L) 1.87M against AMD's 2.30M, while
-    ``laplacian3d-23``, one grid step smaller, still breaks out.
+    (``cholmod_analyze.c:767-781``). When it breaks, both stop at AMD and the
+    answers agree by construction. When it does not, upstream's third method is
+    METIS and this port's is natural, so the two can pick different orderings.
+    ``laplacian3d-24`` is that case: CHOLMOD selects METIS there and gets
+    nnz(L) 1.87M against AMD's 2.30M, while ``laplacian3d-23``, one grid step
+    smaller, still breaks out.
     """
     ref = REF_ANALYZE[name]
-    got = analyze(M)
-    assert got["ordering"] == "amd"
+    got = analyze(M, ordering="best")
     assert got["metis_would_be_tried"] == (ref.default_ordering != 2)
 
     fl, lnz, anz = got["amd_fl"], got["amd_lnz"], got["amd_anz"]
     assert got["metis_would_be_tried"] == (not (fl < 500 * lnz or lnz < 5 * anz))
+
+
+@pytest.mark.parametrize("name,M", ANALYZE_CORPUS, ids=[n for n, _ in ANALYZE_CORPUS])
+def test_analyze_best_selects_but_does_not_invent(name, M):
+    """``ordering="best"`` returns one of the orderings it tried, unchanged.
+
+    The trial loop is CHOLMOD's (``cholmod_analyze.c:554-782``): run each
+    method, keep the smallest ``lnz``. Two properties follow, and both are
+    worth holding onto because the loop now decides what every caller of
+    ``hea.sparse`` gets by default. It never returns an analysis that is worse
+    than pinning AMD; and when AMD's break check fires it never *looks* past
+    AMD, which is what keeps the default as cheap as the pinned path on the
+    matrices — every one here — where AMD already wins.
+    """
+    best = analyze(M, ordering="best")
+    amd = analyze(M, ordering="amd")
+    same_as = amd if best["ordering"] == "amd" else analyze(M, ordering="natural")
+
+    np.testing.assert_array_equal(best["perm"], same_as["perm"])
+    np.testing.assert_array_equal(best["colcount"], same_as["colcount"])
+    assert best["lnz"] == same_as["lnz"]
+    assert best["lnz"] <= amd["lnz"]
+    if not best["metis_would_be_tried"]:
+        assert best["ordering"] == "amd"
 
 
 @pytest.mark.parametrize("name,M", ANALYZE_CORPUS, ids=[n for n, _ in ANALYZE_CORPUS])

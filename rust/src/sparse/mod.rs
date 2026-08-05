@@ -111,21 +111,22 @@ fn amd_order(
 /// elimination tree, its weighted postordering, and the column counts of `L`.
 ///
 /// `indptr`/`indices` are a CSC pattern and `stype` selects the stored half the
-/// way CHOLMOD's `A->stype` does. `ordering` is `"amd"` or `"natural"`;
-/// `default_strategy` says whether `Common->nmethods` was left at its default
-/// 0, which is the only setting under which upstream would consider METIS.
+/// way CHOLMOD's `A->stype` does. `ordering` is `"best"`, `"amd"` or
+/// `"natural"`; `"best"` is `Common->nmethods == 0`, the trial loop, and the
+/// only setting under which the reported `ordering` can differ from the one
+/// asked for.
 ///
 /// Returns `perm`, `colcount`, `parent` and `post`, all in the final ordering —
 /// i.e. with the weighted postorder already composed in, which is what makes
 /// `perm` the same quantity as `scikit-sparse`'s `F.perm` (and different from
 /// `amd_order`'s output). `fl`/`lnz` are the exact counts from
-/// `cholmod_rowcolcounts`, not AMD's estimates; `metis_would_be_tried` reports
-/// whether upstream's default strategy would have gone on to try METIS, which
-/// is the one place this port can diverge from a CHOLMOD built with the
-/// Partition module.
+/// `cholmod_rowcolcounts` for the *selected* ordering, not AMD's estimates;
+/// `amd_fl`/`amd_lnz`/`amd_anz` are AMD's estimates whenever AMD ran, and
+/// `metis_would_be_tried` is the break check taken on them — true when the
+/// trial loop went on past AMD, which is where this port's candidate set and a
+/// CHOLMOD built with the Partition module can differ.
 #[pyfunction]
-#[pyo3(signature = (n, indptr, indices, stype, ordering="amd", default_strategy=true,
-                    use_long=false))]
+#[pyo3(signature = (n, indptr, indices, stype, ordering="best", use_long=false))]
 fn analyze(
     py: Python<'_>,
     n: usize,
@@ -133,29 +134,18 @@ fn analyze(
     indices: PyReadonlyArray1<'_, i64>,
     stype: i32,
     ordering: &str,
-    default_strategy: bool,
     use_long: bool,
 ) -> PyResult<Py<PyDict>> {
     let indptr = indptr.as_slice()?;
     let indices = indices.as_slice()?;
-    let order = match ordering {
-        "amd" => symbolic::Ordering::Amd,
-        "natural" => symbolic::Ordering::Natural,
-        other => {
-            return Err(PyValueError::new_err(format!(
-                "ordering must be 'amd' or 'natural', not {other:?}"
-            )));
-        }
-    };
+    let method = py::parse_method(ordering)?;
     let width = if use_long {
         IntWidth::I64
     } else {
         IntWidth::I32
     };
     let s = py
-        .allow_threads(|| {
-            symbolic::analyze(n, indptr, indices, stype, order, default_strategy, width)
-        })
+        .allow_threads(|| symbolic::analyze(n, indptr, indices, stype, method, width))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let d = PyDict::new(py);
@@ -166,14 +156,7 @@ fn analyze(
     d.set_item("fl", s.fl)?;
     d.set_item("lnz", s.lnz)?;
     d.set_item("anz", s.anz)?;
-    d.set_item(
-        "ordering",
-        match s.ordering {
-            symbolic::Ordering::Amd => "amd",
-            symbolic::Ordering::Natural => "natural",
-            symbolic::Ordering::Postordered => "postordered",
-        },
-    )?;
+    d.set_item("ordering", py::ordering_name(s.ordering))?;
     d.set_item("metis_would_be_tried", s.metis_would_be_tried)?;
     if let Some(info) = s.amd {
         /* AMD's own estimates, which are what the METIS decision is taken on
@@ -197,7 +180,7 @@ fn analyze(
 /// unless `L` happens to be packed — plus `minor`, which is `n` when `A` was
 /// positive definite and otherwise the column where it stopped being so.
 #[pyfunction]
-#[pyo3(signature = (n, indptr, indices, data, stype, beta=0.0, ordering="amd",
+#[pyo3(signature = (n, indptr, indices, data, stype, beta=0.0, ordering="best",
                     final_ll=false, final_asis=true, final_pack=true,
                     final_monotonic=true))]
 #[allow(clippy::too_many_arguments)]
@@ -218,15 +201,7 @@ fn factorize(
     let indptr = indptr.as_slice()?;
     let indices = indices.as_slice()?;
     let data = data.as_slice()?;
-    let order = match ordering {
-        "amd" => symbolic::Ordering::Amd,
-        "natural" => symbolic::Ordering::Natural,
-        other => {
-            return Err(PyValueError::new_err(format!(
-                "ordering must be 'amd' or 'natural', not {other:?}"
-            )));
-        }
-    };
+    let method = py::parse_method(ordering)?;
     let params = numeric::Params {
         final_ll,
         final_asis,
@@ -255,8 +230,8 @@ fn factorize(
                 stype,
                 sorted: ws::columns_are_sorted(n, indptr, indices),
             };
-            let s = symbolic::analyze_sparse(&a, order, true, IntWidth::I64)
-                .map_err(|e| e.to_string())?;
+            let s =
+                symbolic::analyze_sparse(&a, method, IntWidth::I64).map_err(|e| e.to_string())?;
             let mut l = numeric::Factor::from_symbolic(&s);
             let mut work = ws::Work::new(n);
             let fl = numeric::factorize(&a, beta, &mut l, &params, &mut work)
@@ -289,7 +264,7 @@ fn factorize(
 /// `auto_supernodal`: whether upstream's default `CHOLMOD_AUTO` would have
 /// taken this branch at all, which the caller forces here either way.
 #[pyfunction]
-#[pyo3(signature = (n, indptr, indices, stype, ordering="amd"))]
+#[pyo3(signature = (n, indptr, indices, stype, ordering="best"))]
 fn super_analyze(
     py: Python<'_>,
     n: usize,
@@ -300,15 +275,7 @@ fn super_analyze(
 ) -> PyResult<Py<PyDict>> {
     let indptr = indptr.as_slice()?;
     let indices = indices.as_slice()?;
-    let order = match ordering {
-        "amd" => symbolic::Ordering::Amd,
-        "natural" => symbolic::Ordering::Natural,
-        other => {
-            return Err(PyValueError::new_err(format!(
-                "ordering must be 'amd' or 'natural', not {other:?}"
-            )));
-        }
-    };
+    let method = py::parse_method(ordering)?;
     let (s, ss) = py
         .allow_threads(|| -> Result<_, String> {
             let nz = ws::validate_csc(n, indptr, indices).map_err(|e| e.to_string())?;
@@ -321,8 +288,8 @@ fn super_analyze(
                 stype,
                 sorted: ws::columns_are_sorted(n, indptr, indices),
             };
-            let s = symbolic::analyze_sparse(&a, order, true, IntWidth::I64)
-                .map_err(|e| e.to_string())?;
+            let s =
+                symbolic::analyze_sparse(&a, method, IntWidth::I64).map_err(|e| e.to_string())?;
             let mut work = ws::Work::new(n);
             /* the supernodal branch permutes A a second time, for pattern
              * only: `permute_matrices (..., FALSE, ...)` */
@@ -373,7 +340,7 @@ fn super_analyze(
 /// bar is stated in. It cannot be had by differencing two whole-pipeline
 /// timings: the analysis is a third of them and the noise swamps the rest.
 #[pyfunction]
-#[pyo3(signature = (n, indptr, indices, data, stype, beta=0.0, ordering="amd",
+#[pyo3(signature = (n, indptr, indices, data, stype, beta=0.0, ordering="best",
                     numeric_reps=0))]
 #[allow(clippy::too_many_arguments)]
 fn super_factorize(
@@ -390,15 +357,7 @@ fn super_factorize(
     let indptr = indptr.as_slice()?;
     let indices = indices.as_slice()?;
     let data = data.as_slice()?;
-    let order = match ordering {
-        "amd" => symbolic::Ordering::Amd,
-        "natural" => symbolic::Ordering::Natural,
-        other => {
-            return Err(PyValueError::new_err(format!(
-                "ordering must be 'amd' or 'natural', not {other:?}"
-            )));
-        }
-    };
+    let method = py::parse_method(ordering)?;
     let l = py
         .allow_threads(|| -> Result<_, String> {
             let nz = ws::validate_csc(n, indptr, indices).map_err(|e| e.to_string())?;
@@ -417,8 +376,8 @@ fn super_factorize(
                 stype,
                 sorted: ws::columns_are_sorted(n, indptr, indices),
             };
-            let s = symbolic::analyze_sparse(&a, order, true, IntWidth::I64)
-                .map_err(|e| e.to_string())?;
+            let s =
+                symbolic::analyze_sparse(&a, method, IntWidth::I64).map_err(|e| e.to_string())?;
             let mut work = ws::Work::new(n);
             let a2 = symbolic::permute_sym(&a, s.ordering, &s.perm, false, false, &mut work.all());
             let sym = super_symbolic::super_symbolic(
@@ -475,7 +434,7 @@ fn super_factorize(
 #[pyfunction]
 #[pyo3(name = "super_solve")]
 #[pyo3(signature = (n, indptr, indices, data, b, nrhs, stype, sys="A", beta=0.0,
-                    ordering="amd", solve_reps=0))]
+                    ordering="best", solve_reps=0))]
 #[allow(clippy::too_many_arguments)]
 fn supernodal_solve(
     py: Python<'_>,
@@ -495,15 +454,7 @@ fn supernodal_solve(
     let indices = indices.as_slice()?;
     let data = data.as_slice()?;
     let b = b.as_slice()?;
-    let order = match ordering {
-        "amd" => symbolic::Ordering::Amd,
-        "natural" => symbolic::Ordering::Natural,
-        other => {
-            return Err(PyValueError::new_err(format!(
-                "ordering must be 'amd' or 'natural', not {other:?}"
-            )));
-        }
-    };
+    let method = py::parse_method(ordering)?;
     let sys = match sys {
         "A" => solve::Sys::A,
         "LDLt" => solve::Sys::LDLt,
@@ -534,8 +485,8 @@ fn supernodal_solve(
                 stype,
                 sorted: ws::columns_are_sorted(n, indptr, indices),
             };
-            let s = symbolic::analyze_sparse(&a, order, true, IntWidth::I64)
-                .map_err(|e| e.to_string())?;
+            let s =
+                symbolic::analyze_sparse(&a, method, IntWidth::I64).map_err(|e| e.to_string())?;
             let mut work = ws::Work::new(n);
             let a2 = symbolic::permute_sym(&a, s.ordering, &s.perm, false, false, &mut work.all());
             let sym = super_symbolic::super_symbolic(

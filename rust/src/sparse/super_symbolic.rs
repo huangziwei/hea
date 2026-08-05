@@ -647,7 +647,7 @@ pub fn super_symbolic(
 mod tests {
     use super::*;
     use crate::sparse::amd::IntWidth;
-    use crate::sparse::symbolic::{analyze_sparse, permute_sym, Ordering, Symbolic};
+    use crate::sparse::symbolic::{analyze_sparse, permute_sym, Method, Ordering, Symbolic};
     use crate::sparse::testcorpus::{corpus, triangle_csc};
     use crate::sparse::ws::Work;
 
@@ -668,7 +668,7 @@ mod tests {
                         stype,
                         sorted: true,
                     };
-                    let s = analyze_sparse(&a, order, true, IntWidth::I64).unwrap();
+                    let s = analyze_sparse(&a, Method::Pinned(order), IntWidth::I64).unwrap();
                     let mut work = Work::new(n);
                     let a2 = permute_sym(&a, s.ordering, &s.perm, false, false, &mut work.all());
                     let ss = super_symbolic(
@@ -774,7 +774,7 @@ mod tests {
             stype: 1,
             sorted: true,
         };
-        let s = analyze_sparse(&a, Ordering::Amd, true, IntWidth::I64).unwrap();
+        let s = analyze_sparse(&a, Method::Pinned(Ordering::Amd), IntWidth::I64).unwrap();
         let mut work = Work::new(n);
         let a2 = permute_sym(&a, s.ordering, &s.perm, false, false, &mut work.all());
         assert!(

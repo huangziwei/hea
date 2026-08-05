@@ -202,23 +202,6 @@ impl Work {
         }
     }
 
-    /// The division `cholmod_analyze` sets up once the ordering is done
-    /// (`:515-520`): the kernels get `Iwork [0..2n)`, and `First` and `Level`
-    /// live at `[2n..3n)` and `[3n..4n)` where nothing below will touch them.
-    pub(super) fn split_analyze(&mut self, n: usize) -> (WorkRef<'_>, &mut [i64], &mut [i64]) {
-        let (scratch, work4n) = self.iwork.split_at_mut(2 * n);
-        let (first, rest) = work4n.split_at_mut(n);
-        let (level, _) = rest.split_at_mut(n);
-        let w = WorkRef {
-            iwork: scratch,
-            flag: &mut self.flag,
-            head: &mut self.head,
-            xwork: &mut self.xwork,
-            mark: &mut self.mark,
-        };
-        (w, first, level)
-    }
-
     /// `cholmod_allocate_work (n, len, 0, Common)` where `n` is unchanged —
     /// grow `Iwork` if it is short, and leave it alone otherwise
     /// (`t_cholmod_alloc_work.c:81`). The supernodal numeric factorization

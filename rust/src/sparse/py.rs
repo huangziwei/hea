@@ -19,7 +19,7 @@ use pyo3::prelude::*;
 use super::amd::IntWidth;
 use super::numeric::{self, Factor, Params};
 use super::solve::{self, SolveWork, Sys};
-use super::symbolic::{self, Ordering, Sparse};
+use super::symbolic::{self, Method, Ordering, Sparse};
 use super::ws::{self, Work};
 
 /// `sys` as `cholmod_solve` names it. The two permutation-only systems have no
@@ -46,16 +46,34 @@ fn parse_sys(s: &str) -> PyResult<Sys> {
     })
 }
 
-fn parse_ordering(s: &str) -> PyResult<Ordering> {
+/// The `ordering=` argument every entry point in this crate takes.
+///
+/// `"best"` is `Common->nmethods == 0`, CHOLMOD's own default: try each of
+/// [`symbolic::DEFAULT_METHODS`] and keep the one with the smallest nnz(L).
+/// The other two pin a single method, which is what `sksparse`'s
+/// `ordering_method=` does and what a parity test against a specific ordering
+/// needs.
+pub(super) fn parse_method(s: &str) -> PyResult<Method> {
     Ok(match s {
-        "amd" => Ordering::Amd,
-        "natural" => Ordering::Natural,
+        "best" => Method::Default,
+        "amd" => Method::Pinned(Ordering::Amd),
+        "natural" => Method::Pinned(Ordering::Natural),
         other => {
             return Err(PyValueError::new_err(format!(
-                "ordering must be 'amd' or 'natural', not {other:?}"
+                "ordering must be 'best', 'amd' or 'natural', not {other:?}"
             )));
         }
     })
+}
+
+/// `L->ordering` on the way out, as [`parse_method`] would spell it. Never
+/// `"best"`: the trial loop reports what it *selected*.
+pub(super) fn ordering_name(o: Ordering) -> &'static str {
+    match o {
+        Ordering::Amd => "amd",
+        Ordering::Natural => "natural",
+        Ordering::Postordered => "postordered",
+    }
 }
 
 /// A numeric Cholesky factorization, reusable for both new values and repeated
@@ -81,7 +99,7 @@ impl CholFactor {
     /// `LL'` over CHOLMOD's default `LDL'`; the two differ in the last bits of
     /// `L`, so it is a factorization choice rather than a presentation one.
     #[new]
-    #[pyo3(signature = (n, indptr, indices, data, stype, beta=0.0, ordering="amd",
+    #[pyo3(signature = (n, indptr, indices, data, stype, beta=0.0, ordering="best",
                         use_ll=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -98,7 +116,7 @@ impl CholFactor {
         let indptr = indptr.as_slice()?;
         let indices = indices.as_slice()?;
         let data = data.as_slice()?;
-        let order = parse_ordering(ordering)?;
+        let method = parse_method(ordering)?;
         let params = Params {
             final_ll: use_ll,
             ..Params::default()
@@ -121,8 +139,8 @@ impl CholFactor {
                 stype,
                 sorted: ws::columns_are_sorted(n, indptr, indices),
             };
-            let s = symbolic::analyze_sparse(&a, order, true, IntWidth::I64)
-                .map_err(|e| e.to_string())?;
+            let s =
+                symbolic::analyze_sparse(&a, method, IntWidth::I64).map_err(|e| e.to_string())?;
             let mut l = Factor::from_symbolic(&s);
             let mut work = Work::new(n);
             let fl = numeric::factorize(&a, beta, &mut l, &params, &mut work)
@@ -252,6 +270,14 @@ impl CholFactor {
     #[getter]
     fn n(&self) -> usize {
         self.l.n
+    }
+
+    /// `L->ordering` — which method the trial loop actually selected, never
+    /// `"best"`. Worth reading: it is the difference between a factor that
+    /// fills in and one that does not.
+    #[getter]
+    fn ordering(&self) -> &'static str {
+        ordering_name(self.l.ordering)
     }
 
     /// `L->minor`: `n` if `A` is positive definite, else the first column at
