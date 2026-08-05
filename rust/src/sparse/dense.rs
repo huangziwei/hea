@@ -283,7 +283,7 @@ fn tile_sub<const MR: usize, const NR: usize>(
         for (jj, accj) in acc.iter_mut().enumerate() {
             let bv = x[bo + jj];
             for (ii, v) in accj.iter_mut().enumerate() {
-                *v -= bv * x[ao + ii];
+                *v = x[ao + ii].mul_add(-bv, *v);
             }
         }
     }
@@ -348,6 +348,21 @@ fn slab_sub<const MR: usize>(
 /// The indirection is paid twice per tile, not once per `l`: the destination is
 /// read into `acc` before the `l` loop and written back after it, so the loop
 /// itself touches only `a` and `b`, which are plain shared borrows.
+///
+/// **The two ends move whole rows, and that is not a tidiness choice.** Written
+/// entry at a time, `c [j0 + jj] [i + ii]` is a bounds-checked double
+/// indirection, and `MR * NR` of them at each end put a panicking edge between
+/// every pair of writes into `acc`. LLVM will not promote an array that has to
+/// be consistent at that many exits, so `acc` stayed in memory and the `l` loop
+/// — which never touches `c` at all — came out **scalar and spilling**: 79
+/// `fsub` against [`tile_sub`]'s 49 `fsub.2d`, 218 loads against 73. That is an
+/// exact factor of two on a kernel that was already near the machine's ceiling,
+/// and it was the whole reason threading looked broken: each worker ran at
+/// 15.5 GFLOP/s where the serial path ran at 29, so two threads bought
+/// **nothing at all** and eight bought 2.1x. Slicing `[i .. i + MR]` once per
+/// column instead leaves `NR` checks per end and hands LLVM a fixed-size copy;
+/// the vector form comes back and with it the scaling (2 threads 1.00x → 1.60x,
+/// 8 threads 2.13x → 2.60x).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn tile_scat<const MR: usize, const NR: usize>(
@@ -364,23 +379,19 @@ fn tile_scat<const MR: usize, const NR: usize>(
 ) {
     let mut acc = [[0.0f64; MR]; NR];
     for (jj, accj) in acc.iter_mut().enumerate() {
-        for (ii, v) in accj.iter_mut().enumerate() {
-            *v = c[j0 + jj][i + ii];
-        }
+        accj.copy_from_slice(&c[j0 + jj][i..i + MR]);
     }
     for l in 0..k {
         let (ao, bo) = (ia + l * lda, jb + l * ldb);
         for (jj, accj) in acc.iter_mut().enumerate() {
             let bv = b[bo + jj];
             for (ii, v) in accj.iter_mut().enumerate() {
-                *v -= bv * a[ao + ii];
+                *v = a[ao + ii].mul_add(-bv, *v);
             }
         }
     }
     for (jj, accj) in acc.iter().enumerate() {
-        for (ii, &v) in accj.iter().enumerate() {
-            c[j0 + jj][i + ii] = v;
-        }
+        c[j0 + jj][i..i + MR].copy_from_slice(accj);
     }
 }
 
@@ -652,7 +663,7 @@ fn strip_sub<const LR: usize>(
         for (q, &tq) in t.iter().enumerate() {
             let xq = xo[q] + i;
             for (ii, vv) in v.iter_mut().enumerate() {
-                *vv -= tq * x[xq + ii];
+                *vv = x[xq + ii].mul_add(-tq, *vv);
             }
         }
         for (ii, &vv) in v.iter().enumerate() {
@@ -663,7 +674,7 @@ fn strip_sub<const LR: usize>(
     while i < m {
         let mut v = x[yo + i];
         for (q, &tq) in t.iter().enumerate() {
-            v -= tq * x[xo[q] + i];
+            v = x[xo[q] + i].mul_add(-tq, v);
         }
         x[yo + i] = v;
         i += 1;

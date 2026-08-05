@@ -234,7 +234,9 @@ def cho_factor(
     (``t_cholmod_rowfac_worker.c:424``), so the two forms disagree about what
     "not positive definite" means. Pass ``use_ll=False`` for the ``LDL'``.
     """
-    return Factor(A, beta, lower=lower, order=order, use_ll=use_ll, supernodal=supernodal)
+    return Factor(
+        A, beta, lower=lower, order=order, use_ll=use_ll, supernodal=supernodal
+    )
 
 
 def cho_solve(A, b, beta=0.0, *, lower=False, order="best"):
