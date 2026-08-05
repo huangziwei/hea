@@ -367,8 +367,14 @@ fn super_analyze(
 /// Returns the supernodal factor whole: the pattern (as `super_analyze` does)
 /// plus `L->x`, the concatenation of every supernode's dense
 /// `nsrow`-by-`nscol` column-major block, and `minor`.
+/// `numeric_reps > 0` also returns `numeric_ms`, the best of that many
+/// factorizations against one symbolic analysis — the *re*factorization cost,
+/// which is what a caller holding a factor pays and what the plan's acceptance
+/// bar is stated in. It cannot be had by differencing two whole-pipeline
+/// timings: the analysis is a third of them and the noise swamps the rest.
 #[pyfunction]
-#[pyo3(signature = (n, indptr, indices, data, stype, beta=0.0, ordering="amd"))]
+#[pyo3(signature = (n, indptr, indices, data, stype, beta=0.0, ordering="amd",
+                    numeric_reps=0))]
 #[allow(clippy::too_many_arguments)]
 fn super_factorize(
     py: Python<'_>,
@@ -379,6 +385,7 @@ fn super_factorize(
     stype: i32,
     beta: f64,
     ordering: &str,
+    numeric_reps: usize,
 ) -> PyResult<Py<PyDict>> {
     let indptr = indptr.as_slice()?;
     let indices = indices.as_slice()?;
@@ -426,11 +433,21 @@ fn super_factorize(
             let mut cwork = super_numeric::SuperWork::new();
             super_numeric::super_factorize(&a, beta, &mut l, &mut work, &mut cwork)
                 .map_err(|e| e.to_string())?;
-            Ok(l)
+
+            let mut best = f64::INFINITY;
+            for _ in 0..numeric_reps {
+                let t0 = std::time::Instant::now();
+                super_numeric::super_factorize(&a, beta, &mut l, &mut work, &mut cwork)
+                    .map_err(|e| e.to_string())?;
+                best = best.min(t0.elapsed().as_secs_f64() * 1e3);
+            }
+            Ok((l, if numeric_reps == 0 { 0.0 } else { best }))
         })
         .map_err(PyValueError::new_err)?;
+    let (l, numeric_ms) = l;
 
     let d = PyDict::new(py);
+    d.set_item("numeric_ms", numeric_ms)?;
     d.set_item("perm", l.perm.into_pyarray(py))?;
     d.set_item("colcount", l.colcount.into_pyarray(py))?;
     d.set_item("nsuper", l.sym.nsuper)?;

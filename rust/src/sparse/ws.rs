@@ -235,13 +235,6 @@ impl Work {
         }
     }
 
-    /// `Common->mark = EMPTY ; CLEAR_FLAG (Common)` — the unconditional reset
-    /// a kernel that used `Flag` as something other than a mark array owes its
-    /// successor (`cholmod_super_numeric.c:331-332`).
-    pub(super) fn reset_flag(&mut self) {
-        self.all().reset_flag();
-    }
-
     /// The between-users invariant every kernel here promises to restore:
     /// `Flag [i] < mark` for all `i`, `Head` all `EMPTY`, `Xwork` all zero
     /// (`cholmod_internal.h:225-238`). Upstream checks it with
