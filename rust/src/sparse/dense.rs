@@ -294,42 +294,49 @@ fn tile_sub<const MR: usize, const NR: usize>(
     }
 }
 
-/// The `m` direction of one `NR`-wide column block of [`tile_sub`], tiled
-/// 8/4/2/1.
+/// One `MR`-row slab of [`tile_sub`] across every column of `C`, the columns
+/// grouped 4/2/1.
+///
+/// **This nesting is the one that matters.** The slab's `MR` rows of `A` are
+/// `MR * k` doubles — 64 KB at `MR = 8` and `k = 1021`, so they fit L1 — and
+/// every column group reuses them. Sweeping columns on the outside instead, as
+/// a `C`-major loop would, streams the whole of `A` once per group: eight
+/// passes over an operand that is megabytes wide, which on `gmm`'s panel put
+/// the factorization at three quarters of the machine's memory bandwidth and
+/// left it there no matter how many cores were pointed at it.
+///
+/// Free to reorder because the tiles are independent — each `C (i,j)` sums over
+/// its own `l` ascending regardless of which tile computes it, and no tile
+/// reads another's output.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn cols_sub<const NR: usize>(
-    m: usize,
+fn slab_sub<const MR: usize>(
+    n: usize,
     k: usize,
     x: &mut Ws<f64>,
-    ia0: usize,
+    ia: usize,
     lda: usize,
     jb: usize,
     ldb: usize,
-    ic0: usize,
+    ic: usize,
     ldc: usize,
 ) {
-    let mut i = 0;
-    while i + 8 <= m {
-        tile_sub::<8, NR>(k, x, ia0 + i, lda, jb, ldb, ic0 + i, ldc);
-        i += 8;
+    let mut j = 0;
+    while j + 4 <= n {
+        tile_sub::<MR, 4>(k, x, ia, lda, jb + j, ldb, ic + j * ldc, ldc);
+        j += 4;
     }
-    if i + 4 <= m {
-        tile_sub::<4, NR>(k, x, ia0 + i, lda, jb, ldb, ic0 + i, ldc);
-        i += 4;
+    if j + 2 <= n {
+        tile_sub::<MR, 2>(k, x, ia, lda, jb + j, ldb, ic + j * ldc, ldc);
+        j += 2;
     }
-    if i + 2 <= m {
-        tile_sub::<2, NR>(k, x, ia0 + i, lda, jb, ldb, ic0 + i, ldc);
-        i += 2;
-    }
-    if i < m {
-        tile_sub::<1, NR>(k, x, ia0 + i, lda, jb, ldb, ic0 + i, ldc);
+    if j < n {
+        tile_sub::<MR, 1>(k, x, ia, lda, jb + j, ldb, ic + j * ldc, ldc);
     }
 }
 
-/// One column of `C` and `MR` rows of it — [`tile_sub`] at `NR = 1`, with the
-/// destination handed over as its own slice instead of an offset into the
-/// shared array.
+/// [`tile_sub`] with the destination handed over as `NR` separate column
+/// slices instead of one offset into the shared array.
 ///
 /// **Same rounding, entry for entry.** `tile_sub` loads `C (i,j)`, then
 /// subtracts `B (j,l) * A (i,l)` for `l` ascending, and does that independently
@@ -337,9 +344,13 @@ fn cols_sub<const NR: usize>(
 /// carving the tile up moves work between tasks without moving a rounding —
 /// which is what lets [`gemm_sub_par`] hand row blocks to different threads and
 /// still reproduce the serial answer bit for bit.
+///
+/// The indirection is paid twice per tile, not once per `l`: the destination is
+/// read into `acc` before the `l` loop and written back after it, so the loop
+/// itself touches only `a` and `b`, which are plain shared borrows.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn tile_col<const MR: usize>(
+fn tile_scat<const MR: usize, const NR: usize>(
     k: usize,
     a: &Ws<f64>,
     ia: usize,
@@ -347,30 +358,38 @@ fn tile_col<const MR: usize>(
     b: &Ws<f64>,
     jb: usize,
     ldb: usize,
-    c: &mut [f64],
+    c: &mut [&mut [f64]],
+    j0: usize,
     i: usize,
 ) {
-    let mut acc = [0.0f64; MR];
-    for (ii, v) in acc.iter_mut().enumerate() {
-        *v = c[i + ii];
-    }
-    for l in 0..k {
-        let bv = b[jb + l * ldb];
-        let ao = ia + l * lda;
-        for (ii, v) in acc.iter_mut().enumerate() {
-            *v -= bv * a[ao + ii];
+    let mut acc = [[0.0f64; MR]; NR];
+    for (jj, accj) in acc.iter_mut().enumerate() {
+        for (ii, v) in accj.iter_mut().enumerate() {
+            *v = c[j0 + jj][i + ii];
         }
     }
-    for (ii, &v) in acc.iter().enumerate() {
-        c[i + ii] = v;
+    for l in 0..k {
+        let (ao, bo) = (ia + l * lda, jb + l * ldb);
+        for (jj, accj) in acc.iter_mut().enumerate() {
+            let bv = b[bo + jj];
+            for (ii, v) in accj.iter_mut().enumerate() {
+                *v -= bv * a[ao + ii];
+            }
+        }
+    }
+    for (jj, accj) in acc.iter().enumerate() {
+        for (ii, &v) in accj.iter().enumerate() {
+            c[j0 + jj][i + ii] = v;
+        }
     }
 }
 
-/// The `m` direction of one column of [`tile_col`], tiled 8/4/2/1 the way
-/// [`cols_sub`] tiles its own.
+/// One `MR`-row slab of [`tile_scat`] across every column, grouped 4/2/1 —
+/// [`slab_sub`]'s nesting, and the same reason for it.
+#[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn col_sub(
-    m: usize,
+fn slab_scat<const MR: usize>(
+    n: usize,
     k: usize,
     a: &Ws<f64>,
     ia: usize,
@@ -378,50 +397,130 @@ fn col_sub(
     b: &Ws<f64>,
     jb: usize,
     ldb: usize,
-    c: &mut [f64],
+    c: &mut [&mut [f64]],
+    i: usize,
 ) {
-    let mut i = 0;
-    while i + 8 <= m {
-        tile_col::<8>(k, a, ia + i, lda, b, jb, ldb, c, i);
-        i += 8;
+    let mut j = 0;
+    while j + 4 <= n {
+        tile_scat::<MR, 4>(k, a, ia, lda, b, jb + j, ldb, c, j, i);
+        j += 4;
     }
-    if i + 4 <= m {
-        tile_col::<4>(k, a, ia + i, lda, b, jb, ldb, c, i);
-        i += 4;
+    if j + 2 <= n {
+        tile_scat::<MR, 2>(k, a, ia, lda, b, jb + j, ldb, c, j, i);
+        j += 2;
     }
-    if i + 2 <= m {
-        tile_col::<2>(k, a, ia + i, lda, b, jb, ldb, c, i);
-        i += 2;
+    if j < n {
+        tile_scat::<MR, 1>(k, a, ia, lda, b, jb + j, ldb, c, j, i);
     }
-    if i < m {
-        tile_col::<1>(k, a, ia + i, lda, b, jb, ldb, c, i);
+}
+
+/// One task of [`gemm_sub_par`]: every column of `C`, over the rows this task
+/// was handed.
+///
+/// Same shape as [`gemm_sub`], so a task runs the tiles the serial path would
+/// have run over the same entries — including the slab reuse, which is why a
+/// task carries all of `C`'s columns rather than a group of them.
+#[allow(clippy::too_many_arguments)]
+fn block_scat(
+    k: usize,
+    a: &Ws<f64>,
+    ia: usize,
+    lda: usize,
+    b: &Ws<f64>,
+    jb: usize,
+    ldb: usize,
+    c: &mut [&mut [f64]],
+) {
+    let (m, n) = (c[0].len(), c.len());
+    let kc = k_block(n);
+    let mut l0 = 0;
+    while l0 < k {
+        let kb = kc.min(k - l0);
+        let (ia, jb) = (ia + l0 * lda, jb + l0 * ldb);
+        let mut i = 0;
+        while i + 8 <= m {
+            slab_scat::<8>(n, kb, a, ia + i, lda, b, jb, ldb, c, i);
+            i += 8;
+        }
+        if i + 4 <= m {
+            slab_scat::<4>(n, kb, a, ia + i, lda, b, jb, ldb, c, i);
+            i += 4;
+        }
+        if i + 2 <= m {
+            slab_scat::<2>(n, kb, a, ia + i, lda, b, jb, ldb, c, i);
+            i += 2;
+        }
+        if i < m {
+            slab_scat::<1>(n, kb, a, ia + i, lda, b, jb, ldb, c, i);
+        }
+        l0 += kb;
     }
 }
 
 /// How many flops a `C -= A B'` must carry before [`gemm_sub_par`] is worth a
-/// fork/join. Below it the serial [`gemm_sub`] runs, which is also the wider
-/// kernel — it keeps `NR = 4` columns of the destination in registers, where
-/// the parallel path takes one column at a time.
+/// fork/join. Below it the serial [`gemm_sub`] runs.
 const GEMM_PAR_FLOPS: f64 = 2.0e6;
+
+/// How many row blocks [`gemm_sub_par`] cuts per thread.
+///
+/// One block per thread is the wrong number on a heterogeneous machine: the
+/// blocks are equal and the cores are not, so the join waits on whichever block
+/// landed on an efficiency core. Over-decomposing lets rayon's work stealing
+/// discover the ratio instead of the schedule assuming it. Measured on `gmm`'s
+/// 1021-column supernode, 12 threads: 9.3 ms at one block per thread, 6.2 at
+/// four, 6.2 at eight.
+const PAR_OVER: usize = 4;
+
+/// How much of `B` one pass over the rows may keep live, in doubles — 64 KB
+/// against the 128 KB L1 an M-series performance core has, leaving room for the
+/// slab of `A` beside it.
+const KC_DOUBLES: usize = 8192;
+
+/// How many columns of `A` (and of `B`) a pass covers, so that [`slab_sub`]'s
+/// reuse of `B` across row slabs is reuse out of L1 rather than out of L2.
+///
+/// **Free to choose, for the reason the panel width is.** A destination entry
+/// is loaded, has its sources for this `k` range subtracted in ascending order,
+/// and is stored; the next range picks it up where the last left off. The
+/// intermediate store and reload of an `f64` is exact, so `C (i,j)` still sees
+/// `(((c - a0 b0) - a1 b1) - ...)` over all of `k` in index order, at any block
+/// size.
+///
+/// It is not free for speed, and the whole falloff at large `k` was this: `B`
+/// is `n`-by-`k` and gets re-read once per slab, so as soon as it outgrows L1
+/// every slab pays for it again. Measured on an `m`-by-32-by-`k` panel, hea ran
+/// at 30.8 GFLOP/s at `k = 256` (`B` = 64 KB), 22.2 at `k = 510` (130 KB) and
+/// 14.8 at `k = 1024` (262 KB) — a clean staircase down from the L1 boundary,
+/// not a gradual decay.
+#[inline]
+fn k_block(n: usize) -> usize {
+    (KC_DOUBLES / n.max(1)).max(64)
+}
 
 /// [`gemm_sub`] with the rows of `C` split across threads.
 ///
 /// **Row blocks, not column blocks.** A row block reads only its own rows of
 /// `A`, so the traffic through `A` scales with the block; splitting the other
-/// way would stream all of `A` through every task, and `n` is the panel width —
-/// 8 — so there would be nothing to gain for it either.
+/// way would stream all of `A` through every task.
 ///
 /// Sound without `unsafe` because of a property both callers have: **everything
 /// read lies below `ic` and everything written at or above it.** `potrf_l`'s
 /// `A` and `B` are columns `0..j0` and its `C` is columns `j0..j0+nb`;
 /// `trsm_rlt`'s are the same shape one block down. So the array splits once at
-/// `ic` into a head every task shares and a tail carved into disjoint column
-/// strips, one per (row block, column) pair.
+/// `ic` into a head every task shares and a tail carved into disjoint pieces.
 ///
-/// The kernel is [`tile_col`] rather than [`tile_sub`], i.e. one column of `C`
-/// at a time instead of four. That costs re-reading the block's slice of `A`
-/// once per column — cheap, because a row block's `A` is sized to stay in
-/// cache, and it is what makes every destination piece a contiguous slice.
+/// A task is a **row block across every column**, and the width is most of the
+/// point. `C` narrower than the register tile is the same arithmetic against
+/// more traffic: [`tile_scat`] at `NR = 4` does 32 multiply-adds per 12 loads
+/// where `NR = 1` does 8 per 9, and a task holding one column at a time also
+/// gives up [`slab_sub`]'s reuse of `A`. Measured on `gmm`'s `M`, one column
+/// per task ran *slower on two threads than on one* — the kernel lost more than
+/// the second core won.
+///
+/// The narrow version's one advantage was that a single column's rows are a
+/// contiguous slice; carrying all of them means carrying a slice each, which is
+/// what [`tile_scat`] takes. It costs an indirection twice per tile, against
+/// `k` iterations of useful work.
 #[allow(clippy::too_many_arguments)]
 fn gemm_sub_par(
     m: usize,
@@ -438,48 +537,52 @@ fn gemm_sub_par(
 ) {
     let (src, dst) = x.split_at_mut(ic);
 
-    /* the columns of C, as disjoint slices.  The last one is whatever remains:
-     * the array is only guaranteed out to `(n-1)*ldc + m`. */
-    let mut cols: Vec<&mut [f64]> = Vec::with_capacity(n);
+    /* the columns of C.  The last one is whatever remains: the array is only
+     * guaranteed out to `(n-1)*ldc + m`. */
+    let mut tails: Vec<&mut [f64]> = Vec::with_capacity(n);
     let mut rest = dst;
-    for _ in 0..n - 1 {
-        let (c, tail) = rest.split_at_mut(ldc);
-        cols.push(c);
-        rest = tail;
-    }
-    cols.push(rest);
-
-    /* One task per (row block, column): `nt * n` of them, deliberately more
-     * than there are threads.
-     *
-     * Grouping a row block's `n` columns into one task instead — `n` times
-     * fewer fork/joins, and `A` read once per block rather than once per
-     * column — measures *worse* on this machine, 9.5 ms against 7.9 on `gmm`'s
-     * `M`, and no over-decomposition factor recovers it. The cores are not
-     * interchangeable: 8 performance and 4 efficiency, so equal-sized tasks
-     * put the critical path on an E-core. Small tasks let rayon's stealing
-     * find that out at run time, which is worth more here than the cache
-     * locality it costs. */
-    let rows = m.div_ceil(nt).max(1);
-    let mut jobs: Vec<(usize, usize, &mut [f64])> = Vec::with_capacity(nt * n);
-    for (j, col) in cols.into_iter().enumerate() {
-        let mut rest = &mut col[..m];
-        let mut i0 = 0;
-        while i0 < m {
-            let len = rows.min(m - i0);
-            let (piece, tail) = rest.split_at_mut(len);
-            jobs.push((i0, j, piece));
+    for j in 0..n {
+        let col = if j + 1 < n {
+            let (c, tail) = rest.split_at_mut(ldc);
             rest = tail;
-            i0 += len;
+            c
+        } else {
+            std::mem::take(&mut rest)
+        };
+        tails.push(&mut col[..m]);
+    }
+
+    /* Peel one row block off every column at a time, so the pieces come out in
+     * row-block-major order and `par_chunks_mut` can hand a whole block to a
+     * task without a second pass to transpose them.
+     *
+     * Two allocations for the call, and that matters: this runs once per panel,
+     * and a `Vec` per column plus a `Vec` per block — which is what collecting
+     * the columns separately and transposing them costs — was enough overhead
+     * that widening the panel measurably improved thread scaling, i.e. the
+     * fork/join was competing with the arithmetic. */
+    let rows = m.div_ceil(nt * PAR_OVER).max(8);
+    let nblk = m.div_ceil(rows);
+    let mut flat: Vec<&mut [f64]> = Vec::with_capacity(nblk * n);
+    for _ in 0..nblk {
+        for t in tails.iter_mut() {
+            let taken = std::mem::take(t);
+            let (head, tail) = taken.split_at_mut(rows.min(taken.len()));
+            flat.push(head);
+            *t = tail;
         }
     }
 
-    jobs.par_iter_mut()
-        .for_each(|(i0, j, c)| col_sub(c.len(), k, src, ia + *i0, lda, src, jb + *j, ldb, c));
+    flat.par_chunks_mut(n)
+        .enumerate()
+        .for_each(|(b, c)| block_scat(k, src, ia + b * rows, lda, src, jb, ldb, c));
 }
 
 /// `C -= A * B'` for three sub-blocks of one array: `A` is `m`-by-`k` at `ia`,
 /// `B` is `n`-by-`k` at `jb`, `C` is `m`-by-`n` at `ic`.
+///
+/// Row slabs outside, column groups inside — see [`slab_sub`] for why that way
+/// round.
 #[allow(clippy::too_many_arguments)]
 fn gemm_sub(
     m: usize,
@@ -493,17 +596,28 @@ fn gemm_sub(
     ic: usize,
     ldc: usize,
 ) {
-    let mut j = 0;
-    while j + 4 <= n {
-        cols_sub::<4>(m, k, x, ia, lda, jb + j, ldb, ic + j * ldc, ldc);
-        j += 4;
-    }
-    if j + 2 <= n {
-        cols_sub::<2>(m, k, x, ia, lda, jb + j, ldb, ic + j * ldc, ldc);
-        j += 2;
-    }
-    if j < n {
-        cols_sub::<1>(m, k, x, ia, lda, jb + j, ldb, ic + j * ldc, ldc);
+    let kc = k_block(n);
+    let mut l0 = 0;
+    while l0 < k {
+        let kb = kc.min(k - l0);
+        let (ia, jb) = (ia + l0 * lda, jb + l0 * ldb);
+        let mut i = 0;
+        while i + 8 <= m {
+            slab_sub::<8>(n, kb, x, ia + i, lda, jb, ldb, ic + i, ldc);
+            i += 8;
+        }
+        if i + 4 <= m {
+            slab_sub::<4>(n, kb, x, ia + i, lda, jb, ldb, ic + i, ldc);
+            i += 4;
+        }
+        if i + 2 <= m {
+            slab_sub::<2>(n, kb, x, ia + i, lda, jb, ldb, ic + i, ldc);
+            i += 2;
+        }
+        if i < m {
+            slab_sub::<1>(n, kb, x, ia + i, lda, jb, ldb, ic + i, ldc);
+        }
+        l0 += kb;
     }
 }
 
