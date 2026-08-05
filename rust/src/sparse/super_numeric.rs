@@ -839,6 +839,11 @@ struct Ctx<'a> {
     tree_flops: f64,
     /// Whether rayon has more than one thread to fork onto.
     threads: bool,
+    /// `rayon::current_num_threads()`, passed to the dense panel kernels so a
+    /// supernode big enough to be worth it can go wide on its own factorization
+    /// — the flops of a crossed random-effects `M` sit almost entirely in one
+    /// supernode, where the tree driver has nothing to spread.
+    nthreads: usize,
     counters: &'a Counters,
 }
 
@@ -937,6 +942,7 @@ fn node_numeric(
         nscol2 as usize, /* N: nscol2 */
         own,
         nsrow as usize, /* A, LDA: L1, nsrow */
+        ctx.nthreads,
     );
 
     /* if the matrix is not positive definite, the supernode is repeated
@@ -967,6 +973,7 @@ fn node_numeric(
             nscol2 as usize, /* N */
             own,
             nsrow as usize, /* A/B, LDA/LDB: L1 and L2, nsrow */
+            ctx.nthreads,
         );
     }
     0
@@ -1444,6 +1451,7 @@ pub fn super_numeric(
         par_flops: *par_flops,
         tree_flops: *tree_flops,
         threads: rayon::current_num_threads() > 1,
+        nthreads: rayon::current_num_threads(),
         counters,
     };
 

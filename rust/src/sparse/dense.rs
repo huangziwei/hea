@@ -54,6 +54,8 @@
 //! produce; it changes nothing numerically unless the other operand is an
 //! infinity or a NaN.
 
+use rayon::prelude::*;
+
 use super::ws::Ws;
 
 /// `C := A * A'`, lower triangle only — `dsyrk ("L", "N", n, k, 1.0, a, lda,
@@ -325,6 +327,157 @@ fn cols_sub<const NR: usize>(
     }
 }
 
+/// One column of `C` and `MR` rows of it — [`tile_sub`] at `NR = 1`, with the
+/// destination handed over as its own slice instead of an offset into the
+/// shared array.
+///
+/// **Same rounding, entry for entry.** `tile_sub` loads `C (i,j)`, then
+/// subtracts `B (j,l) * A (i,l)` for `l` ascending, and does that independently
+/// for every `(i,j)` in its tile. Nothing crosses between rows or columns, so
+/// carving the tile up moves work between tasks without moving a rounding —
+/// which is what lets [`gemm_sub_par`] hand row blocks to different threads and
+/// still reproduce the serial answer bit for bit.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn tile_col<const MR: usize>(
+    k: usize,
+    a: &Ws<f64>,
+    ia: usize,
+    lda: usize,
+    b: &Ws<f64>,
+    jb: usize,
+    ldb: usize,
+    c: &mut [f64],
+    i: usize,
+) {
+    let mut acc = [0.0f64; MR];
+    for (ii, v) in acc.iter_mut().enumerate() {
+        *v = c[i + ii];
+    }
+    for l in 0..k {
+        let bv = b[jb + l * ldb];
+        let ao = ia + l * lda;
+        for (ii, v) in acc.iter_mut().enumerate() {
+            *v -= bv * a[ao + ii];
+        }
+    }
+    for (ii, &v) in acc.iter().enumerate() {
+        c[i + ii] = v;
+    }
+}
+
+/// The `m` direction of one column of [`tile_col`], tiled 8/4/2/1 the way
+/// [`cols_sub`] tiles its own.
+#[allow(clippy::too_many_arguments)]
+fn col_sub(
+    m: usize,
+    k: usize,
+    a: &Ws<f64>,
+    ia: usize,
+    lda: usize,
+    b: &Ws<f64>,
+    jb: usize,
+    ldb: usize,
+    c: &mut [f64],
+) {
+    let mut i = 0;
+    while i + 8 <= m {
+        tile_col::<8>(k, a, ia + i, lda, b, jb, ldb, c, i);
+        i += 8;
+    }
+    if i + 4 <= m {
+        tile_col::<4>(k, a, ia + i, lda, b, jb, ldb, c, i);
+        i += 4;
+    }
+    if i + 2 <= m {
+        tile_col::<2>(k, a, ia + i, lda, b, jb, ldb, c, i);
+        i += 2;
+    }
+    if i < m {
+        tile_col::<1>(k, a, ia + i, lda, b, jb, ldb, c, i);
+    }
+}
+
+/// How many flops a `C -= A B'` must carry before [`gemm_sub_par`] is worth a
+/// fork/join. Below it the serial [`gemm_sub`] runs, which is also the wider
+/// kernel — it keeps `NR = 4` columns of the destination in registers, where
+/// the parallel path takes one column at a time.
+const GEMM_PAR_FLOPS: f64 = 2.0e6;
+
+/// [`gemm_sub`] with the rows of `C` split across threads.
+///
+/// **Row blocks, not column blocks.** A row block reads only its own rows of
+/// `A`, so the traffic through `A` scales with the block; splitting the other
+/// way would stream all of `A` through every task, and `n` is the panel width —
+/// 8 — so there would be nothing to gain for it either.
+///
+/// Sound without `unsafe` because of a property both callers have: **everything
+/// read lies below `ic` and everything written at or above it.** `potrf_l`'s
+/// `A` and `B` are columns `0..j0` and its `C` is columns `j0..j0+nb`;
+/// `trsm_rlt`'s are the same shape one block down. So the array splits once at
+/// `ic` into a head every task shares and a tail carved into disjoint column
+/// strips, one per (row block, column) pair.
+///
+/// The kernel is [`tile_col`] rather than [`tile_sub`], i.e. one column of `C`
+/// at a time instead of four. That costs re-reading the block's slice of `A`
+/// once per column — cheap, because a row block's `A` is sized to stay in
+/// cache, and it is what makes every destination piece a contiguous slice.
+#[allow(clippy::too_many_arguments)]
+fn gemm_sub_par(
+    m: usize,
+    n: usize,
+    k: usize,
+    x: &mut Ws<f64>,
+    ia: usize,
+    lda: usize,
+    jb: usize,
+    ldb: usize,
+    ic: usize,
+    ldc: usize,
+    nt: usize,
+) {
+    let (src, dst) = x.split_at_mut(ic);
+
+    /* the columns of C, as disjoint slices.  The last one is whatever remains:
+     * the array is only guaranteed out to `(n-1)*ldc + m`. */
+    let mut cols: Vec<&mut [f64]> = Vec::with_capacity(n);
+    let mut rest = dst;
+    for _ in 0..n - 1 {
+        let (c, tail) = rest.split_at_mut(ldc);
+        cols.push(c);
+        rest = tail;
+    }
+    cols.push(rest);
+
+    /* One task per (row block, column): `nt * n` of them, deliberately more
+     * than there are threads.
+     *
+     * Grouping a row block's `n` columns into one task instead — `n` times
+     * fewer fork/joins, and `A` read once per block rather than once per
+     * column — measures *worse* on this machine, 9.5 ms against 7.9 on `gmm`'s
+     * `M`, and no over-decomposition factor recovers it. The cores are not
+     * interchangeable: 8 performance and 4 efficiency, so equal-sized tasks
+     * put the critical path on an E-core. Small tasks let rayon's stealing
+     * find that out at run time, which is worth more here than the cache
+     * locality it costs. */
+    let rows = m.div_ceil(nt).max(1);
+    let mut jobs: Vec<(usize, usize, &mut [f64])> = Vec::with_capacity(nt * n);
+    for (j, col) in cols.into_iter().enumerate() {
+        let mut rest = &mut col[..m];
+        let mut i0 = 0;
+        while i0 < m {
+            let len = rows.min(m - i0);
+            let (piece, tail) = rest.split_at_mut(len);
+            jobs.push((i0, j, piece));
+            rest = tail;
+            i0 += len;
+        }
+    }
+
+    jobs.par_iter_mut()
+        .for_each(|(i0, j, c)| col_sub(c.len(), k, src, ia + *i0, lda, src, jb + *j, ldb, c));
+}
+
 /// `C -= A * B'` for three sub-blocks of one array: `A` is `m`-by-`k` at `ia`,
 /// `B` is `n`-by-`k` at `jb`, `C` is `m`-by-`n` at `ic`.
 #[allow(clippy::too_many_arguments)]
@@ -416,14 +569,15 @@ fn strip_sub<const LR: usize>(
 /// [`gemm_sub`], and only the panel's own columns go through the rank-1 ladder.
 /// A destination entry still sees every source once, `l` ascending, so the
 /// blocking is a scheduling change and `L` is unchanged entry for entry.
-pub fn potrf_l(n: usize, a: &mut [f64], lda: usize) -> i64 {
+pub fn potrf_l(n: usize, a: &mut [f64], lda: usize, nt: usize) -> i64 {
     debug_assert!(n == 0 || a.len() >= (n - 1) * lda + n);
     let a = Ws::new(a);
 
     let mut save = [0.0f64; POTRF_NB * (POTRF_NB - 1) / 2];
+    let wide = panel_width(n);
     let mut j0 = 0;
     while j0 < n {
-        let nb = POTRF_NB.min(n - j0);
+        let nb = wide.min(n - j0);
         if j0 > 0 {
             /* `gemm_sub` writes whole rectangles, so it also covers the strict
              * upper triangle of this panel's diagonal square — which `dpotrf
@@ -441,7 +595,12 @@ pub fn potrf_l(n: usize, a: &mut [f64], lda: usize) -> i64 {
             }
 
             /* A (j0:n-1, j0:j0+nb-1) -= A (j0:n-1, 0:j0-1) * A (j0:j0+nb-1, 0:j0-1)' */
-            gemm_sub(n - j0, nb, j0, a, j0, lda, j0, lda, j0 + j0 * lda, lda);
+            let m = n - j0;
+            if nt > 1 && 2.0 * (m * nb * j0) as f64 >= GEMM_PAR_FLOPS {
+                gemm_sub_par(m, nb, j0, a, j0, lda, j0, lda, j0 + j0 * lda, lda, nt);
+            } else {
+                gemm_sub(m, nb, j0, a, j0, lda, j0, lda, j0 + j0 * lda, lda);
+            }
 
             let mut q = 0;
             for j in 1..nb {
@@ -460,9 +619,35 @@ pub fn potrf_l(n: usize, a: &mut [f64], lda: usize) -> i64 {
     0
 }
 
-/// [`potrf_l`]'s panel width — how many columns go through the rank-1 ladder
-/// before the next [`gemm_sub`] catches the rest up.
-const POTRF_NB: usize = 8;
+/// The widest panel [`potrf_l`] and [`trsm_rlt`] use, and the bound on
+/// `potrf_l`'s save buffer. [`panel_width`] picks the actual width.
+const POTRF_NB: usize = 32;
+
+/// How many columns of an `n`-column block go through the rank-1 ladder before
+/// the next `C -= A B'` catches the rest up.
+///
+/// **Free to choose.** A destination entry accumulates over `l` ascending
+/// whether a source arrives through the block update or through the ladder, so
+/// the width is a scheduling parameter and `L` is the same entry for entry at
+/// any value of it — which the bit-exactness digest over the whole solve corpus
+/// confirms, unchanged across 8, 16, 32 and 64.
+///
+/// It is not free for *speed*, and it cuts both ways. The ladder is the slow
+/// half: its share of the work is roughly `3·nb/n`, so a wide panel on a small
+/// block spends everything there. A narrow panel on a large block gives the
+/// block update too little to do — at `nb = 8` the parallel path's tasks are
+/// smaller than the fork/join that dispatches them. Measured on this machine:
+/// widening 8 → 32 took `gmm`'s 1021-column supernode from 15.7 to 7.9 ms and
+/// simultaneously took gridfit 320², which is thousands of small supernodes,
+/// from 67.8 to 102.7. Hence the split rather than a constant.
+#[inline]
+fn panel_width(n: usize) -> usize {
+    if n >= 256 {
+        POTRF_NB
+    } else {
+        8
+    }
+}
 
 /// The unblocked `dpotf2 ("L")` on an `m`-by-`n` panel whose leading `n` rows
 /// are its diagonal block, using only the panel's own columns as sources.
@@ -538,7 +723,7 @@ fn potf2_panel(m: usize, n: usize, a: &mut Ws<f64>, off: usize, lda: usize) -> i
 /// the left of a panel arrive through one [`gemm_sub`], the panel's own through
 /// the rank-1 ladder, and every destination entry still sees its sources once
 /// in index order.
-pub fn trsm_rlt(m: usize, n: usize, x: &mut [f64], ld: usize) {
+pub fn trsm_rlt(m: usize, n: usize, x: &mut [f64], ld: usize, nt: usize) {
     debug_assert!(n == 0 || x.len() >= (n - 1) * ld + n + m);
     let x = Ws::new(x);
 
@@ -548,12 +733,17 @@ pub fn trsm_rlt(m: usize, n: usize, x: &mut [f64], ld: usize) {
      * That is not done here: it is a data-dependent branch in the hot loop for
      * a case the supernodal factorization does not produce, and it changes
      * nothing numerically unless the other operand is an infinity or a NaN. */
+    let wide = panel_width(n);
     let mut j0 = 0;
     while j0 < n {
-        let nb = TRSM_NB.min(n - j0);
+        let nb = wide.min(n - j0);
         if j0 > 0 {
             /* B (:, j0:j0+nb-1) -= B (:, 0:j0-1) * A (j0:j0+nb-1, 0:j0-1)' */
-            gemm_sub(m, nb, j0, x, n, ld, j0, ld, n + j0 * ld, ld);
+            if nt > 1 && 2.0 * (m * nb * j0) as f64 >= GEMM_PAR_FLOPS {
+                gemm_sub_par(m, nb, j0, x, n, ld, j0, ld, n + j0 * ld, ld, nt);
+            } else {
+                gemm_sub(m, nb, j0, x, n, ld, j0, ld, n + j0 * ld, ld);
+            }
         }
         for j in j0..j0 + nb {
             let yo = n + j * ld;
@@ -586,9 +776,6 @@ pub fn trsm_rlt(m: usize, n: usize, x: &mut [f64], ld: usize) {
         j0 += nb;
     }
 }
-
-/// [`trsm_rlt`]'s panel width, the counterpart of [`POTRF_NB`].
-const TRSM_NB: usize = 8;
 
 /* ========================================================================= */
 /* === the solve kernels =================================================== */
@@ -1178,12 +1365,64 @@ mod tests {
             let ld = n + 3;
             let m = spd(n, ld, 4242);
             let mut a = m.clone();
-            assert_eq!(potrf_l(n, &mut a, ld), 0, "n={n}");
+            assert_eq!(potrf_l(n, &mut a, ld, 1), 0, "n={n}");
             for j in 0..n {
                 for i in j..n {
                     let want: f64 = (0..=j.min(i)).map(|l| a[i + l * ld] * a[j + l * ld]).sum();
                     assert!((want - m[i + j * ld]).abs() < 1e-10, "n={n} ({i},{j})");
                 }
+            }
+        }
+    }
+
+    /// The entries of an `m`-by-`n` column-major block, skipping the padding
+    /// between columns — which the helpers above leave as `NaN`, and `NaN` is
+    /// never equal to itself.
+    fn block(x: &[f64], m: usize, n: usize, ld: usize) -> Vec<f64> {
+        (0..n)
+            .flat_map(|j| x[j * ld..j * ld + m].iter().copied())
+            .collect()
+    }
+
+    /// Going wide across the rows of the panel update must not move a bit.
+    ///
+    /// [`gemm_sub_par`] splits `C -= A B'` by rows of `C` and drops to
+    /// [`tile_col`], one column of `C` at a time, where the serial path keeps
+    /// four in registers. Neither changes what any destination entry
+    /// accumulates or the order it accumulates it in, so `==` is the right
+    /// comparison and a tolerance would be hiding something. Sizes straddle
+    /// [`GEMM_PAR_FLOPS`], so the threshold is exercised from both sides, and
+    /// the row tiling's 8/4/2/1 tail from several remainders.
+    #[test]
+    fn the_parallel_panel_update_is_bit_identical() {
+        for &n in &[9usize, 33, 64, 130, 257] {
+            for &ld in &[n, n + 5] {
+                let m = spd(n, ld, 20260805);
+
+                let (mut serial, mut wide) = (m.clone(), m.clone());
+                assert_eq!(potrf_l(n, &mut serial, ld, 1), 0, "n={n}");
+                assert_eq!(potrf_l(n, &mut wide, ld, 8), 0, "n={n}");
+                assert_eq!(
+                    block(&serial, n, n, ld),
+                    block(&wide, n, n, ld),
+                    "potrf_l moved a bit at n={n} ld={ld}"
+                );
+
+                /* trsm_rlt's own panel update, on the rows below the block:
+                 * one array holding the factored `cols`-by-`cols` triangle and
+                 * the `rows` rows under it, exactly as a supernode does */
+                let cols = n.min(48);
+                let (rows, nsrow) = (n, n + cols);
+                let mut x = spd(nsrow, nsrow, 777);
+                assert_eq!(potrf_l(cols, &mut x, nsrow, 1), 0);
+                let (mut serial, mut wide) = (x.clone(), x.clone());
+                trsm_rlt(rows, cols, &mut serial, nsrow, 1);
+                trsm_rlt(rows, cols, &mut wide, nsrow, 8);
+                assert_eq!(
+                    block(&serial, nsrow, cols, nsrow),
+                    block(&wide, nsrow, cols, nsrow),
+                    "trsm_rlt moved a bit at n={n} ld={ld}"
+                );
             }
         }
     }
@@ -1205,12 +1444,12 @@ mod tests {
                     a[bad + i * n] = 0.0;
                 }
             }
-            assert_eq!(potrf_l(n, &mut a, n), bad as i64 + 1);
+            assert_eq!(potrf_l(n, &mut a, n, 1), bad as i64 + 1);
         }
         /* a NaN pivot is a failure too, not a silent NaN factor */
         let mut a = spd(3, 3, 5);
         a[0] = f64::NAN;
-        assert_eq!(potrf_l(3, &mut a, 3), 1);
+        assert_eq!(potrf_l(3, &mut a, 3, 1), 1);
     }
 
     /// The two vector solves invert `L` and `L'`, and the two matrix solves
@@ -1221,7 +1460,7 @@ mod tests {
         for &n in &[1usize, 2, 5, 17] {
             let ld = n + 3;
             let mut l = spd(n, ld, 909);
-            assert_eq!(potrf_l(n, &mut l, ld), 0);
+            assert_eq!(potrf_l(n, &mut l, ld, 1), 0);
             let b = mat(n, 3, n, 55);
 
             for (tag, forward) in [("L", true), ("Lt", false)] {
@@ -1328,7 +1567,7 @@ mod tests {
         for &(m, n) in &[(1usize, 1usize), (5, 3), (2, 6)] {
             let ld = m + n + 2;
             let mut x = spd(n, ld, 8080);
-            assert_eq!(potrf_l(n, &mut x, ld), 0);
+            assert_eq!(potrf_l(n, &mut x, ld, 1), 0);
             /* B, below the diagonal block, at the same leading dimension */
             let b0 = mat(m, n, ld, 606);
             for j in 0..n {
@@ -1336,7 +1575,7 @@ mod tests {
                     x[n + i + j * ld] = b0[i + j * ld];
                 }
             }
-            trsm_rlt(m, n, &mut x, ld);
+            trsm_rlt(m, n, &mut x, ld, 1);
             /* B * A' == B0 again, i.e. (B A')(i,j) = sum_l B(i,l) A(j,l) with
              * A lower triangular, so l runs 0..=j */
             for j in 0..n {

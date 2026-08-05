@@ -27,8 +27,9 @@
 
 use crate::nmath::util::rfma;
 
+use super::super_numeric::SuperFactor;
 use super::symbolic::{permute_sym, Ordering, Sparse, Symbolic};
-use super::ws::{Work, WorkRef, Ws, EMPTY};
+use super::ws::{clear_flag, Work, WorkRef, Ws, EMPTY};
 
 /// Why a factorization could not be performed. Not positive definite is *not*
 /// one of these: upstream reports that through `L->minor < n` and carries on
@@ -189,6 +190,66 @@ impl Factor {
             i: Vec::new(),
             x: Vec::new(),
         }
+    }
+
+    /// The supernodal factor as a packed simplicial `LL'` —
+    /// `super_num_to_simplicial_num` (`t_cholmod_change_factor.c:875-995`)
+    /// through `t_cholmod_change_factor_3_template.c` with `TO_PACKED` and
+    /// `TO_LL` both set.
+    ///
+    /// Column `j` of supernode `s` is column `jj = j - k1` of an
+    /// `nsrow`-by-`nscol` column-major block, and its entries run from the
+    /// diagonal down: rows `Ls [psi+jj .. psi+nsrow)`, values
+    /// `Lx [psx + ii + jj*nsrow]`.
+    ///
+    /// The result keeps the entries relaxed supernode amalgamation added — the
+    /// conversion moves values, it does not recompute the pattern. That is
+    /// upstream's `Common->final_resymbol` and a separate step,
+    /// [`resymbol_noperm`].
+    pub fn from_supernodal(l: &SuperFactor) -> Factor {
+        let n = l.n;
+        let (sup, lpi, lpx, ls) = (&l.sym.sup, &l.sym.pi, &l.sym.px, &l.sym.s);
+
+        let mut f = Factor {
+            n,
+            perm: l.perm.clone(),
+            colcount: l.colcount.clone(),
+            ordering: l.ordering,
+            /* the supernodal factorization is LL' and nothing else */
+            is_ll: true,
+            is_monotonic: true,
+            minor: l.minor,
+            numeric: true,
+            p: vec![0; n + 1],
+            nz: vec![0; n],
+            prev: vec![0; n + 2],
+            next: vec![0; n + 2],
+            i: Vec::with_capacity(l.sym.xsize),
+            x: Vec::with_capacity(l.sym.xsize),
+        };
+
+        let mut p = 0i64;
+        for s in 0..l.sym.nsuper {
+            let k1 = sup[s] as usize;
+            let psi = lpi[s] as usize;
+            let psx = lpx[s] as usize;
+            let nsrow = lpi[s + 1] as usize - psi;
+            let nscol = sup[s + 1] as usize - k1;
+
+            for jj in 0..nscol {
+                let j = jj + k1;
+                f.nz[j] = (nsrow - jj) as i64;
+                f.p[j] = p;
+                for ii in jj..nsrow {
+                    f.i.push(ls[psi + ii]);
+                    f.x.push(l.x[psx + ii + jj * nsrow]);
+                    p += 1;
+                }
+            }
+        }
+        f.p[n] = p;
+        f.natural_list();
+        f
     }
 
     /// `L->nzmax`.
@@ -1177,6 +1238,126 @@ pub fn factorize(
         l.change_factor(l.is_ll, params.final_pack, params.final_monotonic, params)?;
     }
     Ok(fl)
+}
+
+/* ========================================================================= */
+/* === cholmod_resymbol_noperm ============================================= */
+/* ========================================================================= */
+
+/// Prune `L` back to the pattern it would have had if it had been factorized
+/// directly — `cholmod_resymbol_noperm` (`cholmod_resymbol.c:243-473`) through
+/// `t_cholmod_resymbol_worker.c`, for a symmetric `A` and `pack = TRUE`.
+///
+/// `L` after [`Factor::from_supernodal`] is a *superset*: relaxed supernode
+/// amalgamation merges columns with different patterns and every column of the
+/// merged supernode then carries their union. This is the step that removes
+/// them, and it is why `scikit-sparse`'s `F.L()` has exactly `ColCount [j]`
+/// entries in column `j` where a raw supernodal conversion has more.
+///
+/// **`A` must be `tril (P A P')`** — symmetric *lower* and already permuted the
+/// way `L` was factorized (`:268-271` rejects the upper form outright, and the
+/// header at `:219-222` states the permutation requirement). That is exactly
+/// the `S` the supernodal factorization was handed.
+///
+/// Upstream's `stype == 0` arm builds link lists over the columns of `A(:,f)`;
+/// it is `LL' = FF'`, out of scope here as everywhere else in this module, and
+/// the `Anext` half of the workspace goes with it.
+pub fn resymbol_noperm(
+    a: &Sparse,
+    pack: bool,
+    l: &mut Factor,
+    work: &mut WorkRef<'_>,
+) -> Result<(), NumericError> {
+    if a.stype >= 0 {
+        return Err(NumericError::Invalid(
+            "resymbol_noperm needs tril (P A P'): symmetric upper is rejected \
+             upstream and LL' = FF' is not ported",
+        ));
+    }
+    if a.n != l.n {
+        return Err(NumericError::Invalid("dimensions of A and L do not match"));
+    }
+    let n = l.n;
+
+    /* cannot pack a non-monotonic matrix (`:322-326`) */
+    let pack = pack && l.is_monotonic;
+
+    /* get workspace, once and outside the sweep, the way rowfac does.  Link [j]
+     * is the list of children of j in the etree of the *pruned* L, built as the
+     * sweep goes: a column is linked to its parent as soon as its own pattern
+     * is final (`worker:170-181`).
+     *
+     * Plain indexing rather than [`Ws`] below: this runs once when a caller
+     * reads `L`, not per factorization, so a bounds check per entry buys
+     * clarity for nothing. */
+    let flag = Ws::new(&mut work.flag[..n]);
+    let mark = &mut *work.mark;
+    let link = &mut work.iwork[..n];
+    link.fill(EMPTY);
+
+    let mut pdest: usize = 0;
+    for k in 0..n {
+        /* compute column k of I+A: flag the diagonal, then the lower triangle
+         * of column k (`worker:69-88`) */
+        clear_flag(flag, mark);
+        flag[k as i64] = *mark;
+        for p in a.p[k]..a.p[k + 1] {
+            let i = a.i[p as usize];
+            if i > k as i64 {
+                flag[i] = *mark;
+            }
+        }
+
+        /* union of the children's patterns (`worker:113-131`).  Li [Lp[j]] is
+         * j itself, so the walk starts one past the diagonal. */
+        let mut j = link[k];
+        while j != EMPTY {
+            let ju = j as usize;
+            let p = l.p[ju] as usize;
+            for q in p + 1..p + l.nz[ju] as usize {
+                flag[l.i[q]] = *mark;
+            }
+            j = link[ju];
+        }
+
+        /* prune column k in place (`worker:133-162`) */
+        let p0 = l.p[k] as usize;
+        let pend = p0 + l.nz[k] as usize;
+        if pack {
+            l.p[k] = pdest as i64;
+        } else {
+            pdest = p0;
+        }
+        for p in p0..pend {
+            let row = l.i[p];
+            if flag[row] == *mark {
+                l.i[pdest] = row;
+                l.x[pdest] = l.x[p];
+                pdest += 1;
+            }
+        }
+        l.nz[k] = pdest as i64 - l.p[k];
+
+        /* prepare this column for its parent, which is the first entry after
+         * the diagonal (`worker:164-181`) */
+        let parent = if l.nz[k] > 1 {
+            l.i[l.p[k] as usize + 1]
+        } else {
+            EMPTY
+        };
+        if parent != EMPTY {
+            link[k] = link[parent as usize];
+            link[parent as usize] = k as i64;
+        }
+    }
+
+    if pack {
+        l.p[n] = pdest as i64;
+        /* shrink L to be just large enough (`:455-461`) */
+        l.i.truncate(pdest);
+        l.x.truncate(pdest);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

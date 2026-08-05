@@ -19,6 +19,9 @@ use pyo3::prelude::*;
 use super::amd::IntWidth;
 use super::numeric::{self, Factor, Params};
 use super::solve::{self, SolveWork, Sys};
+use super::super_numeric::{self, SuperFactor, SuperWork};
+use super::super_solve::{self, SuperSolveWork};
+use super::super_symbolic;
 use super::symbolic::{self, Method, Ordering, Sparse};
 use super::ws::{self, Work};
 
@@ -76,6 +79,58 @@ pub(super) fn ordering_name(o: Ordering) -> &'static str {
     }
 }
 
+/// `Common->supernodal` (`t_cholmod_defaults.c:42`).
+pub(super) fn parse_supernodal(s: &str) -> PyResult<SuperMode> {
+    Ok(match s {
+        "auto" => SuperMode::Auto,
+        "simplicial" => SuperMode::Simplicial,
+        "supernodal" => SuperMode::Super,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "supernodal must be 'auto', 'simplicial' or 'supernodal', not {other:?}"
+            )));
+        }
+    })
+}
+
+/// `CHOLMOD_SIMPLICIAL` / `CHOLMOD_AUTO` / `CHOLMOD_SUPERNODAL`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SuperMode {
+    Simplicial,
+    Auto,
+    Super,
+}
+
+/// `Common->supernodal_switch` (`t_cholmod_defaults.c:43`) — `CHOLMOD_AUTO`
+/// takes the supernodal branch when `fl / lnz` reaches this
+/// (`cholmod_analyze.c:887-891`).
+const SUPERNODAL_SWITCH: f64 = 40.0;
+
+/// Which factorization `L` holds, with the workspace that path needs.
+///
+/// Upstream carries both in one `cholmod_factor` behind `L->is_super` and
+/// switches on it in `cholmod_factorize_p` (`:172`). The two have disjoint
+/// fields and disjoint workspaces, so they are an enum here rather than a
+/// struct with half its members unused.
+enum Kind {
+    Simplicial(Box<Simp>),
+    Supernodal(Box<Super>),
+}
+
+/// The simplicial factor and the two things only it needs.
+struct Simp {
+    l: Factor,
+    params: Params,
+    ywork: SolveWork,
+}
+
+/// The supernodal factor and the two things only it needs.
+struct Super {
+    l: SuperFactor,
+    cwork: SuperWork,
+    ywork: SuperSolveWork,
+}
+
 /// A numeric Cholesky factorization, reusable for both new values and repeated
 /// solves.
 #[pyclass(module = "hea._rs")]
@@ -83,11 +138,10 @@ pub struct CholFactor {
     /// The input triangle. Kept so `refactorize` can replace `x` alone, which
     /// is what `cholmod_factorize (A, L, Common)` is handed each time.
     a: Sparse,
-    l: Factor,
-    params: Params,
+    kind: Kind,
     work: Work,
-    ywork: SolveWork,
-    /// `Common->rowfacfl` from the last factorization.
+    /// `Common->rowfacfl` from the last factorization. Simplicial only —
+    /// `cholmod_super_numeric` does not keep a flop count.
     fl: f64,
 }
 
@@ -95,12 +149,20 @@ pub struct CholFactor {
 impl CholFactor {
     /// `cholmod_analyze` followed by `cholmod_factorize_p`.
     ///
-    /// `stype` selects the stored half the way `A->stype` does. `use_ll` picks
-    /// `LL'` over CHOLMOD's default `LDL'`; the two differ in the last bits of
-    /// `L`, so it is a factorization choice rather than a presentation one.
+    /// `stype` selects the stored half the way `A->stype` does.
+    ///
+    /// `supernodal` is `Common->supernodal`: `"auto"` takes the supernodal
+    /// branch when `fl / lnz >= 40` (`cholmod_analyze.c:887-891`), which is
+    /// CHOLMOD's own default and 5-20x faster on the matrices that trip it.
+    /// The supernodal factorization is `LL'` and only `LL'`, so `use_ll` is
+    /// read by the simplicial path alone — pass `supernodal="simplicial"` to
+    /// insist on an `LDL'`. The two forms disagree about which matrices are
+    /// factorizable at all (`rowfac` fails an `LL'` on any non-positive pivot
+    /// and an `LDL'` only on a zero one), so that is a real choice and not a
+    /// presentational one.
     #[new]
     #[pyo3(signature = (n, indptr, indices, data, stype, beta=0.0, ordering="best",
-                        use_ll=false))]
+                        use_ll=false, supernodal="auto"))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -112,11 +174,13 @@ impl CholFactor {
         beta: f64,
         ordering: &str,
         use_ll: bool,
+        supernodal: &str,
     ) -> PyResult<CholFactor> {
         let indptr = indptr.as_slice()?;
         let indices = indices.as_slice()?;
         let data = data.as_slice()?;
         let method = parse_method(ordering)?;
+        let mode = parse_supernodal(supernodal)?;
         let params = Params {
             final_ll: use_ll,
             ..Params::default()
@@ -141,16 +205,54 @@ impl CholFactor {
             };
             let s =
                 symbolic::analyze_sparse(&a, method, IntWidth::I64).map_err(|e| e.to_string())?;
-            let mut l = Factor::from_symbolic(&s);
             let mut work = Work::new(n);
+
+            /* supernodal analysis, if requested or if selected automatically
+             * (`cholmod_analyze.c:882-902`) */
+            let want_super = match mode {
+                SuperMode::Simplicial => false,
+                SuperMode::Super => true,
+                SuperMode::Auto => s.lnz > 0.0 && (s.fl / s.lnz) >= SUPERNODAL_SWITCH,
+            };
+
+            if want_super {
+                let a2 =
+                    symbolic::permute_sym(&a, s.ordering, &s.perm, false, false, &mut work.all());
+                let sym = super_symbolic::super_symbolic(
+                    a2.as_ref().unwrap_or(&a),
+                    &s.parent,
+                    &s.colcount,
+                    &super_symbolic::Relax::default(),
+                    &mut work,
+                )
+                .map_err(|e| e.to_string())?;
+                let mut l = SuperFactor::new(&s, sym);
+                let mut cwork = SuperWork::new();
+                super_numeric::super_factorize(&a, beta, &mut l, &mut work, &mut cwork)
+                    .map_err(|e| e.to_string())?;
+                return Ok(CholFactor {
+                    a,
+                    kind: Kind::Supernodal(Box::new(Super {
+                        l,
+                        cwork,
+                        ywork: SuperSolveWork::new(),
+                    })),
+                    work,
+                    fl: 0.0,
+                });
+            }
+
+            let mut l = Factor::from_symbolic(&s);
             let fl = numeric::factorize(&a, beta, &mut l, &params, &mut work)
                 .map_err(|e| e.to_string())?;
             Ok(CholFactor {
                 a,
-                l,
-                params,
+                kind: Kind::Simplicial(Box::new(Simp {
+                    l,
+                    params,
+                    ywork: SolveWork::new(),
+                })),
                 work,
-                ywork: SolveWork::new(),
                 fl,
             })
         })
@@ -174,10 +276,19 @@ impl CholFactor {
                 self.a.i.len()
             )));
         }
+        let (a, kind, work, fl) = (&mut self.a, &mut self.kind, &mut self.work, &mut self.fl);
         py.allow_threads(|| -> Result<(), String> {
-            self.a.x.copy_from_slice(&data[..self.a.i.len()]);
-            self.fl = numeric::factorize(&self.a, beta, &mut self.l, &self.params, &mut self.work)
-                .map_err(|e| e.to_string())?;
+            a.x.copy_from_slice(&data[..a.i.len()]);
+            match kind {
+                Kind::Simplicial(k) => {
+                    *fl = numeric::factorize(a, beta, &mut k.l, &k.params, work)
+                        .map_err(|e| e.to_string())?;
+                }
+                Kind::Supernodal(k) => {
+                    super_numeric::super_factorize(a, beta, &mut k.l, work, &mut k.cwork)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
             Ok(())
         })
         .map_err(PyValueError::new_err)
@@ -196,7 +307,7 @@ impl CholFactor {
     ) -> PyResult<Py<PyArray1<f64>>> {
         let b = b.as_slice()?;
         let sys = parse_sys(system)?;
-        let n = self.l.n;
+        let n = self.n();
         if b.len() != n * nrhs {
             return Err(PyValueError::new_err(format!(
                 "b has length {}, expected n*nrhs = {}",
@@ -205,8 +316,14 @@ impl CholFactor {
             )));
         }
         let mut x = vec![0.0f64; n * nrhs];
-        py.allow_threads(|| solve::solve(sys, &self.l, b, nrhs, &mut x, &mut self.ywork))
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let kind = &mut self.kind;
+        py.allow_threads(|| match kind {
+            Kind::Simplicial(k) => solve::solve(sys, &k.l, b, nrhs, &mut x, &mut k.ywork),
+            Kind::Supernodal(k) => {
+                super_solve::super_solve(sys, &k.l, b, nrhs, &mut x, &mut k.ywork)
+            }
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(x.into_pyarray(py).unbind())
     }
 
@@ -216,28 +333,51 @@ impl CholFactor {
     /// `Li [Lp[j] .. Lp[j]+Lnz[j])`, not `Lp[j+1]` — so this compacts them,
     /// which is what `cholmod_pack_factor` does and what every consumer of a
     /// `scipy.sparse` matrix expects.
+    ///
+    /// A supernodal factor is converted first, and **pruned**: relaxed
+    /// supernode amalgamation leaves entries that are not in `L`, and dropping
+    /// them is what makes this return the same matrix whichever path ran. That
+    /// is upstream's `Common->final_resymbol`, which CHOLMOD leaves off by
+    /// default and `scikit-sparse` turns on — and `scikit-sparse` is what this
+    /// is a replacement for.
     fn factor_csc(
-        &self,
+        &mut self,
         py: Python<'_>,
-    ) -> (Py<PyArray1<i64>>, Py<PyArray1<i64>>, Py<PyArray1<f64>>) {
-        let n = self.l.n;
-        let nz: i64 = self.l.nz.iter().sum();
+    ) -> PyResult<(Py<PyArray1<i64>>, Py<PyArray1<i64>>, Py<PyArray1<f64>>)> {
+        let (a, kind, work) = (&self.a, &mut self.kind, &mut self.work);
+        let simplicial;
+        let l: &Factor = match kind {
+            Kind::Simplicial(k) => &k.l,
+            Kind::Supernodal(k) => {
+                let mut f = Factor::from_supernodal(&k.l);
+                /* resymbol wants tril (P A P'), which is the S the supernodal
+                 * factorization was handed (`cholmod_factorize.c:275`) */
+                let s = symbolic::permute_sym(a, f.ordering, &f.perm, true, true, &mut work.all());
+                numeric::resymbol_noperm(s.as_ref().unwrap_or(a), true, &mut f, &mut work.all())
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                simplicial = f;
+                &simplicial
+            }
+        };
+
+        let n = l.n;
+        let nz: i64 = l.nz.iter().sum();
         let mut indptr = Vec::with_capacity(n + 1);
         let mut indices = Vec::with_capacity(nz as usize);
         let mut data = Vec::with_capacity(nz as usize);
         indptr.push(0i64);
         for j in 0..n {
-            let p = self.l.p[j] as usize;
-            let len = self.l.nz[j] as usize;
-            indices.extend_from_slice(&self.l.i[p..p + len]);
-            data.extend_from_slice(&self.l.x[p..p + len]);
+            let p = l.p[j] as usize;
+            let len = l.nz[j] as usize;
+            indices.extend_from_slice(&l.i[p..p + len]);
+            data.extend_from_slice(&l.x[p..p + len]);
             indptr.push(indices.len() as i64);
         }
-        (
+        Ok((
             indptr.into_pyarray(py).unbind(),
             indices.into_pyarray(py).unbind(),
             data.into_pyarray(py).unbind(),
-        )
+        ))
     }
 
     /// `½ log|det A|`.
@@ -248,28 +388,55 @@ impl CholFactor {
     /// stopped early, because a caller reading a log-determinant off a factor
     /// that does not exist is a bug, not a limit case.
     fn half_log_det(&self) -> PyResult<f64> {
-        if self.l.minor < self.l.n {
+        let n = self.n();
+        if self.minor() < n {
             return Err(PyZeroDivisionError::new_err(format!(
                 "matrix is not positive definite (leading minor {} is not)",
-                self.l.minor + 1
+                self.minor() + 1
             )));
         }
         let mut s = 0.0f64;
-        for j in 0..self.l.n {
-            s += self.l.x[self.l.p[j] as usize].ln();
+        match &self.kind {
+            Kind::Simplicial(k) => {
+                let l = &k.l;
+                for j in 0..n {
+                    s += l.x[l.p[j] as usize].ln();
+                }
+            }
+            Kind::Supernodal(k) => {
+                let l = &k.l;
+                /* the diagonal of supernode s is x [px[s] + jj*(nsrow+1)]:
+                 * column jj of an nsrow-by-nscol column-major block */
+                for t in 0..l.sym.nsuper {
+                    let psx = l.sym.px[t] as usize;
+                    let nsrow = (l.sym.pi[t + 1] - l.sym.pi[t]) as usize;
+                    let nscol = (l.sym.sup[t + 1] - l.sym.sup[t]) as usize;
+                    for jj in 0..nscol {
+                        s += l.x[psx + jj * (nsrow + 1)].ln();
+                    }
+                }
+            }
         }
-        Ok(if self.l.is_ll { s } else { 0.5 * s })
+        Ok(if self.is_ll() { s } else { 0.5 * s })
     }
 
     /// `L->Perm`: `L L' = P A P'`, i.e. `A[p][:, p]` is what was factorized.
     #[getter]
     fn perm(&self, py: Python<'_>) -> Py<PyArray1<i64>> {
-        self.l.perm.clone().into_pyarray(py).unbind()
+        match &self.kind {
+            Kind::Simplicial(k) => k.l.perm.clone(),
+            Kind::Supernodal(k) => k.l.perm.clone(),
+        }
+        .into_pyarray(py)
+        .unbind()
     }
 
     #[getter]
     fn n(&self) -> usize {
-        self.l.n
+        match &self.kind {
+            Kind::Simplicial(k) => k.l.n,
+            Kind::Supernodal(k) => k.l.n,
+        }
     }
 
     /// `L->ordering` — which method the trial loop actually selected, never
@@ -277,29 +444,68 @@ impl CholFactor {
     /// fills in and one that does not.
     #[getter]
     fn ordering(&self) -> &'static str {
-        ordering_name(self.l.ordering)
+        ordering_name(match &self.kind {
+            Kind::Simplicial(k) => k.l.ordering,
+            Kind::Supernodal(k) => k.l.ordering,
+        })
     }
 
     /// `L->minor`: `n` if `A` is positive definite, else the first column at
     /// which it was found not to be.
     #[getter]
     fn minor(&self) -> usize {
-        self.l.minor
+        match &self.kind {
+            Kind::Simplicial(k) => k.l.minor,
+            Kind::Supernodal(k) => k.l.minor,
+        }
     }
 
     #[getter]
     fn is_ll(&self) -> bool {
-        self.l.is_ll
+        match &self.kind {
+            Kind::Simplicial(k) => k.l.is_ll,
+            /* the supernodal factorization is LL' and nothing else */
+            Kind::Supernodal(_) => true,
+        }
     }
 
-    /// `Common->rowfacfl` from the last factorization.
+    /// `L->is_super`.
+    #[getter]
+    fn is_super(&self) -> bool {
+        matches!(self.kind, Kind::Supernodal(_))
+    }
+
+    /// `Common->rowfacfl` from the last factorization. Zero on the supernodal
+    /// path, which does not keep a flop count.
     #[getter]
     fn rowfacfl(&self) -> f64 {
         self.fl
     }
 
+    /// Entries in `L` — the same number either path took, and the same as
+    /// `len(factor_csc()[2])`.
+    ///
+    /// For the supernodal factor that is `Σ ColCount [j]` from the analysis,
+    /// **not** `L->xsize`: the dense blocks also hold the entries relaxed
+    /// amalgamation added, which are not in `L` and which `factor_csc` prunes.
+    /// See `xsize` for what is actually allocated.
     #[getter]
     fn nnz(&self) -> i64 {
-        self.l.nz.iter().sum()
+        match &self.kind {
+            Kind::Simplicial(k) => k.l.nz.iter().sum(),
+            Kind::Supernodal(k) => k.l.colcount.iter().sum(),
+        }
+    }
+
+    /// Doubles held by `L`: `L->xsize` for a supernodal factor, `L->nzmax` for
+    /// a simplicial one. Larger than [`Self::nnz`] on the supernodal path —
+    /// that gap is the price of the dense blocks, and it is reported rather
+    /// than smoothed over.
+    #[getter]
+    fn xsize(&self) -> i64 {
+        match &self.kind {
+            Kind::Simplicial(k) => k.l.nzmax() as i64,
+            Kind::Supernodal(k) => k.l.sym.xsize as i64,
+        }
     }
 }

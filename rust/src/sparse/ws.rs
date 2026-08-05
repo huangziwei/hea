@@ -38,6 +38,20 @@ impl<T> Ws<T> {
         unsafe { &*(s as *const [T] as *const Ws<T>) }
     }
 
+    /// Split into a read-only head and a writable tail.
+    ///
+    /// Asymmetric on purpose. The one caller is [`super::dense`]'s parallel
+    /// `C -= A B'`, where everything read lies below the destination and
+    /// everything written at or above it; the head is what several threads
+    /// share, and the tail is what gets carved into disjoint pieces — which
+    /// wants a plain slice, since [`Ws`] indexes by `Int` and the pieces are
+    /// bounded by construction.
+    #[inline(always)]
+    pub(super) fn split_at_mut(&mut self, mid: usize) -> (&Ws<T>, &mut [T]) {
+        let (lo, hi) = self.0.split_at_mut(mid);
+        (Ws::new_ref(lo), hi)
+    }
+
     /// `set_empty (X, n)` / `memset` — the whole-array reset the mark trick
     /// falls back to on overflow.
     #[inline]

@@ -86,10 +86,17 @@ class Factor:
 
     __slots__ = ("_F", "_lower", "_n")
 
-    def __init__(self, A, beta=0.0, *, lower=False, order="best", use_ll=True):
+    def __init__(
+        self, A, beta=0.0, *, lower=False, order="best", use_ll=True, supernodal=None
+    ):
         n, indptr, indices, data = _as_csc(A)
         self._n = n
         self._lower = bool(lower)
+        if supernodal is None:
+            # The supernodal factorization is ``LL'`` and only ``LL'``, so a
+            # caller who asked for ``LDL'`` has to get the simplicial one --
+            # the two disagree about which matrices are factorizable at all.
+            supernodal = "auto" if use_ll else "simplicial"
         self._F = _CholFactor(
             n,
             indptr,
@@ -99,6 +106,7 @@ class Factor:
             float(beta),
             order,
             bool(use_ll),
+            supernodal,
         )
         self._check()
 
@@ -179,6 +187,17 @@ class Factor:
         return bool(self._F.is_ll)
 
     @property
+    def is_super(self) -> bool:
+        """Whether the supernodal factorization ran.
+
+        Chosen the way CHOLMOD chooses it — by the flops-per-nonzero of the
+        analysis — and worth 4x on the matrices that trip it. It changes no
+        answer: :attr:`L`, :meth:`solve` and :meth:`half_log_det` are the same
+        either way.
+        """
+        return bool(self._F.is_super)
+
+    @property
     def nnz(self) -> int:
         """Entries in ``L``."""
         return int(self._F.nnz)
@@ -191,7 +210,9 @@ class Factor:
         )
 
 
-def cho_factor(A, beta=0.0, *, lower=False, order="best", use_ll=True) -> Factor:
+def cho_factor(
+    A, beta=0.0, *, lower=False, order="best", use_ll=True, supernodal=None
+) -> Factor:
     """Factorize ``beta*I + A`` and return a reusable :class:`Factor`.
 
     ``lower`` selects which triangle of ``A`` is the stored half, matching
@@ -213,7 +234,7 @@ def cho_factor(A, beta=0.0, *, lower=False, order="best", use_ll=True) -> Factor
     (``t_cholmod_rowfac_worker.c:424``), so the two forms disagree about what
     "not positive definite" means. Pass ``use_ll=False`` for the ``LDL'``.
     """
-    return Factor(A, beta, lower=lower, order=order, use_ll=use_ll)
+    return Factor(A, beta, lower=lower, order=order, use_ll=use_ll, supernodal=supernodal)
 
 
 def cho_solve(A, b, beta=0.0, *, lower=False, order="best"):

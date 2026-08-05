@@ -1463,7 +1463,17 @@ def solve_rhs(n: int, nrhs: int) -> np.ndarray:
 
 
 def cho(M, stype: int = 1, use_ll: bool = False, **kw):
-    """A factor of the stored triangle, through the public facade."""
+    """A factor of the stored triangle, through the public facade, **pinned to
+    the simplicial path** unless told otherwise.
+
+    The references in this file were generated with ``supernodal =
+    CHOLMOD_SIMPLICIAL``, so pinning is what makes them the right oracle — the
+    supernodal factorization computes the same ``L`` in a different arithmetic
+    order and does not reproduce them bit for bit. ``hea.sparse`` itself
+    defaults to ``CHOLMOD_AUTO``; :func:`test_supernodal_and_simplicial_agree`
+    is what covers that.
+    """
+    kw.setdefault("supernodal", "simplicial")
     tri = sp.csc_array((sp.triu(M) if stype > 0 else sp.tril(M)).tocsc())
     tri.sort_indices()
     return hea.sparse.Factor(tri, lower=stype < 0, use_ll=use_ll, **kw)
@@ -1490,6 +1500,43 @@ def test_solve_matches_cholmod(name, M, stype, use_ll):
         np.ravel(F.solve(solve_rhs(n, 4), s).reshape(n, 4), order="F") for s in SYSTEMS
     ]
     assert _shaf(np.concatenate(parts) if n else np.zeros(0)) == ref.by_system
+
+
+@pytest.mark.parametrize("name,M", CORPUS, ids=[n for n, _ in CORPUS])
+@pytest.mark.parametrize("stype", [1, -1])
+def test_supernodal_and_simplicial_agree(name, M, stype):
+    """The two factorizations are the same factorization.
+
+    ``hea.sparse`` picks between them the way CHOLMOD does — supernodal when
+    the analysis reports at least 40 flops per nonzero of ``L``
+    (``cholmod_analyze.c:887-891``) — and it is worth 4x on the matrices that
+    trip it. Which one ran must not be observable in the answer: same ``L``
+    (same pattern, and the supernodal one is pruned of the entries relaxed
+    amalgamation added), same permutation, same log-determinant, same solves.
+
+    ``L`` is compared exactly on *pattern* and to a tolerance on *values*:
+    a different arithmetic order gives different last bits, which is why the
+    bit-exactness pins above run simplicial. Agreement with CHOLMOD's own
+    supernodal, bit for bit, is checked outside this suite.
+    """
+    n = M.shape[0]
+    if n == 0:
+        pytest.skip("nothing to factorize")
+    sup = cho(M, stype, use_ll=True, supernodal="supernodal")
+    sim = cho(M, stype, use_ll=True, supernodal="simplicial")
+    assert sup.is_super and not sim.is_super
+
+    np.testing.assert_array_equal(sup.P, sim.P)
+    assert sup.nnz == sim.nnz
+    Ls, Li = sup.L, sim.L
+    np.testing.assert_array_equal(Ls.indptr, Li.indptr)
+    np.testing.assert_array_equal(Ls.indices, Li.indices)
+    scale = max(np.abs(Li.data).max(), 1.0)
+    assert np.abs(Ls.data - Li.data).max() <= 1e-12 * scale
+    assert sup.half_log_det() == pytest.approx(sim.half_log_det(), rel=1e-12)
+
+    B = solve_rhs(n, 3)
+    assert np.abs(sup.solve(B) - sim.solve(B)).max() <= 1e-9 * scale
 
 
 @pytest.mark.parametrize("name,M", CORPUS, ids=[n for n, _ in CORPUS])
