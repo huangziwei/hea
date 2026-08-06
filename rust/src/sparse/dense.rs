@@ -283,7 +283,7 @@ fn tile_sub<const MR: usize, const NR: usize>(
         for (jj, accj) in acc.iter_mut().enumerate() {
             let bv = x[bo + jj];
             for (ii, v) in accj.iter_mut().enumerate() {
-                *v = x[ao + ii].mul_add(-bv, *v);
+                *v -= bv * x[ao + ii];
             }
         }
     }
@@ -386,7 +386,7 @@ fn tile_scat<const MR: usize, const NR: usize>(
         for (jj, accj) in acc.iter_mut().enumerate() {
             let bv = b[bo + jj];
             for (ii, v) in accj.iter_mut().enumerate() {
-                *v = a[ao + ii].mul_add(-bv, *v);
+                *v -= bv * a[ao + ii];
             }
         }
     }
@@ -663,7 +663,7 @@ fn strip_sub<const LR: usize>(
         for (q, &tq) in t.iter().enumerate() {
             let xq = xo[q] + i;
             for (ii, vv) in v.iter_mut().enumerate() {
-                *vv = x[xq + ii].mul_add(-tq, *vv);
+                *vv -= tq * x[xq + ii];
             }
         }
         for (ii, &vv) in v.iter().enumerate() {
@@ -674,7 +674,7 @@ fn strip_sub<const LR: usize>(
     while i < m {
         let mut v = x[yo + i];
         for (q, &tq) in t.iter().enumerate() {
-            v = x[xo[q] + i].mul_add(-tq, v);
+            v -= tq * x[xo[q] + i];
         }
         x[yo + i] = v;
         i += 1;
