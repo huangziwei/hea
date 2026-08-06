@@ -36,36 +36,98 @@ Polars's own sub-namespaces are re-exported as ``hea.selectors``,
 ``hea.exceptions``, ``hea.api``, ``hea.plugins``.
 """
 
-# Polars sub-namespaces — useful as ``hea.selectors`` etc., the only
-# polars-flavored access points we expose at the top level.
-from polars import api, exceptions, plugins, selectors  # noqa: F401
+# Everything below is resolved on first attribute access (PEP 562), not at
+# import time. The reason is a number: eager, ``import hea`` costs ~690 ms and
+# pulls 1476 modules including ``matplotlib.pyplot``, and a *submodule* import
+# cannot dodge its parent's cost -- so ``import hea.sparse`` paid all of it for
+# numpy and ``scipy.sparse``. Lazily it is ~112 ms, which is the
+# ``numpy + scipy.sparse`` floor to within 2 ms, and ``hea._rs`` alone is 12 ms
+# against a bare interpreter's 11.
+#
+# That is what makes ``hea.sparse`` usable as a dependency by a package that
+# wants a sparse Cholesky and nothing else -- the whole reason it is written
+# with no hea-internal imports. It also speeds up every other consumer: a
+# script that only needs ``hea.models`` no longer pays for ``ggplot``.
+#
+# Nothing about the public surface changes. Names resolve on first touch and
+# are cached in the module dict, so the second access is a plain global.
 
-# The three core data type classes. Always the hea subclasses (which
-# inherit from polars and carry the tidyverse verbs) — never the raw
-# ``pl.DataFrame`` / ``pl.LazyFrame`` / ``pl.Series``. Top-level so
-# ``isinstance(x, hea.DataFrame)`` and ``hea.DataFrame({...})`` work
-# without the ``hea.tidy.`` prefix.
-from .tidy import DataFrame, LazyFrame, Series
+from typing import TYPE_CHECKING
 
-# hea sub-modules — imported so ``hea.tidy`` / ``hea.models`` / … are
-# attribute-accessible without ``import hea.X`` separately.
-from . import (  # noqa: F401
-    R,
-    dtypes,
-    family,
-    ggplot,
-    io,
-    models,
-    plot,
-    tidy,
-    translate,
+if TYPE_CHECKING:
+    # Eager for type checkers and IDEs only -- never executed at runtime, so
+    # completion and go-to-definition keep working without the import cost.
+    from polars import api, exceptions, plugins, selectors
+
+    from . import (
+        R,
+        dtypes,
+        family,
+        ggplot,
+        io,
+        models,
+        plot,
+        sparse,
+        tidy,
+        translate,
+    )
+    from .io import data, map_data
+    from .session_info import session_info
+    from .tidy import DataFrame, LazyFrame, Series
+
+#: hea sub-modules, reachable as ``hea.tidy`` / ``hea.models`` / … after a bare
+#: ``import hea``. ``sparse`` is here too: it is the CHOLMOD port, and it is the
+#: one module that must stay cheap enough to depend on alone.
+_SUBMODULES = frozenset(
+    {
+        "R",
+        "dtypes",
+        "family",
+        "ggplot",
+        "io",
+        "models",
+        "plot",
+        "sparse",
+        "tidy",
+        "translate",
+    }
 )
 
-# ``data``, ``map_data``, and ``session_info`` are exposed at the top
-# level — they're hit in nearly every notebook (``data('iris')``,
-# ``map_data('world')``, ``session_info()`` as the trailing reproducibility
-# watermark). ``data`` / ``map_data`` live in :mod:`hea.io` (they're
-# dataset loaders — disk + rdatasets I/O); ``session_info`` has its own
-# module for the watermark logic.
-from .io import data, map_data  # noqa: F401
-from .session_info import session_info  # noqa: F401
+#: Polars sub-namespaces re-exported as ``hea.selectors`` etc. — the only
+#: polars-flavored access points exposed at the top level.
+_POLARS = frozenset({"api", "exceptions", "plugins", "selectors"})
+
+#: Names that live in a sub-module but are hit often enough to belong at the
+#: top level: the three core data types, and the loaders/watermark that appear
+#: in nearly every notebook (``data('iris')``, ``session_info()``).
+_ATTRS = {
+    "DataFrame": ".tidy",
+    "LazyFrame": ".tidy",
+    "Series": ".tidy",
+    "data": ".io",
+    "map_data": ".io",
+    "session_info": ".session_info",
+}
+
+__all__ = sorted(_SUBMODULES | _POLARS | set(_ATTRS))
+
+
+def __getattr__(name: str):
+    """Resolve a top-level name on first access — PEP 562."""
+    from importlib import import_module
+
+    if name in _SUBMODULES:
+        value = import_module(f".{name}", __name__)
+    elif name in _POLARS:
+        value = getattr(import_module("polars"), name)
+    elif name in _ATTRS:
+        value = getattr(import_module(_ATTRS[name], __name__), name)
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    # cache it, so this runs once per name and never again
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return __all__

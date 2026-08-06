@@ -1036,7 +1036,7 @@ import polars as pl  # noqa: E402
 from scipy.linalg import eigh_tridiagonal as _eigh_tridiagonal  # noqa: E402
 
 from hea._dispatch import rs_fn  # noqa: E402
-from hea.R._shared import _rfma_vec  # noqa: E402
+from hea._rfma import _rfma_vec  # noqa: E402
 
 # Rust tp kernel-eval: rayon-parallel build of b=[E|T] (XBuild) and the knot
 # matrix E (tpsE); byte-exact to the numpy builds (tests/test_rs_parity.py),

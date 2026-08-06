@@ -53,7 +53,7 @@ import polars as pl
 from scipy.linalg import cho_factor, cho_solve, qr as scipy_qr, solve_triangular
 from scipy.linalg.lapack import dgeqp3, dormqr, dpstrf
 from ..R import distributions as _dist
-from ..R._shared import _rfma_vec
+from .._rfma import _rfma_vec
 
 from ..family import (
     DiscreteX,
