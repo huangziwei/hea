@@ -1780,6 +1780,58 @@ def test_L_snapshot_stays_sparse(fm04ML, fm06ML):
         np.testing.assert_allclose(np.abs(Ld).sum(), np.abs(fm.L).sum())
 
 
+def test_insteval_crossed_grows_the_supernodal_pattern():
+    """The supernodal counterpart of the test below, and the one that reached a
+    user: ``InstEval`` with three crossed grouping factors.
+
+    ``M``'s pattern grows here too, and the supernodal analysis *cannot* absorb
+    a wider ``A`` the way ``rowfac`` can — its supernodes fix where every entry
+    of ``L`` lives. So the factor has to re-analyze rather than refuse, which is
+    ``cholmod_analyze`` + ``cholmod_factorize`` together. Pinned to lme4 2.0.1,
+    ML.
+
+    73k rows, so this is the slowest test in the module (~5 s). It earns it: it
+    is the only end-to-end cover of the re-analysis path.
+    """
+    d = load_dataset("lme4", "InstEval")
+    m = gmm("y ~ 1 + (1 | s) + (1 | d) + (1 | dept:service)", d, REML=False)
+    np.testing.assert_allclose(float(m.logLik()), -118826.645896, rtol=0, atol=1e-4)
+    np.testing.assert_allclose(
+        np.sort(np.atleast_1d(np.asarray(m.theta, float))),
+        np.sort([0.2758781, 0.4354107, 0.0935924]),
+        rtol=0,
+        atol=1e-4,
+    )
+    np.testing.assert_allclose(float(m.sigma), 1.1768400, rtol=0, atol=1e-6)
+
+
+def test_machines_correlated_slopes_grow_the_cholesky_pattern():
+    """``M``'s sparsity pattern is not constant across a fit, and the factor has
+    to cope. ``nlme::Machines`` is the detector.
+
+    With ``(Machine|Worker)`` no observation is on two machines at once, so each
+    worker's ``Zᵀ Z`` block carries a structural zero off the diagonal. At the
+    starting theta ``Λ`` is the identity and ``M`` inherits that zero -- scipy
+    does not emit an entry that came out numerically zero -- and the moment the
+    optimizer tries a nonzero correlation, ``Λ Zᵀ Z Λᵀ`` fills it in and the
+    pattern *grows*. A factor that assumed the analyzed pattern raised partway
+    through the fit; the simplicial path is required to factorize the wider
+    matrix instead, which is what CHOLMOD does.
+
+    Values are lme4 2.0.1, ML. The ``(Machine|Worker)`` optimum is flat -- theta
+    moves in the 4th decimal for a 1e-6 change in the deviance -- so the pins
+    are on the log-likelihood, which is the quantity the surface is flat *in*.
+    """
+    d = load_dataset("nlme", "Machines")
+    for f, want in (
+        ("score ~ Machine + (1|Worker)", -146.8516279),
+        ("score ~ Machine + (Machine|Worker)", -108.2089147),
+        ("score ~ Machine + (1|Worker) + (1|Machine:Worker)", -112.6347235),
+    ):
+        m = gmm(f, d, REML=False)
+        np.testing.assert_allclose(float(m.logLik()), want, rtol=0, atol=1e-5)
+
+
 def test_gmm_factorizes_through_hea_sparse():
     """``gmm``'s inner Cholesky is ``hea.sparse``, and shares its error class.
 

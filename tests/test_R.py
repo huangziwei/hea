@@ -8,6 +8,7 @@ none of it shadows a Python builtin.
 from __future__ import annotations
 
 import builtins
+import importlib
 import math
 import sys
 
@@ -4551,3 +4552,31 @@ def test_prop_test_k_2_still_supports_continuity_correction():
 def test_prop_test_estimates_for_k_3():
     res = prop_test([3, 7, 8], [10, 10, 10])
     assert res.estimate == {"prop 1": 0.3, "prop 2": 0.7, "prop 3": 0.8}
+
+
+def test_star_import_binds_functions_not_submodules():
+    """``from hea.R import *`` is the R-user transition path, so every name in
+    ``__all__`` must be the *function*, never the sub-module of the same name.
+
+    ``factor``, ``matrix`` and ``emmeans`` are each both. Importing a sub-module
+    binds it into the parent namespace and shadows the re-export; eagerly the
+    ``from .factor import (...)`` line ran last and the function won, so the
+    clash was invisible. Under a lazy ``__init__`` whoever touches the module
+    first wins, and resolving *any* export from ``.factor`` -- ``fct``, say --
+    was enough to leave ``hea.R.factor`` pointing at the module and to make
+    ``factor(col("test"), labels=...)`` raise ``'module' object is not callable``.
+    """
+    import types
+
+    import hea.R
+
+    ns = {}
+    exec("from hea.R import *", ns)  # noqa: S102 -- the documented ergonomic
+    shadowed = [n for n in hea.R.__all__ if isinstance(ns.get(n), types.ModuleType)]
+    assert shadowed == [], f"star-import bound sub-modules for {shadowed}"
+
+    # and by attribute, in either touch order
+    for first in ("fct", "factor"):
+        mod = importlib.reload(importlib.import_module("hea.R"))
+        getattr(mod, first)
+        assert callable(mod.factor) and not isinstance(mod.factor, types.ModuleType)

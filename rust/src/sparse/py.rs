@@ -131,41 +131,87 @@ struct Super {
     ywork: SuperSolveWork,
 }
 
-/// Put `A`'s values onto the analyzed pattern, column by column.
+/// Whether `A`'s pattern is inside the one `L`'s supernodes were built on.
 ///
-/// Both patterns have their row indices ascending — the constructor rejects
-/// anything else — so this is a merge, not a search: walk the analyzed column
-/// and the incoming one together, take the value where the rows agree, and
-/// leave a zero in every analyzed slot the incoming column does not reach.
+/// Both patterns have their row indices ascending, so this is a merge, not a
+/// search.
 ///
-/// The merge is also the check. If the incoming column holds a row the
-/// analyzed one does not, the merge runs off the end of the analyzed column
-/// with that row unconsumed, and there is nowhere in `L` for its contribution
-/// to go — so that is refused rather than dropped.
-fn scatter_onto_pattern(a: &mut Sparse, p: &[i64], i: &[i64], x: &[f64]) -> Result<(), String> {
-    a.x.fill(0.0);
+/// Only the **supernodal** path asks. There the symbolic analysis fixes where
+/// every entry of `L` lives, so an entry of `A` outside that pattern has nowhere
+/// to be assembled; the answer decides whether the analysis can be reused or has
+/// to be redone. The simplicial path never asks: `rowfac` derives each row's
+/// pattern from `A` and the etree as it goes and grows `L` when it has to, so a
+/// wider `A` is simply factorized.
+fn pattern_is_contained(a: &Sparse, p: &[i64], i: &[i64]) -> bool {
     for j in 0..a.n {
         let (mut q, qend) = (a.p[j] as usize, a.p[j + 1] as usize);
-        for (&row, &v) in i[p[j] as usize..p[j + 1] as usize]
-            .iter()
-            .zip(&x[p[j] as usize..p[j + 1] as usize])
-        {
+        for &row in &i[p[j] as usize..p[j + 1] as usize] {
             while q < qend && a.i[q] < row {
                 q += 1;
             }
             if q == qend || a.i[q] != row {
-                return Err(format!(
-                    "the pattern has grown: row {row} of column {j} is not in the \
-                     pattern this factor was analyzed on, so the symbolic analysis \
-                     cannot be reused. Re-analyze instead (build a new Factor), or \
-                     factorize the widest pattern first"
-                ));
+                return false;
             }
-            a.x[q] = v;
             q += 1;
         }
     }
-    Ok(())
+    true
+}
+
+/// `cholmod_analyze` followed by `cholmod_factorize_p` — the body both the
+/// constructor and a re-analyzing [`CholFactor::refactorize`] run.
+fn analyze_and_factorize(
+    a: &Sparse,
+    beta: f64,
+    method: Method,
+    mode: SuperMode,
+    params: Params,
+    work: &mut Work,
+) -> Result<(Kind, f64), String> {
+    let s = symbolic::analyze_sparse(a, method, IntWidth::I64).map_err(|e| e.to_string())?;
+
+    /* supernodal analysis, if requested or if selected automatically
+     * (`cholmod_analyze.c:882-902`) */
+    let want_super = match mode {
+        SuperMode::Simplicial => false,
+        SuperMode::Super => true,
+        SuperMode::Auto => s.lnz > 0.0 && (s.fl / s.lnz) >= SUPERNODAL_SWITCH,
+    };
+
+    if want_super {
+        let a2 = symbolic::permute_sym(a, s.ordering, &s.perm, false, false, &mut work.all());
+        let sym = super_symbolic::super_symbolic(
+            a2.as_ref().unwrap_or(a),
+            &s.parent,
+            &s.colcount,
+            &super_symbolic::Relax::default(),
+            work,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut l = SuperFactor::new(&s, sym);
+        let mut cwork = SuperWork::new();
+        super_numeric::super_factorize(a, beta, &mut l, work, &mut cwork)
+            .map_err(|e| e.to_string())?;
+        return Ok((
+            Kind::Supernodal(Box::new(Super {
+                l,
+                cwork,
+                ywork: SuperSolveWork::new(),
+            })),
+            0.0,
+        ));
+    }
+
+    let mut l = Factor::from_symbolic(&s);
+    let fl = numeric::factorize(a, beta, &mut l, &params, work).map_err(|e| e.to_string())?;
+    Ok((
+        Kind::Simplicial(Box::new(Simp {
+            l,
+            params,
+            ywork: SolveWork::new(),
+        })),
+        fl,
+    ))
 }
 
 /// A numeric Cholesky factorization, reusable for both new values and repeated
@@ -180,6 +226,11 @@ pub struct CholFactor {
     /// `Common->rowfacfl` from the last factorization. Simplicial only —
     /// `cholmod_super_numeric` does not keep a flop count.
     fl: f64,
+    /// What `cholmod_analyze` was told, kept so the analysis can be *redone*
+    /// when a later `A` outgrows it — see [`CholFactor::refactorize`].
+    method: Method,
+    mode: SuperMode,
+    params: Params,
 }
 
 #[pymethods]
@@ -240,57 +291,16 @@ impl CholFactor {
                 stype,
                 sorted: ws::columns_are_sorted(n, indptr, indices),
             };
-            let s =
-                symbolic::analyze_sparse(&a, method, IntWidth::I64).map_err(|e| e.to_string())?;
             let mut work = Work::new(n);
-
-            /* supernodal analysis, if requested or if selected automatically
-             * (`cholmod_analyze.c:882-902`) */
-            let want_super = match mode {
-                SuperMode::Simplicial => false,
-                SuperMode::Super => true,
-                SuperMode::Auto => s.lnz > 0.0 && (s.fl / s.lnz) >= SUPERNODAL_SWITCH,
-            };
-
-            if want_super {
-                let a2 =
-                    symbolic::permute_sym(&a, s.ordering, &s.perm, false, false, &mut work.all());
-                let sym = super_symbolic::super_symbolic(
-                    a2.as_ref().unwrap_or(&a),
-                    &s.parent,
-                    &s.colcount,
-                    &super_symbolic::Relax::default(),
-                    &mut work,
-                )
-                .map_err(|e| e.to_string())?;
-                let mut l = SuperFactor::new(&s, sym);
-                let mut cwork = SuperWork::new();
-                super_numeric::super_factorize(&a, beta, &mut l, &mut work, &mut cwork)
-                    .map_err(|e| e.to_string())?;
-                return Ok(CholFactor {
-                    a,
-                    kind: Kind::Supernodal(Box::new(Super {
-                        l,
-                        cwork,
-                        ywork: SuperSolveWork::new(),
-                    })),
-                    work,
-                    fl: 0.0,
-                });
-            }
-
-            let mut l = Factor::from_symbolic(&s);
-            let fl = numeric::factorize(&a, beta, &mut l, &params, &mut work)
-                .map_err(|e| e.to_string())?;
+            let (kind, fl) = analyze_and_factorize(&a, beta, method, mode, params, &mut work)?;
             Ok(CholFactor {
                 a,
-                kind: Kind::Simplicial(Box::new(Simp {
-                    l,
-                    params,
-                    ywork: SolveWork::new(),
-                })),
+                kind,
                 work,
                 fl,
+                method,
+                mode,
+                params,
             })
         })
         .map_err(PyValueError::new_err)
@@ -299,22 +309,21 @@ impl CholFactor {
     /// Refactorize new values against the same symbolic analysis —
     /// `cholmod_factorize (A, L, Common)` on a numeric `L`.
     ///
-    /// **The pattern is taken from `A`, not assumed to match.** It usually does
-    /// match, and then this is the value copy it looks like. But a caller that
-    /// builds `A` as a product recomputes its pattern every time, and a
-    /// numerically zero entry is one the product simply does not emit: `gmm`'s
-    /// `M = Λ Zᵀ Z Λᵀ + I` drops to block-diagonal the moment the optimizer
-    /// tries a zero variance component, and scipy prunes those entries rather
-    /// than storing them. `cholmod_factorize` is handed the whole `A` for
-    /// exactly this reason, so this is too.
+    /// **The pattern comes from `A`, and is not assumed to match.** It usually
+    /// does, and then this is the value copy it looks like. But a caller that
+    /// builds `A` as a product recomputes its pattern every time, and an entry
+    /// that comes out numerically zero is one the product simply does not
+    /// emit — so the pattern moves with the values. `gmm`'s
+    /// `M = Λ Zᵀ Z Λᵀ + I` does it in both directions: it drops to
+    /// block-diagonal when the optimizer tries a zero variance component, and
+    /// on `nlme::Machines` with `(Machine|Worker)` it *gains* the `(2,1)` entry
+    /// of each block the moment a correlation goes nonzero, because no
+    /// observation is on two machines at once and `Zᵀ Z` has a structural zero
+    /// there. `cholmod_factorize` is handed the whole `A` for exactly this
+    /// reason, so this is too.
     ///
-    /// A pattern that has *shrunk* is scattered onto the analyzed one with the
-    /// missing entries set to zero, which is arithmetically what upstream does
-    /// with them — an absent entry and an explicit zero contribute the same
-    /// nothing, and `L`'s structure comes from the analysis either way. A
-    /// pattern that has *grown* is an error: the symbolic analysis has no
-    /// column for the new entry, so its contribution would be dropped and the
-    /// factor would be quietly wrong. Upstream does not check that; this does.
+    /// Whether a *wider* `A` is allowed is a property of the path, not a policy
+    /// choice: [`pattern_is_contained`] says which and why.
     #[pyo3(signature = (indptr, indices, data, beta=0.0))]
     fn refactorize(
         &mut self,
@@ -325,6 +334,7 @@ impl CholFactor {
         beta: f64,
     ) -> PyResult<()> {
         let (indptr, indices, data) = (indptr.as_slice()?, indices.as_slice()?, data.as_slice()?);
+        let (method, mode, params) = (self.method, self.mode, self.params);
         let (a, kind, work, fl) = (&mut self.a, &mut self.kind, &mut self.work, &mut self.fl);
         if indptr.len() != a.p.len() {
             return Err(PyValueError::new_err(format!(
@@ -345,7 +355,28 @@ impl CholFactor {
             if indptr == &a.p[..] && indices[..nz] == a.i[..] {
                 a.x.copy_from_slice(&data[..nz]);
             } else {
-                scatter_onto_pattern(a, indptr, &indices[..nz], &data[..nz])?;
+                ws::validate_csc(a.n, indptr, &indices[..nz]).map_err(|e| e.to_string())?;
+                /* Only the supernodal analysis can fail to hold a wider `A`;
+                 * see `pattern_is_contained`. When it cannot, redo it — that is
+                 * `cholmod_analyze` + `cholmod_factorize` together, which is
+                 * what a caller would otherwise have to do by hand, and it is
+                 * bounded: a pattern can only grow up to the structural product
+                 * that produced it, so this fires a handful of times per fit at
+                 * worst and never in the steady state. */
+                let reanalyze = matches!(kind, Kind::Supernodal(_))
+                    && !pattern_is_contained(a, indptr, &indices[..nz]);
+                a.p.copy_from_slice(indptr);
+                a.i.clear();
+                a.i.extend_from_slice(&indices[..nz]);
+                a.x.clear();
+                a.x.extend_from_slice(&data[..nz]);
+                a.sorted = ws::columns_are_sorted(a.n, indptr, indices);
+                if reanalyze {
+                    let (k, f) = analyze_and_factorize(a, beta, method, mode, params, work)?;
+                    *kind = k;
+                    *fl = f;
+                    return Ok(());
+                }
             }
             match kind {
                 Kind::Simplicial(k) => {

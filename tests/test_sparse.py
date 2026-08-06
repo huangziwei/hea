@@ -1687,17 +1687,75 @@ def test_refactorize_accepts_a_pattern_that_shrank():
     )
 
 
-def test_refactorize_refuses_a_pattern_that_grew():
-    """The other direction cannot be honoured and must not be silent.
+def test_refactorize_grows_the_pattern_on_the_simplicial_path():
+    """A *wider* ``A`` is factorized, not refused — because ``rowfac`` derives
+    each row's pattern from ``A`` and the etree as it goes and grows ``L`` when
+    it has to. That is upstream's behaviour and it is load-bearing.
 
-    The symbolic analysis has no column for an entry outside the pattern it was
-    built on, so its contribution would be dropped and the factor would be
-    quietly wrong. Upstream does not check this; the port does.
+    The shape is ``nlme::Machines`` with ``(Machine|Worker)``: no observation is
+    on two machines at once, so each worker's ``Zᵀ Z`` block has a structural
+    zero off the diagonal, and the moment a correlation parameter goes nonzero
+    ``Λ Zᵀ Z Λᵀ`` fills it in. Refusing that broke the fit outright.
     """
-    thin = sp.csc_array(np.diag([4.0, 3.0, 2.0]))
-    F = hea.sparse.cho_factor(thin)
-    grown = sp.csc_array(np.array([[4.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]]))
-    with pytest.raises(ValueError, match="pattern has grown"):
-        F.factorize(grown)
+    ztz = np.array([[9.0, 3, 3], [3, 3, 0], [3, 0, 3]])
+    lam = np.array([[1.0, 0, 0], [0.3, 1, 0], [0.2, 0.4, 1]])
+    narrow = sp.csc_array(ztz + np.eye(3))
+    wide = sp.csc_array(lam @ ztz @ lam.T + np.eye(3))
+    assert wide.nnz > narrow.nnz
+
+    F = hea.sparse.cho_factor(narrow)
+    assert not F.is_super
+    F.factorize(wide)
+
+    b = np.array([1.0, 2.0, 3.0])
+    np.testing.assert_allclose(
+        F.solve(b), np.linalg.solve(wide.toarray(), b), atol=1e-12
+    )
+    np.testing.assert_allclose(
+        F.half_log_det(), 0.5 * np.linalg.slogdet(wide.toarray())[1], rtol=1e-12
+    )
+    # and back down again
+    F.factorize(narrow)
+    np.testing.assert_allclose(
+        F.solve(b), np.linalg.solve(narrow.toarray(), b), atol=1e-12
+    )
+
+
+def test_refactorize_reanalyzes_when_the_supernodes_cannot_hold_the_pattern():
+    """The supernodal path grows too — by re-analyzing, not by refusing.
+
+    Its supernodes fix where every entry of ``L`` lives, so unlike ``rowfac`` it
+    cannot absorb a wider ``A`` in place. Refusing was the first fix and it was
+    wrong: it broke ``InstEval`` with three crossed grouping factors, where the
+    pattern grows on the supernodal side. Redoing the analysis is what
+    ``cholmod_analyze`` + ``cholmod_factorize`` amount to, and it is bounded —
+    a pattern can only grow up to the structural product that produced it.
+    """
+    ztz = np.array([[9.0, 3, 3], [3, 3, 0], [3, 0, 3]])
+    lam = np.array([[1.0, 0, 0], [0.3, 1, 0], [0.2, 0.4, 1]])
+    narrow = sp.csc_array(ztz + np.eye(3))
+    wide = sp.csc_array(lam @ ztz @ lam.T + np.eye(3))
+    b = np.array([1.0, 2.0, 3.0])
+
+    for mode in ("simplicial", "supernodal"):
+        F = hea.sparse.Factor(narrow, supernodal=mode)
+        assert F.is_super == (mode == "supernodal")
+        F.factorize(wide)
+        assert F.is_super == (mode == "supernodal")  # and it stays on its path
+        np.testing.assert_allclose(
+            F.solve(b), np.linalg.solve(wide.toarray(), b), atol=1e-12
+        )
+        np.testing.assert_allclose(
+            F.half_log_det(), 0.5 * np.linalg.slogdet(wide.toarray())[1], rtol=1e-12
+        )
+        # L still factors the permuted matrix after a re-analysis
+        p = F.P
+        ld = F.L.toarray()
+        np.testing.assert_allclose(ld @ ld.T, wide.toarray()[np.ix_(p, p)], atol=1e-12)
+        F.factorize(narrow)
+        np.testing.assert_allclose(
+            F.solve(b), np.linalg.solve(narrow.toarray(), b), atol=1e-12
+        )
+
     with pytest.raises(ValueError, match="expected n = 3"):
-        F.factorize(sp.csc_array(np.eye(4)))
+        hea.sparse.cho_factor(narrow).factorize(sp.csc_array(np.eye(4)))
