@@ -1708,6 +1708,175 @@ def test_influence_family_matches_lme4(sleepstudy_data):
     np.testing.assert_allclose(R.cooks_distance(infg), infg.cooks_distance())
 
 
+def test_chol_permutation_is_applied_before_triangular_solves(fm04ML):
+    """``L`` factors the *permuted* ``M`` (``L Lᵀ = M[p][:, p]``), so every
+    consumer that solves against ``L`` directly must permute its right-hand
+    side first — lme4's ``solve(L, solve(L, ., system="P"), system="L")``.
+
+    ``Pastes`` is the detector: its AMD ordering genuinely reorders ``M``, so
+    dropping the permutation makes ``XᵀX − RZXᵀRZX`` indefinite and the ``RX``
+    Cholesky fails outright. ``Penicillin``'s ordering is an automorphism of
+    ``M`` (``M[p][:, p] == M`` exactly) and ``sleepstudy``/``Dyestuff`` order
+    to the identity, so none of those three can see the difference.
+    """
+    from scipy.linalg import solve_triangular
+
+    p = np.asarray(fm04ML._L_perm)
+    L = fm04ML._L_dense()
+    q = L.shape[0]
+
+    # This model is a real detector, not a P == I / automorphism freebie.
+    assert not np.array_equal(p, np.arange(q))
+    M_perm = L @ L.T  # P M Pᵀ
+    M = np.empty_like(M_perm)
+    M[np.ix_(p, p)] = M_perm
+    assert np.abs(M_perm - M).max() > 1.0
+
+    # lme4 2.0.1 / Matrix 1.7-5:
+    #   fm <- lmer(strength ~ 1 + (1|sample) + (1|batch), Pastes, REML=FALSE)
+    h = fm04ML.hatvalues()
+    np.testing.assert_allclose(h[:4], [0.483008256986] * 4, atol=1e-6)
+    np.testing.assert_allclose(h.sum(), 28.9804954191, atol=1e-6)
+    RX, RZX = fm04ML._getme_rx_rzx()
+    # RZX is in CHOLMOD's ordering, so this pin is permutation-sensitive
+    # elementwise — an invariant like RXᵀRX + RZXᵀRZX = XᵀX is not, and holds
+    # by construction here whether or not the permutation was applied.
+    np.testing.assert_allclose(RZX[:3, 0], [1.38661956586] * 3, atol=1e-6)
+    np.testing.assert_allclose((RZX**2).sum(), 58.3557147663, atol=1e-6)
+    np.testing.assert_allclose(RX.ravel(), [1.28229685866], atol=1e-6)
+    cmp = fm04ML.getME("devcomp")["cmp"]
+    np.testing.assert_allclose(cmp["ldL2"], 101.038133994, atol=1e-6)
+    np.testing.assert_allclose(cmp["ldRX2"], 0.497305781419, atol=1e-6)
+    np.testing.assert_allclose(
+        fm04ML.cooks_distance()[:4],
+        [0.0838821144297, 0.00136121670933, 3.11212355395, 3.34006765633],
+        atol=1e-6,
+    )
+
+    # Without the permutation the Schur complement is not positive definite —
+    # the pre-fix failure mode, pinned so a silent regression can't pass.
+    ZLtX = np.asarray((fm04ML._Z_sp_solve @ fm04ML.Lambda).T @ fm04ML._X_solve)
+    RZX_bad = solve_triangular(L, ZLtX, lower=True)
+    with pytest.raises(np.linalg.LinAlgError):
+        np.linalg.cholesky(fm04ML._XtX - RZX_bad.T @ RZX_bad)
+
+
+def test_L_snapshot_stays_sparse(fm04ML, fm06ML):
+    """``L`` is kept sparse — ``getME("L")``'s lme4 counterpart is a sparse
+    ``dCHMsimpl``, and the factor of a scalar-bar model is banded, so a dense
+    q×q snapshot grows quadratically for a linear amount of data (at q=4000 it
+    is 122 MB of array holding 6000 nonzeros)."""
+    from scipy.sparse import issparse
+
+    for fm in (fm04ML, fm06ML):
+        assert issparse(fm.L)
+        assert issparse(fm.getME("L"))
+        assert fm.L.shape == (fm.q, fm.q)
+        assert fm.L.nnz < fm.q * fm.q
+        Ld = fm._L_dense()
+        assert Ld.shape == (fm.q, fm.q)
+        # lower triangular, and it factors the permuted M
+        np.testing.assert_array_equal(np.triu(Ld, 1), 0.0)
+        np.testing.assert_allclose(np.abs(Ld).sum(), np.abs(fm.L).sum())
+
+
+def test_insteval_crossed_grows_the_supernodal_pattern():
+    """The supernodal counterpart of the test below, and the one that reached a
+    user: ``InstEval`` with three crossed grouping factors.
+
+    ``M``'s pattern grows here too, and the supernodal analysis *cannot* absorb
+    a wider ``A`` the way ``rowfac`` can — its supernodes fix where every entry
+    of ``L`` lives. So the factor has to re-analyze rather than refuse, which is
+    ``cholmod_analyze`` + ``cholmod_factorize`` together. Pinned to lme4 2.0.1,
+    ML.
+
+    73k rows, so this is the slowest test in the module (~5 s). It earns it: it
+    is the only end-to-end cover of the re-analysis path.
+    """
+    d = load_dataset("lme4", "InstEval")
+    m = gmm("y ~ 1 + (1 | s) + (1 | d) + (1 | dept:service)", d, REML=False)
+    np.testing.assert_allclose(float(m.logLik()), -118826.645896, rtol=0, atol=1e-4)
+    np.testing.assert_allclose(
+        np.sort(np.atleast_1d(np.asarray(m.theta, float))),
+        np.sort([0.2758781, 0.4354107, 0.0935924]),
+        rtol=0,
+        atol=1e-4,
+    )
+    np.testing.assert_allclose(float(m.sigma), 1.1768400, rtol=0, atol=1e-6)
+
+
+def test_machines_correlated_slopes_grow_the_cholesky_pattern():
+    """``M``'s sparsity pattern is not constant across a fit, and the factor has
+    to cope. ``nlme::Machines`` is the detector.
+
+    With ``(Machine|Worker)`` no observation is on two machines at once, so each
+    worker's ``Zᵀ Z`` block carries a structural zero off the diagonal. At the
+    starting theta ``Λ`` is the identity and ``M`` inherits that zero -- scipy
+    does not emit an entry that came out numerically zero -- and the moment the
+    optimizer tries a nonzero correlation, ``Λ Zᵀ Z Λᵀ`` fills it in and the
+    pattern *grows*. A factor that assumed the analyzed pattern raised partway
+    through the fit; the simplicial path is required to factorize the wider
+    matrix instead, which is what CHOLMOD does.
+
+    Values are lme4 2.0.1, ML. The ``(Machine|Worker)`` optimum is flat -- theta
+    moves in the 4th decimal for a 1e-6 change in the deviance -- so the pins
+    are on the log-likelihood, which is the quantity the surface is flat *in*.
+    """
+    d = load_dataset("nlme", "Machines")
+    for f, want in (
+        ("score ~ Machine + (1|Worker)", -146.8516279),
+        ("score ~ Machine + (Machine|Worker)", -108.2089147),
+        ("score ~ Machine + (1|Worker) + (1|Machine:Worker)", -112.6347235),
+    ):
+        m = gmm(f, d, REML=False)
+        np.testing.assert_allclose(float(m.logLik()), want, rtol=0, atol=1e-5)
+
+
+def test_gmm_factorizes_through_hea_sparse():
+    """``gmm``'s inner Cholesky is ``hea.sparse``, and shares its error class.
+
+    Both halves are load-bearing. ``_glmm_deviance`` catches ``CholmodError``
+    to *reject a theta* and let the optimizer move on, so a second exception
+    class would turn a rejected step into a crashed fit. And ``L`` factors the
+    *permuted* ``M``, which is the contract ``_apply_L_perm`` depends on --
+    see ``test_chol_permutation_is_applied_before_triangular_solves`` for the
+    fit-level detector.
+    """
+    import importlib
+
+    from scipy.sparse import csc_array
+
+    import hea.sparse
+
+    # the re-exported ``gmm`` callable shadows the module of the same name
+    gmm_mod = importlib.import_module("hea.models.gmm")
+
+    assert gmm_mod.cho_factor is hea.sparse.cho_factor
+    assert gmm_mod.CholmodError is hea.sparse.CholmodError
+
+    rng = np.random.default_rng(0)
+    A = rng.standard_normal((8, 8))
+    M = csc_array(A @ A.T + 8.0 * np.eye(8))
+
+    F = gmm_mod.cho_factor(M)
+    p = F.P
+    Ld = F.L.toarray()
+    np.testing.assert_allclose(Ld @ Ld.T, M.toarray()[np.ix_(p, p)], atol=1e-10)
+
+    # the analysis is reusable across refactorizations, which is the whole
+    # reason a fit can afford hundreds of them
+    M2 = csc_array(A @ A.T + 12.0 * np.eye(8))
+    F.factorize(M2)
+    b = np.ones(8)
+    np.testing.assert_allclose(F.solve(b), np.linalg.solve(M2.toarray(), b), atol=1e-10)
+    np.testing.assert_allclose(
+        F.half_log_det(), 0.5 * np.linalg.slogdet(M2.toarray())[1], rtol=1e-12
+    )
+
+    with pytest.raises(gmm_mod.CholmodError):
+        gmm_mod.cho_factor(csc_array(-np.eye(4)))
+
+
 def test_lmer_rejects_glmer_keys_and_wires_optinfo(sleepstudy_data):
     """#6 remainder: lmerControl() rejects glmer-only inner-loop keys; the LMM
     fit now populates m.optinfo via calc.derivs (the post-fit gradient/Hessian

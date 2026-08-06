@@ -13,6 +13,8 @@ The dataset name → package resolution is the main thing to lock down:
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 
 from hea import data
@@ -97,3 +99,47 @@ def test_dataset_index_aliases_datasets_to_R():
     pkgs = idx.get("iris", [])
     assert "R" in pkgs
     assert "datasets" not in pkgs
+
+
+def test_missing_data_extra_says_what_to_install():
+    """``rdatasets``/``pyarrow`` live behind ``hea[data]``, so every failure that
+    a missing extra can cause has to name the extra.
+
+    They are 177 MB of the 205 a dependent package would inherit and they serve
+    one feature, which is why they moved out of the hard dependencies. The cost
+    is that ``data("iris")`` stops working on a bare install — acceptable only
+    if the error says so instead of surfacing a bare 404 or polars' pyarrow
+    message.
+    """
+    import hea.io as io
+
+    assert "hea[data]" in io._DATA_EXTRA_HINT
+
+    # every branch of data() that a missing extra can reach appends the hint
+    with mock.patch.object(io, "_have_rdatasets", return_value=False):
+        with pytest.raises(ValueError, match=r"hea\[data\]"):
+            io.data("definitely-not-a-dataset-name")
+        with pytest.raises(ValueError, match=r"hea\[data\]"):
+            io.data("iris", package="not-a-package-either")
+
+    # ... and it is silent when the extra is present, so the message does not
+    # become noise on a normal install
+    with mock.patch.object(io, "_have_rdatasets", return_value=True):
+        with pytest.raises(ValueError) as ei:
+            io.data("definitely-not-a-dataset-name")
+        assert "hea[data]" not in str(ei.value)
+
+
+def test_from_pandas_translates_the_pyarrow_error():
+    """polars' "pyarrow is required" is accurate but says nothing about hea."""
+    import hea.io as io
+
+    class _Boom:
+        pass
+
+    with mock.patch.object(
+        io.pl, "from_pandas", side_effect=ImportError("pyarrow is required for ...")
+    ):
+        with pytest.raises(ImportError, match=r"hea\[data\]") as ei:
+            io._from_pandas(_Boom())
+        assert "pyarrow is required" in str(ei.value)  # upstream's text is kept

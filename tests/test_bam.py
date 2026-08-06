@@ -1142,6 +1142,74 @@ def test_bam_discrete_bins_parametric_covariates_like_mgcv(tmp_path):
     assert abs(float(mF.deviance) - r_devF) < 1e-8 * (abs(r_devF) + 1.0)
 
 
+def test_bam_discrete_constraint_folded_into_marginal():
+    """mgcv stores the CONSTRAINED basis for a non-tensor smooth (bam.r:2527,
+    with ``v=rep(0,0)``/``qc=0``), so ``s(x,k=10)`` is a 9-column marginal, not
+    10 with a post-hoc ``T``. mgcv's own ``Xd`` dims for
+    ``y ~ s(x1,k=10)+s(x2,k=10)`` are 1x1, 1000x9, 1000x9. The direct-factor
+    loop runs one pass over ``n`` per source column, so the extra column is
+    ~11% of the dominant kernel. Folding must not move the fit."""
+    from hea.models.bam import design_full_X
+
+    rng = np.random.default_rng(16)
+    n = 3000
+    x = rng.uniform(0, 1, n)
+    zc = rng.uniform(0, 1, n)
+    yv = np.sin(6 * x) + np.cos(4 * zc) + rng.standard_normal(n) * 0.3
+    m = hea.models.bam(
+        "y ~ s(x, k=10) + s(z, k=10)", {"y": yv, "x": x, "z": zc}, discrete=True
+    )
+    from hea.models.bam import XWXd
+
+    d = m._discrete_design
+    for t in d.terms[1:]:
+        width = t.coef_slice.stop - t.coef_slice.start
+        assert width == 9
+        # Folded: the marginal IS the block, with no post-hoc T left over.
+        # Rows are the variable's unique count, columns the block width —
+        # mgcv's `1000x9`, not the raw basis's 10 columns.
+        assert len(t.Xd_list) == 1
+        assert t.Xd_list[0].shape[1] == width
+        assert t.Xd_list[0].shape[0] in set(int(v) for v in d.nr)
+        assert t.absorb is None and t.keep_cols is None
+    # …and the kernels still agree with the dense cross-product on it.
+    Xf = design_full_X(d)
+    assert Xf.shape[1] == d.p
+    w = rng.uniform(0.1, 2.0, n)
+    np.testing.assert_allclose(XWXd(d, w), Xf.T @ (w[:, None] * Xf), rtol=0, atol=1e-9)
+
+
+def test_bam_discrete_kernel_bounds_proof_still_fires():
+    """The rust block kernel skips its ``O(n)`` index scan when the caller
+    passes ``bounds_checked`` (the caller caches the proof per term). With the
+    flag off it must still reject an out-of-range index rather than reading out
+    of bounds."""
+    import sys
+
+    bam_mod = sys.modules["hea.models.bam"]
+    rs = bam_mod._rs_xwx_smooth_block
+    if rs is None:
+        pytest.skip("rust extension not built")
+    # m_i·m_j > n and min(p) <= 15 ⇒ the direct-factor branch, the one whose
+    # unchecked gathers the proof guards (the dense branch indexes checked).
+    n, m_i, m_j, p = 64, 10, 12, 3
+    rng = np.random.default_rng(17)
+    xim = np.ascontiguousarray(rng.standard_normal((m_i, p)))
+    xjm = np.ascontiguousarray(rng.standard_normal((m_j, p)))
+    ki = rng.integers(0, m_i, (1, n)).astype(np.int64)
+    kj = rng.integers(0, m_j, (1, n)).astype(np.int64)
+    tti = np.zeros((1, 1, 0))
+    ttj = np.zeros((1, 1, 0))
+    w = np.ascontiguousarray(rng.uniform(0.5, 2.0, n))
+    empty = np.zeros(0)
+    ok = rs(xim, xjm, ki, kj, tti, ttj, w, empty, False, False)
+    assert ok.shape == (p, p)
+    kj_bad = kj.copy()
+    kj_bad[0, 3] = m_j  # one past the last bin
+    with pytest.raises(IndexError, match="out of range"):
+        rs(xim, xjm, ki, kj_bad, tti, ttj, w, empty, False, False)
+
+
 def test_bam_no_parametric_columns():
     """``y ~ s(x) - 1`` has a zero-column parametric design; polars collapses
     that to ``(0, 0)``, so the row count has to come from the response (the

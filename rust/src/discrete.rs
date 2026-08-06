@@ -401,6 +401,7 @@ fn xwx_smooth_block<'py>(
     w: PyReadonlyArray1<'py, f64>,
     woff: PyReadonlyArray1<'py, f64>,
     diag_term: bool,
+    bounds_checked: bool,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let mim = xim.shape()[0];
     let pim = xim.shape()[1];
@@ -454,12 +455,19 @@ fn xwx_smooth_block<'py>(
             to_col_major(&xjm_f, mjm, pjm),
         )
     };
-    // One-shot bounds proof for `direct_factor`'s unchecked gathers/scatters:
-    // the indices are bin numbers and get re-scanned once per marginal column,
-    // so checking here rather than per access removes two compare-and-branches
-    // from every row of every pass. Violation is a caller bug (mgcv's C would
-    // simply read out of bounds); surface it as a Python exception instead.
-    if !dense && !(indices_in_range(&ki_f, mim) && indices_in_range(&kj_f, mjm)) {
+    // Bounds proof for `direct_factor`'s unchecked gathers/scatters. The
+    // indices are data (bin numbers), so the compiler cannot hoist a per-access
+    // check out of the row loop; proving the whole row set once instead removes
+    // two compare-and-branches from every row of every pass.
+    //
+    // `bounds_checked` says the caller already proved it. That matters because
+    // the scan is a second read of `2n` i64 — 0.077 ms of a 0.647 ms block at
+    // n = 110k — while the index rows are FIXED for a design's lifetime: they
+    // depend only on `k` and the term's marginal, not on the weights. The
+    // caller caches the proof per (term, marginal) and pays it once per fit
+    // instead of once per block per PIRLS iteration. mgcv's C never checks.
+    if !dense && !bounds_checked && !(indices_in_range(&ki_f, mim) && indices_in_range(&kj_f, mjm))
+    {
         return Err(pyo3::exceptions::PyIndexError::new_err(format!(
             "xwx_smooth_block: discrete index out of range for marginals \
              ({mim}, {mjm}) — k columns and Xd are inconsistent"

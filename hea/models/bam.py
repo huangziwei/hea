@@ -53,7 +53,7 @@ import polars as pl
 from scipy.linalg import cho_factor, cho_solve, qr as scipy_qr, solve_triangular
 from scipy.linalg.lapack import dgeqp3, dormqr, dpstrf
 from ..R import distributions as _dist
-from ..R._shared import _rfma_vec
+from .._rfma import _rfma_vec
 
 from ..family import (
     DiscreteX,
@@ -8090,8 +8090,8 @@ class _DiscreteTerm:
     # Predict-time replay (used for predict.bamd, not the fitter).
     spec: Optional[BasisSpec] = None
     label: str = ""
-    # Cache for :func:`_term_k_rows` — ``(key, rows)``, rebuilt when the design's
-    # ``k`` changes. Not part of the design's identity.
+    # Cache for :func:`_term_k_rows_bounds` — ``(key, rows, lo, hi)``, rebuilt
+    # when the design's ``k`` changes. Not part of the design's identity.
     _k_rows_cache: Optional[tuple] = None
 
 
@@ -8438,29 +8438,40 @@ def _append_smooth_discrete_term(
     # as the authoritative post-transform width.
     p_term = block.X.shape[1]
 
-    # Deliberate deviation from mgcv: the marginal goes in RAW and the
-    # constraint stays post-hoc (:func:`_term_constraint_T`).
+    # mgcv stores the CONSTRAINED basis for a non-tensor smooth: bam.r:2527
+    # takes `G$X[1:nr, first.para:last.para]` — already centred — and leaves
+    # `v[[kb]] <- rep(0,0)`, `qc[kb] <- 0` (:2524). Only tensor margins go in
+    # raw, with the constraint deferred to `v`/`qc` (:2505-2515), because a
+    # tensor's constraint acts on the product space, not on any one margin.
     #
-    # mgcv folds it. For a non-tensor smooth bam.r:2523-2531 stores
-    # `G$X[,first.para:last.para]` — the already-centred basis — and sets
-    # `v[[kb]] <- rep(0,0)`, `qc[kb] <- 0`; only tensor margins go in raw with
-    # the constraint deferred to `v`/`qc` (:2505-2515). Folding is exact
-    # (gathering commutes with the linear column map: `Xd_raw[K,:] @ T ==
-    # (Xd_raw @ T)[K,:]`) and shrinks every kernel — `s(x,k=10)` becomes a
-    # 9-column marginal instead of 10, and the `T_i' B_raw T_j` sandwich in
-    # XWXd/XWyd disappears. Measured: XWXd 5.19 → 4.71 ms on a 4-smooth
-    # n=110k fit.
+    # Folding is exact — gathering commutes with a linear column map,
+    # `(Xd_raw @ T)[K,:] == Xd_raw[K,:] @ T` — and it shrinks the dominant
+    # loop: `XWXijs`'s direct factor runs one pass over `n` per column of the
+    # source marginal (discrete.c:1925/1966), so `s(x,k=10)` costs 9 passes
+    # instead of 10, and the `T_i' B_raw T_j` sandwich disappears. A by=
+    # smooth folds too: its by-marginal has `p=1`, so it neither reorders nor
+    # widens the term, and `by·(X_raw @ T) == absorb.apply(by·X_raw)`.
     #
-    # It is NOT applied because it triples the outer iteration count on the
-    # factor-`by` Poisson fit in dev/emsyns: `_build_qr_discrete_pirls` runs
-    # 36 → 121 times at n=438k, so the fit goes 6.8 → 17.6 s despite each
-    # iteration being ~2x faster. Both spellings are numerically right (same
-    # deviance to 1e-12, same sp to 3e-6) — folding merely reassociates the
-    # rounding, and this fit is sensitive enough to it to take a different
-    # fREML path. That sensitivity is a lead about hea's outer loop, not a
-    # property of the fold, and it is NOT yet traced: see the memory note
-    # `discrete-kernel-perf`. Re-enable only alongside a fix for it, and
-    # re-run dev/emsyns/bench.py at reps=16 before believing a win.
+    # (Applying this used to take the n=438k factor-`by` fit from 36 to 121
+    # PIRLS builds. The cause was not the fold — it reassociates rounding, and
+    # a chol2qr round trip on the discrete rail was amplifying that; see
+    # `_bgam_fit_loop`, where X'WX now reaches Sl.fitChol as accumulated.)
+    fold_T = None
+    if len(margin_raws) == 1 and (
+        spec.absorb is not None or spec.keep_cols is not None
+    ):
+        p_raw = int(np.prod([Xd.shape[1] for Xd in Xd_list]))
+        fold_T = np.eye(p_raw, dtype=float)
+        if spec.absorb is not None:
+            fold_T = spec.absorb.apply(fold_T)
+        if spec.keep_cols is not None:
+            fold_T = fold_T[:, spec.keep_cols]
+        if fold_T.shape != (p_raw, p_term):
+            # Constraint not expressible as a column map of this margin alone
+            # — keep it post-hoc rather than silently reshaping the term.
+            fold_T = None
+        else:
+            Xd_list[-1] = np.ascontiguousarray(Xd_list[-1] @ fold_T)
 
     # by= is the FIRST marginal of the term (mgcv discrete.mf:261-269 +
     # fit-side bam.r:2469-2483): an ``m_by × 1`` basis — the discretised
@@ -8494,9 +8505,11 @@ def _append_smooth_discrete_term(
             Xd_list=Xd_list,
             k_cols=k_cols,
             coef_slice=slice(p_total, p_total + p_term),
-            absorb=spec.absorb,
+            # Folded into the marginal above ⇒ no post-hoc T (mgcv's
+            # `v=rep(0,0)`, `qc=0` for a non-tensor smooth, bam.r:2524).
+            absorb=None if fold_T is not None else spec.absorb,
             by=spec.by,
-            keep_cols=spec.keep_cols,
+            keep_cols=None if fold_T is not None else spec.keep_cols,
             spec=spec,
             label=block.label,
         )
@@ -9050,9 +9063,16 @@ def _smooth_smooth_block(
             TTj3 = np.zeros((sj, ndj, 0))
         # (s, n) int64, contiguous. Depends only on the term's index columns,
         # so it is identical across every PIRLS iteration and every block the
-        # term appears in — cache it on the term rather than restacking.
-        Ki = _term_k_rows(ti, k, ks_im, si)
-        Kj = Ki if diag_term else _term_k_rows(tj, k, ks_jm, sj)
+        # term appears in — cache it on the term rather than restacking. The
+        # cached extrema discharge the kernel's bounds proof for free: the rust
+        # side would otherwise re-scan 2n indices per block (see
+        # ``bounds_checked`` in rust/src/discrete.rs).
+        Ki, lo_i, hi_i = _term_k_rows_bounds(ti, k, ks_im, si)
+        if diag_term:
+            Kj, lo_j, hi_j = Ki, lo_i, hi_i
+        else:
+            Kj, lo_j, hi_j = _term_k_rows_bounds(tj, k, ks_jm, sj)
+        bounds_ok = lo_i >= 0 and hi_i < mim and lo_j >= 0 and hi_j < mjm
         woff_arg = np.ascontiguousarray(w_off, dtype=float) if ar1 else _XWX_EMPTY_F64
         return _rs_xwx_smooth_block(
             np.ascontiguousarray(Xim),
@@ -9064,6 +9084,7 @@ def _smooth_smooth_block(
             np.ascontiguousarray(w),
             woff_arg,
             diag_term,
+            bounds_ok,
         )
 
     Ki_all = [k[:, ks_im + s].astype(np.int64) for s in range(si)]
@@ -9123,22 +9144,31 @@ def _smooth_smooth_block(
     return block
 
 
-def _term_k_rows(term, k: np.ndarray, ks: int, s_count: int) -> np.ndarray:
+def _term_k_rows_bounds(
+    term, k: np.ndarray, ks: int, s_count: int
+) -> tuple[np.ndarray, int, int]:
     """The term's final-marginal index columns as a contiguous ``(s_count, n)``
-    int64 block, cached on the term.
+    int64 block plus that block's ``(min, max)``, cached on the term.
 
-    ``k`` is fixed for a design, so this is invariant across PIRLS iterations
-    and across every block the term participates in; rebuilding it per block
-    was ~10% of ``XWXd``. Keyed on ``id(k)`` so a different design (or a
+    ``k`` is fixed for a design, so both are invariant across PIRLS iterations
+    and across every block the term participates in; rebuilding the rows per
+    block was ~10% of ``XWXd``. Keyed on ``id(k)`` so a different design (or a
     predict-time frame) rebuilds rather than reusing a stale block.
+
+    The extrema ride along because they are what discharges the kernels' bounds
+    proof. Without them the rust side re-scans ``2n`` indices on every block of
+    every iteration (0.077 ms of a 0.647 ms block at n = 110k); with them the
+    design pays for the proof once per term.
     """
     cache = getattr(term, "_k_rows_cache", None)
     key = (id(k), ks, s_count)
     if cache is not None and cache[0] == key:
-        return cache[1]
+        return cache[1], cache[2], cache[3]
     rows = np.ascontiguousarray(k[:, ks : ks + s_count].T, dtype=np.int64)
-    term._k_rows_cache = (key, rows)
-    return rows
+    lo = int(rows.min()) if rows.size else 0
+    hi = int(rows.max()) if rows.size else -1
+    term._k_rows_cache = (key, rows, lo, hi)
+    return rows, lo, hi
 
 
 def _tri_matvec(w: np.ndarray, w_off: np.ndarray, V: np.ndarray) -> np.ndarray:

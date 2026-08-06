@@ -694,7 +694,7 @@ wheels = [
 
 [[package]]
 name = "hea"
-version = "0.1.8"
+version = "0.1.9"
 source = { editable = "." }
 dependencies = [
     { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -703,22 +703,22 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "polars" },
-    { name = "pyarrow" },
-    { name = "rdatasets" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 
 [package.optional-dependencies]
-fast = [
-    { name = "scikit-sparse" },
+data = [
+    { name = "pyarrow" },
+    { name = "rdatasets" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "build" },
     { name = "flake8" },
+    { name = "hea", extra = ["data"] },
     { name = "ipykernel" },
     { name = "maturin" },
     { name = "nbconvert" },
@@ -734,17 +734,17 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.10.0" },
     { name = "numpy", specifier = ">=2.2.2" },
     { name = "polars", specifier = "==1.41.2" },
-    { name = "pyarrow", specifier = ">=24.0.0" },
-    { name = "rdatasets", specifier = ">=0.2.10" },
-    { name = "scikit-sparse", marker = "extra == 'fast'", specifier = ">=0.5.0" },
+    { name = "pyarrow", marker = "extra == 'data'", specifier = ">=24.0.0" },
+    { name = "rdatasets", marker = "extra == 'data'", specifier = ">=0.2.10" },
     { name = "scipy", specifier = ">=1.15.1" },
 ]
-provides-extras = ["fast"]
+provides-extras = ["data", "fast"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "build" },
     { name = "flake8", specifier = ">=7.1.1" },
+    { name = "hea", extras = ["data"] },
     { name = "ipykernel", specifier = ">=7.2.0" },
     { name = "maturin", specifier = ">=1.14.0" },
     { name = "nbconvert", specifier = ">=7.17.1" },
@@ -2875,21 +2875,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/22/e8/15fd23e02b2442b56b2026b455977bc3057aa34b26e6323d1e99e8531a9f/ruff-0.15.19-py3-none-win_amd64.whl", hash = "sha256:efeca47ee3f9d4a7162655a3b8e6ee4a878646044233978d4d2c1ff8cdd914f0", size = 12123473, upload-time = "2026-06-24T01:10:27.74Z" },
     { url = "https://files.pythonhosted.org/packages/30/66/9a73695e31eaee04f35d8475998bf8ab354465f9c638936d76111603dcc5/ruff-0.15.19-py3-none-win_arm64.whl", hash = "sha256:6c6b607466e47349332eb1d9be52fb1467423fc07c217341af41cd0f3f0573be", size = 11376779, upload-time = "2026-06-24T01:10:34.465Z" },
 ]
-
-[[package]]
-name = "scikit-sparse"
-version = "0.5.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "packaging" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/4a/70/2351a8755de0b3d9821864299d6bba3feafb91e106b9b762a2675910392e/scikit_sparse-0.5.0.tar.gz", hash = "sha256:217579251b1d91dcfeab5a16d6408f462dc353939f9e5dfa65ec0b41f0b603dc", size = 106285, upload-time = "2026-03-03T19:18:41.586Z" }
 
 [[package]]
 name = "scipy"

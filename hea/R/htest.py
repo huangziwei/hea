@@ -21,7 +21,14 @@ from . import distributions as _dist
 from . import nmath as _nm
 
 from ._shared import _as_array, _fmt, _fmt_pval, _rfma
-from ..models.lm import lm
+
+# ``lm`` is imported inside the three functions that call it, not here.
+# Module level closes a cycle: ``hea.family`` imports ``hea.R.nmath``, which
+# runs ``hea/R/__init__.py``, which imports this module, which would import
+# ``hea.models`` -- whose ``bam`` imports ``hea.family`` straight back. The
+# eager ``hea/__init__.py`` used to hide it by loading ``hea.R`` first; a lazy
+# one does not, and whichever of the two a caller touches first decides. It is
+# also weight: nothing in ``hea.R`` needs ``bam``/``gam``/``glm`` at import.
 
 
 def _avg_rank(a) -> np.ndarray:
@@ -3015,6 +3022,8 @@ def prop_trend_test(x, n, score=None) -> HTest:
     p = _rsum_ld(x) / _rsum_ld(n)
     w = n / p / (1 - p)
     freq = x / n
+    from ..models.lm import lm
+
     fit = lm("freq ~ score", pl.DataFrame({"freq": freq, "score": score}), weights=w)
     chisq = float(np.asarray(fit.effects)[1]) ** 2
     score_str = " ".join(
@@ -3965,6 +3974,8 @@ def aov(formula: str, data: pl.DataFrame, *, type: str = "II") -> AnovaTable:
     (``value ~ 1 + group_b + group_c``) — both go through ``hea.lm``,
     so the term grouping comes from the formula's own ``term_labels``.
     """
+    from ..models.lm import lm
+
     fit = lm(formula, data)
     term_labels = list(fit._expanded.term_labels)
     rss_full = float(fit.rss)

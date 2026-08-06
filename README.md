@@ -17,20 +17,12 @@ BTW, the name `lmpy` is blocked on PyPI due to the name is "too similar to some 
 pip install hea
 ```
 
-for sparse matrix speed-up in `lme`, you might want to use `scikit-sparse`, but you need to install some system deps first:
+for core functionalities.
+
+or if you want to load the example datasets:
 
 ```bash
-# mac
-brew install suite-sparse
-
-# debian
-sudo apt-get install libsuitesparse-dev
-```
-
-then 
-
-```bash
-pip install "hea[fast]"
+pip install "hea[data]"
 ```
 
 ## Usage
