@@ -32,8 +32,6 @@ dependencies = [
     "matplotlib>=3.10.0",
     "numpy>=2.2.2",
     "polars==1.41.2",
-    "pyarrow>=24.0.0",
-    "rdatasets>=0.2.10",
     "scipy>=1.15.1",
 ]
 
@@ -45,6 +43,20 @@ license-files = ["LICENSE"]
 readme = {file = "README.md", content-type = "text/markdown"}
 
 [project.optional-dependencies]
+# The bundled example datasets -- `data("penguins", "palmerpenguins")` and the
+# rest of `hea.data`'s rdatasets-sourced corpus. Two packages, and they are one
+# feature: `rdatasets` is the source, `pyarrow` is what polars needs to convert
+# its pandas frames when a column carries an extension dtype.
+#
+# 177 MB of the 205 a dependent package would otherwise inherit, and nothing in
+# the modeling core touches either: with `pyarrow` genuinely absent (a shadow
+# site-packages, not a `sys.meta_path` hook -- those are silently dead on 3.12+)
+# the suite is 4567 passed / 4 failed, and all four are `hea.data()` loading
+# `palmerpenguins`. Bundled CSV datasets keep working without this.
+data = [
+    "pyarrow>=24.0.0",
+    "rdatasets>=0.2.10",
+]
 # Retained empty so existing `hea[fast]` pins keep resolving. The sparse
 # Cholesky is `hea.sparse` now -- CHOLMOD ported to Rust, in the wheel -- so
 # there is nothing optional left to install for it.
@@ -52,6 +64,10 @@ fast = []
 
 [dependency-groups]
 dev = [
+    # The test corpus is the dataset corpus -- `load_dataset` reaches rdatasets
+    # for most of it -- so development and CI take the `data` extra even though
+    # an install does not.
+    "hea[data]",
     # maturin is the build backend (see [build-system]); `uv sync` builds the
     # hea._rs extension in editable mode and the `maturin develop` CLI lives here.
     # CI pins maturin==1.14.0.

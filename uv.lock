@@ -703,17 +703,22 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "polars" },
-    { name = "pyarrow" },
-    { name = "rdatasets" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
+
+[package.optional-dependencies]
+data = [
+    { name = "pyarrow" },
+    { name = "rdatasets" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "build" },
     { name = "flake8" },
+    { name = "hea", extra = ["data"] },
     { name = "ipykernel" },
     { name = "maturin" },
     { name = "nbconvert" },
@@ -729,16 +734,17 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.10.0" },
     { name = "numpy", specifier = ">=2.2.2" },
     { name = "polars", specifier = "==1.41.2" },
-    { name = "pyarrow", specifier = ">=24.0.0" },
-    { name = "rdatasets", specifier = ">=0.2.10" },
+    { name = "pyarrow", marker = "extra == 'data'", specifier = ">=24.0.0" },
+    { name = "rdatasets", marker = "extra == 'data'", specifier = ">=0.2.10" },
     { name = "scipy", specifier = ">=1.15.1" },
 ]
-provides-extras = ["fast"]
+provides-extras = ["data", "fast"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "build" },
     { name = "flake8", specifier = ">=7.1.1" },
+    { name = "hea", extras = ["data"] },
     { name = "ipykernel", specifier = ">=7.2.0" },
     { name = "maturin", specifier = ">=1.14.0" },
     { name = "nbconvert", specifier = ">=7.17.1" },

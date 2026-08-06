@@ -17,6 +17,14 @@ BTW, the name `lmpy` is blocked on PyPI due to the name is "too similar to some 
 pip install hea
 ```
 
+for core functionalities.
+
+or if you want to load the example datasets:
+
+```bash
+pip install "hea[data]"
+```
+
 ## Usage
 
 ```python

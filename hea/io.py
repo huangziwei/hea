@@ -281,6 +281,38 @@ def _normalize_rownames(df: pl.DataFrame) -> pl.DataFrame:
     return df.rename({"rownames": "rowname"})
 
 
+#: What to tell someone who asked for a dataset that lives behind the extra.
+#: ``rdatasets`` and ``pyarrow`` moved out of the hard dependencies -- they are
+#: 177 MB and they serve one feature -- so a bare install resolves the bundled
+#: CSV corpus and nothing else. Without this, the failure is a bare "not found"
+#: (no ``rdatasets``) or polars' own pyarrow message (no ``pyarrow``), and
+#: neither says what to install.
+_DATA_EXTRA_HINT = (
+    'the rdatasets corpus needs hea\'s "data" extra: '
+    'pip install "hea[data]"  (or: uv add "hea[data]")'
+)
+
+
+def _have_rdatasets() -> bool:
+    """Whether the ``data`` extra is installed."""
+    from importlib.util import find_spec
+
+    return find_spec("rdatasets") is not None
+
+
+def _from_pandas(df):
+    """``pl.from_pandas``, with the missing-``pyarrow`` error made actionable.
+
+    polars needs ``pyarrow`` to convert a pandas frame whose columns are not
+    plain numpy-backed -- which the rdatasets corpus routinely is -- and says so
+    clearly, but says nothing about ``hea[data]``.
+    """
+    try:
+        return pl.from_pandas(df)
+    except ImportError as e:  # polars: "pyarrow is required for converting ..."
+        raise ImportError(f"{e}\n\n{_DATA_EXTRA_HINT}") from e
+
+
 def _try_load_rdatasets(package: str, name: str) -> pl.DataFrame | None:
     """Load ``(package, name)`` from the ``rdatasets`` package, or None if missing.
 
@@ -300,7 +332,7 @@ def _try_load_rdatasets(package: str, name: str) -> pl.DataFrame | None:
     items = {it.removesuffix(".pkl") for it in rdatasets.items(rd_pkg)}
     if name not in items:
         return None
-    df = pl.from_pandas(rdatasets.data(rd_pkg, name))
+    df = _from_pandas(rdatasets.data(rd_pkg, name))
     return _normalize_rownames(df)
 
 
@@ -468,10 +500,11 @@ def data(
         idx = _dataset_index()
         candidates = idx.get(name, [])
         if not candidates:
+            hint = "" if _have_rdatasets() else f"\n\n{_DATA_EXTRA_HINT}"
             raise ValueError(
                 f"data(): {name!r} not found in rdatasets or any "
                 "bundled datasets/ directory. Pass `package=` "
-                "explicitly to attempt a GitHub download."
+                f"explicitly to attempt a GitHub download.{hint}"
             )
         if len(candidates) > 1:
             quoted = ", ".join(repr(p) for p in candidates)
@@ -490,10 +523,14 @@ def data(
         # (covers fresh installs where ``datasets/`` is empty).
         idx = _dataset_index()
         if name in idx and package not in idx[name]:
+            # Without the extra the index only knows the bundled corpus, so
+            # "available in 'R'" can be an artefact of rdatasets being absent
+            # rather than a real answer about where the dataset lives.
+            hint = "" if _have_rdatasets() else f"\n\n{_DATA_EXTRA_HINT}"
             quoted = ", ".join(repr(p) for p in idx[name])
             raise ValueError(
                 f"data(): {name!r} not in package {package!r}. "
-                f"Available packages with this name: {quoted}."
+                f"Available packages with this name: {quoted}.{hint}"
             )
 
     df: pl.DataFrame | None = None
@@ -528,17 +565,22 @@ def data(
                     except OSError:
                         pass
                 if e.code == 404:
+                    # Most of the corpus is sourced from rdatasets, and the
+                    # download is only the fallback for what this repo bundles.
+                    # Without the extra the fallback is all there is, so say so
+                    # rather than leaving a bare 404.
+                    hint = "" if _have_rdatasets() else f"\n\n{_DATA_EXTRA_HINT}"
                     suggestions = idx.get(name, [])
                     if suggestions:
                         quoted = ", ".join(repr(p) for p in suggestions)
                         raise ValueError(
                             f"data(): {name!r} not in package {package!r} "
-                            f"(404 from GitHub). Available in: {quoted}."
+                            f"(404 from GitHub). Available in: {quoted}.{hint}"
                         ) from None
                     raise ValueError(
                         f"data(): {name!r} not in package {package!r} "
                         "(404 from GitHub) and not in any other known "
-                        "package."
+                        f"package.{hint}"
                     ) from None
                 raise
             except Exception:
