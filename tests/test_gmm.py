@@ -1780,21 +1780,49 @@ def test_L_snapshot_stays_sparse(fm04ML, fm06ML):
         np.testing.assert_allclose(np.abs(Ld).sum(), np.abs(fm.L).sum())
 
 
-def test_splu_fallback_reports_identity_permutation():
-    """The splu fallback factors ``M`` itself rather than a permuted copy, so
-    its ``P`` must be the identity — otherwise ``_apply_L_perm`` would scramble
-    right-hand sides on the no-SuiteSparse path."""
+def test_gmm_factorizes_through_hea_sparse():
+    """``gmm``'s inner Cholesky is ``hea.sparse``, and shares its error class.
+
+    Both halves are load-bearing. ``_glmm_deviance`` catches ``CholmodError``
+    to *reject a theta* and let the optimizer move on, so a second exception
+    class would turn a rejected step into a crashed fit. And ``L`` factors the
+    *permuted* ``M``, which is the contract ``_apply_L_perm`` depends on --
+    see ``test_chol_permutation_is_applied_before_triangular_solves`` for the
+    fit-level detector.
+    """
+    import importlib
+
     from scipy.sparse import csc_array
 
-    from hea.models.gmm import _SpluFactor
+    import hea.sparse
+
+    # the re-exported ``gmm`` callable shadows the module of the same name
+    gmm_mod = importlib.import_module("hea.models.gmm")
+
+    assert gmm_mod.cho_factor is hea.sparse.cho_factor
+    assert gmm_mod.CholmodError is hea.sparse.CholmodError
 
     rng = np.random.default_rng(0)
     A = rng.standard_normal((8, 8))
     M = csc_array(A @ A.T + 8.0 * np.eye(8))
-    F = _SpluFactor(M)
-    np.testing.assert_array_equal(F.P, np.arange(8))
+
+    F = gmm_mod.cho_factor(M)
+    p = F.P
     Ld = F.L.toarray()
-    np.testing.assert_allclose(Ld @ Ld.T, M.toarray(), atol=1e-10)
+    np.testing.assert_allclose(Ld @ Ld.T, M.toarray()[np.ix_(p, p)], atol=1e-10)
+
+    # the analysis is reusable across refactorizations, which is the whole
+    # reason a fit can afford hundreds of them
+    M2 = csc_array(A @ A.T + 12.0 * np.eye(8))
+    F.factorize(M2)
+    b = np.ones(8)
+    np.testing.assert_allclose(F.solve(b), np.linalg.solve(M2.toarray(), b), atol=1e-10)
+    np.testing.assert_allclose(
+        F.half_log_det(), 0.5 * np.linalg.slogdet(M2.toarray())[1], rtol=1e-12
+    )
+
+    with pytest.raises(gmm_mod.CholmodError):
+        gmm_mod.cho_factor(csc_array(-np.eye(4)))
 
 
 def test_lmer_rejects_glmer_keys_and_wires_optinfo(sleepstudy_data):

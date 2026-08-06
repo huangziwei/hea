@@ -54,6 +54,7 @@ from ..formula import (
     prepare_design,
 )
 from .lm import _apply_subset, _label_top_n, _lowess, _qq_plot
+from ..sparse import CholmodError, cho_factor
 from ..utils import (
     format_df,
     format_pval,
@@ -66,156 +67,26 @@ __all__ = ["gmm", "Profile"]
 
 
 # ---------------------------------------------------------------------------
-# CHOLMOD compatibility shim.
+# The inner Cholesky of ``M = Λ Zᵀ Z Λᵀ + I``.
 #
-# Routes through ``sksparse.cholmod`` when scikit-sparse is installed (the
-# fast path used here for the inner Cholesky of ``M = Λ Zᵀ Z Λᵀ + I``).
-# Falls back to ``scipy.sparse.linalg.splu`` otherwise — slower than
-# CHOLMOD because SuperLU re-runs symbolic analysis on every refactor and
-# doesn't exploit symmetry, but it preserves sparsity. A one-time
-# ``UserWarning`` points users at ``hea[fast]``.
+# ``hea.sparse`` is CHOLMOD, ported, and ships with hea — so there is no
+# optional fast path, no ``scikit-sparse``, and no ``splu`` fallback to warn
+# about. What this module needs from it is that one symbolic analysis is
+# reused across the hundreds of refactorizations a fit issues:
+# :class:`hea.sparse.Factor` holds it, and ``factorize(M)`` replays it on new
+# values.
 #
-# Both backends expose the slice of the API the rest of this module uses:
-#   * ``factorize(M)`` — refactor with new numeric values
-#   * ``solve(b)`` — solve ``M⁻¹ b``
-#   * ``half_log_det()`` — ``½·log|det M|``
-#   * ``L`` — sparse Cholesky factor. sksparse returns it directly; the
-#     splu fallback computes via dense Cholesky on first access.
-#   * ``P`` — the fill-reducing permutation ``p`` behind that factor, so that
-#     ``L Lᵀ == M[p][:, p]``. Needed by every consumer that solves against
-#     ``L`` directly rather than through ``solve()``: CHOLMOD's ``L`` is in
-#     the permuted ordering, so ``L⁻ᵀL⁻¹ = P M⁻¹ Pᵀ ≠ M⁻¹`` whenever
-#     ``p != arange(q)``. The splu fallback factors ``M`` itself, so ``p``
-#     is the identity there.
+# The slice of the API used below is ``factorize(M)``, ``solve(b)``,
+# ``half_log_det()``, ``L``, and ``P`` — the fill-reducing permutation behind
+# that ``L``, so that ``L Lᵀ == M[p][:, p]``. Every consumer that solves
+# against ``L`` directly rather than through ``solve()`` needs ``P``: CHOLMOD's
+# ``L`` is in the permuted ordering, so ``L⁻ᵀL⁻¹ = P M⁻¹ Pᵀ ≠ M⁻¹`` whenever
+# ``p != arange(q)``.
+#
+# ``CholmodError`` is re-exported rather than redefined: ``_glmm_deviance``
+# catches it to *reject a θ* and let the optimizer move on, so it has to be the
+# same class the factorization raises.
 # ---------------------------------------------------------------------------
-
-try:
-    from sksparse.cholmod import (
-        CholmodError as _SksparseCholmodError,
-        cho_factor as _sks_cho_factor,
-    )
-
-    _HAS_SKSPARSE = True
-except ImportError:
-    _HAS_SKSPARSE = False
-
-
-class CholmodError(Exception):
-    """Raised when the Cholesky factor cannot be built (e.g. non-SPD matrix).
-
-    Unifies ``sksparse.cholmod.CholmodError`` (fast path) and the SuperLU
-    ``RuntimeError`` / non-positive-diagonal check (fallback).
-    """
-
-
-class _SksparseFactor:
-    """Wraps an ``sksparse.cholmod`` factor with our unified API."""
-
-    __slots__ = ("_F",)
-
-    def __init__(self, M):
-        try:
-            self._F = _sks_cho_factor(M)
-        except _SksparseCholmodError as e:
-            raise CholmodError(str(e)) from e
-
-    def factorize(self, M) -> None:
-        try:
-            self._F.factorize(M)
-        except _SksparseCholmodError as e:
-            raise CholmodError(str(e)) from e
-
-    def solve(self, b):
-        return self._F.solve(b)
-
-    def half_log_det(self) -> float:
-        return float(np.log(self._F.L.diagonal()).sum())
-
-    @property
-    def L(self):
-        return self._F.L
-
-    @property
-    def P(self) -> np.ndarray:
-        return np.asarray(self._F.perm, dtype=np.intp)
-
-
-class _SpluFactor:
-    """``scipy.sparse.linalg.splu`` fallback — sparse LU on SPD matrices."""
-
-    __slots__ = ("_M", "_lu", "_L_cache")
-
-    def __init__(self, M):
-        self._M = None
-        self._lu = None
-        self._L_cache = None
-        self.factorize(M)
-
-    def factorize(self, M) -> None:
-        from scipy.sparse.linalg import splu
-
-        M = M.tocsc() if hasattr(M, "tocsc") else M
-        self._M = M
-        try:
-            self._lu = splu(M)
-        except RuntimeError as e:
-            raise CholmodError(str(e)) from e
-        self._L_cache = None
-
-    def solve(self, b):
-        return self._lu.solve(b)
-
-    def half_log_det(self) -> float:
-        # |det M| = |det U| since L is unit-diagonal and the permutation
-        # signs cancel for SPD M (det M > 0).
-        return 0.5 * float(np.log(np.abs(self._lu.U.diagonal())).sum())
-
-    @property
-    def L(self):
-        # Cholesky's L isn't directly available from SuperLU. Compute via
-        # dense Cholesky on first access — only touched once per fit
-        # (snapshot stored on the result), so this is cold-path.
-        if self._L_cache is None:
-            from scipy.linalg import cholesky as _scipy_cholesky
-
-            M_dense = self._M.toarray()
-            L_dense = _scipy_cholesky(M_dense, lower=True)
-            self._L_cache = csc_array(L_dense)
-        return self._L_cache
-
-    @property
-    def P(self) -> np.ndarray:
-        # ``L`` above is the Cholesky of ``M`` itself, not of a permuted
-        # copy, so the permutation this factor's ``L`` lives in is trivial.
-        return np.arange(self._M.shape[0], dtype=np.intp)
-
-
-_SKSPARSE_WARNED = False
-
-
-def _warn_no_sksparse_once() -> None:
-    global _SKSPARSE_WARNED
-    if _SKSPARSE_WARNED:
-        return
-    warnings.warn(
-        "scikit-sparse is not installed; hea.gmm is using a "
-        "scipy.sparse.linalg.splu fallback. This is functional but slower "
-        "than CHOLMOD for large mixed-effect models (no symbolic-analysis "
-        "reuse across deviance evaluations). Install SuiteSparse "
-        "(e.g. `apt install libsuitesparse-dev` or `brew install suite-sparse`) "
-        "and `pip install scikit-sparse` (or `pip install hea[fast]`) for "
-        "the fast path.",
-        UserWarning,
-        stacklevel=3,
-    )
-    _SKSPARSE_WARNED = True
-
-
-def cho_factor(M):
-    if _HAS_SKSPARSE:
-        return _SksparseFactor(M)
-    _warn_no_sksparse_once()
-    return _SpluFactor(M)
 
 
 @dataclass(slots=True)
@@ -3566,8 +3437,8 @@ def _bobyqa_driver(
 # ``ftol_abs`` stopping test woven into the trust-region loop (stop.c
 # ``relstop`` → injected at ``_bobyqa_bobyqb``'s ``f < fopt`` branch). Reusing
 # the minqa core + these three wrappers reproduces ``nloptwrap`` to the CHOLMOD
-# floor (~1e-9 on θ̂; the residual is scikit-sparse-vs-lme4 arithmetic, the same
-# gap that makes lme4's own optimizers disagree by ~1e-5 on flat surfaces).
+# floor (~1e-9 on θ̂; the residual is CHOLMOD-vs-lme4 arithmetic, the same gap
+# that makes lme4's own optimizers disagree by ~1e-5 on flat surfaces).
 # ----------------------------------------------------------------------
 
 _DBL_MIN = 2.2250738585072014e-308  # for nlopt_istiny
@@ -5638,8 +5509,10 @@ class gmm:
         # ------------- profiled-deviance optimization ----------------------
         #
         # Z and Λᵀ are stored sparse (CSC). The hot step — the Cholesky of
-        # ``M = Λ Zᵀ Z Λᵀ + I`` — goes through ``sksparse.cholmod`` (CHOLMOD
-        # with AMD reordering). The symbolic factor is computed once on the
+        # ``M = Λ Zᵀ Z Λᵀ + I`` — goes through ``hea.sparse`` (CHOLMOD, with
+        # the fill-reducing ordering chosen per matrix rather than pinned to
+        # AMD: on a crossed design AMD is the wrong one and costs 2x). The
+        # symbolic factor is computed once on the
         # first factorization and reused by ``factor.factorize(M_new)`` every
         # subsequent call; only the numeric re-factor runs inside the
         # optimizer loop. Without this, InstEval-class fits (q ≈ 4k) sit in
@@ -6613,8 +6486,8 @@ class gmm:
         # gradient amplifies into visibly different θ. einsum sidesteps that
         # BLAS path and stays bit-identical.
         cu_sq = float(np.einsum("i,i->", ZLty, M_inv_ZLty))
-        # ½·log|M|: CHOLMOD's LLᵀ ⇒ Σ log diag(L); splu fallback ⇒ ½·Σ log|U.diag|.
-        # Sidesteps sksparse's slow F.logdet() Python wrapper (~210 µs, 20× this).
+        # ½·log|M|: CHOLMOD's LLᵀ ⇒ Σ log diag(L), read straight off the factor
+        # rather than by materializing ``L`` and taking its diagonal in Python.
         log_det_Lz = F.half_log_det()
         if X.shape[1] > 0:
             ZLtX = np.asarray(ZL.T @ X)
@@ -9256,9 +9129,10 @@ class gmm:
         so a forward solve against it is only ``M``'s factor once the
         right-hand side has been permuted into the same ordering. lme4
         applies this as the inner half of ``solve(L, solve(L, ., system="P"),
-        system="L")`` (``lme4:::hatvalues.merMod``). ``P`` is the identity for
-        the splu fallback and for models whose AMD ordering happens to be
-        trivial, so this is a no-op exactly when it should be."""
+        system="L")`` (``lme4:::hatvalues.merMod``). ``P`` is the identity
+        whenever the analysis picked a trivial ordering — which on a crossed
+        design is the *usual* case, since natural beats AMD there — so this is
+        a no-op exactly when it should be."""
         p = getattr(self, "_L_perm", None)
         if p is None:
             return B

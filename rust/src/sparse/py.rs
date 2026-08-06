@@ -131,6 +131,43 @@ struct Super {
     ywork: SuperSolveWork,
 }
 
+/// Put `A`'s values onto the analyzed pattern, column by column.
+///
+/// Both patterns have their row indices ascending — the constructor rejects
+/// anything else — so this is a merge, not a search: walk the analyzed column
+/// and the incoming one together, take the value where the rows agree, and
+/// leave a zero in every analyzed slot the incoming column does not reach.
+///
+/// The merge is also the check. If the incoming column holds a row the
+/// analyzed one does not, the merge runs off the end of the analyzed column
+/// with that row unconsumed, and there is nowhere in `L` for its contribution
+/// to go — so that is refused rather than dropped.
+fn scatter_onto_pattern(a: &mut Sparse, p: &[i64], i: &[i64], x: &[f64]) -> Result<(), String> {
+    a.x.fill(0.0);
+    for j in 0..a.n {
+        let (mut q, qend) = (a.p[j] as usize, a.p[j + 1] as usize);
+        for (&row, &v) in i[p[j] as usize..p[j + 1] as usize]
+            .iter()
+            .zip(&x[p[j] as usize..p[j + 1] as usize])
+        {
+            while q < qend && a.i[q] < row {
+                q += 1;
+            }
+            if q == qend || a.i[q] != row {
+                return Err(format!(
+                    "the pattern has grown: row {row} of column {j} is not in the \
+                     pattern this factor was analyzed on, so the symbolic analysis \
+                     cannot be reused. Re-analyze instead (build a new Factor), or \
+                     factorize the widest pattern first"
+                ));
+            }
+            a.x[q] = v;
+            q += 1;
+        }
+    }
+    Ok(())
+}
+
 /// A numeric Cholesky factorization, reusable for both new values and repeated
 /// solves.
 #[pyclass(module = "hea._rs")]
@@ -259,26 +296,57 @@ impl CholFactor {
         .map_err(PyValueError::new_err)
     }
 
-    /// Refactorize with new values on the same pattern, reusing the symbolic
-    /// analysis — `cholmod_factorize (A, L, Common)` on a numeric `L`.
-    #[pyo3(signature = (data, beta=0.0))]
+    /// Refactorize new values against the same symbolic analysis —
+    /// `cholmod_factorize (A, L, Common)` on a numeric `L`.
+    ///
+    /// **The pattern is taken from `A`, not assumed to match.** It usually does
+    /// match, and then this is the value copy it looks like. But a caller that
+    /// builds `A` as a product recomputes its pattern every time, and a
+    /// numerically zero entry is one the product simply does not emit: `gmm`'s
+    /// `M = Λ Zᵀ Z Λᵀ + I` drops to block-diagonal the moment the optimizer
+    /// tries a zero variance component, and scipy prunes those entries rather
+    /// than storing them. `cholmod_factorize` is handed the whole `A` for
+    /// exactly this reason, so this is too.
+    ///
+    /// A pattern that has *shrunk* is scattered onto the analyzed one with the
+    /// missing entries set to zero, which is arithmetically what upstream does
+    /// with them — an absent entry and an explicit zero contribute the same
+    /// nothing, and `L`'s structure comes from the analysis either way. A
+    /// pattern that has *grown* is an error: the symbolic analysis has no
+    /// column for the new entry, so its contribution would be dropped and the
+    /// factor would be quietly wrong. Upstream does not check that; this does.
+    #[pyo3(signature = (indptr, indices, data, beta=0.0))]
     fn refactorize(
         &mut self,
         py: Python<'_>,
+        indptr: PyReadonlyArray1<'_, i64>,
+        indices: PyReadonlyArray1<'_, i64>,
         data: PyReadonlyArray1<'_, f64>,
         beta: f64,
     ) -> PyResult<()> {
-        let data = data.as_slice()?;
-        if data.len() < self.a.i.len() {
+        let (indptr, indices, data) = (indptr.as_slice()?, indices.as_slice()?, data.as_slice()?);
+        let (a, kind, work, fl) = (&mut self.a, &mut self.kind, &mut self.work, &mut self.fl);
+        if indptr.len() != a.p.len() {
             return Err(PyValueError::new_err(format!(
-                "data has length {}, expected at least nnz = {}",
-                data.len(),
-                self.a.i.len()
+                "indptr has length {}, expected n + 1 = {}",
+                indptr.len(),
+                a.p.len()
             )));
         }
-        let (a, kind, work, fl) = (&mut self.a, &mut self.kind, &mut self.work, &mut self.fl);
+        let nz = indptr[a.n] as usize;
+        if nz > indices.len() || nz > data.len() {
+            return Err(PyValueError::new_err(format!(
+                "indptr[n] = {nz} is out of range for {} row indices and {} values",
+                indices.len(),
+                data.len()
+            )));
+        }
         py.allow_threads(|| -> Result<(), String> {
-            a.x.copy_from_slice(&data[..a.i.len()]);
+            if indptr == &a.p[..] && indices[..nz] == a.i[..] {
+                a.x.copy_from_slice(&data[..nz]);
+            } else {
+                scatter_onto_pattern(a, indptr, &indices[..nz], &data[..nz])?;
+            }
             match kind {
                 Kind::Simplicial(k) => {
                     *fl = numeric::factorize(a, beta, &mut k.l, &k.params, work)

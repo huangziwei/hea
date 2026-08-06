@@ -37,12 +37,7 @@ jobs:
       uses: Swatinem/rust-cache@v2
       with:
         workspaces: rust
-    - name: Install SuiteSparse (CHOLMOD backend) + R + mgcv 1.9-4 (live-R parity oracle)
-      # scikit-sparse builds against libsuitesparse-dev. Without it, hea
-      # falls back to scipy.sparse.linalg.splu, whose different sparse
-      # reduction order opens a wider FP floor on glmer fits — enough
-      # to fail the FD-Hessian SE pin on poly() contrasts (~2e-2 abs)
-      # and the predict tolerance (~3e-9 abs).
+    - name: Install R + mgcv 1.9-4 (live-R parity oracle)
       # r-base-core gives Rscript for the live-R oracle: test_rs_parity.py runs here
       # as a TOLERANCE check (Linux/glibc isn't 0-ulp to R — that's macOS only),
       # gating the x86-64 Rust path per-commit. (The tidyverse translator tests still
@@ -63,7 +58,7 @@ jobs:
         echo "deb https://cloud.r-project.org/bin/linux/ubuntu $(lsb_release -cs)-cran40/" \
           | sudo tee /etc/apt/sources.list.d/cran.list > /dev/null
         sudo apt-get update
-        sudo apt-get install -y libsuitesparse-dev r-base r-base-dev gfortran
+        sudo apt-get install -y r-base r-base-dev gfortran
         if [ "$(Rscript -e 'cat(as.character(packageVersion("mgcv")))')" != "1.9.4" ]; then
           curl -fL -o /tmp/mgcv.tar.gz \
             https://cran.r-project.org/src/contrib/mgcv_1.9-4.tar.gz \

@@ -118,9 +118,24 @@ class Factor:
             )
 
     def factorize(self, A, beta=0.0) -> None:
-        """Refactorize new values on the same pattern, reusing the analysis."""
-        _, _, _, data = _as_csc(A)
-        self._F.refactorize(data, float(beta))
+        """Refactorize ``A`` against the same symbolic analysis.
+
+        ``A`` must have the same shape and its pattern must be contained in the
+        one this factor was analyzed on — which is what lets the analysis, by
+        far the expensive half, be paid for once across a sequence of
+        refactorizations.
+
+        Containment rather than equality, because a caller that builds ``A`` as
+        a product does not control its pattern: an entry that comes out
+        numerically zero is simply not emitted, so the pattern can shrink from
+        one call to the next. Those are filled back in as explicit zeros, which
+        changes no arithmetic. A pattern that has *grown* raises instead of
+        silently dropping the new entries.
+        """
+        n, indptr, indices, data = _as_csc(A)
+        if n != self._n:
+            raise ValueError(f"A is {n}-by-{n}, expected n = {self._n}")
+        self._F.refactorize(indptr, indices, data, float(beta))
         self._check()
 
     def solve(self, b, system="A"):

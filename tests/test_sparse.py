@@ -1651,3 +1651,53 @@ def test_cho_solve_one_shot_matches_the_factor():
     np.testing.assert_array_equal(
         hea.sparse.cho_solve(M, b), hea.sparse.cho_factor(M).solve(b)
     )
+
+
+def test_refactorize_accepts_a_pattern_that_shrank():
+    """``factorize`` takes ``A``'s pattern, not just its values.
+
+    A caller that builds ``A`` as a product does not control its pattern: an
+    entry that comes out numerically zero is not emitted at all. ``gmm``'s
+    ``M = Λ Zᵀ Z Λᵀ + I`` goes block-diagonal the moment the optimizer tries a
+    zero variance component, so the same factor is handed 72 nonzeros and then
+    36. That has to keep working -- ``cholmod_factorize`` is handed the whole
+    ``A`` for exactly this reason -- and it has to keep being *right*, which is
+    what the dense comparison below checks.
+    """
+    full = sp.csc_array(np.array([[4.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]]))
+    F = hea.sparse.cho_factor(full)
+
+    # the same matrix with its off-diagonal numerically zero -- and therefore
+    # structurally absent, which is what scipy hands back
+    thin = sp.csc_array(np.diag([4.0, 3.0, 2.0]))
+    assert thin.nnz < full.nnz
+    F.factorize(thin)
+
+    b = np.array([1.0, 2.0, 3.0])
+    np.testing.assert_allclose(
+        F.solve(b), np.linalg.solve(thin.toarray(), b), atol=1e-12
+    )
+    np.testing.assert_allclose(
+        F.half_log_det(), 0.5 * np.linalg.slogdet(thin.toarray())[1], rtol=1e-12
+    )
+    # and it goes back
+    F.factorize(full)
+    np.testing.assert_allclose(
+        F.solve(b), np.linalg.solve(full.toarray(), b), atol=1e-12
+    )
+
+
+def test_refactorize_refuses_a_pattern_that_grew():
+    """The other direction cannot be honoured and must not be silent.
+
+    The symbolic analysis has no column for an entry outside the pattern it was
+    built on, so its contribution would be dropped and the factor would be
+    quietly wrong. Upstream does not check this; the port does.
+    """
+    thin = sp.csc_array(np.diag([4.0, 3.0, 2.0]))
+    F = hea.sparse.cho_factor(thin)
+    grown = sp.csc_array(np.array([[4.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]]))
+    with pytest.raises(ValueError, match="pattern has grown"):
+        F.factorize(grown)
+    with pytest.raises(ValueError, match="expected n = 3"):
+        F.factorize(sp.csc_array(np.eye(4)))
