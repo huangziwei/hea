@@ -27,7 +27,6 @@ from .color_continuous import ScaleContinuousColor
 from .discrete import ScaleDiscreteColor
 from .scale import _NAME_MISSING
 
-
 # ---------------------------------------------------------------------------
 # Size — continuous (default), area-proportional, manual, discrete
 # ---------------------------------------------------------------------------

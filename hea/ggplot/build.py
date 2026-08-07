@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 
 import polars as pl
 
-from .aes import Aes
 from ._util import to_numeric_aes, to_series
+from .aes import Aes
 from .scales.list import ScalesList
 
 
@@ -582,7 +582,7 @@ def _apply_scale_transforms_pre_stat(df: pl.DataFrame, scales) -> pl.DataFrame:
             arr = df[sibling].to_numpy()
             try:
                 transformed = trans.transform(arr)
-            except Exception:
+            except Exception:  # noqa: BLE001, S112
                 continue
             df = df.with_columns(pl.Series(sibling, transformed))
     return df
@@ -620,7 +620,7 @@ def _apply_scale_transforms_post_stat(
             arr = df[sibling].to_numpy()
             try:
                 transformed = trans.transform(arr)
-            except Exception:
+            except Exception:  # noqa: BLE001, S112
                 continue
             df = df.with_columns(pl.Series(sibling, transformed))
     return df
@@ -886,9 +886,7 @@ def _promote_string_aes_params(mapping, aes_params, data):
     keep = {}
     for k, v in aes_params.items():
         canon = _canon(k)
-        if isinstance(v, str) and v in data.columns:
-            promoted[canon] = v
-        elif isinstance(v, pl.Expr):
+        if isinstance(v, str) and v in data.columns or isinstance(v, pl.Expr):
             promoted[canon] = v
         elif isinstance(v, (AfterStat, AfterScale)):
             # ``geom_bar(y=after_stat("sqrt(count)"))`` — without this,

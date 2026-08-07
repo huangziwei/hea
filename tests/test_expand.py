@@ -8,8 +8,8 @@ match R exactly. One test per fixture.
 from __future__ import annotations
 
 import pytest
-
 from conftest import fixture_meta, fixtures_by_kind, load_dataset
+
 from hea.formula import expand, parse
 
 WR_FIXTURES = fixtures_by_kind("wr")

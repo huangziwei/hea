@@ -23,8 +23,9 @@ which the simple stack here doesn't model.
 
 from __future__ import annotations
 
-import numpy as np
+import contextlib
 
+import numpy as np
 
 _PAR_STACK: list = []
 
@@ -70,7 +71,7 @@ class _ParContext:
         self._cells: list = []
         self._idx: int = 0
 
-    def __enter__(self) -> "_ParContext":
+    def __enter__(self) -> _ParContext:  # noqa: PYI034 - typing.Self needs 3.11, we support 3.10
         import matplotlib.pyplot as plt
 
         nrow, ncol = self.shape
@@ -95,12 +96,10 @@ class _ParContext:
         for ax in self._cells[self._idx :]:
             ax.set_visible(False)
         if self.fig is not None:
-            try:
+            # tight_layout occasionally fails on exotic legends / colorbars;
+            # not worth raising over a layout polish.
+            with contextlib.suppress(Exception):
                 self.fig.tight_layout()
-            except Exception:
-                # tight_layout occasionally fails on exotic legends /
-                # colorbars; not worth raising over a layout polish.
-                pass
         return False
 
     def next_cell(self):

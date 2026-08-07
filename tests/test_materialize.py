@@ -11,8 +11,8 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 import pytest
-
 from conftest import FIXTURE_ROOT, fixture_meta, fixtures_by_kind, load_dataset
+
 from hea.formula import (
     Call,
     ParseError,

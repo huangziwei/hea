@@ -16,41 +16,42 @@ and separates fixed-effect terms from lme4 RE bars. No X/Z materialization yet.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
 from itertools import combinations
-from typing import Mapping, Optional, Union
+from types import MappingProxyType
 
 __all__ = [
-    "tokenize",
-    "parse",
-    "ParseError",
-    "Token",
-    "Formula",
-    "Name",
-    "Literal",
-    "Dot",
-    "Empty",
-    "UnaryOp",
     "BinOp",
     "Call",
+    "Design",
+    "Dot",
+    "Empty",
+    "ExpandedFormula",
+    "Formula",
+    "Literal",
+    "Name",
     "Paren",
+    "ParseError",
+    "ReTerms",
+    "SmoothBlock",
     "Subscript",
     "Term",
-    "ExpandedFormula",
-    "expand",
+    "Token",
+    "UnaryOp",
     "deparse",
+    "expand",
+    "is_matrix_col",
+    "long_form_view",
     "materialize",
     "materialize_bars",
-    "ReTerms",
     "materialize_smooths",
-    "SmoothBlock",
-    "Design",
-    "prepare_design",
-    "normalize_data",
-    "is_matrix_col",
     "matrix_to_2d",
-    "long_form_view",
+    "normalize_data",
+    "parse",
+    "prepare_design",
+    "tokenize",
 ]
 
 
@@ -226,7 +227,7 @@ class Name:
 
 @dataclass(slots=True)
 class Literal:
-    value: Union[int, float, str, bool, None]
+    value: int | float | str | bool | None
     kind: str  # "num" | "str" | "bool" | "NA"
 
 
@@ -243,43 +244,43 @@ class Empty:
 @dataclass(slots=True)
 class UnaryOp:
     op: str
-    operand: "Node"
+    operand: Node
 
 
 @dataclass(slots=True)
 class BinOp:
     op: str
-    left: "Node"
-    right: "Node"
+    left: Node
+    right: Node
 
 
 @dataclass(slots=True)
 class Call:
     fn: str
-    args: list["Node"]
-    kwargs: dict[str, "Node"] = field(default_factory=dict)
+    args: list[Node]
+    kwargs: dict[str, Node] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class Paren:
-    expr: "Node"
+    expr: Node
 
 
 @dataclass(slots=True)
 class Subscript:
     """`x[i]` — single-bracket indexing. Multi-index (`x[i, j]`) stored in `idx` as a list."""
 
-    obj: "Node"
-    idx: list["Node"]
+    obj: Node
+    idx: list[Node]
 
 
 @dataclass(slots=True)
 class Formula:
-    lhs: Optional["Node"]
-    rhs: "Node"
+    lhs: Node | None
+    rhs: Node
 
 
-Node = Union[Name, Literal, Dot, Empty, UnaryOp, BinOp, Call, Paren, Subscript]
+Node = Name | Literal | Dot | Empty | UnaryOp | BinOp | Call | Paren | Subscript
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +314,7 @@ _BINOPS: dict[str, tuple[int, bool]] = {
 
 
 class _Parser:
-    __slots__ = ("tokens", "i")
+    __slots__ = ("i", "tokens")
 
     def __init__(self, tokens: list[Token]):
         self.tokens = tokens
@@ -614,7 +615,7 @@ class Term:
             return "(Intercept)"
         return ":".join(_deparse(a) for a in self.atoms)
 
-    def union(self, other: "Term") -> "Term":
+    def union(self, other: Term) -> Term:
         """Merge two terms. Preserve first-seen order; dedupe by atom key."""
         seen = {_deparse(a) for a in self.atoms}
         merged = list(self.atoms)
@@ -910,11 +911,10 @@ def _source_var_order(node) -> dict[str, int]:
                 walk(n.left)
                 walk(n.right)
                 return
-            if n.op == "^":
-                if isinstance(n.right, Literal) and n.right.kind == "num":
-                    walk(n.left)  # power expansion: only base vars appear
-                    return
-                # non-literal exponent: whole node is one atom (see expansion)
+            if n.op == "^" and isinstance(n.right, Literal) and n.right.kind == "num":
+                walk(n.left)  # power expansion: only base vars appear
+                return
+            # non-literal exponent: whole node is one atom (see expansion)
         order.setdefault(_deparse(n), len(order))
 
     walk(node)
@@ -923,7 +923,7 @@ def _source_var_order(node) -> dict[str, int]:
 
 def expand(
     formula: Formula,
-    data_columns: Optional[list[str]] = None,
+    data_columns: list[str] | None = None,
 ) -> ExpandedFormula:
     """Expand a parsed formula's RHS into intercept + ordered term list + bars.
 
@@ -1027,16 +1027,17 @@ def _contains_dot(node) -> bool:
 # Not yet: bs(), ns(), orthogonal poly(), cut(), pmin/pmax.
 
 
-import contextlib  # noqa: E402
-import contextvars  # noqa: E402
-import locale as _locale  # noqa: E402
-import math  # noqa: E402
-import numpy as np  # noqa: E402  — kept near usage to localize heavy import
-import polars as pl  # noqa: E402
-from scipy.linalg import eigh_tridiagonal as _eigh_tridiagonal  # noqa: E402
+import contextlib
+import contextvars
+import locale as _locale
+import math
 
-from hea._dispatch import rs_fn  # noqa: E402
-from hea._rfma import _rfma_vec  # noqa: E402
+import numpy as np
+import polars as pl
+from scipy.linalg import eigh_tridiagonal as _eigh_tridiagonal
+
+from hea._dispatch import rs_fn
+from hea._rfma import _rfma_vec
 
 # Rust tp kernel-eval: rayon-parallel build of b=[E|T] (XBuild) and the knot
 # matrix E (tpsE); byte-exact to the numpy builds (tests/test_rs_parity.py),
@@ -1166,8 +1167,8 @@ def set_ordered_cols(cols):
 # re-code the contrast. Two context vars rather than threading a parameter
 # through every ``factor()``/``C()``/``ordered()`` call site, matching how
 # ``_ORDERED_COLS_CV``/``_CONTRASTS_CV`` already reach the same builder.
-_XLEV_CV: contextvars.ContextVar[dict] = contextvars.ContextVar(
-    "hea_xlevels", default={}
+_XLEV_CV: contextvars.ContextVar[Mapping] = contextvars.ContextVar(
+    "hea_xlevels", default=MappingProxyType({})
 )
 _XLEV_SINK_CV: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "hea_xlevels_sink", default=None
@@ -1237,9 +1238,9 @@ def capture_xlevels():
 # built from a bare-name reference whose label is in this mapping AND no
 # ``C(...)`` wrapping has already set ``forced_contrast``, the mapped contrast
 # is applied. R semantics: in-formula ``C(...)`` wins over the argument.
-_CONTRASTS_CV: contextvars.ContextVar[dict] = contextvars.ContextVar(
+_CONTRASTS_CV: contextvars.ContextVar[Mapping] = contextvars.ContextVar(
     "_hea_contrasts",
-    default={},
+    default=MappingProxyType({}),
 )
 
 
@@ -1329,8 +1330,8 @@ class _FactorBlock:
     levels: list  # ordered list of level values
     ordered: bool
     label: str  # e.g. "Species" or "C(Species, contr.sum)"
-    forced_contrast: Optional[str] = None  # override for default treatment/poly
-    how_many: Optional[int] = None  # C(f, _, how.many): truncate contrast cols
+    forced_contrast: str | None = None  # override for default treatment/poly
+    how_many: int | None = None  # C(f, _, how.many): truncate contrast cols
 
 
 def _as_float(x) -> np.ndarray:
@@ -1358,9 +1359,7 @@ def _is_categorical(series: pl.Series) -> bool:
         return True
     # R treats a logical column as a 2-level factor FALSE < TRUE (so `~ l`
     # gives `lTRUE`, `~ 0 + l` gives `lFALSE`, `lTRUE`), not a 0/1 numeric.
-    if dt == pl.Boolean:
-        return True
-    return False
+    return dt == pl.Boolean
 
 
 def _factor_from_series(
@@ -1664,8 +1663,8 @@ def _is_logical_node(node) -> bool:
 
 
 def _apply_factor_levels_labels(
-    blk: "_FactorBlock", call: Call, s: pl.Series, label: str
-) -> "_FactorBlock":
+    blk: _FactorBlock, call: Call, s: pl.Series, label: str
+) -> _FactorBlock:
     """Apply R's factor()/ordered() ``levels=`` (recode order) and ``labels=``
     (rename) kwargs to an already-built factor block.
 
@@ -1695,7 +1694,7 @@ def _apply_factor_levels_labels(
     return _FactorBlock(codes=codes, levels=display, ordered=blk.ordered, label=label)
 
 
-def _logical_factor_block(node, data: pl.DataFrame, label: str) -> "_FactorBlock":
+def _logical_factor_block(node, data: pl.DataFrame, label: str) -> _FactorBlock:
     """Materialize a logical-valued atom as R's `FALSE < TRUE` 2-level factor.
 
     Routes through the same `pl.Boolean` path `_factor_from_series` uses for a
@@ -2584,9 +2583,7 @@ def _contrast_matrix(fb: _FactorBlock, reduced: bool) -> tuple[np.ndarray, list[
             suffs = [str(lv) for lv in fb.levels[1:]]
         elif name == "contr.SAS":
             suffs = [str(lv) for lv in fb.levels[:-1]]
-        elif name == "contr.sum":
-            suffs = [str(i + 1) for i in range(k - 1)]
-        elif name == "contr.helmert":
+        elif name == "contr.sum" or name == "contr.helmert":
             suffs = [str(i + 1) for i in range(k - 1)]
         elif name == "contr.poly":
             suff = [".L", ".Q", ".C"] + [f"^{i}" for i in range(4, k)]
@@ -2653,7 +2650,7 @@ def _khatri_rao(blocks: list[_NumBlock]) -> _NumBlock:
 def _encode_term_marginals(
     term: Term,
     data: pl.DataFrame,
-    covered: set["Term"],
+    covered: set[Term],
     cache: dict | None = None,
 ) -> list[_NumBlock]:
     """The term's per-atom column blocks, before the row-tensor product.
@@ -2713,7 +2710,7 @@ def _encode_term_marginals(
 def _encode_term(
     term: Term,
     data: pl.DataFrame,
-    covered: set["Term"],
+    covered: set[Term],
     cache: dict | None = None,
 ) -> _NumBlock:
     """Encode a single term to its numeric column block.
@@ -2932,7 +2929,7 @@ def _build_design(
     *,
     drop_na: bool = True,
     basis_state: dict | None = None,
-) -> tuple[Optional[np.ndarray], list[str], list[int]]:
+) -> tuple[np.ndarray | None, list[str], list[int]]:
     """Core design assembly — :func:`_build_design_impl` under the fit's
     predict-time state: factors coded on the fit's level set, and the
     variable types checked against the fit's."""
@@ -2949,7 +2946,7 @@ def _build_design_impl(
     *,
     drop_na: bool = True,
     basis_state: dict | None = None,
-) -> tuple[Optional[np.ndarray], list[str], list[int]]:
+) -> tuple[np.ndarray | None, list[str], list[int]]:
     """Core design assembly shared by ``materialize`` and ``prepare_design``.
 
     Returns ``(values, names, assign)`` where ``values`` is an **F-contiguous**
@@ -3337,11 +3334,11 @@ class SmoothBlock:
     cls: str  # class name (e.g. "re.smooth.spec")
     X: np.ndarray  # basis matrix, (n, k)
     S: list[np.ndarray]  # penalty matrices, each (k, k)
-    spec: Optional["BasisSpec"] = None  # predict-time replay state
+    spec: BasisSpec | None = None  # predict-time replay state
     # mgcv ``sm$S.scale``, parallel to ``S``: the ``maS`` factor
     # ``_scale_penalty`` divided each penalty by (1.0 where the rescale
     # didn't apply). ``gam.vcomp(rescale=TRUE)`` divides sp by it.
-    S_scale: Optional[list[float]] = None
+    S_scale: list[float] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -3403,10 +3400,10 @@ class _AbsorbTransform:
         the dropped column is removed via ``keep_mask``.
     """
 
-    full_Z: Optional[np.ndarray] = None
-    indi: Optional[np.ndarray] = None
-    Z_sub: Optional[np.ndarray] = None
-    keep_mask: Optional[np.ndarray] = None
+    full_Z: np.ndarray | None = None
+    indi: np.ndarray | None = None
+    Z_sub: np.ndarray | None = None
+    keep_mask: np.ndarray | None = None
 
     def apply(self, X: np.ndarray) -> np.ndarray:
         if self.full_Z is not None:
@@ -3494,11 +3491,11 @@ class BasisSpec:
     """
 
     raw: _RawBasis
-    by: Optional[_ByMask] = None
-    absorb: Optional[Union[_AbsorbTransform, _SweepDropTransform]] = None
-    keep_cols: Optional[np.ndarray] = None
-    predict_raw: Optional[_RawBasis] = None
-    coef_remap: Optional[tuple[np.ndarray, np.ndarray]] = None
+    by: _ByMask | None = None
+    absorb: _AbsorbTransform | _SweepDropTransform | None = None
+    keep_cols: np.ndarray | None = None
+    predict_raw: _RawBasis | None = None
+    coef_remap: tuple[np.ndarray, np.ndarray] | None = None
     # mgcv summation-convention support. When ``summation_dim`` is set
     # (non-None), the smooth's variables ``matrix_vars`` are matrix-typed
     # (``Array(Float64, m)``) and the basis is evaluated on a long-form
@@ -3508,8 +3505,8 @@ class BasisSpec:
     # for matrix-arg te the row-sum runs FIRST, then absorb. The QR
     # Householder absorb is linear and commutes with row-summation, so the
     # same predict order works for both transform types.
-    summation_dim: Optional[int] = None
-    matrix_vars: Optional[tuple[str, ...]] = None
+    summation_dim: int | None = None
+    matrix_vars: tuple[str, ...] | None = None
 
     def predict_mat(self, data: pl.DataFrame, *, apply_by: bool = True) -> np.ndarray:
         # ``apply_by=False`` skips the ``by=`` step, reproducing mgcv's
@@ -3775,7 +3772,7 @@ class _MRFRawBasis(_RawBasis):
 
     term: str
     levels: list
-    P: Optional[np.ndarray] = None
+    P: np.ndarray | None = None
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         col = data[self.term].to_numpy()
@@ -3875,7 +3872,7 @@ class _T2RawBasis(_RawBasis):
     P_per_margin: list[np.ndarray]
     ranks: list[int]
     null_dim: int
-    Zn: Optional[np.ndarray]
+    Zn: np.ndarray | None
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         Xm_np = [m.eval(data) @ P for m, P in zip(self.margins, self.P_per_margin)]
@@ -4139,14 +4136,14 @@ def _id_basis_frame(group_calls: list[Call], data: pl.DataFrame) -> pl.DataFrame
     return pl.DataFrame(cols)
 
 
-def _smooth_arg_expr_map(expanded: "ExpandedFormula") -> dict[str, "Node"]:
+def _smooth_arg_expr_map(expanded: ExpandedFormula) -> dict[str, Node]:
     """Walk every smooth Call (``s``/``te``/``ti``/``t2``) in ``expanded``
     and collect a ``{deparsed_text: ast_node}`` map for every non-``Name``
     positional argument. Same deparse text appears in
     :func:`_smooth_term_vars`, so the resulting map's keys line up with the
     column names the smooth builders ask for at fit/predict time.
     """
-    out: dict[str, "Node"] = {}
+    out: dict[str, Node] = {}
     for c in expanded.smooths:
         for a in c.args:
             if isinstance(a, Name):
@@ -4160,7 +4157,7 @@ def _smooth_arg_expr_map(expanded: "ExpandedFormula") -> dict[str, "Node"]:
 
 def _apply_smooth_arg_exprs(
     data: pl.DataFrame,
-    expr_map: dict[str, "Node"],
+    expr_map: dict[str, Node],
 ) -> pl.DataFrame:
     """Materialise smooth-arg expressions into columns of ``data``.
 
@@ -4975,7 +4972,7 @@ def _absorb_sumzero(
     replays the same rotation on new-data rows — the predict-time half of
     mgcv's ``Predict.matrix`` dispatch.
     """
-    n, k = X.shape
+    _n, k = X.shape
     if k == 0:
         return X, list(S_list), _AbsorbTransform()
     C = (C_source if C_source is not None else X).mean(axis=0)
@@ -5430,8 +5427,7 @@ def _cc_raw(
         raise ValueError("cc smooth must be 1D")
     x = data[term[0]].to_numpy().astype(float)
     nk = _cc_default_k(call)
-    if nk < 4:
-        nk = 4
+    nk = max(nk, 4)
     if knots_vec is None:
         kn = _cc_place_knots(x, nk)
     else:
@@ -6021,7 +6017,7 @@ def _gp_parse_m(call: Call) -> tuple[bool, int, float, float]:
     if not vals:
         return (False, 3, -1.0, 1.0)
     stationary = vals[0] < 0
-    t = abs(int(round(vals[0])))
+    t = abs(round(vals[0]))
     if t == 0:  # shouldn't happen, but guard
         t = 3
     rho = vals[1] if len(vals) > 1 else -1.0
@@ -6067,7 +6063,7 @@ def _gp_E_with_defn(
 ) -> np.ndarray:
     """Recompute kernel using a pre-resolved defn (rho already known)."""
     st_t, rho, power_k = defn
-    type_ = abs(int(round(st_t)))
+    type_ = abs(round(st_t))
     diff = x[:, None, :] - xk[None, :, :]
     E = np.sqrt((diff**2).sum(axis=2)) / rho
     return _gp_apply_kernel(E, type_, power_k)
@@ -6089,8 +6085,7 @@ def _gp_default_k(call: Call, d: int, null_space_dim: int) -> int:
     table = {1: 10, 2: 30, 3: 100}
     add = table.get(d, 100)
     bs_dim = d + 1 + add
-    if bs_dim < d + 2:
-        bs_dim = d + 2
+    bs_dim = max(bs_dim, d + 2)
     return bs_dim
 
 
@@ -6102,8 +6097,7 @@ def _build_gp_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     null_space_dim = 1 if stationary else d + 1
 
     bs_dim = _gp_default_k(call, d, null_space_dim)
-    if bs_dim < d + 2:
-        bs_dim = d + 2
+    bs_dim = max(bs_dim, d + 2)
 
     # Knots: unique covariate combinations (mgcv's `uniquecombs`).
     xu = np.unique(x_full, axis=0)
@@ -6597,13 +6591,10 @@ def _tp_rlanczos(
     # How often to do the tridiag eigendecomp / convergence test. Direct
     # port of mgcv's heuristic.
     f_check = (m + lm) // 2
-    if f_check < 10:
-        f_check = 10
+    f_check = max(f_check, 10)
     kk_fc = n // 10
-    if kk_fc < 1:
-        kk_fc = 1
-    if kk_fc < f_check:
-        f_check = kk_fc
+    kk_fc = max(kk_fc, 1)
+    f_check = min(f_check, kk_fc)
 
     # Reorthogonalization uses classical Gram-Schmidt twice (CGS2) via a
     # batched BLAS matmul — mgcv's C code uses sequential MGS2 in a tight
@@ -6682,9 +6673,8 @@ def _tp_rlanczos(
         np.multiply(z, z, out=buf)
         bj = float(np.sqrt(buf.sum()))
         b[j] = bj
-        if j < n - 1:
-            if bj > 0.0:
-                np.divide(z, bj, out=Q[j + 1])
+        if j < n - 1 and bj > 0.0:
+            np.divide(z, bj, out=Q[j + 1])
             # else: Q[j+1] already zero-initialized.
 
         if ((j >= m + lm) and (j % f_check == 0)) or (j == n - 1):
@@ -6879,8 +6869,7 @@ def _tp_raw(
     m = _tp_order_m(call, d)
     M = _tp_null_space_dim(d, m)
     k = _tp_default_k(call, d, m)
-    if k < M + 1:
-        k = M + 1
+    k = max(k, M + 1)
 
     # Collapse to unique rows (Xu). mgcv large-n rule (smooth.r:1286-1302):
     # with no user knots, more than max.knots=2000 unique locations means
@@ -7008,7 +6997,7 @@ def _tp_raw(
     X_raw = X_raw / w
     S_list = [S / w[:, None] / w[None, :] for S in S_list]
 
-    state = dict(shift=shift, Xu=Xu, m=m, d=d, UZ=UZ, w=w, M=M, k=k)
+    state = {"shift": shift, "Xu": Xu, "m": m, "d": d, "UZ": UZ, "w": w, "M": M, "k": k}
     return X_raw, S_list, M, k, k - M, state
 
 
@@ -7163,7 +7152,7 @@ def _duchon_E(
     when ke even, dᵏ otherwise, times the mgcv sign."""
     diff = x[:, None, :] - xk[None, :, :]
     dist = np.sqrt((diff * diff).sum(axis=-1))
-    ke = int(round(2 * m + 2 * s - n))
+    ke = round(2 * m + 2 * s - n)
     if ke % 2 == 0:
         logd = np.log(np.where(dist > 0, dist, 1.0))
         E = np.where(dist > 0, (dist**ke) * logd, 0.0)
@@ -7198,10 +7187,9 @@ def _ds_order_ms(call: Call, d: int) -> tuple[int, float]:
     vals = _eval_c_vec_floats(m_src) if m_src is not None else None
     m = vals[0] if vals else 2.0
     s = vals[1] if (vals and len(vals) > 1) else 0.0
-    m = int(round(m))
+    m = round(m)
     s = round(s * 2) / 2
-    if m < 1:
-        m = 1
+    m = max(m, 1)
     if s >= d / 2:
         s = (d - 1) / 2
     if s <= -d / 2:
@@ -7426,13 +7414,12 @@ def _sos_order_m(call: Call) -> int:
     """sos penalty order m (single int): default 0; <−2 → −1; >4 → 4."""
     m_src = call.kwargs.get("m")
     if isinstance(m_src, Literal) and m_src.kind == "num":
-        m = int(round(m_src.value))
+        m = round(m_src.value)
     else:
         m = 0
     if m < -2:
         m = -1
-    if m > 4:
-        m = 4
+    m = min(m, 4)
     return m
 
 
@@ -7618,7 +7605,8 @@ def _nat_param(
     # forwardsolve(t(R), t(forwardsolve(t(R), t(S)))) — and, like mgcv, NO
     # symmetrization before eigen (an LU solve or a 0.5*(A+A') perturbs the
     # null cluster enough to land on a different resolution).
-    from scipy.linalg import eigh as _sla_eigh, solve_triangular as _sla_tri
+    from scipy.linalg import eigh as _sla_eigh
+    from scipy.linalg import solve_triangular as _sla_tri
 
     Y = _sla_tri(R.T, S.T, lower=True)  # R^-T S'
     RSR = _sla_tri(R.T, Y.T, lower=True)  # R^-T (S R^-1)
@@ -7837,7 +7825,7 @@ def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     it from each other level). scale.penalty runs on the pre-contrast X.
     """
     term = _smooth_term_vars(call)
-    fterm, others = _fs_find_factor(term, data)
+    fterm, _others = _fs_find_factor(term, data)
     if fterm is None:
         return _build_tp_smooth(call, data)
 
@@ -7859,7 +7847,7 @@ def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         )
 
     # Base smooth: tp on non-factor terms, raw constructor output.
-    Xb, Sb_list, M, k, rank, state = _tp_raw(call, data, otherlist)
+    Xb, Sb_list, M, k, _rank, state = _tp_raw(call, data, otherlist)
     if len(Sb_list) != 1:
         raise NotImplementedError("sz with multiply-penalized base basis not supported")
     S_base = Sb_list[0]
@@ -8097,19 +8085,19 @@ def _ad_D2(ni: int, nj: int) -> dict:
     ci_pm = Ind[2:ni, 0 : nj - 2].ravel(order="F")
     Dcr[rows, ci_pm] = -s
 
-    return dict(
-        Drr=Drr,
-        Dcc=Dcc,
-        Dcr=Dcr,
-        rr_ri=rr_ri,
-        rr_ci=rr_ci,
-        cc_ri=cc_ri,
-        cc_ci=cc_ci,
-        cr_ri=cr_ri,
-        cr_ci=cr_ci,
-        rmt=rmt,
-        cmt=cmt,
-    )
+    return {
+        "Drr": Drr,
+        "Dcc": Dcc,
+        "Dcr": Dcr,
+        "rr_ri": rr_ri,
+        "rr_ci": rr_ci,
+        "cc_ri": cc_ri,
+        "cc_ci": cc_ci,
+        "cr_ri": cr_ri,
+        "cr_ci": cr_ci,
+        "rmt": rmt,
+        "cmt": cmt,
+    }
 
 
 def _ad_inner_2d_basis(
@@ -8370,13 +8358,13 @@ def _te_parse_margins(call: Call, data: pl.DataFrame) -> list[dict]:
     for i in range(n_bases):
         j1 = j + d_list[i]
         specs.append(
-            dict(
-                term=term[j:j1],
-                bs=bs_list[i],
-                k=k_list[i],
-                m=m_list[i],
-                fx=fx_list[i],
-            )
+            {
+                "term": term[j:j1],
+                "bs": bs_list[i],
+                "k": k_list[i],
+                "m": m_list[i],
+                "fx": fx_list[i],
+            }
         )
         j = j1
     return specs
@@ -9115,9 +9103,8 @@ def _smooth_matrix_vars(call: Call, data: pl.DataFrame) -> list[str]:
     out: list[str] = []
     cols = set(data.columns)
     for a in call.args:
-        if isinstance(a, Name) and a.ident in cols:
-            if is_matrix_col(data[a.ident]):
-                out.append(a.ident)
+        if isinstance(a, Name) and a.ident in cols and is_matrix_col(data[a.ident]):
+            out.append(a.ident)
     return out
 
 
@@ -9779,14 +9766,14 @@ class Design:
     # as read-only (mutating it would corrupt ``X``). ``None`` for an empty
     # design or a ``Design`` built without the fast lane. ``X_names`` are the
     # matching column labels (== ``X.columns``).
-    X_values: Optional[np.ndarray] = None
-    X_names: Optional[list[str]] = None
+    X_values: np.ndarray | None = None
+    X_names: list[str] | None = None
 
 
 # LHS function table — maps R-side function names to a polars-expr builder.
 # Mirrors what mgcv/base R accept on a formula LHS: arithmetic via
 # `_eval_lhs_expr` (UnaryOp/BinOp), plus these elementary transforms.
-_LHS_FUNCS: dict[str, "callable"] = {
+_LHS_FUNCS: dict[str, callable] = {
     "log": lambda e: e.log(),
     "log2": lambda e: e.log(2.0),
     "log10": lambda e: e.log10(),
@@ -9938,7 +9925,7 @@ def _na_mask_with_matrix_cols(
     return keep
 
 
-def _multivariate_lhs_specs(lhs) -> Optional[list[tuple[str, "Node"]]]:
+def _multivariate_lhs_specs(lhs) -> list[tuple[str, Node]] | None:
     """Response columns for a multivariate LHS, else ``None``.
 
     R's ``cbind(y1, y2, ...) ~ rhs`` fits a multivariate linear model (class
@@ -9957,7 +9944,7 @@ def prepare_design(
     formula: str,
     data: pl.DataFrame | Mapping[str, np.ndarray | list | pl.Series],
     *,
-    contrasts: Optional[Mapping[str, str]] = None,
+    contrasts: Mapping[str, str] | None = None,
     na_action: str = "omit",
     basis_state: dict | None = None,
 ) -> Design:

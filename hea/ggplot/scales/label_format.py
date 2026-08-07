@@ -72,12 +72,12 @@ def _auto_accuracy(scaled_values, largest_with_cents):
 def _format_number(x, accuracy, big_mark, decimal_mark):
     """Round ``x`` to ``accuracy`` and render with the requested separators."""
     if accuracy < 1:
-        ndigits = int(round(-math.log10(accuracy)))
+        ndigits = round(-math.log10(accuracy))
     else:
         ndigits = 0
     rounded = round(x / accuracy) * accuracy
     if ndigits == 0:
-        s = f"{int(round(rounded)):,}"
+        s = f"{round(rounded):,}"
     else:
         s = f"{rounded:,.{ndigits}f}"
     # Swap default separators (',' and '.') for the requested ones.

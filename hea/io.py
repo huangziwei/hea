@@ -40,16 +40,16 @@ from pathlib import Path
 import polars as _pl
 import polars as pl  # alias used by the dataset loaders below
 
-from .formula import set_ordered_cols
-from .tidy import DataFrame, _rewrap
-
 # These polars I/O helpers return plain dict[str, DataType] (schema
 # introspection only) — no wrapping needed.
-from polars import (  # noqa: F401  re-exported as-is
+from polars import (
     read_ipc_schema,
     read_parquet_metadata,
     read_parquet_schema,
 )
+
+from .formula import set_ordered_cols
+from .tidy import DataFrame, _rewrap
 
 
 def _wrap_factory(name: str):
@@ -151,7 +151,7 @@ def read_csv(source, *args, **kwargs):
     return _polars_read_csv(source, *args, **kwargs)
 
 
-__all__ = [
+__all__ = [  # noqa: PLE0604 - _READERS/_SCANNERS are the source of truth
     *_READERS,
     *_SCANNERS,
     "read_ipc_schema",
@@ -215,7 +215,7 @@ _KNOWN_TS_DATASETS: dict[tuple[str, str], float] = {
 }
 
 
-def _apply_ts_metadata(df: "DataFrame", package: str, name: str) -> "DataFrame":
+def _apply_ts_metadata(df: DataFrame, package: str, name: str) -> DataFrame:
     """Stamp ``_ts_meta`` on ``df`` if ``(package, name)`` is in the known
     R ts table. Otherwise return the frame unchanged.
     """

@@ -17,11 +17,11 @@ import numpy as np
 import polars as pl
 
 __all__ = [
-    "significance_code",
     "format_df",
+    "format_pval",
     "format_signif",
     "format_signif_jointly",
-    "format_pval",
+    "significance_code",
 ]
 
 

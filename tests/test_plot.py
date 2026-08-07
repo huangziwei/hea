@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import matplotlib
 
-matplotlib.use("Agg")  # noqa: E402
+matplotlib.use("Agg")
 
 import matplotlib.axes
 import matplotlib.lines
@@ -19,8 +19,8 @@ import polars as pl
 import pytest
 
 from hea import plot as lmplot
-from hea.R import factor
 from hea.models import lm
+from hea.R import factor
 
 
 @pytest.fixture
@@ -107,7 +107,7 @@ def test_plot_lm_which_subset(numeric_df):
 def test_formula_expression_lhs(numeric_df):
     """Expression LHS like `residuals(m) ~ x` resolves the model from the
     caller's frame and evaluates `residuals()` from the default env."""
-    m = lm("y ~ x", numeric_df)  # noqa: F841 — used by the formula via frame lookup
+    m = lm("y ~ x", numeric_df)  # noqa: F841 - used by the formula via frame lookup
     ax = lmplot.plot("residuals(m) ~ x", data=numeric_df)
     assert ax.get_ylabel() == "residuals(m)"
     assert ax.get_xlabel() == "x"
@@ -132,7 +132,7 @@ def test_formula_multi_rhs(numeric_df):
 
 def test_explicit_axes_chaining(numeric_df):
     """User-supplied `ax=` is reused (no new figure created)."""
-    fig, ax = plt.subplots()
+    _fig, ax = plt.subplots()
     returned = lmplot.plot("y ~ x", data=numeric_df, ax=ax)
     assert returned is ax
     plt.close("all")
@@ -243,14 +243,14 @@ def test_abline_with_no_prior_hea_plot_errors():
 def test_abline_lm_without_intercept_errors(numeric_df):
     """`abline(lmod)` requires the fit to have an intercept and exactly one slope."""
     m = lm("y ~ 0 + x", numeric_df)  # no intercept
-    fig, ax = plt.subplots()
+    _fig, ax = plt.subplots()
     with pytest.raises(ValueError, match="(Intercept)|2 coefficients"):
         lmplot.abline(m, ax=ax)
     plt.close("all")
 
 
 def test_abline_coef_wrong_length_errors():
-    fig, ax = plt.subplots()
+    _fig, ax = plt.subplots()
     with pytest.raises(ValueError, match="length-2"):
         lmplot.abline(np.array([1.0, 2.0, 3.0]), ax=ax)
     plt.close("all")
@@ -308,7 +308,7 @@ def test_qqline_through_quartiles():
     """qqline must pass through (q25, y25) and (q75, y75) for standard normal."""
     rng = np.random.RandomState(0)
     vals = rng.randn(200)
-    fig, ax = plt.subplots()
+    _fig, ax = plt.subplots()
     n = len(vals)
     probs = (np.arange(1, n + 1) - 0.5) / n
     from scipy.stats import norm
@@ -520,7 +520,7 @@ def test_plot_leverage_constant_swaps_to_factor_levels():
 
     pg = data("PlantGrowth")
     m = lm("weight ~ group", data=pg)
-    fig, ax = plt.subplots()
+    _fig, ax = plt.subplots()
     m.plot_leverage(ax=ax)
     assert "Constant Leverage" in ax.get_title()
     assert ax.get_xlabel() == "Factor Level Combinations"
@@ -535,7 +535,7 @@ def test_plot_leverage_keeps_standard_view_for_continuous_predictor(numeric_df):
     """A model with a non-constant hat matrix (any continuous predictor)
     must still draw the standard Residuals-vs-Leverage view."""
     m = lm("y ~ x + z", data=numeric_df)
-    fig, ax = plt.subplots()
+    _fig, ax = plt.subplots()
     m.plot_leverage(ax=ax)
     assert ax.get_title() == "Residuals vs. Leverage"
     assert ax.get_xlabel() == "Leverage"

@@ -33,8 +33,6 @@ unary ``+`` ``-`` —      65    nud
 
 from __future__ import annotations
 
-from typing import Optional
-
 from . import r_ast as A
 from .r_ast import Node, Span
 from .r_lexer import Token, tokenize
@@ -100,7 +98,7 @@ def parse(src: str) -> A.Program:
 
 
 class _Parser:
-    __slots__ = ("tokens", "src", "i")
+    __slots__ = ("i", "src", "tokens")
 
     def __init__(self, tokens: list[Token], src: str):
         self.tokens = tokens
@@ -437,7 +435,7 @@ class _Parser:
                 name = name_tok.value
                 if name.startswith("`"):
                     name = name[1:-1]
-                default: Optional[Node] = None
+                default: Node | None = None
                 if self._accept("="):
                     default = self.parse_expr(0)
                 params.append(
@@ -466,7 +464,7 @@ class _Parser:
         cond = self.parse_expr(0)
         self._expect(")")
         then = self.parse_expr(0)
-        otherwise: Optional[Node] = None
+        otherwise: Node | None = None
         # ``else`` may legally appear after a TERM when the if-body is a
         # brace block — peek across newlines for it.
         if self._peek_skip_terms().kind == "else":

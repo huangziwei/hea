@@ -20,11 +20,10 @@ import sys
 
 import numpy as np
 import pytest
-
 from conftest import have_rscript, run_rng_r_oracle
 
 rs = pytest.importorskip("hea._rs")
-from hea.R.rng import RGenerator, RMersenneTwister  # noqa: E402
+from hea.R.rng import RGenerator, RMersenneTwister
 
 if not have_rscript():
     pytest.skip("Rscript not on PATH (install R)", allow_module_level=True)
@@ -368,7 +367,7 @@ def test_rust_path_is_active():
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
 def test_rng_3way_bit_exact(case, seed, r_oracles):
-    name, rcall, params, py = case
+    name, _rcall, _params, py = case
     r_vals = r_oracles[seed][name]
     rust_vals = py(RMersenneTwister(seed))  # Rust path
     py_vals = py(RMersenneTwister(seed, force_py=True))  # pure-Python path

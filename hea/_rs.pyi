@@ -5,10 +5,12 @@ callers degrade to the pure-Python ``hea.R.nmath`` kernels (see
 pre-broadcasts to equal length); trailing flags are bools.
 """
 
+from typing import TypeAlias
+
 import numpy as np
 from numpy.typing import NDArray
 
-_A = NDArray[np.float64]
+_A: TypeAlias = NDArray[np.float64]
 
 # normal (mu/sigma are arrays, uniform with the rest of the surface)
 def pnorm(

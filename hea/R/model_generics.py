@@ -776,7 +776,7 @@ def _merge_formula_vars_from_caller(
         val = ns[name]
         try:
             arr = np.asarray(val).ravel()
-        except Exception:
+        except Exception:  # noqa: BLE001, S112
             continue
         if arr.size == n_rows:
             add[name] = arr.tolist()

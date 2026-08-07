@@ -22,7 +22,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Elements
 # ---------------------------------------------------------------------------
@@ -168,7 +167,7 @@ class Theme:
     elements: dict = field(default_factory=dict)
     complete: bool = False
 
-    def __add__(self, other: "Theme") -> "Theme":
+    def __add__(self, other: Theme) -> Theme:
         if not isinstance(other, Theme):
             return NotImplemented
         # A complete theme on the right replaces wholesale (matches

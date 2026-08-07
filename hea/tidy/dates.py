@@ -24,13 +24,13 @@ def today(tzone: str = ""):
     import datetime as _dt
 
     if not tzone:
-        return _dt.date.today()
+        return _dt.date.today()  # noqa: DTZ011 - R's tzone="" is system local time
     try:
         from zoneinfo import ZoneInfo
 
         return _dt.datetime.now(ZoneInfo(tzone)).date()
-    except Exception:
-        return _dt.date.today()
+    except Exception:  # noqa: BLE001
+        return _dt.date.today()  # noqa: DTZ011 - R's tzone="" is system local time
 
 
 def _parse_lubridate(value, order: str, with_time: bool, tz: str = ""):
@@ -47,6 +47,7 @@ def _parse_lubridate(value, order: str, with_time: bool, tz: str = ""):
     scalars; a Python list for list/Series/ndarray inputs.
     """
     import re as _re
+
     from dateutil import parser as _du
 
     dayfirst = order == "dmy"
@@ -147,10 +148,10 @@ def now(tzone: str = ""):
     import datetime as _dt
 
     if not tzone:
-        return _dt.datetime.now()
+        return _dt.datetime.now()  # noqa: DTZ005 - R's tzone="" is system local time
     try:
         from zoneinfo import ZoneInfo
 
         return _dt.datetime.now(ZoneInfo(tzone))
-    except Exception:
-        return _dt.datetime.now()
+    except Exception:  # noqa: BLE001
+        return _dt.datetime.now()  # noqa: DTZ005 - R's tzone="" is system local time

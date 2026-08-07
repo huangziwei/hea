@@ -18,6 +18,7 @@ The renderer reads ``theme(legend.position=...)`` (one of ``"right"``,
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -31,7 +32,6 @@ from ._util import r_color
 from .scales.color_continuous import ScaleContinuousColor
 from .scales.discrete import ScaleDiscreteColor, ScaleIdentity
 from .theme import element_blank, element_rect, element_text
-
 
 # ggplot2 sizes are in mm; matplotlib widths/lengths are in pt. R's TeX
 # convention: 72.27 pt/inch, 25.4 mm/inch → ≈ 2.8454 pt/mm.
@@ -742,9 +742,8 @@ def _apply_handle_override(handle, key, value, key_glyph):
                 if key_glyph == "point":
                     handle.set_markeredgecolor(c)
                     handle.set_markerfacecolor(c)
-        elif isinstance(handle, Patch):
-            if c is not None:
-                handle.set_edgecolor(c)
+        elif isinstance(handle, Patch) and c is not None:
+            handle.set_edgecolor(c)
         return
     if key == "fill":
         c = "none" if value is None else r_color(value)
@@ -833,7 +832,7 @@ def _is_na(v):
         return True
     if isinstance(v, float):
         try:
-            return v != v  # NaN check
+            return math.isnan(v)
         except TypeError:
             return False
     return False
@@ -1098,7 +1097,7 @@ def _apply_n_dodge(ax, axis_name: str, n: int) -> None:
     ticks = target_axis.get_major_ticks()
     if not ticks:
         return
-    label = ticks[0].label1 if axis_name == "x" else ticks[0].label1
+    label = ticks[0].label1
     font_size = float(label.get_fontsize())
     # 1.2× font size is matplotlib's default line spacing — gives the
     # alternate row enough clearance to sit fully below (or beside) the

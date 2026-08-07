@@ -313,10 +313,9 @@ def _cauchy(
                 tj = bkmin
                 ibp = int(iorder[ibkmin - 1])
             else:
-                if iter_ == 2:
-                    if ibkmin != nbreak:
-                        t[ibkmin - 1] = float(t[nbreak - 1])
-                        iorder[ibkmin - 1] = int(iorder[nbreak - 1])
+                if iter_ == 2 and ibkmin != nbreak:
+                    t[ibkmin - 1] = float(t[nbreak - 1])
+                    iorder[ibkmin - 1] = int(iorder[nbreak - 1])
                 _hpsolb(nleft, t, iorder, iter_ - 2)
                 tj = float(t[nleft - 1])
                 ibp = int(iorder[nleft - 1])
@@ -384,8 +383,7 @@ def _cauchy(
                 # f2 += 2*dibp*wmp - dibp2*wmw: the inner two-product
                 # subtract fuses on its first product
                 f2 = f2 + _rfma(2.0 * dibp, wmp, -(dibp2 * wmw))
-            if f2 < epsmch * f2_org:
-                f2 = epsmch * f2_org
+            f2 = max(f2, epsmch * f2_org)
             if nleft > 0:
                 dtm = -f1 / f2
                 continue
@@ -401,8 +399,7 @@ def _cauchy(
         print("\nGCP found in this segment")
         print(f"Piece    {nint} f1, f2 at start point {f1:.4e} {f2:.4e}")
         print(f"Distance to the stationary point =  {dtm:.4e}")
-    if dtm <= 0.0:
-        dtm = 0.0
+    dtm = max(0.0, dtm)
     tsum += dtm
     # move free variables and those whose breakpoints weren't reached
     _daxpy(n, tsum, d, xcp)
@@ -464,11 +461,10 @@ def _errclb(n, m, factr, lo, u, nbd, task):
             task = "ERROR: INVALID NBD"
             info = -6
             k = i
-        if nbd[i - 1] == 2:
-            if float(lo[i - 1]) > float(u[i - 1]):
-                task = "ERROR: NO FEASIBLE SOLUTION"
-                info = -7
-                k = i
+        if nbd[i - 1] == 2 and float(lo[i - 1]) > float(u[i - 1]):
+            task = "ERROR: NO FEASIBLE SOLUTION"
+            info = -7
+            k = i
     return task, info, k
 
 
@@ -876,7 +872,7 @@ def _dcsrch(f, g, stp, ftol, gtol, xtol, stpmin, stpmax, task, ls):
     # convergence
     if f <= ftest and abs(g) <= gtol * (-ls["ginit"]):
         task = "CONVERGENCE"
-    if task.startswith("WARN") or task.startswith("CONV"):
+    if task.startswith(("WARN", "CONV")):
         return stp, task
     # modified function in stage 1 when value dropped but not enough
     if ls["stage"] == 1 and f <= ls["fx"] and f > ftest:
@@ -942,10 +938,8 @@ def _dcsrch(f, g, stp, ftol, gtol, xtol, stpmin, stpmax, task, ls):
         ls["stmin"] = _rfma(stp - ls["stx"], 1.1, stp)
         ls["stmax"] = _rfma(stp - ls["stx"], 4.0, stp)
     # force the step within [stpmin, stpmax]
-    if stp < stpmin:
-        stp = stpmin
-    if stp > stpmax:
-        stp = stpmax
+    stp = max(stp, stpmin)
+    stp = min(stp, stpmax)
     # if no further progress, take the best point so far
     if (ls["brackt"] and (stp <= ls["stmin"] or stp >= ls["stmax"])) or (
         ls["brackt"] and ls["stmax"] - ls["stmin"] <= xtol * ls["stmax"]
@@ -1076,15 +1070,12 @@ def _projgr(n, lo, u, nbd, x, g):
             if gi < 0.0:
                 if nbd[i] >= 2:
                     d1 = float(x[i]) - float(u[i])
-                    if gi < d1:
-                        gi = d1
+                    gi = max(gi, d1)
             else:
                 if nbd[i] <= 2:
                     d1 = float(x[i]) - float(lo[i])
-                    if gi > d1:
-                        gi = d1
-        if sbgnrm < abs(gi):
-            sbgnrm = abs(gi)
+                    gi = min(gi, d1)
+        sbgnrm = max(sbgnrm, abs(gi))
     return sbgnrm
 
 

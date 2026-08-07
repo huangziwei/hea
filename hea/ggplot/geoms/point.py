@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from ..aes import split_layer_kwargs
 from .geom import Geom
 
-
 # ggplot2 size is in mm. R's grid graphics uses 72.27 pt/inch (TeX convention),
 # so 1 mm = 72.27 / 25.4 ≈ 2.8454 pt. matplotlib's ``s`` is the marker area in
 # pt² (i.e. diameter² for a circle), so ``s = (size_mm * _PT_PER_MM) ** 2``.

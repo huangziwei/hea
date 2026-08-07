@@ -20,11 +20,11 @@ import sys
 
 import numpy as np
 import pytest
-
 from conftest import have_rscript
 
 from hea.R.clustering import (
     Dendrogram,
+    _unlist,
     as_dendrogram,
     as_hclust,
     cophenetic,
@@ -42,7 +42,6 @@ from hea.R.clustering import (
     rev_dendrogram,
     str_dendrogram,
 )
-from hea.R.clustering import _unlist
 from hea.R.distance import dist
 
 _STRICT = sys.platform == "darwin"

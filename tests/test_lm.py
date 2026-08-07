@@ -16,9 +16,9 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 import pytest
+from conftest import load_dataset
 from scipy.stats import f as f_dist
 
-from conftest import load_dataset
 from hea.models import lm
 
 
@@ -431,7 +431,7 @@ def test_wood_2_1_1_stomata_rank_deficient_anova():
     one aliased tree dummy via dqrdc2 pivoting. Verify the F-test in
     anova(m0, m1) matches the book: Df=4 (not 5), F=6.665 (not 5.025),
     Res.Df_full=18 (not 17)."""
-    from hea.R import anova  # noqa: F401 — keeps import close to use
+    from hea.R import anova  # noqa: F401 - keeps import close to use
 
     df = load_dataset("gamair", "stomata")
     m1 = lm("area ~ CO2 + tree", data=df)
@@ -1496,8 +1496,8 @@ def test_predict_uses_fit_xlevels_not_newdata_levels():
     SAME width, so no error, and a ``g="b"`` row silently got the baseline
     prediction. R raises ``factor g has new level zz`` (models.R:583-587).
     """
-    from hea.models.glm import glm
     from hea.family import Poisson
+    from hea.models.glm import glm
 
     rng = np.random.default_rng(0)
     n = 200

@@ -21,6 +21,7 @@ so matplotlib allocates space proportionally even when the parent
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import polars as pl
@@ -417,7 +418,7 @@ def _predict_axis_tick_labels(build_output, axis: str) -> list[str] | None:
             if not breaks:
                 return None
             return list(scale._compute_labels(breaks))
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     return None
@@ -465,8 +466,8 @@ def _predict_colorbar_tick_labels(vmin: float, vmax: float) -> list[str]:
     """
     import matplotlib.ticker as mticker
 
-    if not (vmin == vmin and vmax == vmax) or vmax <= vmin:  # NaN / degenerate
-        return [_format_tick_g(vmax if vmax == vmax else 0.0)]
+    if math.isnan(vmin) or math.isnan(vmax) or vmax <= vmin:  # NaN / degenerate
+        return [_format_tick_g(0.0 if math.isnan(vmax) else vmax)]
 
     candidates: set[float] = set()
     for n in (3, 5, 7, 9):
@@ -887,7 +888,7 @@ def _set_facet_axis_labels(fig, panel_axes: list, xlabel, ylabel) -> None:
     for ax in panel_axes:
         try:
             bbox = ax.get_subplotspec().get_position(fig)
-        except Exception:
+        except Exception:  # noqa: BLE001, S112
             continue
         bboxes.append(bbox)
     if not bboxes:
@@ -1045,9 +1046,7 @@ def _has_right_guide(blk) -> bool:
 
         if build_colorbar_specs(plot, bo):
             return True
-        if build_legend_groups(plot, bo):
-            return True
-        return False
+        return bool(build_legend_groups(plot, bo))
     if isinstance(blk, SuperBlock):
         # Walk children in the rightmost col.
         for r in range(blk.nrow):
@@ -1078,9 +1077,7 @@ def _has_left_guide(blk) -> bool:
 
         if build_colorbar_specs(plot, bo):
             return True
-        if build_legend_groups(plot, bo):
-            return True
-        return False
+        return bool(build_legend_groups(plot, bo))
     if isinstance(blk, SuperBlock):
         for r in range(blk.nrow):
             cell = blk.cells[r][0]
@@ -1106,9 +1103,7 @@ def _has_top_guide(blk) -> bool:
 
         if build_colorbar_specs(plot, bo):
             return True
-        if build_legend_groups(plot, bo):
-            return True
-        return False
+        return bool(build_legend_groups(plot, bo))
     if isinstance(blk, SuperBlock):
         for c in range(blk.ncol):
             cell = blk.cells[0][c]
@@ -1134,9 +1129,7 @@ def _has_bottom_guide(blk) -> bool:
 
         if build_colorbar_specs(plot, bo):
             return True
-        if build_legend_groups(plot, bo):
-            return True
-        return False
+        return bool(build_legend_groups(plot, bo))
     if isinstance(blk, SuperBlock):
         for c in range(blk.ncol):
             cell = blk.cells[blk.nrow - 1][c]
@@ -1660,7 +1653,7 @@ def _collect_legend_groups(leaves) -> list:
     return list(seen.values())
 
 
-def _measure_guide_area_block(merged_groups, legend_theme) -> "GuideAreaBlock":
+def _measure_guide_area_block(merged_groups, legend_theme) -> GuideAreaBlock:
     """Compute the natural size of the merged legend.
 
     The collection orientation tracks the legend's theme: vertical for
@@ -1695,7 +1688,7 @@ def _measure_guide_area_block(merged_groups, legend_theme) -> "GuideAreaBlock":
     )
 
 
-def _render_guide_area_cell(blk: "GuideAreaBlock", fig, panel_cell) -> None:
+def _render_guide_area_cell(blk: GuideAreaBlock, fig, panel_cell) -> None:
     """Draw the merged legends collected by ``plot_layout(guides="collect")``
     into the :func:`guide_area` slot. Lays out one ``host`` axes per
     legend group inside the cell and renders into each via the same
@@ -2457,7 +2450,7 @@ def right_cell_width_in_estimate(fig, subplotspec) -> float:
     """Approximate cell width in inches via its subplotspec position."""
     try:
         bbox = subplotspec.get_position(fig)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return 0.0
     return bbox.width * fig.get_figwidth()
 

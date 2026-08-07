@@ -20,7 +20,6 @@ import sys
 
 import numpy as np
 import pytest
-
 from conftest import have_rscript
 
 from hea.R import set_seed
@@ -109,7 +108,7 @@ def test_kmeans_explicit_larger_vs_R(algo):
     x = np.vstack([rng.normal(c, 0.8, (12, 4)) for c in (-4, 0, 4, 8)])
     centers = np.array([x[0], x[15], x[28], x[40]])
     z = kmeans(x, centers, algorithm=algo, iter_max=50)
-    rcl, rce, rws, rit = _r_kmeans_explicit(x, centers, algo)
+    rcl, rce, _rws, rit = _r_kmeans_explicit(x, centers, algo)
     assert np.array_equal(z.cluster, rcl)
     _assert_centers(z.centers, rce)
     assert z.iter == rit
@@ -289,7 +288,7 @@ def test_rs_kmns_ifault3_k_out_of_range():
     # k <= 1 or k >= m -> ifault 3, empty arrays (matches _kmns early return).
     x = np.ascontiguousarray(_blobs())
     centers = np.ascontiguousarray(x[:1])
-    ifault, cluster, cen_flat, nc, wss, it = _rs_mod.kmns(x, centers, 1, 10)
+    ifault, cluster, _cen_flat, _nc, _wss, _it = _rs_mod.kmns(x, centers, 1, 10)
     assert int(ifault) == 3
     assert np.asarray(cluster).size == 0
 

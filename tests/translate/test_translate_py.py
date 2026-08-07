@@ -10,7 +10,6 @@ is normalized-equivalent to the input.
 
 import re
 
-
 from hea.translate.py_to_r import translate as py_to_r
 from hea.translate.r_to_py import translate as r_to_py
 

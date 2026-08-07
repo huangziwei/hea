@@ -33,7 +33,7 @@ class GroupBy:
     slice, etc.).
     """
 
-    __slots__ = ("_df", "_by", "_kwargs")
+    __slots__ = ("_by", "_df", "_kwargs")
 
     def __init__(self, df: DataFrame, by: list, kwargs: dict):
         self._df = df
@@ -98,7 +98,7 @@ class GroupBy:
 
     # ---- windowed verbs (preserve grouping like dplyr) ---------------
 
-    def mutate(self, *args: pl.Expr, **kwargs: pl.Expr) -> "GroupBy":
+    def mutate(self, *args: pl.Expr, **kwargs: pl.Expr) -> GroupBy:
         """Add columns whose values are computed within each group.
 
         Each expression is wrapped in ``.over(group_cols)`` — matches
@@ -114,7 +114,7 @@ class GroupBy:
         new_df = self._df._wrap(pl.DataFrame.with_columns(self._df, windowed))
         return GroupBy(new_df, self._by, self._kwargs)
 
-    def filter(self, *predicates) -> "GroupBy":
+    def filter(self, *predicates) -> GroupBy:
         """Per-group filter — reductions in the predicate become per-group.
 
         dplyr's ``group_by(g) |> filter(r == max(r))`` keeps rows where
@@ -136,7 +136,7 @@ class GroupBy:
         new_df = self._df._wrap(pl.DataFrame.filter(self._df, masked))
         return GroupBy(new_df, self._by, self._kwargs)
 
-    def arrange(self, *cols: Any) -> "GroupBy":
+    def arrange(self, *cols: Any) -> GroupBy:
         """Sort the underlying frame and preserve grouping.
 
         Mirrors dplyr 1.0+'s default ``arrange()`` on grouped tibbles:
@@ -148,7 +148,7 @@ class GroupBy:
 
     sort = arrange  # polars name
 
-    def select(self, *cols: Any, **named: Any) -> "GroupBy":
+    def select(self, *cols: Any, **named: Any) -> GroupBy:
         """Select columns, always keeping the grouping vars (dplyr behavior).
 
         If any group var isn't named in the selection, it's prepended
@@ -161,7 +161,7 @@ class GroupBy:
             new_df = self._df.select(*missing, *cols, **named)
         return GroupBy(new_df, self._by, self._kwargs)
 
-    def transmute(self, *args: pl.Expr, **kwargs: pl.Expr) -> "GroupBy":
+    def transmute(self, *args: pl.Expr, **kwargs: pl.Expr) -> GroupBy:
         """``mutate`` that drops unmentioned columns. Group vars are kept."""
         args, kwargs = _resolve_lazy_factors(self._df, args, kwargs)
         exprs = _kwargs_to_exprs(args, kwargs)
@@ -176,7 +176,7 @@ class GroupBy:
         )
         return GroupBy(new_df, self._by, self._kwargs)
 
-    def distinct(self, *cols: str, keep_all: bool = False) -> "GroupBy":
+    def distinct(self, *cols: str, keep_all: bool = False) -> GroupBy:
         """Per-group distinct — the grouping vars are part of the key.
 
         ``df.group_by(g).distinct(x)`` returns one row per ``(g, x)`` —
@@ -187,7 +187,7 @@ class GroupBy:
         new_df = self._df.distinct(*key_cols, keep_all=keep_all)
         return GroupBy(new_df, self._by, self._kwargs)
 
-    def rename(self, mapping: dict | None = None, /, **kwargs: str) -> "GroupBy":
+    def rename(self, mapping: dict | None = None, /, **kwargs: str) -> GroupBy:
         """Rename columns; group vars follow the rename automatically."""
         new_df = self._df.rename(mapping, **kwargs)
         # Build the old→new map to update self._by
@@ -198,11 +198,11 @@ class GroupBy:
         new_by = [old_to_new.get(g, g) for g in self._by]
         return GroupBy(new_df, new_by, self._kwargs)
 
-    def relocate(self, *args, **kwargs) -> "GroupBy":
+    def relocate(self, *args, **kwargs) -> GroupBy:
         """Reorder columns. Group vars unchanged."""
         return GroupBy(self._df.relocate(*args, **kwargs), self._by, self._kwargs)
 
-    def drop(self, *cols: Any, strict: bool = True) -> "GroupBy":
+    def drop(self, *cols: Any, strict: bool = True) -> GroupBy:
         """Drop columns. Refuses to drop a grouping variable — call
         ``.ungroup().drop(...)`` if that's really what you want."""
         # Resolve cols to names if possible
@@ -216,12 +216,12 @@ class GroupBy:
 
     # ---- slice family per group (preserve grouping) ------------------
 
-    def slice_head(self, n: int = 1) -> "GroupBy":
+    def slice_head(self, n: int = 1) -> GroupBy:
         gb = pl.DataFrame.group_by(self._df, self._by, **self._kwargs)
         new_df = self._df._wrap(gb.head(n))
         return GroupBy(new_df, self._by, self._kwargs)
 
-    def slice_tail(self, n: int = 1) -> "GroupBy":
+    def slice_tail(self, n: int = 1) -> GroupBy:
         gb = pl.DataFrame.group_by(self._df, self._by, **self._kwargs)
         new_df = self._df._wrap(gb.tail(n))
         return GroupBy(new_df, self._by, self._kwargs)
@@ -231,7 +231,7 @@ class GroupBy:
         col: str,
         n: int = 1,
         with_ties: bool = True,
-    ) -> "GroupBy":
+    ) -> GroupBy:
         return self._slice_extreme(col, n, with_ties, descending=False)
 
     def slice_max(
@@ -239,7 +239,7 @@ class GroupBy:
         col: str,
         n: int = 1,
         with_ties: bool = True,
-    ) -> "GroupBy":
+    ) -> GroupBy:
         return self._slice_extreme(col, n, with_ties, descending=True)
 
     def _slice_extreme(
@@ -249,7 +249,7 @@ class GroupBy:
         with_ties: bool,
         *,
         descending: bool,
-    ) -> "GroupBy":
+    ) -> GroupBy:
         """Per-group slice_min / slice_max with dplyr-faithful null handling.
 
         Nulls sort to the end within each group; they're kept only when
@@ -287,7 +287,7 @@ class GroupBy:
         prop: float | None = None,
         replace: bool = False,
         seed: int | None = None,
-    ) -> "GroupBy":
+    ) -> GroupBy:
         """Random rows per group. ``seed`` is a **polars** seed, not R's — see
         :meth:`hea.tidy.dataframe.DataFrame.slice_sample`."""
         if (n is None) == (prop is None):
@@ -309,7 +309,7 @@ class GroupBy:
             ).explode(cols)
         return GroupBy(self._df._wrap(out), self._by, self._kwargs)
 
-    def slice(self, positions) -> "GroupBy":
+    def slice(self, positions) -> GroupBy:
         """dplyr's positional ``slice()`` within each group.
 
         ``g.slice([0, 2])`` keeps the 1st and 3rd row of every group;

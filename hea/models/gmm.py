@@ -23,25 +23,26 @@ Models Using lme4", J. Stat. Software 67(1), §5 ("Profiled Deviance").
 
 from __future__ import annotations
 
+import math
+import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
-import warnings
-from typing import Callable, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-from scipy.linalg import qr as _scipy_qr, solve_triangular
+from scipy.linalg import qr as _scipy_qr
+from scipy.linalg import solve_triangular
 from scipy.optimize import minimize, minimize_scalar
 from scipy.sparse import csc_array, eye_array
 from scipy.special import digamma, polygamma, roots_hermite
 
 from .. import family as _family_mod
-from ..R import nmath as _nmath
 from ..family import Family, Gaussian, _coerce_response
 from ..formula import (
-    BinOp,
     CONTRAST_FN_NAMES,
+    BinOp,
     ExpandedFormula,
     ReTerms,
     _bar_lhs_to_ef,
@@ -53,7 +54,7 @@ from ..formula import (
     materialize_bars,
     prepare_design,
 )
-from .lm import _apply_subset, _label_top_n, _lowess, _qq_plot
+from ..R import nmath as _nmath
 from ..sparse import CholmodError, cho_factor
 from ..utils import (
     format_df,
@@ -62,8 +63,9 @@ from ..utils import (
     format_signif_jointly,
     significance_code,
 )
+from .lm import _apply_subset, _label_top_n, _lowess, _qq_plot
 
-__all__ = ["gmm", "Profile"]
+__all__ = ["Profile", "gmm"]
 
 
 # ---------------------------------------------------------------------------
@@ -127,16 +129,16 @@ class _FitInputs:
     """``True`` for REML, ``False`` for ML."""
 
     # Optional inputs ---------------------------------------------------
-    weights: Optional[np.ndarray] = None
+    weights: np.ndarray | None = None
     """Prior weights (``None`` ≡ unit weights)."""
 
-    mustart: Optional[np.ndarray] = None
+    mustart: np.ndarray | None = None
     """Starting μ for GLMM PIRLS."""
 
-    etastart: Optional[np.ndarray] = None
+    etastart: np.ndarray | None = None
     """Starting η for GLMM PIRLS."""
 
-    start: Optional[dict] = None
+    start: dict | None = None
     """User-supplied starting values for the GLMM outer optimizer. Accepts
     ``None`` (use defaults: θ from ``re_terms.theta``, β from Stage 0's
     converged ``pp.delb``), a numpy array (interpreted as ``θ`` only), or a
@@ -179,7 +181,7 @@ class _FitInputs:
     """Integer verbosity level. ``>0`` enables Nelder-Mead progress prints;
     ``>2`` enables PIRLS iteration prints."""
 
-    opt_ctrl: Optional[dict] = None
+    opt_ctrl: dict | None = None
     """Optimizer-specific control options. Nelder_Mead keys are recognised
     with lme4's R-flavoured names (``maxfun``, ``XtolRel``, ``FtolAbs``,
     ``FtolRel``, ``MinfMax``, ``verbose``). Mirrors ``glmerControl(optCtrl=)``."""
@@ -195,21 +197,21 @@ class _FitInputs:
     LN_BOBYQA), ``"bobyqa"``, or ``"Nelder_Mead"``. A non-string here (the tuple
     default, e.g. a direct construction) is read as the lmer default."""
 
-    check_conv_grad: Optional[dict] = None
+    check_conv_grad: dict | None = None
     """``glmerControl(check.conv.grad=)`` — ``{action, tol, relTol}`` for the
     post-fit scaled-gradient convergence diagnostic (8.14)."""
 
-    check_conv_hess: Optional[dict] = None
+    check_conv_hess: dict | None = None
     """``glmerControl(check.conv.hess=)`` — ``{action, tol}`` for the post-fit
     Hessian definiteness / conditioning diagnostic (8.14)."""
 
     # Diagnostic carries ------------------------------------------------
     # These follow the data through the fit so the resulting ``gmm`` instance
     # can produce diagnostics, predict on new data, and round-trip formulas.
-    expanded: Optional[ExpandedFormula] = None
+    expanded: ExpandedFormula | None = None
     """The parsed/expanded formula, used by ``predict`` and ``profile``."""
 
-    data: Optional[pl.DataFrame] = None
+    data: pl.DataFrame | None = None
     """Post-NA-omit row set, in row-aligned order with X/Z/y/offset."""
 
     dev_fun_only: bool = False
@@ -304,9 +306,9 @@ def _deriv12(
     fn: Callable[[np.ndarray], float],
     x: np.ndarray,
     delta: float = 1e-4,
-    fx: Optional[float] = None,
-    lower: Optional[np.ndarray] = None,
-    upper: Optional[np.ndarray] = None,
+    fx: float | None = None,
+    lower: np.ndarray | None = None,
+    upper: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Central-difference gradient + Hessian — port of lme4's ``deriv12``.
 
@@ -448,17 +450,17 @@ class _GlmResponse:
     """
 
     __slots__ = (
-        "family",
-        "y",
-        "weights",
-        "offset",
         "eta",
-        "mu",
-        "sqrt_x_wt",
-        "sqrt_r_wt",
-        "wt_res",
-        "wrss",
+        "family",
         "log_det_weights",
+        "mu",
+        "offset",
+        "sqrt_r_wt",
+        "sqrt_x_wt",
+        "weights",
+        "wrss",
+        "wt_res",
+        "y",
     )
 
     def __init__(
@@ -466,10 +468,10 @@ class _GlmResponse:
         family: Family,
         y: np.ndarray,
         *,
-        weights: Optional[np.ndarray] = None,
-        offset: Optional[np.ndarray] = None,
-        mustart: Optional[np.ndarray] = None,
-        etastart: Optional[np.ndarray] = None,
+        weights: np.ndarray | None = None,
+        offset: np.ndarray | None = None,
+        mustart: np.ndarray | None = None,
+        etastart: np.ndarray | None = None,
     ):
         y = np.asarray(y, dtype=float)
         n = len(y)
@@ -691,37 +693,37 @@ class _PredState:
     """
 
     __slots__ = (
+        "M_inv_RZX",  # (q, p) = M⁻¹ · RZX_unfactored
+        "RX",  # (p, p) lower Cholesky of (V'V − RZX'·M⁻¹·RZX)
+        "RZX_unfactored",  # (q, p) = lamt_ut · V
+        "V",  # (n, p) = diag(sqrt_x_wt) · X
+        "VtV",  # (p, p) = V'·V
         # Read-only design pieces ----------------------------------------
         "X",  # (n, p) fixed-effect design
         "Z_sp",  # (n, q) sparse Z (CSC)
-        "n",
-        "p",
-        "q",
-        # Λᵀ template (built once from ReTerms, structure is fixed) ------
-        "_lt_theta_pos",
+        # Cached identity for M assembly (built once) -------------------
+        "_eye_q_sp",
         "_lt_indices",
         "_lt_indptr",
         "_lt_shape",
-        # Persistent state ----------------------------------------------
-        "theta",
+        # Λᵀ template (built once from ReTerms, structure is fixed) ------
+        "_lt_theta_pos",
         "beta0",
-        "u0",
+        "chol_factor",  # CHOLMOD factor of M = LamtUt · LamtUt' + I
         "delb",
         "delu",
-        # Current weighted state (set by update_xwts_and_decomp) --------
-        "sqrt_x_wt",
         "lambdat_sp",  # current Λᵀ as CSC (built by set_theta)
-        "V",  # (n, p) = diag(sqrt_x_wt) · X
-        "VtV",  # (p, p) = V'·V
         "lamt_ut",  # (q, n) sparse = Λᵀ · √W · Z' (i.e. LamtUt)
-        "RZX_unfactored",  # (q, p) = lamt_ut · V
-        "M_inv_RZX",  # (q, p) = M⁻¹ · RZX_unfactored
-        "RX",  # (p, p) lower Cholesky of (V'V − RZX'·M⁻¹·RZX)
         "log_det_l_sq",  # 2 log|L| from CHOLMOD
         "log_det_rx_sq",  # 2 log|RX|
-        "chol_factor",  # CHOLMOD factor of M = LamtUt · LamtUt' + I
-        # Cached identity for M assembly (built once) -------------------
-        "_eye_q_sp",
+        "n",
+        "p",
+        "q",
+        # Current weighted state (set by update_xwts_and_decomp) --------
+        "sqrt_x_wt",
+        # Persistent state ----------------------------------------------
+        "theta",
+        "u0",
     )
 
     def __init__(self, X: np.ndarray, Z_sp: csc_array, re_terms: ReTerms):
@@ -1143,8 +1145,8 @@ def _devc_col(
 
 
 def _glmm_agq_deviance(
-    pred: "_PredState",
-    resp: "_GlmResponse",
+    pred: _PredState,
+    resp: _GlmResponse,
     gqmat: np.ndarray,
     fac: np.ndarray,
     n_levels: int,
@@ -1196,9 +1198,9 @@ def _glmm_devfun_factory(
     tol_pwrss: float = 1e-7,
     maxit_pwrss: int = 100,
     verbose: int = 0,
-    gqmat: Optional[np.ndarray] = None,
-    fac: Optional[np.ndarray] = None,
-    n_levels: Optional[int] = None,
+    gqmat: np.ndarray | None = None,
+    fac: np.ndarray | None = None,
+    n_levels: int | None = None,
 ) -> Callable[[np.ndarray], float]:
     """Build the Laplace deviance evaluator for a given optimization stage.
 
@@ -1577,14 +1579,13 @@ def _bobyqa_prelim(
                 diff = stepb - stepa
                 hq[ih] = TWO * (temp - gopt[nfx]) / diff
                 gopt[nfx] = (gopt[nfx] * stepb - temp * stepa) / diff
-                if stepa * stepb < ZERO:
-                    if f < fval[nf - n]:
-                        fval[nf] = fval[nf - n]
-                        fval[nf - n] = f
-                        if kopt == nf:
-                            kopt = nf - n
-                        xpt[nf - n, nfx] = stepb
-                        xpt[nf, nfx] = stepa
+                if stepa * stepb < ZERO and f < fval[nf - n]:
+                    fval[nf] = fval[nf - n]
+                    fval[nf - n] = f
+                    if kopt == nf:
+                        kopt = nf - n
+                    xpt[nf - n, nfx] = stepb
+                    xpt[nf, nfx] = stepa
                 bmat[1, nfx] = -(stepa + stepb) / (stepa * stepb)
                 bmat[nf, nfx] = -HALF / xpt[nf - n, nfx]
                 bmat[nf - n, nfx] = -bmat[1, nfx] - bmat[nf, nfx]
@@ -1732,11 +1733,10 @@ def _bobyqa_altmov(
                 step = subd
                 vlag_local = temp
                 isbd = iubd
-            if subd > HALF:
-                if abs(vlag_local) < 0.25:
-                    step = HALF
-                    vlag_local = 0.25
-                    isbd = 0
+            if subd > HALF and abs(vlag_local) < 0.25:
+                step = HALF
+                vlag_local = 0.25
+                isbd = 0
             vlag_local = vlag_local * dderiv
         #
         # PREDSQ for this line, maintain PRESAV.
@@ -1873,15 +1873,14 @@ def _bobyqa_trsbox(
     #
     iterc = 0
     nact = 0
-    sqstp = ZERO  # noqa: F841
+    sqstp = ZERO  # noqa: F841 - kept for fidelity with the F77 source
     for i in range(1, n + 1):
         xbdi[i] = ZERO
         if xopt[i] <= sl[i]:
             if gopt[i] >= ZERO:
                 xbdi[i] = ONEMIN
-        elif xopt[i] >= su[i]:
-            if gopt[i] <= ZERO:
-                xbdi[i] = ONE
+        elif xopt[i] >= su[i] and gopt[i] <= ZERO:
+            xbdi[i] = ONE
         if xbdi[i] != ZERO:
             nact = nact + 1
         d[i] = ZERO
@@ -2072,7 +2071,7 @@ def _bobyqa_trsbox(
                         xbdi[i] = ONE
                         jumped_to_100 = True
                         break
-                    ratio = ONE  # noqa: F841
+                    ratio = ONE  # noqa: F841 - kept for fidelity with the F77 source
                     ssq = d[i] ** 2 + s[i] ** 2
                     temp = ssq - (xopt[i] - sl[i]) ** 2
                     if temp > ZERO:
@@ -2355,10 +2354,9 @@ def _bobyqa_rescue(
         while retry_120:
             dsqmin = ZERO
             for k in range(1, npt + 1):
-                if w[ndim + k] > ZERO:
-                    if dsqmin == ZERO or w[ndim + k] < dsqmin:
-                        knew = k
-                        dsqmin = w[ndim + k]
+                if w[ndim + k] > ZERO and (dsqmin == ZERO or w[ndim + k] < dsqmin):
+                    knew = k
+                    dsqmin = w[ndim + k]
             if dsqmin == ZERO:
                 # GOTO 260: finalize new interpolation points.
                 return _bobyqa_rescue_finalize(
@@ -3705,7 +3703,7 @@ class NelderMead:
         xstep: np.ndarray,
         x0: np.ndarray,
         *,
-        xtol_abs: Optional[np.ndarray] = None,
+        xtol_abs: np.ndarray | None = None,
         ftol_abs: float = 1e-5,
         ftol_rel: float = 1e-15,
         xtol_rel: float = 1e-7,
@@ -3977,13 +3975,14 @@ def _resolve_lme_family(family) -> Family:
         family = cls
     if isinstance(family, Family):
         if isinstance(family, _family_mod.Quasi):
-            raise ValueError('"quasi" families cannot be used in glmer')
+            # type, so it is a value error, not a type error.
+            raise ValueError('"quasi" families cannot be used in glmer')  # noqa: TRY004 - quasi is a valid Family; this rejects a supported type
         return family
     if callable(family):
         result = family()
         if isinstance(result, Family):
             if isinstance(result, _family_mod.Quasi):
-                raise ValueError('"quasi" families cannot be used in glmer')
+                raise ValueError('"quasi" families cannot be used in glmer')  # noqa: TRY004 - quasi is a valid Family; this rejects a supported type
             return result
         raise TypeError(
             f"family must resolve to a Family instance; calling {family!r} "
@@ -4207,8 +4206,10 @@ def _check_hess(H_sub, tol, hesstype=""):
         t = f" {hesstype}" if hesstype else ""
         return (
             [
-                f"Model failed to converge: degenerate{t} Hessian with "
-                f"{neg} negative eigenvalues"
+                (
+                    f"Model failed to converge: degenerate{t} Hessian with "
+                    f"{neg} negative eigenvalues"
+                )
             ],
             -3,
         )
@@ -4221,8 +4222,10 @@ def _check_hess(H_sub, tol, hesstype=""):
         t = f"{hesstype} " if hesstype else ""
         return (
             [
-                f"{t}Hessian is numerically singular: parameters are not "
-                f"uniquely determined"
+                (
+                    f"{t}Hessian is numerically singular: parameters are not "
+                    f"uniquely determined"
+                )
             ],
             -4,
         )
@@ -4306,14 +4309,14 @@ def _build_optinfo(
     theta: np.ndarray,
     theta_bounds: list,
     optim: dict,
-    optim_stage0: Optional[dict],
-    ctrl: Optional[dict],
+    optim_stage0: dict | None,
+    ctrl: dict | None,
     optimizer: tuple = ("bobyqa", "Nelder_Mead"),
     grad=None,
     hess=None,
-    n_theta: Optional[int] = None,
-    grad_cfg: Optional[dict] = None,
-    hess_cfg: Optional[dict] = None,
+    n_theta: int | None = None,
+    grad_cfg: dict | None = None,
+    hess_cfg: dict | None = None,
 ) -> dict:
     """Port of lme4's ``m@optinfo`` (utilities.R:448) + ``checkConv`` runs.
 
@@ -4797,7 +4800,7 @@ def _check_rank_drop_cols(
     """
     if action == "ignore":
         return X, list(col_names), []
-    n, p = X.shape
+    _n, p = X.shape
     if p == 0:
         return X, list(col_names), []
     # Order-preserving Householder QR (no pivoting) — keep R[j,j] in the
@@ -5100,18 +5103,18 @@ class gmm:
         *,
         family: object = None,
         REML: bool = True,
-        weights: Optional[np.ndarray] = None,
-        offset: Optional[np.ndarray] = None,
-        mustart: Optional[np.ndarray] = None,
-        etastart: Optional[np.ndarray] = None,
+        weights: np.ndarray | None = None,
+        offset: np.ndarray | None = None,
+        mustart: np.ndarray | None = None,
+        etastart: np.ndarray | None = None,
         nAGQ: int = 1,
         start=None,
         subset=None,
         na_action: str = "na.omit",
-        contrasts: Optional[dict] = None,
+        contrasts: dict | None = None,
         verbose: int = 0,
         devFunOnly: bool = False,
-        control: Optional[dict] = None,
+        control: dict | None = None,
         nAGQ0initStep: bool = True,
     ):
         self.formula = formula
@@ -5127,20 +5130,20 @@ class gmm:
             _m = glmer_nb(
                 formula,
                 data,
-                _gmm_kwargs=dict(
-                    weights=weights,
-                    offset=offset,
-                    mustart=mustart,
-                    etastart=etastart,
-                    nAGQ=nAGQ,
-                    start=start,
-                    subset=subset,
-                    na_action=na_action,
-                    contrasts=contrasts,
-                    verbose=verbose,
-                    control=control,
-                    nAGQ0initStep=nAGQ0initStep,
-                ),
+                _gmm_kwargs={
+                    "weights": weights,
+                    "offset": offset,
+                    "mustart": mustart,
+                    "etastart": etastart,
+                    "nAGQ": nAGQ,
+                    "start": start,
+                    "subset": subset,
+                    "na_action": na_action,
+                    "contrasts": contrasts,
+                    "verbose": verbose,
+                    "control": control,
+                    "nAGQ0initStep": nAGQ0initStep,
+                },
             )
             self.__dict__.update(_m.__dict__)
             self.formula = formula
@@ -5778,7 +5781,7 @@ class gmm:
                     d_grad, d_hess = _deriv12(
                         _devfun_g, theta_hat, fx=float(res.fun), lower=_lo, upper=_hi
                     )
-            except Exception:  # noqa: BLE001 — checkConv bails
+            except Exception:  # noqa: BLE001
                 d_grad = d_hess = None
             _devfun_g(theta_hat)  # restore the factor to θ̂
         _opt_name = (
@@ -5884,7 +5887,7 @@ class gmm:
         # User-supplied starting values override the defaults. Mirror lme4's
         # ``getStart`` (modular.R:472-533): None → no override; ndarray →
         # θ-only; dict → keys ``theta``/``par`` and ``beta``/``fixef``.
-        beta_user_start: Optional[np.ndarray] = None
+        beta_user_start: np.ndarray | None = None
         if inputs.start is not None:
             if isinstance(inputs.start, dict):
                 if "theta" in inputs.start and "par" in inputs.start:
@@ -7141,7 +7144,7 @@ class gmm:
             beta_opt[k] = res.x[n_theta + a]
         return float(res.fun), theta_opt, 1.0, beta_opt
 
-    def _profile_glmm(self, n_grid: int, alphamax: float) -> "Profile":
+    def _profile_glmm(self, n_grid: int, alphamax: float) -> Profile:
         """Profile a **scale-known** GLMM (Poisson/Binomial) — the
         constrained-Laplace path. Mirrors the Gaussian :meth:`profile` but over
         the Stage-1 ``[θ, β]`` Laplace devfun (no residual σ axis, ``useSc=0``),
@@ -7246,7 +7249,7 @@ class gmm:
         which=None,
         signames: bool = True,
         prof_scale: str = "sdcor",
-    ) -> "Profile":
+    ) -> Profile:
         """Compute profile-likelihood curves for the variance components, σ,
         and each β_j — lme4's ``profile.merMod``.
 
@@ -7844,7 +7847,7 @@ class gmm:
         # formula selecting a subset of random-effect terms.
         _no_re = (
             re_form is False
-            or (isinstance(re_form, float) and re_form != re_form)  # NaN
+            or (isinstance(re_form, float) and math.isnan(re_form))
             or (
                 isinstance(re_form, str)
                 and re_form.strip().replace(" ", "") in ("NA", "~0", "0")
@@ -8274,7 +8277,7 @@ class gmm:
         _ok_re = (
             re_form is None
             or re_form is False
-            or (isinstance(re_form, float) and re_form != re_form)  # NaN
+            or (isinstance(re_form, float) and math.isnan(re_form))
             or (
                 isinstance(re_form, str)
                 and re_form.strip().replace(" ", "") in ("NA", "~0", "0")
@@ -8357,7 +8360,7 @@ class gmm:
 
     # ---- refit / parametric bootstrap ----------------------------------
 
-    def _refit_response(self, newresp) -> "gmm":
+    def _refit_response(self, newresp) -> gmm:
         """Refit this model to a new response vector, preserving family / REML
         / weights / offset / nAGQ / control — the engine behind :meth:`bootMer`
         and the ``refit(model, newresp=)`` generic (lme4's ``refit.merMod``).
@@ -8425,7 +8428,7 @@ class gmm:
         verbose: bool = False,
         parallel: str = "no",
         ncpus: int = 1,
-    ) -> "BootMer":
+    ) -> BootMer:
         """Model-based parametric bootstrap — port of ``bootMer`` (bootMer.R).
 
         Simulates ``nsim`` responses from the fitted model (via
@@ -8492,7 +8495,7 @@ class gmm:
         def _one(y_k):
             try:
                 return self._boot_apply_fun(FUN, self._refit_response(y_k))[0]
-            except Exception:  # noqa: BLE001 — lme4's factory swallows + NA-fills
+            except Exception:  # noqa: BLE001
                 return np.full(t0.shape, np.nan)
 
         if parallel == "no" or ncpus <= 1:
@@ -8625,8 +8628,7 @@ class gmm:
                 "optimizer", "bobyqa+Nelder_Mead"
             )
             out.append(f"optimizer ({opt_name}) convergence code: 0 (OK)")
-            for msg in opt_messages:
-                out.append(msg)
+            out.extend(opt_messages)
         print("\n".join(out))
 
     # ---- diagnostic plots ----------------------------------------------
@@ -8709,7 +8711,7 @@ class gmm:
         postVar: bool = False,
         drop: bool = False,
         whichel=None,
-    ) -> "RanefResult":
+    ) -> RanefResult:
         """BLUPs per random-effect bar — lme4's ``ranef(m, condVar=, postVar=,
         drop=, whichel=)``.
 
@@ -9005,9 +9007,9 @@ class gmm:
         if name == "q":
             return int(self.q)
         if name == "n_rtrms":
-            return int(len(re.cnms))
+            return len(re.cnms)
         if name == "n_rfacs":
-            return int(len(re.flist_levels))
+            return len(re.flist_levels)
         if name == "is_REML":
             return self.isREML()
         if name == "REML":
@@ -9059,7 +9061,7 @@ class gmm:
         if name == "q_i":  # RE coefficients per term (= c·n_levels)
             return np.asarray([c * n for _k, _s, c, n in self._bar_layout()], dtype=int)
         if name == "k":  # number of RE terms
-            return int(len(self._re.cnms))
+            return len(self._re.cnms)
         if name == "m_i":  # covariance params per term (= c(c+1)/2)
             return np.asarray(
                 [c * (c + 1) // 2 for _k, _s, c, _n in self._bar_layout()], dtype=int
@@ -9195,7 +9197,7 @@ class gmm:
             "q": q,
             "nth": int(np.asarray(self.theta).size),
             "useSc": 1,
-            "reTrms": int(len(self._re.cnms)),
+            "reTrms": len(self._re.cnms),
             "spFe": 0,
             "REML": p if self.REML else 0,
             "GLMM": 0,
@@ -9203,7 +9205,7 @@ class gmm:
         }
         return {"cmp": cmp, "dims": dims}
 
-    def VarCorr(self) -> "VarCorr":
+    def VarCorr(self) -> VarCorr:
         """``VarCorr()`` — the estimated random-effect (co)variances
         (``lme4::VarCorr.merMod``).
 
@@ -9265,14 +9267,14 @@ class gmm:
         out[~nm] = arr
         return out
 
-    def refit(self, newresp=None) -> "gmm":
+    def refit(self, newresp=None) -> gmm:
         """``refit()`` — refit this model, optionally to a new response vector
         (thin wrapper over :func:`hea.R.model_generics.refit`)."""
         from ..R.model_generics import refit as _refit
 
         return _refit(self, newresp)
 
-    def refitML(self) -> "gmm":
+    def refitML(self) -> gmm:
         """``refitML()`` — an ML-fit copy of a REML LMM (a no-op for an ML fit
         or any GLMM); thin wrapper over
         :func:`hea.R.model_generics.refitML`."""
@@ -9350,7 +9352,7 @@ class gmm:
             rr = np.sign(r) * np.sqrt(r**2 + (h * pr**2) / (1.0 - h))
         return np.where(np.isfinite(rr), rr, np.nan) / self.sigma
 
-    def influence(self, groups=None, do_coef: bool = True) -> "Influence":
+    def influence(self, groups=None, do_coef: bool = True) -> Influence:
         """``influence()`` — case/group-deletion influence (lme4's
         ``influence.merMod``). ``groups=None`` deletes each observation in turn;
         ``groups="<factor>"`` deletes each level of that grouping factor. Each
@@ -9922,7 +9924,7 @@ class VarCorr:
     ``print`` / ``repr`` reproduces lme4's Groups / Name / Std.Dev. / Corr table.
     """
 
-    def __init__(self, model: "gmm"):
+    def __init__(self, model: gmm):
         self._model = model
         self.sc = float(model.sigma)
         self._keys = list(model.sd_re.keys())
@@ -10064,7 +10066,7 @@ class Profile:
         """
         if zeta is not None:
             zz = np.atleast_1d(np.asarray(zeta, dtype=float))
-            z_lo = float(zz[0]) if zz.size > 1 else float(zz[0])
+            z_lo = float(zz[0])
             z_hi = float(zz[1]) if zz.size > 1 else float(zz[0])
             z_lo, z_hi = -abs(z_lo), abs(z_hi)
         else:
@@ -10091,7 +10093,7 @@ class Profile:
         levels: tuple[float, ...] = (0.50, 0.80, 0.90, 0.95, 0.99),
         *,
         which: str | list[str] | None = None,
-        transform: str | "Callable[[np.ndarray], np.ndarray]" | None = None,
+        transform: str | Callable[[np.ndarray], np.ndarray] | None = None,
         ax=None,
     ):
         """Profile zeta plot — the Pythonic replacement for R's
@@ -10269,6 +10271,7 @@ class Profile:
         """
         import matplotlib.pyplot as plt
         from scipy.interpolate import CubicSpline, PchipInterpolator
+
         from ..R import distributions as _dist
 
         if which is None:
@@ -10291,7 +10294,7 @@ class Profile:
         # log applies to .sig* and .sigma only; fixed effects keep
         # natural scale.
         if transform is None:
-            tx_fn: dict[str, "Callable[[np.ndarray], np.ndarray]"] = {
+            tx_fn: dict[str, Callable[[np.ndarray], np.ndarray]] = {
                 name: (lambda x: np.asarray(x)) for name in names
             }
             tx_label = {name: name for name in names}
@@ -10364,7 +10367,7 @@ class Profile:
                 xc2 = _sacos(float(sji(+level)) / level)
                 yc3 = _sacos(float(sij(-level)) / level)
                 xc4 = _sacos(float(sji(-level)) / level)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return None
             if any(np.isnan(v) for v in (yc1, xc2, yc3, xc4)):
                 return None
@@ -10420,13 +10423,13 @@ class Profile:
                 for lev in zeta_levels:
                     pts = _contour_pts(sij, sji, float(lev))
                     pts_per_level.append(pts)
-                contours[(ii, jj)] = dict(
-                    sij=sij,
-                    sji=sji,
-                    trace_i=(zi_i[o_i], zj_i[o_i]),
-                    trace_j=(zi_j[o_j], zj_j[o_j]),
-                    pts=pts_per_level,
-                )
+                contours[(ii, jj)] = {
+                    "sij": sij,
+                    "sji": sji,
+                    "trace_i": (zi_i[o_i], zj_i[o_i]),
+                    "trace_j": (zi_j[o_j], zj_j[o_j]),
+                    "pts": pts_per_level,
+                }
 
         fig, axes = plt.subplots(
             n,

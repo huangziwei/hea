@@ -22,16 +22,21 @@ import io
 import numpy as np
 import polars as pl
 import pytest
-
 from conftest import load_dataset, load_glm_oracle
-from hea.R import AIC, BIC, add1, anova, drop1, step
+
 from hea.family import Binomial, Gamma, Gaussian, Poisson
 from hea.models import gam, glm, lm
 from hea.R import (
+    AIC,
+    BIC,
     _anova_gam_rdf,
     _anova_gam_table,
     _anova_glm_table,
     _extract_aic_lm,
+    add1,
+    anova,
+    drop1,
+    step,
 )
 
 

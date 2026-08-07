@@ -111,7 +111,7 @@ def test_missing_data_extra_says_what_to_install():
     if the error says so instead of surfacing a bare 404 or polars' pyarrow
     message.
     """
-    import hea.io as io
+    from hea import io
 
     assert "hea[data]" in io._DATA_EXTRA_HINT
 
@@ -132,7 +132,7 @@ def test_missing_data_extra_says_what_to_install():
 
 def test_from_pandas_translates_the_pyarrow_error():
     """polars' "pyarrow is required" is accurate but says nothing about hea."""
-    import hea.io as io
+    from hea import io
 
     class _Boom:
         pass

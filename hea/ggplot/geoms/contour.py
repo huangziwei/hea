@@ -18,7 +18,6 @@ import numpy as np
 from ..aes import split_layer_kwargs
 from .geom import Geom
 
-
 _PT_PER_MM = 72.27 / 25.4
 
 
@@ -62,8 +61,8 @@ class GeomContour(Geom):
     key_glyph: str = "path"
 
     def draw_panel(self, data, ax) -> None:
-        from .._util import r_color
         from ...plot._util import r_lty
+        from .._util import r_color
 
         if len(data) == 0:
             return

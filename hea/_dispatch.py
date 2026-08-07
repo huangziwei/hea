@@ -35,7 +35,7 @@ def _load():
         return None
     try:
         from . import _rs  # hea._rs — the compiled Rust extension
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     return _rs
 

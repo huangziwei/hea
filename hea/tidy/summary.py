@@ -68,7 +68,7 @@ class Summary:
         if w is None:
             try:
                 w = shutil.get_terminal_size((80, 20)).columns
-            except Exception:
+            except Exception:  # noqa: BLE001
                 w = 80
         return _render_summary(self.blocks, w)
 
@@ -170,7 +170,7 @@ def _signif_round(x: float, digits: int) -> float:
     """Round ``x`` to ``digits`` significant figures."""
     if x == 0:
         return 0.0
-    return round(x, digits - int(math.floor(math.log10(abs(x)))) - 1)
+    return round(x, digits - math.floor(math.log10(abs(x))) - 1)
 
 
 def _format_numeric_stats(values: list[float], digits: int) -> list[str]:
@@ -187,18 +187,18 @@ def _format_numeric_stats(values: list[float], digits: int) -> list[str]:
     signifs = [0.0 if v == 0 else _signif_round(v, digits) for v in values]
 
     if all(v == int(v) for v in signifs):
-        return [str(int(round(v))) for v in values]
+        return [str(round(v)) for v in values]
 
     max_dec = 0
     for v in signifs:
         if v == 0 or v == int(v):
             continue
-        int_digits = int(math.floor(math.log10(abs(v)))) + 1
+        int_digits = math.floor(math.log10(abs(v))) + 1
         if int_digits >= digits:
             continue
         max_dec = max(max_dec, digits - int_digits)
     if max_dec == 0:
-        return [str(int(round(v))) for v in values]
+        return [str(round(v)) for v in values]
     return [f"{v:.{max_dec}f}" for v in values]
 
 

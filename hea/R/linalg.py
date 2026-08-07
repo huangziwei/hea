@@ -26,7 +26,7 @@ import numpy as np
 
 from .._dispatch import rs_fn
 
-__all__ = ["dqrdc2", "dqrsl", "dqrls", "Cdqrls", "dqrls_rank"]
+__all__ = ["Cdqrls", "dqrdc2", "dqrls", "dqrls_rank", "dqrsl"]
 
 _rs_dqrls = rs_fn("dqrls")
 _rs_dqrls_rank = rs_fn("dqrls_rank")
@@ -71,7 +71,7 @@ def dqrdc2(x: np.ndarray, tol: float = 1e-7):
     # Householder reduction of x
     lup = min(n, p)
     k = p + 1  # Fortran 'k' (1-based rank boundary)
-    for l in range(1, lup + 1):  # noqa: E741 — Fortran 'l' (1-based), kept for port fidelity
+    for l in range(1, lup + 1):
         l0 = l - 1
         # cycle columns l..p left-to-right until one has non-negligible norm;
         # a column is negligible if its norm fell below tol·(original norm).

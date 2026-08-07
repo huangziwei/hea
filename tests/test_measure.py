@@ -82,7 +82,7 @@ def test_legend_cell_zero_for_no_entries():
 
 
 def test_legend_cell_grows_with_entries():
-    w, h_few = m.legend_cell_size_in(None, ["a", "b"])
+    _w, h_few = m.legend_cell_size_in(None, ["a", "b"])
     _, h_many = m.legend_cell_size_in(None, ["a", "b", "c", "d", "e", "f"])
     assert h_many > h_few
 

@@ -54,5 +54,5 @@ def test_chol_lower_matches_numpy_within_tol():
 
 def test_chol_lower_rejects_non_pd():
     a = np.array([[1.0, 2.0], [2.0, 1.0]])  # indefinite
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="not positive definite"):
         rs.chol_lower(a)

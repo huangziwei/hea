@@ -14,6 +14,8 @@ import hea.ggplot as hg
 from hea.ggplot import aes, geom_point, geom_smooth, theme_minimal
 from hea.ggplot.core import (
     _should_install_fluent,
+)
+from hea.ggplot.core import (
     ggplot as ggplot_class,
 )
 
@@ -162,7 +164,8 @@ def test_fluent_theme_method_works_via_property_handle():
     the fluent install loop (the dataclass field shadows class-level
     install)."""
     import polars as pl
-    from hea.ggplot import aes, theme, geom_point
+
+    from hea.ggplot import aes, geom_point, theme
 
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     p_fluent = ggplot_class(df, aes("x", "y")) + geom_point()
@@ -176,7 +179,8 @@ def test_plot_theme_attribute_access_still_works():
     must keep working — many internal code paths and external tests
     rely on it. The handle delegates these via ``__getattr__``."""
     import polars as pl
-    from hea.ggplot import aes, theme, geom_point
+
+    from hea.ggplot import aes, geom_point, theme
 
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     p = ggplot_class(df, aes("x", "y")) + geom_point() + theme(aspect_ratio=2)
@@ -332,9 +336,9 @@ def test_layer_level_callable_kwarg_promotes_to_mapping():
     and ``pl.Expr`` do — so the bare-kwarg form matches ``aes(group=...)``.
     """
     import numpy as np
-    from hea.tidy import col
-    from hea.tidy import cut_width
+
     from hea.ggplot.build import build
+    from hea.tidy import col, cut_width
 
     rng = np.random.default_rng(0)
     df = hea.tidy.DataFrame(
@@ -363,9 +367,9 @@ def test_cut_width_accepts_bare_column_name():
     ``cut_width(col("carat"), 0.1)`` — symmetric with ``fct_*`` and
     documented as supported in :mod:`cuts`."""
     import numpy as np
-    from hea.tidy import col
-    from hea.tidy import cut_width
+
     from hea.ggplot.build import build
+    from hea.tidy import col, cut_width
 
     rng = np.random.default_rng(0)
     df = hea.tidy.DataFrame(

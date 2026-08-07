@@ -72,7 +72,6 @@ dev = [
     # hea._rs extension in editable mode and the `maturin develop` CLI lives here.
     # CI pins maturin==1.14.0.
     "maturin>=1.14.0",
-    "flake8>=7.1.1",
     "pytest>=9.0.3",
     "pytest-xdist>=3.6",
     "pyyaml>=6.0.3",
@@ -84,13 +83,17 @@ dev = [
 ]
 
 [tool.ruff.lint]
-# ``from hea.R import *`` is the intentional ergonomic for the R-flavored
-# namespace — see hea/R.py. We commit to NOT using star imports anywhere
-# else, so silencing these globally is safe:
-#   F403 — flags every ``from X import *`` line.
-#   F405 — flags every name that *might* come from a star import (ruff
-#          can't statically resolve our ``__all__``).
-ignore = ["F403", "F405"]
+# We run ruff's default rule set, which as of 0.16 is 413 rules rather than the
+# 59 of earlier releases. Nothing is silenced project-wide: the handful of
+# places where a rule is genuinely wrong for this codebase (deliberate blind
+# excepts in the matplotlib/polars best-effort paths, `exec` in the translate
+# runners, R's local-time `Sys.Date()` semantics, …) carry an inline
+# `# noqa: <CODE>` with the reason, so the rule stays live for new code.
+#
+# Note that 0.16 also *dropped* 18 rules from the defaults — among them F403,
+# F405 and E741, which this file used to silence for `from hea.R import *` and
+# for family.py's single-letter math names. Those ignores are gone because the
+# rules are no longer enabled, not because the policy changed.
 
 [tool.ruff.lint.per-file-ignores]
 # ``__init__.py`` modules deliberately re-export their submodules' public
@@ -99,10 +102,4 @@ ignore = ["F403", "F405"]
 # re-export, not a mistake. The curated ``__all__`` lists remain the source
 # of truth for ``from hea.X import *``.
 "**/__init__.py" = ["F401"]
-# ``family.py`` is a mechanical port of mgcv's efam.r / coxph.r / mvam.r,
-# where single-letter math names (``l`` = log-likelihood / deviance residual,
-# loop indices, …) mirror the R/C source verbatim. Renaming them would reduce
-# port fidelity, so E741 (ambiguous name) is silenced for this file only — the
-# names are deliberate, not mistakes.
-"hea/family.py" = ["E741"]
 

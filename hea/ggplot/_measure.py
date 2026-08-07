@@ -17,7 +17,6 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.text import Text
 
-
 # Internal measurement figure. Lazily created on first call. Its dpi is
 # fixed; we always convert pixel extents to inches before returning, so
 # the chosen value doesn't leak.

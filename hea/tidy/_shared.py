@@ -24,7 +24,6 @@ import polars as pl
 
 from .basics import _Desc
 
-
 # ---- janitor-style name cleaning ------------------------------------
 
 _CLEAN_NAMES_REPLACE = (
@@ -244,14 +243,14 @@ class _TidyRange:
     of a method call, which is exactly where the translator emits).
     """
 
-    __slots__ = ("start", "stop", "exclude")
+    __slots__ = ("exclude", "start", "stop")
 
     def __init__(self, start: str, stop: str, *, exclude: bool = False):
         self.start = start
         self.stop = stop
         self.exclude = exclude
 
-    def __invert__(self) -> "_TidyRange":
+    def __invert__(self) -> _TidyRange:
         return _TidyRange(self.start, self.stop, exclude=not self.exclude)
 
     def __repr__(self) -> str:

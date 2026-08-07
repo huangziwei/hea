@@ -263,12 +263,12 @@ def test_predict_bamd_matches_mgcv(tag, family):
         return np.loadtxt(str(base / nm))
 
     df = pl.read_csv(str(base / "data.csv"))
-    kw = dict(family=family) if family is not None else {}
+    kw = {"family": family} if family is not None else {}
     m = hea.models.bam("y ~ s(x, k=15)", df, discrete=True, **kw)
     coef = np.asarray(m.coefficients).reshape(-1)
 
     # --- training-data predictions (newdata=None) ---
-    tol = dict(rtol=1e-5, atol=1e-6)
+    tol = {"rtol": 1e-5, "atol": 1e-6}
     np.testing.assert_allclose(
         m.predict(type="link")["fit"].to_numpy(), L("train_link.csv"), **tol
     )
@@ -1063,7 +1063,7 @@ def test_bam_discrete_parametric_split_is_numerically_exact():
 
     d1, d0 = m_split._discrete_design, m_flat._discrete_design
     assert d1.p == d0.p
-    assert [t.kind for t in d0.terms][0] == "param"
+    assert next(t.kind for t in d0.terms) == "param"
     np.testing.assert_array_equal(design_full_X(d1), design_full_X(d0))
     w = rng.uniform(0.1, 2.0, n)
     A1, A0 = XWXd(d1, w), XWXd(d0, w)
@@ -1170,7 +1170,7 @@ def test_bam_discrete_constraint_folded_into_marginal():
         # mgcv's `1000x9`, not the raw basis's 10 columns.
         assert len(t.Xd_list) == 1
         assert t.Xd_list[0].shape[1] == width
-        assert t.Xd_list[0].shape[0] in set(int(v) for v in d.nr)
+        assert t.Xd_list[0].shape[0] in {int(v) for v in d.nr}
         assert t.absorb is None and t.keep_cols is None
     # …and the kernels still agree with the dense cross-product on it.
     Xf = design_full_X(d)
@@ -1722,8 +1722,8 @@ def test_bam_scale_extended_matches_mgcv():
     tw the two mgcv rails converge to DIFFERENT self-consistent
     (p, φ, sp) fixed points, so each hea rail must reproduce its own.
     """
+    from hea.family import Gaussian, Poisson, nb, tw
     from hea.R.rng import RGenerator
-    from hea.family import tw, nb, Poisson, Gaussian
 
     def _p_of(m):
         th = float(np.asarray(m.family.get_theta())[0])
@@ -1884,8 +1884,9 @@ def test_bam_in_out_coef_samfrac():
     non-discrete rail only; the too-small guard warns and ignores).
     """
     import warnings as _warnings
-    from hea.R.rng import RGenerator
+
     from hea.family import Poisson
+    from hea.R.rng import RGenerator
 
     g = RGenerator(8)
     n = 120
@@ -2008,7 +2009,7 @@ def test_bam_id_links_lambda_matches_mgcv(case, formula, pin_crit):
     absolute log-determinants (a non-id bam property as well), while
     sp/edf/fitted stay invariant and DO pin."""
     df = pl.read_csv(str(_BAM_ID / case / "data.csv"))
-    fam = dict(family=Poisson()) if case == "pois" else {}
+    fam = {"family": Poisson()} if case == "pois" else {}
     # the oracle ran mgcv method="fREML" — call the same string so the
     # criterion VALUE comparison sees the fREML report flavor (explicit
     # "REML" shares the optimizer but reports gam(G=G)'s aic-replaced
@@ -3100,7 +3101,7 @@ def test_bam_censored_chunked_subsety():
       unchunked with θ collapsed to 0. hea restores per build; its
       chunked θ̂ stays next to the unchunked one.
     """
-    from hea.family import cnorm, Gaussian, Poisson, gfam
+    from hea.family import Gaussian, Poisson, cnorm, gfam
 
     _, df, _ = _censored_frames()
     fam = cnorm()
@@ -3637,7 +3638,18 @@ def test_bam_general_discrete_family_initialize_receipts():
             yt3 = np.full(yv.shape[0], fam.links[2].link(np.array(1e-3)))
             Xty3 = x3(yt3)
 
-            def fob(mm):
+            def fob(
+                mm,
+                *,
+                want=want,
+                jj=jj,
+                s3=s3,
+                Xty3=Xty3,
+                fam=fam,
+                yv=yv,
+                Xf=Xf,
+                lpi=lpi,
+            ):
                 st = want.copy()
                 st[jj[2]] = guarded(s3(Xty3 * mm))
                 return fam.ll(yv, Xf, st, lpi=lpi)["l"], st
@@ -3988,9 +4000,9 @@ def test_bam_general_discrete_start():
         rail rejects start= (mgcv bam's warm start is coef=, roadmap
         D23).
     """
-    from hea.family import gaulss
-
     import warnings as _warnings
+
+    from hea.family import gaulss
 
     d = _gaulss_frame()
     m1 = _gaulss_bam_fit()

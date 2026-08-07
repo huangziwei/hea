@@ -12,11 +12,11 @@ auto-detect signal.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 import polars as pl
-
 
 # Map polars BinaryExpr ops (from Expr.meta.serialize) to a readable name.
 _BIN_OPS = {"Eq", "Lt", "LtEq", "Gt", "GtEq"}
@@ -60,7 +60,7 @@ def _parse_join_binary(expr: pl.Expr) -> tuple[str, str, str] | None:
         return None
     try:
         tree = json.loads(expr.meta.serialize(format="json"))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if not isinstance(tree, dict) or "BinaryExpr" not in tree:
         return None

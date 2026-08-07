@@ -17,8 +17,8 @@ from dataclasses import dataclass
 import numpy as np
 import polars as pl
 
-from ...R import nmath as _nmath
 from ..._dispatch import rs_fn
+from ...R import nmath as _nmath
 from .._util import to_numeric_aes
 from .stat import Stat
 

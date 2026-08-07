@@ -19,6 +19,7 @@ those dates; ``"default"`` keeps matplotlib's :class:`AutoDateLocator`.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 
 from .continuous import ScaleContinuous
@@ -82,15 +83,13 @@ def _apply_date_axis(scale, ax, axis: str, *, view_limits) -> None:
         and scale.labels is not None
         and not callable(scale.labels)
     ):
-        try:
+        with contextlib.suppress(Exception):
             ticks = target_axis.get_major_locator()()
             target_axis.set_major_formatter(
                 mdates.DateFormatter("")  # blank to start
             )
             target_axis.set_ticklabels(list(scale.labels))
             del ticks  # silence unused
-        except Exception:
-            pass
 
     if view_limits is not None:
         if axis == "x":

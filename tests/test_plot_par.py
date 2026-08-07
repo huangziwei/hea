@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import matplotlib
 
-matplotlib.use("Agg")  # noqa: E402
+matplotlib.use("Agg")
 
 import matplotlib.axes
 import matplotlib.pyplot as plt
@@ -84,11 +84,10 @@ def test_unused_cells_are_hidden(diastolic):
 
 
 def test_too_many_plots_raises(diastolic):
-    with pytest.raises(RuntimeError, match="all 2 cells used"):
-        with par(mfrow=(1, 2)):
-            hist(diastolic)
-            hist(diastolic)
-            hist(diastolic)
+    with pytest.raises(RuntimeError, match="all 2 cells used"), par(mfrow=(1, 2)):
+        hist(diastolic)
+        hist(diastolic)
+        hist(diastolic)
 
 
 # ---------------------------------------------------------------------------
@@ -185,8 +184,8 @@ def test_profile_plot_single_param_inside_par():
     """``Profile.plot(which="...", ...)`` is a single-panel call —
     inside ``par(mfrow=...)`` it should pull a cell rather than open
     its own figure (Bates Fig. 1.7-style ``par`` ergonomics)."""
-    from hea.models import gmm
     from hea import data
+    from hea.models import gmm
 
     dye = data("Dyestuff")
     fm = gmm("Yield ~ 1 + (1 | Batch)", dye, REML=False)
@@ -230,7 +229,6 @@ def test_par_rejects_bad_shape():
 
 def test_exception_inside_par_unwinds_stack():
     assert _PAR_STACK == []
-    with pytest.raises(RuntimeError, match="boom"):
-        with par(mfrow=(1, 2)):
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError, match="boom"), par(mfrow=(1, 2)):
+        raise RuntimeError("boom")
     assert _PAR_STACK == []

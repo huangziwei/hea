@@ -12,7 +12,6 @@ import pytest
 import hea
 from hea.translate.inline import from_R, to_R
 
-
 # ---------------------------------------------------------------------------
 # Module-level fixtures (notebook-cell analog — top-level scope)
 # ---------------------------------------------------------------------------

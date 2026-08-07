@@ -28,12 +28,11 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from conftest import assert_fp_equiv, load_dataset
 from scipy.stats import chi2
 
-from conftest import assert_fp_equiv, load_dataset
 from hea.family import Gaussian, Poisson
 from hea.models.gmm import gmm
-
 
 # ---------------------------------------------------------------------------
 # Shared fits / profiles. Each model and (where applicable) its profile is
@@ -245,7 +244,7 @@ def test_bates_1_4_dyestuff_fm01_ML_plot_fig17(fm01ML_profile):
 
     pr = fm01ML_profile
 
-    fig, axes = plt.subplots(1, 3, sharey=True)
+    _fig, axes = plt.subplots(1, 3, sharey=True)
     pr.plot(which=".sigma", transform="log", ax=axes[0])
     pr.plot(which=".sigma", ax=axes[1])
     pr.plot(which=".sigma", transform="square", ax=axes[2])
@@ -265,7 +264,7 @@ def test_bates_1_4_dyestuff_fm01_ML_plot_fig17(fm01ML_profile):
     assert [a.get_title() for a in fig2.axes] == [".sigma"]
 
     # ax= with multiple parameters is rejected.
-    fig3, ax3 = plt.subplots()
+    _fig3, ax3 = plt.subplots()
     try:
         pr.plot(ax=ax3)
     except ValueError:
@@ -325,8 +324,9 @@ def test_plot_ranef_layout_vertical_stacks_panels():
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea.models import gmm
+
     from hea import data
+    from hea.models import gmm
 
     pen = data("Penicillin", "lme4")
     fm = gmm("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
@@ -360,8 +360,9 @@ def test_plot_ranef_aspect_controls_subplot_width():
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea.models import gmm
+
     from hea import data
+    from hea.models import gmm
 
     pen = data("Penicillin", "lme4")
     fm = gmm("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
@@ -385,8 +386,9 @@ def test_plot_ranef_explicit_layout_tuple():
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea.models import gmm
+
     from hea import data
+    from hea.models import gmm
 
     pen = data("Penicillin", "lme4")
     fm = gmm("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
@@ -404,8 +406,8 @@ def test_plot_ranef_explicit_layout_tuple():
 
 def test_plot_ranef_layout_rejects_too_few_cells():
     """A (nrow, ncol) tuple with fewer cells than panels raises."""
-    from hea.models import gmm
     from hea import data
+    from hea.models import gmm
 
     pen = data("Penicillin", "lme4")
     fm = gmm("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
@@ -415,8 +417,8 @@ def test_plot_ranef_layout_rejects_too_few_cells():
 
 
 def test_plot_ranef_layout_rejects_bad_value():
-    from hea.models import gmm
     from hea import data
+    from hea.models import gmm
 
     pen = data("Penicillin", "lme4")
     fm = gmm("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
@@ -431,8 +433,9 @@ def test_plot_ranef_which_filters_to_one_term():
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea.models import gmm
+
     from hea import data
+    from hea.models import gmm
 
     pen = data("Penicillin", "lme4")
     fm = gmm("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
@@ -450,8 +453,9 @@ def test_plot_ranef_which_filters_to_one_panel_title():
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea.models import gmm
+
     from hea import data
+    from hea.models import gmm
 
     sleep = data("sleepstudy", "lme4")
     fm = gmm("Reaction ~ 1 + Days + (1 + Days | Subject)", sleep)
@@ -477,8 +481,9 @@ def test_plot_ranef_which_accepts_list():
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea.models import gmm
+
     from hea import data
+    from hea.models import gmm
 
     sleep = data("sleepstudy", "lme4")
     fm = gmm("Reaction ~ 1 + Days + (1 + Days | Subject)", sleep)
@@ -491,8 +496,8 @@ def test_plot_ranef_which_accepts_list():
 
 
 def test_plot_ranef_which_unknown_raises():
-    from hea.models import gmm
     from hea import data
+    from hea.models import gmm
 
     pen = data("Penicillin", "lme4")
     fm = gmm("diameter ~ 1 + (1 | plate) + (1 | sample)", pen)
@@ -511,8 +516,9 @@ def test_bates_2_plot_design_layout_matches_fig_2_3_2_4():
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from hea.models import gmm
+
     from hea import data
+    from hea.models import gmm
 
     penicillin = data("Penicillin", "lme4")
     fm = gmm("diameter ~ 1 + (1 | plate) + (1 | sample)", penicillin)
@@ -1186,7 +1192,7 @@ def test_predicates_match_lme4(sleepstudy_data, fm06ML):
     """#17: isREML/isLMM/isGLMM/isNLMM/isSingular on an LMM. A REML LMM is
     isREML; an ML LMM is not; neither is a GLMM. isSingular flags a boundary
     fit (Dyestuff2, variance → 0) and is False for sleepstudy."""
-    import hea.R as R
+    from hea import R
 
     mR = gmm(_SLEEP_F, sleepstudy_data, REML=True)
     assert (mR.isREML(), mR.isLMM(), mR.isGLMM(), mR.isNLMM()) == (
@@ -1305,7 +1311,7 @@ def test_VarCorr_matches_lme4(sleepstudy_data):
 def test_coef_is_fixef_plus_ranef(sleepstudy_data):
     """#12: coef() = fixef broadcast to each level + the matching ranef BLUP
     (lme4 coef.merMod). fixef() stays fixed-effects-only after the change."""
-    import hea.R as R
+    from hea import R
 
     m = gmm(_SLEEP_F, sleepstudy_data, REML=True)
     cf = m.coef()["Subject"]
@@ -1351,7 +1357,7 @@ def test_getData_and_R_generic_routing(sleepstudy_data):
     """#18 + routing: getData() returns the fit's data frame; the new hea.R
     generics delegate to the methods and thread the new method kwargs
     (vcov correlation=, logLik REML=)."""
-    import hea.R as R
+    from hea import R
 
     m = gmm(_SLEEP_F, sleepstudy_data, REML=True)
     assert m.getData() is m.data
@@ -1382,7 +1388,7 @@ def test_getData_and_R_generic_routing(sleepstudy_data):
 def test_residuals_type_default_and_scaled(sleepstudy_data):
     """#27: LMM residual types all collapse to y−μ; the R generic defaults to
     'response' (lme4's LMM default, not 'deviance'); scaled= divides by σ̂."""
-    import hea.R as R
+    from hea import R
 
     m = gmm(_SLEEP_F, sleepstudy_data, REML=True)
     r = m.residuals_of("response")
@@ -1565,8 +1571,10 @@ def test_na_exclude_padding_and_varcorr_alignment(sleepstudy_data):
     the VarCorr / RE-table Std.Dev. column right-aligns so decimals line up
     (lme4's print layout)."""
     import re
+
     import polars as pl
-    import hea.R as R
+
+    from hea import R
 
     d_na = sleepstudy_data.with_columns(
         pl.when(pl.int_range(pl.len()) == 5)
@@ -1632,7 +1640,7 @@ def test_anova_single_model_sequential_F(sleepstudy_data):
     """#13: anova(m) for one mixed model — the Type-I sequential fixed-effect
     F-table (lme4 anova.merMod). effects = RX·β̂; per-term SS = Σ effects²;
     F = MeanSq/σ̂²; no p-value (no exact denominator df)."""
-    import hea.R as R
+    from hea import R
 
     m = gmm(_SLEEP_F, sleepstudy_data, REML=True)
     a = R.anova(m)
@@ -1654,7 +1662,7 @@ def test_influence_family_matches_lme4(sleepstudy_data):
     """#20: the merMod influence diagnostics — hatvalues / cooks.distance /
     rstudent (closed form) and influence() (case/group-deletion refits) —
     bit-exact to lme4 2.0.1."""
-    import hea.R as R
+    from hea import R
 
     fm = gmm(_SLEEP_F, sleepstudy_data, REML=True)
     h = fm.hatvalues()
@@ -1882,8 +1890,8 @@ def test_lmer_rejects_glmer_keys_and_wires_optinfo(sleepstudy_data):
     fit now populates m.optinfo via calc.derivs (the post-fit gradient/Hessian
     checkConv that was previously inert). A clean fit yields no message; a
     boundary (singular) fit surfaces lme4's message in optinfo + the summary."""
-    import io
     import contextlib
+    import io
 
     for key in ("tolPwrss", "compDev", "nAGQ0initStep", "check.response.not.const"):
         with pytest.raises(ValueError, match="glmer-only"):
@@ -2078,6 +2086,7 @@ def test_predict_via_R_dispatcher():
     """hea.R.predict() routes to model.predict() — required for
     ``from hea.R import predict; predict(fm)`` ergonomics."""
     import polars as pl
+
     from hea.R import predict
 
     gpa = pl.read_csv("datasets/m-clark/gpa.csv")

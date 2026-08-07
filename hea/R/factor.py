@@ -32,7 +32,7 @@ class _LazyFactor:
     frame calls ``_resolve(self)`` to materialize a real ``pl.Expr``.
     """
 
-    __slots__ = ("col_ref", "levels", "labels", "ordered", "strict")
+    __slots__ = ("col_ref", "labels", "levels", "ordered", "strict")
 
     def __init__(self, col_ref, levels, labels, ordered, strict):
         self.col_ref = col_ref  # str column name or pl.Expr
@@ -46,7 +46,7 @@ class _LazyFactor:
             return self.col_ref
         try:
             return self.col_ref.meta.output_name()
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     def _resolve(self, df: pl.DataFrame, fallback_name: str | None = None) -> pl.Expr:
@@ -55,7 +55,7 @@ class _LazyFactor:
         s_utf8 = base.cast(pl.Utf8)
 
         if self.labels is not None:
-            old = [_label_key_to_str(k) for k in self.labels.keys()]
+            old = [_label_key_to_str(k) for k in self.labels]
             new = [str(v) for v in self.labels.values()]
             out_expr = s_utf8.replace_strict(old, new, return_dtype=pl.Enum(new))
         else:
@@ -171,7 +171,7 @@ def factor(
     s = series.cast(pl.Utf8)
 
     if labels is not None:
-        old = [_label_key_to_str(k) for k in labels.keys()]
+        old = [_label_key_to_str(k) for k in labels]
         new = [str(v) for v in labels.values()]
         out = s.replace_strict(old, new, return_dtype=pl.Enum(new))
     else:

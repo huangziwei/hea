@@ -39,8 +39,6 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional
-
 
 _KNOWN_KINDS: frozenset[str] = frozenset(
     {
@@ -106,7 +104,7 @@ class Gap:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Gap":
+    def from_dict(cls, d: dict) -> Gap:
         return cls(**d)
 
 
@@ -114,12 +112,12 @@ def _make_id(kind: str, subject: str, source: str) -> str:
     """Stable hash-based id over the dedup key. 12 hex chars is enough to
     avoid collisions in a registry of even tens of thousands of rows.
     """
-    h = hashlib.sha256(f"{kind}\x00{subject}\x00{source}".encode("utf-8")).hexdigest()
+    h = hashlib.sha256(f"{kind}\x00{subject}\x00{source}".encode()).hexdigest()
     return h[:12]
 
 
 def _today() -> str:
-    return _dt.date.today().isoformat()
+    return _dt.date.today().isoformat()  # noqa: DTZ011 - local date for a dev log
 
 
 def log_gap(
@@ -130,7 +128,7 @@ def log_gap(
     snippet: str = "",
     translation: str = "",
     notes: str = "",
-    registry: Optional[Path] = None,
+    registry: Path | None = None,
 ) -> Gap:
     """Record a gap. Returns the resulting :class:`Gap` (after dedup merge).
 
@@ -170,7 +168,7 @@ def log_gap(
     return existing
 
 
-def read_gaps(registry: Optional[Path] = None) -> list[Gap]:
+def read_gaps(registry: Path | None = None) -> list[Gap]:
     """Load all rows from ``registry``. Returns an empty list if missing."""
     registry = registry or _DEFAULT_REGISTRY
     if not registry.exists():
@@ -184,7 +182,7 @@ def read_gaps(registry: Optional[Path] = None) -> list[Gap]:
     return rows
 
 
-def find_gap(gap_id: str, registry: Optional[Path] = None) -> Optional[Gap]:
+def find_gap(gap_id: str, registry: Path | None = None) -> Gap | None:
     """Look up a row by id. Returns ``None`` if absent."""
     for g in read_gaps(registry):
         if g.id == gap_id:

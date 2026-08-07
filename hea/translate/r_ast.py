@@ -14,8 +14,6 @@ to R unchanged for tests.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
-
 
 # (start_byte, end_byte) into the source string. Half-open: [start, end).
 Span = tuple[int, int]
@@ -115,7 +113,7 @@ class Identifier:
 @dataclass(frozen=True, slots=True)
 class UnaryOp:
     op: str  # "-", "+", "!", "~"
-    operand: "Node"
+    operand: Node
     span: Span
 
 
@@ -125,8 +123,8 @@ class BinOp:
     ``==``, ``&&``, ``%in%``, ``%any%``. Pipes have their own node type."""
 
     op: str
-    left: "Node"
-    right: "Node"
+    left: Node
+    right: Node
     span: Span
 
 
@@ -140,8 +138,8 @@ class Pipe:
     """
 
     op: str  # "|>" or "%>%"
-    lhs: "Node"
-    rhs: "Node"
+    lhs: Node
+    rhs: Node
     span: Span
 
 
@@ -152,8 +150,8 @@ class Assign:
     ``target`` is always on the LHS of the node regardless of source side."""
 
     op: str
-    target: "Node"
-    value: "Node"
+    target: Node
+    value: Node
     span: Span
 
 
@@ -161,8 +159,8 @@ class Assign:
 class Tilde:
     """Formula: ``lhs ~ rhs`` or unary ``~ rhs``."""
 
-    lhs: Optional["Node"]
-    rhs: "Node"
+    lhs: Node | None
+    rhs: Node
     span: Span
 
 
@@ -172,7 +170,7 @@ class NamedArg:
     string-literal text (R allows both ``f(x = 1)`` and ``f("x" = 1)``)."""
 
     name: str
-    value: "Node"
+    value: Node
     span: Span
 
 
@@ -188,8 +186,8 @@ class MissingArg:
 class Call:
     """Function call: ``func(args...)``."""
 
-    func: "Node"
-    args: tuple["Node", ...]
+    func: Node
+    args: tuple[Node, ...]
     span: Span
 
 
@@ -197,8 +195,8 @@ class Call:
 class Subscript:
     """Single-bracket subscript: ``x[i]``, ``x[i, j]``. Multi-arg supported."""
 
-    target: "Node"
-    args: tuple["Node", ...]
+    target: Node
+    args: tuple[Node, ...]
     span: Span
 
 
@@ -206,8 +204,8 @@ class Subscript:
 class DoubleSubscript:
     """Double-bracket subscript: ``x[[i]]``."""
 
-    target: "Node"
-    args: tuple["Node", ...]
+    target: Node
+    args: tuple[Node, ...]
     span: Span
 
 
@@ -215,7 +213,7 @@ class DoubleSubscript:
 class Dollar:
     """Component access: ``x$name``. ``name`` is the literal identifier text."""
 
-    target: "Node"
+    target: Node
     name: str
     span: Span
 
@@ -224,7 +222,7 @@ class Dollar:
 class At:
     """Slot access: ``x@name``."""
 
-    target: "Node"
+    target: Node
     name: str
     span: Span
 
@@ -233,8 +231,8 @@ class At:
 class FunctionDef:
     """``function(params) body`` and R 4.1+ ``\\(params) body`` lambda."""
 
-    params: tuple["Param", ...]
-    body: "Node"
+    params: tuple[Param, ...]
+    body: Node
     span: Span
     shorthand: bool = False  # True for ``\(x) ...``
 
@@ -242,36 +240,36 @@ class FunctionDef:
 @dataclass(frozen=True, slots=True)
 class Param:
     name: str
-    default: Optional["Node"]
+    default: Node | None
     span: Span
 
 
 @dataclass(frozen=True, slots=True)
 class If:
-    cond: "Node"
-    then: "Node"
-    otherwise: Optional["Node"]
+    cond: Node
+    then: Node
+    otherwise: Node | None
     span: Span
 
 
 @dataclass(frozen=True, slots=True)
 class For:
     var: str
-    iterable: "Node"
-    body: "Node"
+    iterable: Node
+    body: Node
     span: Span
 
 
 @dataclass(frozen=True, slots=True)
 class While:
-    cond: "Node"
-    body: "Node"
+    cond: Node
+    body: Node
     span: Span
 
 
 @dataclass(frozen=True, slots=True)
 class Repeat:
-    body: "Node"
+    body: Node
     span: Span
 
 
@@ -290,7 +288,7 @@ class Block:
     """Brace block: ``{ stmt1; stmt2; ... }``. The value of the block is the
     value of its last statement."""
 
-    statements: tuple["Node", ...]
+    statements: tuple[Node, ...]
     span: Span
 
 
@@ -298,7 +296,7 @@ class Block:
 class Program:
     """Top-level: sequence of statements (the whole parsed script)."""
 
-    statements: tuple["Node", ...] = field(default_factory=tuple)
+    statements: tuple[Node, ...] = field(default_factory=tuple)
     span: Span = (0, 0)
 
 

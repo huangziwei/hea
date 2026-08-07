@@ -57,20 +57,20 @@ class Series(pl.Series):
             return super().__invert__()
         return pl.exclude(self.name)
 
-    def to_frame(self, name: str | None = None) -> "DataFrame":
+    def to_frame(self, name: str | None = None) -> DataFrame:
         out = super().to_frame(name) if name is not None else super().to_frame()
         return DataFrame._from_pydf(out._df)
 
-    def to_dummies(self, *args: Any, **kwargs: Any) -> "DataFrame":
+    def to_dummies(self, *args: Any, **kwargs: Any) -> DataFrame:
         return DataFrame._from_pydf(super().to_dummies(*args, **kwargs)._df)
 
-    def value_counts(self, *args: Any, **kwargs: Any) -> "DataFrame":
+    def value_counts(self, *args: Any, **kwargs: Any) -> DataFrame:
         return DataFrame._from_pydf(super().value_counts(*args, **kwargs)._df)
 
-    def hist(self, *args: Any, **kwargs: Any) -> "DataFrame":
+    def hist(self, *args: Any, **kwargs: Any) -> DataFrame:
         return DataFrame._from_pydf(super().hist(*args, **kwargs)._df)
 
-    def is_close(self, *args: Any, **kwargs: Any) -> "Series":
+    def is_close(self, *args: Any, **kwargs: Any) -> Series:
         # Bypasses self._from_pyseries; rewrap.
         out = super().is_close(*args, **kwargs)
         return type(self)._from_pyseries(out._s)
@@ -351,7 +351,7 @@ class LazyFrame(pl.LazyFrame):
     leak point at `polars/lazyframe/frame.py:2510` (collect).
     """
 
-    def _wrap(self, lf: pl.LazyFrame) -> "LazyFrame":
+    def _wrap(self, lf: pl.LazyFrame) -> LazyFrame:
         return type(self)._from_pyldf(lf._ldf)
 
     def collect(self, *args: Any, **kwargs: Any):
@@ -363,23 +363,23 @@ class LazyFrame(pl.LazyFrame):
         # enough to leave un-wrapped for now (allowlisted).
         return out
 
-    def describe(self, *args: Any, **kwargs: Any) -> "DataFrame":
+    def describe(self, *args: Any, **kwargs: Any) -> DataFrame:
         # Despite living on LazyFrame, describe() materializes — returns DataFrame.
         return DataFrame._from_pydf(super().describe(*args, **kwargs)._df)
 
-    def match_to_schema(self, *args: Any, **kwargs: Any) -> "LazyFrame":
+    def match_to_schema(self, *args: Any, **kwargs: Any) -> LazyFrame:
         return self._wrap(super().match_to_schema(*args, **kwargs))
 
-    def sql(self, *args: Any, **kwargs: Any) -> "LazyFrame":
+    def sql(self, *args: Any, **kwargs: Any) -> LazyFrame:
         return self._wrap(super().sql(*args, **kwargs))
 
-    def group_by(self, *args: Any, **kwargs: Any) -> "_HeaLazyGroupBy":
+    def group_by(self, *args: Any, **kwargs: Any) -> _HeaLazyGroupBy:
         return _HeaLazyGroupBy(super().group_by(*args, **kwargs).lgb)
 
-    def group_by_dynamic(self, *args: Any, **kwargs: Any) -> "_HeaLazyGroupBy":
+    def group_by_dynamic(self, *args: Any, **kwargs: Any) -> _HeaLazyGroupBy:
         return _HeaLazyGroupBy(super().group_by_dynamic(*args, **kwargs).lgb)
 
-    def rolling(self, *args: Any, **kwargs: Any) -> "_HeaLazyGroupBy":
+    def rolling(self, *args: Any, **kwargs: Any) -> _HeaLazyGroupBy:
         return _HeaLazyGroupBy(super().rolling(*args, **kwargs).lgb)
 
 

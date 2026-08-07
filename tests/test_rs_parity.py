@@ -32,7 +32,6 @@ import sys
 
 import numpy as np
 import pytest
-
 from conftest import have_rscript, r_scalar_values, run_rs_r_oracle
 
 rs = pytest.importorskip("hea._rs")
@@ -847,7 +846,7 @@ def _build_f64_cases():
         )
     )
     # hypergeometric (m=20 red, n=25 black, k=15 drawn)
-    xs = [float(x) for x in range(0, 16)]
+    xs = [float(x) for x in range(16)]
     X = np.array(xs)
 
     def ones(v):
@@ -915,7 +914,7 @@ def test_fma_cases_python_matches_rs(case):
         "qt": nm.qt,
         "dnorm": nm.dnorm5,
     }
-    name, fn, arrays, flags = case
+    _name, fn, arrays, flags = case
     got_rs = np.asarray(getattr(rs, fn)(*arrays, *flags))
     got_py = np.array(
         [py_fn[fn](*(float(v) for v in args), *flags) for args in zip(*arrays)]
@@ -936,9 +935,9 @@ def test_fma_cases_python_matches_rs(case):
 # rank + pivot must match R EXACTLY (the whole point of porting dqrdc2: a
 # deterministic, R-faithful rank/pivot, immune to BLAS-bistable flakes).
 # ---------------------------------------------------------------------------
-import subprocess  # noqa: E402
+import subprocess
 
-from hea.R import linalg  # noqa: E402
+from hea.R import linalg
 
 _DQRLS_R = r"""
 args <- commandArgs(trailingOnly=TRUE)
@@ -1009,7 +1008,9 @@ def test_dqrls_3way_parity(name, tmp_path):
     within a BLAS tolerance)."""
     x, y = _dqrls_cases()[name]
     rust = linalg.Cdqrls(x, y)  # Rust active path
-    qr, coef, rsd, qty, k, jpvt, qraux = linalg.dqrls(x.copy(), y)  # pure-Python oracle
+    _qr, coef, rsd, qty, k, jpvt, _qraux = linalg.dqrls(
+        x.copy(), y
+    )  # pure-Python oracle
     R = _r_lmfit(x, y, tmp_path)
 
     # rank + pivot: EXACT, all three
@@ -1038,14 +1039,14 @@ def test_dqrls_3way_parity(name, tmp_path):
 # the common `s(x)`; d=2 exercises the even-d log branch, d=3 the odd-d √ branch
 # + the degree-2 polynomial null space (powi vs `**`). Sizes ≥256 hit rayon.
 # ---------------------------------------------------------------------------
-from hea.formula import (  # noqa: E402
+from hea.formula import (
     _tp_eta_const,
     _tp_fast_eta_vec,
     _tp_gen_poly_powers,
     _tp_null_space_dim,
     _tp_T,
 )
-from hea.R._shared import _rfma, _rfma_vec  # noqa: E402
+from hea.R._shared import _rfma, _rfma_vec
 
 
 def _rsq_rfma(diff):
@@ -1221,14 +1222,14 @@ def test_coxlpl_kernel_parity(deriv):
 # Not 0-ulp (different QR — TSQR vs LAPACK), but every returned quantity (β, the
 # Cholesky factor of X'WX+Sλ, log|X'WX+Sλ|) is QR-convention-invariant so they
 # agree to the BLAS floor on well-conditioned problems.
-from scipy.linalg import solve_triangular  # noqa: E402
+from scipy.linalg import solve_triangular
 
 
 def _pls_oracle(X, w, E, z=None, Xtwz=None):
     neg = w < 0.0
     sqw = np.sqrt(np.abs(w))
     aug = np.vstack([X * sqw[:, None], E])
-    Q, R = np.linalg.qr(aug)
+    _Q, R = np.linalg.qr(aug)
     diag = np.diag(R)
     XWz = Xtwz if Xtwz is not None else X.T @ (w * z)
     if not neg.any():
@@ -1292,8 +1293,8 @@ def test_pls_fit1_xtwz_mode_parity():
     E = np.asfortranarray(rng.standard_normal((p, p)) * 0.5)
     wz = rng.standard_normal(n)
     Xtwz = np.asarray(X).T @ wz
-    b0, R0, ld0 = _pls_oracle(np.asarray(X), w, np.asarray(E), Xtwz=Xtwz)
-    ok, beta, R, ld = rs.pls_fit1(X, w, E, np.empty(0), Xtwz, True)
+    b0, _R0, ld0 = _pls_oracle(np.asarray(X), w, np.asarray(E), Xtwz=Xtwz)
+    ok, beta, _R, ld = rs.pls_fit1(X, w, E, np.empty(0), Xtwz, True)
     assert ok
     np.testing.assert_allclose(beta, b0, rtol=0, atol=1e-9)
     np.testing.assert_allclose(ld, ld0, rtol=0, atol=1e-9)
@@ -1452,7 +1453,7 @@ def test_gamlss_xwx_row_col_consistent():
 # `_tweedie_log_a_vec` forced off) — not 0-ulp, the sweep reduces in a
 # different order + uses `rfma` for the wp1²+wp2 combine; (2) the whole
 # `_ld_tweedie_work` vs LIVE R `ldTweedie` (the new R arm).
-import hea.family as _fam  # noqa: E402
+import hea.family as _fam
 
 
 @pytest.mark.parametrize("p", [1.05, 1.1, 1.5, 1.93, 1.99])
@@ -1552,7 +1553,7 @@ def test_tweedie_ldwork_matches_r(theta, rho):
 
 
 # --- psigamma (R dpsifn) — rust vs the pure-Python oracle --------------------
-from hea.R import nmath as _nmath  # noqa: E402
+from hea.R import nmath as _nmath
 
 
 @pytest.mark.parametrize("deriv", [0, 1, 2, 3])
@@ -1613,6 +1614,7 @@ def test_xwx_smooth_block_parity():
     if _bam._rs_xwx_smooth_block is None:
         pytest.skip("hea._rs.xwx_smooth_block unavailable")
     import polars as pl
+
     from hea.family import Poisson
 
     rng = np.random.default_rng(0)
@@ -1649,6 +1651,7 @@ def test_xwx_smooth_block_largep_indreduce_parity():
     if _bam._rs_xwx_smooth_block is None:
         pytest.skip("hea._rs.xwx_smooth_block unavailable")
     import polars as pl
+
     from hea.family import Gaussian
 
     rng = np.random.default_rng(5)
@@ -1724,6 +1727,7 @@ def test_xwx_smooth_block_ar1_tri_parity():
     if _bam._rs_xwx_smooth_block is None:
         pytest.skip("hea._rs.xwx_smooth_block unavailable")
     import polars as pl
+
     from hea.family import Gaussian
     from hea.models.bam import _ar1_rwmatrix_indices
 

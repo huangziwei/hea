@@ -11,9 +11,7 @@ import datetime as _dt
 import polars as pl
 import pytest
 
-from hea.tidy import DataFrame, col
-from hea.tidy import between, closest, join_by, overlaps, within
-
+from hea.tidy import DataFrame, between, closest, col, join_by, overlaps, within
 
 # ---------------------------------------------------------------------------
 # Fixtures — small frames that mirror the chapter's shapes (carrier/airline,

@@ -109,7 +109,7 @@ _ATTRS = {
     "session_info": ".session_info",
 }
 
-__all__ = sorted(_SUBMODULES | _POLARS | set(_ATTRS))
+__all__ = sorted(_SUBMODULES | _POLARS | set(_ATTRS))  # noqa: PLE0605 - derived from the module registries, not a literal
 
 
 def __getattr__(name: str):

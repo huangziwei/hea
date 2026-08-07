@@ -10,9 +10,9 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 import pytest
+from conftest import FIXTURE_ROOT, fixture_meta, fixtures_by_kind, load_dataset
 from scipy.io import mmread
 
-from conftest import FIXTURE_ROOT, fixture_meta, fixtures_by_kind, load_dataset
 from hea.formula import expand, materialize_bars, parse
 
 LME4_FIXTURES = fixtures_by_kind("lme4")

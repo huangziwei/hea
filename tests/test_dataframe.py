@@ -11,10 +11,8 @@ import polars as pl
 import pytest
 
 import hea
-from hea.tidy import DataFrame
 from hea.R import factor
-from hea.tidy import GroupBy, desc, drop, tbl
-
+from hea.tidy import DataFrame, GroupBy, desc, drop, tbl
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -114,6 +112,7 @@ def test_desc_negates_list():
     """``desc()`` on values mirrors dplyr's ``-xtfrm(x)`` — used in
     composable forms like ``min_rank(desc(x))``."""
     import numpy as np
+
     from hea.tidy import min_rank
 
     out = desc([1, 5, 5, 17, 22, None])

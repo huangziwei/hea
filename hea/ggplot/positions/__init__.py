@@ -7,7 +7,6 @@ from .nudge import PositionNudge, position_nudge
 from .position import Position
 from .stack import PositionFill, PositionStack, position_fill, position_stack
 
-
 _NAME_TO_CLASS = {
     "identity": PositionIdentity,
     "jitter": PositionJitter,
@@ -42,19 +41,19 @@ def resolve_position(p) -> Position:
 
 __all__ = [
     "Position",
+    "PositionDodge",
+    "PositionDodge2",
+    "PositionFill",
     "PositionIdentity",
     "PositionJitter",
     "PositionNudge",
-    "PositionDodge",
-    "PositionDodge2",
     "PositionStack",
-    "PositionFill",
+    "position_dodge",
+    "position_dodge2",
+    "position_fill",
     "position_identity",
     "position_jitter",
     "position_nudge",
-    "position_dodge",
-    "position_dodge2",
     "position_stack",
-    "position_fill",
     "resolve_position",
 ]

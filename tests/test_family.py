@@ -46,7 +46,6 @@ from hea.family import (
     tw,
 )
 
-
 MUS = np.array([0.05, 0.2, 0.5, 0.8, 0.95])
 ETAS = np.array([-2.5, -0.5, 0.0, 0.7, 2.0])
 
@@ -1137,7 +1136,7 @@ def test_scat_dd_level2():
 
 @_scat_unit_skip
 def test_scat_ls_extended():
-    y, mu, wt, theta = _scat_load_inputs()
+    y, _mu, wt, theta = _scat_load_inputs()
     s = _scat_unit()
     ls = s.ls_extended(y, wt, theta=theta, scale=1.0)
     summary = np.atleast_1d(np.loadtxt(_SCAT_UNIT / "ls_summary.csv"))
@@ -1226,6 +1225,7 @@ def test_tw_ls_extended_lsth2_matches_mgcv():
 
     sys.path.insert(0, str(Path(__file__).parent))
     from test_gam import _mixed_sp_fixture
+
     from hea.family import tw
 
     y = _mixed_sp_fixture()["ytw2"].to_numpy()
@@ -1668,6 +1668,7 @@ def test_gaulss_ll_matches_mgcv_oracle():
     # ∂H/∂ρ list, and trHid2H through the preconditioned-Cholesky fh/D
     # convention gam.fit5 uses.
     from scipy.linalg import cholesky
+
     from hea.family import gaulss
 
     X, y, coef, d1b, d2b, lpi = _gaulss_oracle_inputs()
@@ -1813,6 +1814,7 @@ def test_gammals_ll_matches_mgcv_oracle():
     # Every gammals()$ll output at deriv 1/2/3/4, pinned to the live
     # R values (Rscript: gammals()$ll on the set.seed(21) inputs above).
     from scipy.linalg import cholesky
+
     from hea.family import gammals
 
     X, y, coef, d1b, d2b, lpi = _gammals_oracle_inputs()
@@ -1911,9 +1913,9 @@ def test_gammals_ll_derivatives_match_fd():
 
 
 def test_gammals_initialize_residuals_and_link():
-    from hea.family import gammals, BoundedLogLink
+    from hea.family import BoundedLogLink, gammals
 
-    X, y, coef, _, _, lpi = _gammals_oracle_inputs()
+    X, y, _coef, _, _, lpi = _gammals_oracle_inputs()
     fam = gammals()
     start = fam.initialize_coef(y, X, lpi)
     assert start.shape == (4,) and np.all(np.isfinite(start))
@@ -1972,6 +1974,7 @@ def _gumbls_oracle_inputs():
 
 def test_gumbls_ll_matches_mgcv_oracle():
     from scipy.linalg import cholesky
+
     from hea.family import gumbls
 
     X, y, coef, d1b, d2b, lpi = _gumbls_oracle_inputs()
@@ -2110,6 +2113,7 @@ def test_gevlss_ll_matches_mgcv_oracle():
     # gevlss()$ll at deriv 1/2/3/4 vs live R (set.seed(31) inputs;
     # Hp = −lbb + 5·I keeps the off-optimum penalized Hessian PD).
     from scipy.linalg import cholesky
+
     from hea.family import gevlss
 
     X, y, coef, d1b, d2b, lpi = _gevlss_oracle_inputs()
@@ -2199,7 +2203,7 @@ def test_gevlss_ll_derivatives_match_fd():
 
 
 def test_gevlss_link_residuals_and_validation():
-    from hea.family import gevlss, ShiftedLogitLink
+    from hea.family import ShiftedLogitLink, gevlss
 
     # shifted-logit confines ξ to (−1, 0.5) and round-trips.
     lk = ShiftedLogitLink()
@@ -2308,6 +2312,7 @@ def _cox_oracle_inputs():
 def test_cox_ph_ll_matches_mgcv_oracle():
     # cox.ph()$ll at every engine deriv level (= C deriv 0..3) vs live R.
     from scipy.linalg import cholesky
+
     from hea.family import cox_ph
 
     time, d, X, beta, d1b, d2b = _cox_oracle_inputs()
@@ -2569,6 +2574,7 @@ def test_ziplss_ll_matches_mgcv_oracle():
     # Every ziplss()$ll output at deriv 1/2/3/4, pinned to the live R
     # values (Rscript: ziplss()$ll on the set.seed(27) inputs above).
     from scipy.linalg import cholesky
+
     from hea.family import ziplss
 
     X, y, coef, d1b, d2b, lpi = _ziplss_oracle_inputs()
@@ -2668,7 +2674,7 @@ def test_ziplss_ll_derivatives_match_fd():
 
 
 def test_ziplss_helpers_initialize_and_validation():
-    from hea.family import ziplss, _l1ee, _lee1, _ldg, _lde, _zipll, _ziplss_ls
+    from hea.family import _l1ee, _lde, _ldg, _lee1, _zipll, _ziplss_ls, ziplss
 
     # robustified scalar helpers, incl. the tail branches the moderate-eta
     # oracle never reaches (R: mgcv:::l1ee/lee1/ldg/lde).
@@ -2712,7 +2718,7 @@ def test_ziplss_helpers_initialize_and_validation():
     )
 
     fam = ziplss()
-    X, y, coef, _, _, lpi = _ziplss_oracle_inputs()
+    X, y, _coef, _, _, lpi = _ziplss_oracle_inputs()
     start = fam.initialize_coef(y, X, lpi)
     assert start.shape == (4,) and np.all(np.isfinite(start))
 
@@ -2796,33 +2802,34 @@ def _multinom_oracle_inputs(K, seed):
 
 # live multinom(K)$ll references (Rscript, mgcv 1.9-4) at the inputs above.
 _MULTINOM_ORACLE = {
-    (2, 41): dict(
-        l=-38.0695935472,
-        lb_sumabs=9.2002046302,
-        lbb_sumabs=75.4481988693,
-        lbb00=-11.5076064746,
-        d1H_sumabs=0.8726944587,
-        d1H0mat_sumabs=15.8743078433,
-        trHid2H=[0.0018660042, -0.3379211462, 0.0702141514],
-        lb=[-1.7610060440, 1.3832675257, 3.4277307608, 2.6282002998],
-        lbb02=5.4228156488,
-        lbb22=-9.4456506089,
-    ),
-    (4, 43): dict(
-        l=-100.8787924997,
-        lb_sumabs=43.6795492702,
-        lbb_sumabs=167.9531090628,
-        lbb00=-12.3369275107,
-        d1H_sumabs=0.5315310582,
-        d1H0mat_sumabs=50.9607930529,
-        trHid2H=[0.4880585105, -0.0145410370, 0.8359873276],
-    ),
+    (2, 41): {
+        "l": -38.0695935472,
+        "lb_sumabs": 9.2002046302,
+        "lbb_sumabs": 75.4481988693,
+        "lbb00": -11.5076064746,
+        "d1H_sumabs": 0.8726944587,
+        "d1H0mat_sumabs": 15.8743078433,
+        "trHid2H": [0.0018660042, -0.3379211462, 0.0702141514],
+        "lb": [-1.7610060440, 1.3832675257, 3.4277307608, 2.6282002998],
+        "lbb02": 5.4228156488,
+        "lbb22": -9.4456506089,
+    },
+    (4, 43): {
+        "l": -100.8787924997,
+        "lb_sumabs": 43.6795492702,
+        "lbb_sumabs": 167.9531090628,
+        "lbb00": -12.3369275107,
+        "d1H_sumabs": 0.5315310582,
+        "d1H0mat_sumabs": 50.9607930529,
+        "trHid2H": [0.4880585105, -0.0145410370, 0.8359873276],
+    },
 }
 
 
 @pytest.mark.parametrize("K,seed", [(2, 41), (4, 43)])
 def test_multinom_ll_matches_mgcv_oracle(K, seed):
     from scipy.linalg import cholesky
+
     from hea.family import multinom
 
     X, y, coef, d1b, d2b, lpi = _multinom_oracle_inputs(K, seed)
@@ -2904,7 +2911,7 @@ def test_multinom_ll_derivatives_match_fd(K, seed):
 def test_multinom_components_and_validation():
     from hea.family import multinom
 
-    X, y, coef, _, _, lpi = _multinom_oracle_inputs(2, 41)
+    X, y, _coef, _, _, lpi = _multinom_oracle_inputs(2, 41)
     fam = multinom(2)
     assert fam.n_lp == 2 and fam.is_general and fam.available_derivs == 2
     start = fam.initialize_coef(y, X, lpi)
@@ -4188,7 +4195,7 @@ def test_shash_hooks_match_mgcv():
     # parameter matrix implied by the oracle coefficients.
     from hea.family import shash
 
-    y, X, lpi, coef, _, _ = _shash_oracle_inputs()
+    y, X, _lpi, coef, _, _ = _shash_oracle_inputs()
     fam = shash()
     F = np.column_stack(
         [
@@ -4277,12 +4284,12 @@ def _mvn_oracle_inputs(m, n, pv, seed, beta):
 
 # live mvn(d)$ll references (Rscript, mgcv 1.9-4) at the inputs above.
 _MVN_ORACLE = {
-    (2, 101): dict(
-        beta=[0.4, -0.3, 0.2, 0.5, 0.15, 0.1, -0.2, -0.05],
-        n=12,
-        pv=(3, 2),
-        l=-15.7256094975,
-        lb=[
+    (2, 101): {
+        "beta": [0.4, -0.3, 0.2, 0.5, 0.15, 0.1, -0.2, -0.05],
+        "n": 12,
+        "pv": (3, 2),
+        "l": -15.7256094975,
+        "lb": [
             -4.9632116233,
             2.4997313471,
             1.3787612378,
@@ -4292,9 +4299,9 @@ _MVN_ORACLE = {
             -0.2294738282,
             -2.4429914298,
         ],
-        lbb_sum=-191.5095845216,
-        lbb_fro=67.3135835142,
-        lbb_diag=[
+        "lbb_sum": -191.5095845216,
+        "lbb_fro": 67.3135835142,
+        "lbb_diag": [
             -14.6568330979,
             -5.5978210354,
             -15.4202009864,
@@ -4304,14 +4311,14 @@ _MVN_ORACLE = {
             -15.9619740982,
             -28.8859828595,
         ],
-        d1Htr=[-26.7424444768, -3.3268032864],
-        d1H0_fro=139.9866331557,
-        d1H1_fro=118.8887931462,
-        d1H0_sum=238.6527021845,
-        d1H1_sum=187.9967632078,
-    ),
-    (3, 103): dict(
-        beta=[
+        "d1Htr": [-26.7424444768, -3.3268032864],
+        "d1H0_fro": 139.9866331557,
+        "d1H1_fro": 118.8887931462,
+        "d1H0_sum": 238.6527021845,
+        "d1H1_sum": 187.9967632078,
+    },
+    (3, 103): {
+        "beta": [
             0.3,
             -0.2,
             0.4,
@@ -4326,10 +4333,10 @@ _MVN_ORACLE = {
             0.08,
             -0.04,
         ],
-        n=14,
-        pv=(2, 3, 2),
-        l=-21.8485684831,
-        lb=[
+        "n": 14,
+        "pv": (2, 3, 2),
+        "l": -21.8485684831,
+        "lb": [
             -2.7005117456,
             -5.4481415192,
             -1.7222714051,
@@ -4344,9 +4351,9 @@ _MVN_ORACLE = {
             -1.5259774175,
             -3.3607073011,
         ],
-        lbb_sum=-314.4691803182,
-        lbb_fro=77.6586394144,
-        lbb_diag=[
+        "lbb_sum": -314.4691803182,
+        "lbb_fro": 77.6586394144,
+        "lbb_diag": [
             -15.4723928531,
             -18.2212267690,
             -14.1400000000,
@@ -4361,12 +4368,12 @@ _MVN_ORACLE = {
             -18.8066297050,
             -34.7214146023,
         ],
-        d1Htr=[2.4098222737, -4.4527135016],
-        d1H0_fro=174.1301225815,
-        d1H1_fro=105.8376694333,
-        d1H0_sum=151.3467988839,
-        d1H1_sum=-153.5943517839,
-    ),
+        "d1Htr": [2.4098222737, -4.4527135016],
+        "d1H0_fro": 174.1301225815,
+        "d1H1_fro": 105.8376694333,
+        "d1H0_sum": 151.3467988839,
+        "d1H1_sum": -153.5943517839,
+    },
 }
 
 
@@ -4427,7 +4434,9 @@ def test_mvn_ll_derivatives_match_fd(m, seed):
     from hea.family import mvn
 
     ref = _MVN_ORACLE[(m, seed)]
-    X, Y, beta, lpi, d1b = _mvn_oracle_inputs(m, ref["n"], ref["pv"], seed, ref["beta"])
+    X, Y, beta, lpi, _d1b = _mvn_oracle_inputs(
+        m, ref["n"], ref["pv"], seed, ref["beta"]
+    )
     fam = mvn(d=m)
     r1 = fam.ll(Y, X, beta, lpi=lpi, deriv=1)
     h = 1e-6
@@ -4703,8 +4712,8 @@ def test_betar_components_match_mgcv():
     y, mu, wt = _betar_dd_inputs()
     D = fam.Dd(y, mu, th, wt, level=2)
     # live betar(theta=8)$Dd references (Rscript, mgcv 1.9-4).
-    ref = dict(
-        Dmu=[
+    ref = {
+        "Dmu": [
             34.2887061086,
             -42.2888136009,
             -7.2280831059,
@@ -4715,7 +4724,7 @@ def test_betar_components_match_mgcv():
             25.0824892008,
             12.7764533599,
         ],
-        Dmu2=[
+        "Dmu2": [
             77.7453285973,
             167.5795893924,
             95.5390226276,
@@ -4726,7 +4735,7 @@ def test_betar_components_match_mgcv():
             76.3881169600,
             79.0007145291,
         ],
-        Dth=[
+        "Dth": [
             7.0207781840,
             7.1218338511,
             -0.9256218382,
@@ -4737,7 +4746,7 @@ def test_betar_components_match_mgcv():
             3.3601482647,
             -0.0420342682,
         ],
-        Dmu3=[
+        "Dmu3": [
             95.4725129451,
             -1230.3954193622,
             -273.1248071677,
@@ -4748,7 +4757,7 @@ def test_betar_components_match_mgcv():
             79.6729211303,
             109.1267089537,
         ],
-        Dmu2th2=[
+        "Dmu2th2": [
             68.2749537031,
             123.1224623633,
             80.5672546417,
@@ -4759,7 +4768,7 @@ def test_betar_components_match_mgcv():
             67.3017228061,
             69.1704603378,
         ],
-        Dmu3th=[
+        "Dmu3th": [
             60.5529734155,
             -470.2984365066,
             -154.3149409500,
@@ -4770,7 +4779,7 @@ def test_betar_components_match_mgcv():
             50.9977946726,
             68.6314414742,
         ],
-    )
+    }
     for nm, val in ref.items():
         np.testing.assert_allclose(D[nm], val, rtol=0, atol=1e-8)
     # EDmu2 ≡ Dmu2 (observed = expected here); Dmu2th ≡ EDmu2th.
@@ -5962,8 +5971,9 @@ def test_cnorm_components_match_mgcv():
 
 
 def test_cnorm_Dd_matches_fd():
-    from hea.family import cnorm, _cnorm_dpnorm
     from scipy.special import log_ndtr
+
+    from hea.family import _cnorm_dpnorm, cnorm
 
     y, yat, mu, wt = _cnorm_dd_inputs()
     th0 = 0.3
@@ -6204,7 +6214,7 @@ def test_cpois_components_match_mgcv():
 
 
 def test_cpois_Dd_matches_fd():
-    from hea.family import cpois, _cpois_dev_resids
+    from hea.family import _cpois_dev_resids, cpois
 
     y, yat, mu, wt = _cpois_dd_inputs()
     fam = cpois()
@@ -7187,7 +7197,7 @@ def test_gfam_construction_and_validation():
 
 
 def test_softplus_link_math():
-    from hea.family import SoftplusLink, BoundedLogLink, _resolve_link
+    from hea.family import BoundedLogLink, SoftplusLink, _resolve_link
 
     L = SoftplusLink()
     assert L.name == "softplus"
@@ -7237,9 +7247,9 @@ def test_softplus_poisson_glm_matches_mgcv():
     link-glm fit (``glm(y~x+z, poisson(link=softplus))``), mgcv-independent —
     R 4.x glm IRLS. The reusable R link lives in
     ``tests/r_oracle/softplus_link.R``. Data: softplus is the true link."""
-    from hea.R.rng import RGenerator
     from hea.family import SoftplusLink
     from hea.models import glm
+    from hea.R.rng import RGenerator
 
     g = RGenerator(7)
     n = 300

@@ -19,22 +19,22 @@ def pdf(file=None, height=None, width=None, **kwargs):
     The translated script still runs every subsequent plotting call;
     you just won't get a PDF on disk. Pair with :func:`dev_off`.
     """
-    return None
+    return
 
 
 def dev_off(*args, **kwargs):
     """R: close the current graphics device. Stub — no-op."""
-    return None
+    return
 
 
 def image(*args, **kwargs):
     """R: ``image(matrix)`` — heatmap-style render of a matrix. Stub."""
-    return None
+    return
 
 
 def stripchart(*args, **kwargs):
     """R: 1-D scatter by group. Stub — no plot is drawn."""
-    return None
+    return
 
 
 def gray(level):
@@ -46,5 +46,5 @@ def gray(level):
     if hasattr(level, "__iter__"):
         return [gray(v) for v in level]
     v = max(0.0, min(1.0, float(level)))
-    byte = int(round(v * 255))
+    byte = round(v * 255)
     return f"#{byte:02x}{byte:02x}{byte:02x}"

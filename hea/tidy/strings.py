@@ -15,7 +15,6 @@ import textwrap
 import numpy as np
 import polars as pl
 
-
 # ---- readr parsers --------------------------------------------------
 
 
@@ -351,9 +350,8 @@ def str_equal(x, y, locale=None, ignore_case=False):
     """stringr: ``str_equal(x, y)`` — element-wise equality with optional
     case-folding. NFC normalization is NOT applied (Python doesn't have
     it built-in); pass pre-normalized inputs if you need it."""
-    if ignore_case:
-        if isinstance(x, str) and isinstance(y, str):
-            return x.casefold() == y.casefold()
+    if ignore_case and isinstance(x, str) and isinstance(y, str):
+        return x.casefold() == y.casefold()
     return x == y
 
 

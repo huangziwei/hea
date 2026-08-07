@@ -37,6 +37,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
+
 from . import distributions as _dist
 
 
@@ -231,7 +232,7 @@ def _reference_grid(model, target: str, levels: list) -> np.ndarray:
     X = model.X.to_numpy().astype(float)
 
     target_cols = [
-        (j, col_names[j][len(target) :])
+        (j, name[len(target) :])
         for j, name in enumerate(col_names)
         if name.startswith(target) and name != target and name != "(Intercept)"
     ]
@@ -391,4 +392,4 @@ def _infer_k_levels(n_contrasts: int) -> int:
     """
     # Solve k(k-1)/2 = n → k = (1 + sqrt(1 + 8n)) / 2.
     k = (1 + np.sqrt(1 + 8 * n_contrasts)) / 2
-    return int(round(k))
+    return round(k)

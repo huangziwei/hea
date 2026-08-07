@@ -19,7 +19,6 @@ import sys
 
 import numpy as np
 import pytest
-
 from conftest import have_rscript
 
 from hea.R.distance import (

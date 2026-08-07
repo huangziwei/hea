@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 
 import polars as pl
 
-from .scale import Scale, _NAME_MISSING
+from .scale import _NAME_MISSING, Scale
 
 
 @dataclass
@@ -171,9 +171,13 @@ class ScaleOrdinal(Scale):
 def scale_x_ordinal(
     *, name=_NAME_MISSING, breaks="default", labels="default", limits=None, expand=None
 ):
-    kwargs = dict(
-        aesthetics=("x",), name=name, breaks=breaks, labels=labels, limits=limits
-    )
+    kwargs = {
+        "aesthetics": ("x",),
+        "name": name,
+        "breaks": breaks,
+        "labels": labels,
+        "limits": limits,
+    }
     if expand is not None:
         kwargs["expand"] = expand
     return ScaleOrdinal(**kwargs)
@@ -182,9 +186,13 @@ def scale_x_ordinal(
 def scale_y_ordinal(
     *, name=_NAME_MISSING, breaks="default", labels="default", limits=None, expand=None
 ):
-    kwargs = dict(
-        aesthetics=("y",), name=name, breaks=breaks, labels=labels, limits=limits
-    )
+    kwargs = {
+        "aesthetics": ("y",),
+        "name": name,
+        "breaks": breaks,
+        "labels": labels,
+        "limits": limits,
+    }
     if expand is not None:
         kwargs["expand"] = expand
     return ScaleOrdinal(**kwargs)

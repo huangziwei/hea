@@ -95,16 +95,14 @@ def boxplot_by(
     ax = resolve_ax(ax)
 
     if isinstance(group, pl.Series):
-        if group.dtype == pl.Enum:
-            levels = group.cat.get_categories().to_list()
-        elif group.dtype == pl.Categorical:
+        if group.dtype == pl.Enum or group.dtype == pl.Categorical:
             levels = group.cat.get_categories().to_list()
         else:
             levels = sorted(group.drop_nulls().unique().to_list())
         g_arr = group.to_numpy()
     else:
         g_arr = np.asarray(group)
-        levels = sorted(set(x for x in g_arr.tolist() if x is not None))
+        levels = sorted({x for x in g_arr.tolist() if x is not None})
 
     if isinstance(y, pl.Series):
         y_arr = y.cast(pl.Float64).to_numpy()

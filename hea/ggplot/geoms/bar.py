@@ -20,7 +20,6 @@ import numpy as np
 from ..aes import split_layer_kwargs
 from .geom import Geom
 
-
 # ggplot2 ``size`` is in mm. matplotlib's ``linewidth`` is in pt
 # (TeX convention: 72.27 pt/inch, 25.4 mm/inch).
 _PT_PER_MM = 72.27 / 25.4
@@ -162,9 +161,7 @@ def _row_colour(df, col, *, when_all_none, when_missing):
     def _is_na(v):
         if v is None:
             return True
-        if isinstance(v, float) and np.isnan(v):
-            return True
-        return False
+        return bool(isinstance(v, float) and np.isnan(v))
 
     if all(_is_na(v) for v in vals):
         return when_all_none if when_all_none == "none" else r_color(when_all_none)

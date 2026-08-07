@@ -14,7 +14,6 @@ import polars as pl
 from ..aes import split_layer_kwargs
 from .stat import Stat
 
-
 _GROUP_KEYS = ("x", "y", "group", "colour", "fill", "shape", "linetype")
 
 

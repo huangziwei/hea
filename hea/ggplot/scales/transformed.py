@@ -47,7 +47,7 @@ class Trans:
         """Pre-transform-on-data approach means the matplotlib axis stays
         linear; subclasses no longer need to return a scale name. Kept
         for any caller that still inspects this."""
-        return None
+        return
 
     def reversed(self) -> bool:
         """True if the axis should display high-to-low (e.g. ``ReverseTrans``)."""
@@ -57,7 +57,7 @@ class Trans:
         """Return ``(positions, labels)`` for nice ticks across the
         *transformed* range ``[lo, hi]``. Default: defer (returns ``None``)
         so the scale's linear tick logic runs."""
-        return None
+        return
 
 
 class IdentityTrans(Trans):
@@ -127,8 +127,8 @@ class SqrtTrans(Trans):
         # See note on ``Log10Trans.matplotlib_scale``. ``coord_trans``
         # uses matplotlib's FuncScale; data is unmodified at the stat
         # layer (display-only transform).
-        forward = lambda x: np.sqrt(np.maximum(x, 0))  # noqa: E731
-        inverse = lambda x: x**2  # noqa: E731
+        forward = lambda x: np.sqrt(np.maximum(x, 0))
+        inverse = lambda x: x**2
         return ("function", {"functions": (forward, inverse)})
 
     def tick_positions_and_labels(self, lo: float, hi: float):
@@ -223,10 +223,10 @@ def _format_log_tick(value: float) -> str:
     abs_v = abs(value)
     if abs_v >= 10000 or (0 < abs_v < 0.01):
         # Use 10^k notation rendered via mathtext.
-        exp = int(round(np.log10(abs_v)))
+        exp = round(np.log10(abs_v))
         return f"$10^{{{exp}}}$"
     if abs_v >= 1:
-        return f"{int(round(value))}"
+        return f"{round(value)}"
     # Sub-unit but not tiny: drop trailing zeros.
     s = f"{value:.6f}".rstrip("0").rstrip(".")
     return s

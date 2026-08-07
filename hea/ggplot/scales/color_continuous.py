@@ -22,7 +22,7 @@ from ._palettes import (
     gradientn_pal,
     viridis_pal,
 )
-from .scale import Scale, _NAME_MISSING
+from .scale import _NAME_MISSING, Scale
 
 
 @dataclass

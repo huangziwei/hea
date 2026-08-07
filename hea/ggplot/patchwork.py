@@ -93,7 +93,7 @@ class PlotGrid:
     widths: list | None = None
     heights: list | None = None
     # Top-level title/subtitle/caption + per-leaf tags via plot_annotation().
-    annotation: "PlotAnnotation | None" = None
+    annotation: PlotAnnotation | None = None
     # ``"collect"`` deduplicates legends across leaf plots (by aes_source +
     # levels + key glyph) and renders one merged legend. ``None`` / ``"keep"``
     # keep per-plot legends. Set via ``plot_layout(guides=...)``.
@@ -185,7 +185,7 @@ class PlotGrid:
             guides=self.guides,
         )
 
-    def _with_layout(self, layout: "PlotLayout") -> "PlotGrid":
+    def _with_layout(self, layout: PlotLayout) -> PlotGrid:
         """Return a copy with layout fields overridden by ``layout`` (only
         non-None fields take effect)."""
         return PlotGrid(
@@ -200,7 +200,7 @@ class PlotGrid:
             guides=layout.guides if layout.guides is not None else self.guides,
         )
 
-    def _with_annotation(self, annotation: "PlotAnnotation") -> "PlotGrid":
+    def _with_annotation(self, annotation: PlotAnnotation) -> PlotGrid:
         """Return a copy with the annotation slot replaced. patchwork's
         last-`plot_annotation()`-wins semantics fall out of replacing rather
         than merging."""
@@ -216,7 +216,7 @@ class PlotGrid:
             guides=self.guides,
         )
 
-    def _apply_to_last_plot(self, thing) -> "PlotGrid":
+    def _apply_to_last_plot(self, thing) -> PlotGrid:
         """Apply ``thing`` (a Theme/Layer/Scale/Labels/...) to the rightmost
         leaf plot in the tree — patchwork's `+`-on-grid behaviour. Skips
         :class:`GuideArea` placeholders so a trailing ``guide_area()``
@@ -274,8 +274,8 @@ class PlotGrid:
         if nrow is None and ncol is None:
             return _wrap_dims(n)
         if ncol is None:
-            return (nrow, int(ceil(n / nrow)))
-        return (int(ceil(n / ncol)), ncol)
+            return (nrow, ceil(n / nrow))
+        return (ceil(n / ncol), ncol)
 
     def _cell_for(self, idx: int) -> tuple[int, int]:
         nrow, ncol = self._dims()
@@ -345,7 +345,7 @@ class PlotGrid:
                 out.append(c)
         return out
 
-    def find_guide_area(self) -> "GuideArea | None":
+    def find_guide_area(self) -> GuideArea | None:
         """First :class:`GuideArea` in depth-first order, or ``None``.
         Used by the renderer to pick the slot for the merged legend when
         ``guides="collect"``."""
@@ -364,11 +364,11 @@ class PlotGrid:
         self.draw(width=width, height=height, units=units, figsize=figsize)
         plt.show()
 
-    def plot_layout(self, **kwargs) -> "PlotGrid":
+    def plot_layout(self, **kwargs) -> PlotGrid:
         """Fluent equivalent of ``grid + plot_layout(...)``."""
         return self + plot_layout(**kwargs)
 
-    def plot_annotation(self, **kwargs) -> "PlotGrid":
+    def plot_annotation(self, **kwargs) -> PlotGrid:
         """Fluent equivalent of ``grid + plot_annotation(...)``."""
         return self + plot_annotation(**kwargs)
 
@@ -625,7 +625,7 @@ def _wrap_dims(n: int) -> tuple[int, int]:
     from math import ceil as _ceil
     from math import sqrt as _sqrt
 
-    side = int(_ceil(_sqrt(n)))
+    side = _ceil(_sqrt(n))
     return (side, side)
 
 

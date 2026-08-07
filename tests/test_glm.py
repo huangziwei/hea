@@ -31,11 +31,10 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 import pytest
-
 from conftest import load_dataset, load_glm_oracle
+
 from hea.family import Binomial, Gamma, Gaussian, InverseGaussian, Poisson, Quasi
 from hea.models import glm
-
 
 # =============================================================================
 # 1. Oracle presence (every (family, link, dataset) triple in glm-port plan)

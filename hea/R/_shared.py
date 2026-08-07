@@ -17,10 +17,10 @@
 
 from __future__ import annotations
 
+import math
 
 import numpy as np
 import polars as pl
-
 
 # Moved to :mod:`hea._rfma` -- a leaf, so that consumers outside ``hea.R``
 # (``hea.formula``, ``hea.models.bam``) do not have to import this package to
@@ -93,7 +93,7 @@ class NamedVector:
             )
 
     @classmethod
-    def from_dict(cls, d: dict) -> "NamedVector":
+    def from_dict(cls, d: dict) -> NamedVector:
         """Build from a name→value mapping (preserves insertion order)."""
         return cls(list(d.keys()), list(d.values()))
 
@@ -221,7 +221,7 @@ class NamedVector:
 
 def _format_num(v: float, digits: int = 6) -> str:
     """Compact numeric format matching R's default `signif`-like output."""
-    if v != v:  # NaN
+    if math.isnan(v):
         return "NaN"
     if v == 0:
         return "0"

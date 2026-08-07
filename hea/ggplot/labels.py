@@ -19,7 +19,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-
 # Sentinel for "user didn't pass this kwarg." ``None`` itself is a valid
 # value meaning "explicitly suppress this label."
 _LABEL_MISSING: Any = object()

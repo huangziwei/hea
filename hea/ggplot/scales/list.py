@@ -217,7 +217,7 @@ class ScalesList:
 
         return None
 
-    def copy(self) -> "ScalesList":
+    def copy(self) -> ScalesList:
         """Independent copy — each ``draw()`` builds fresh scales so repeated
         builds don't accumulate state."""
         new = ScalesList()

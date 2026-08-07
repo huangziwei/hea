@@ -25,11 +25,10 @@ losses:
 from __future__ import annotations
 
 import ast as P
+import math
 import re
-from typing import Optional
 
 from . import _datasets
-
 from .nse import NSEContext, Slot
 from .registry.functions import FUNCTION_TABLE, KWARG_ALIASES
 from .registry.ggplot import is_chain_extension
@@ -343,7 +342,7 @@ class Translator:
             return self._emit_function_def(stmt)
         raise PyToRError(f"unsupported statement: {type(stmt).__name__}")
 
-    def _maybe_smart_data_assign(self, stmt: P.Assign) -> Optional[str]:
+    def _maybe_smart_data_assign(self, stmt: P.Assign) -> str | None:
         """Detect ``<X> = data("<X>", package="<pkg>")`` and reverse to
         ``data("<X>", package = "<pkg>")``.
 
@@ -375,13 +374,15 @@ class Translator:
         # Accept bare ``data(...)`` and ``hea.data(...)`` — both reverse
         # to the same R ``data()`` declaration.
         func = value.func
-        if isinstance(func, P.Name) and func.id == "data":
-            pass
-        elif (
-            isinstance(func, P.Attribute)
-            and isinstance(func.value, P.Name)
-            and func.value.id == "hea"
-            and func.attr == "data"
+        if (
+            isinstance(func, P.Name)
+            and func.id == "data"
+            or (
+                isinstance(func, P.Attribute)
+                and isinstance(func.value, P.Name)
+                and func.value.id == "hea"
+                and func.attr == "data"
+            )
         ):
             pass
         else:
@@ -512,7 +513,7 @@ class Translator:
         if isinstance(value, int):
             return str(value)
         if isinstance(value, float):
-            if value != value:  # NaN
+            if math.isnan(value):
                 return "NaN"
             if value == float("inf"):
                 return "Inf"
@@ -719,7 +720,7 @@ class Translator:
         args_text = self._emit_args(call.args, call.keywords)
         return f"({callee})({args_text})"
 
-    def _maybe_emit_method_form_helper(self, call: P.Call) -> Optional[str]:
+    def _maybe_emit_method_form_helper(self, call: P.Call) -> str | None:
         """If ``call`` is ``<expr>.method(args)`` where ``method`` is a
         registered method-form helper (e.g. ``col("x").mean()``), reverse
         to ``r_func(<expr>, args)``. Returns ``None`` if this pattern
@@ -849,7 +850,7 @@ class Translator:
 
     # ---- helper dispatch ------------------------------------------------
 
-    def _maybe_emit_helper(self, name: str, call: P.Call) -> Optional[str]:
+    def _maybe_emit_helper(self, name: str, call: P.Call) -> str | None:
         """If ``name`` is a known hea helper, emit the R-side version.
         Returns ``None`` if ``name`` isn't a registered helper.
 
@@ -976,15 +977,13 @@ class Translator:
                     continue
 
             # Default: dplyr pipe.
-            r_method, slot, auto = self._lookup_verb_method(method_name)
+            r_method, slot, _auto = self._lookup_verb_method(method_name)
             verb_args = self._emit_verb_args(args, kwargs, slot)
             current = f"{current} |>\n  {r_method}({verb_args})"
 
         return current
 
-    def _emit_slice_reverse(
-        self, current: str, args: list, kwargs: list
-    ) -> Optional[str]:
+    def _emit_slice_reverse(self, current: str, args: list, kwargs: list) -> str | None:
         """``df.slice(...)`` → R ``df |> slice(...)``, undoing the forward map.
 
         Keep positions shift 0→1-based (``[0, 2, 4]`` → ``c(1, 3, 5)``,
@@ -1028,7 +1027,7 @@ class Translator:
         return None
 
     @staticmethod
-    def _shift_up_positions(node: P.expr) -> Optional[str]:
+    def _shift_up_positions(node: P.expr) -> str | None:
         """0-based Python positions → R 1-based source, or ``None`` if not a
         statically shiftable literal."""
 
@@ -1123,7 +1122,7 @@ class Translator:
 
     def _kwarg_slot(self, py_name: str, parent: Slot) -> Slot:
         """Inverse of KWARG_ALIASES value_slot lookup."""
-        for r_name, alias in KWARG_ALIASES.items():
+        for alias in KWARG_ALIASES.values():
             if alias.py_name == py_name and alias.value_slot is not None:
                 return alias.value_slot
         return parent
@@ -1135,12 +1134,11 @@ class Translator:
             # c(name, name); other values pass through.
             if isinstance(value, P.Constant) and isinstance(value.value, str):
                 return value.value
-            if isinstance(value, P.List):
-                if all(
-                    isinstance(e, P.Constant) and isinstance(e.value, str)
-                    for e in value.elts
-                ):
-                    return "c(" + ", ".join(e.value for e in value.elts) + ")"
+            if isinstance(value, P.List) and all(
+                isinstance(e, P.Constant) and isinstance(e.value, str)
+                for e in value.elts
+            ):
+                return "c(" + ", ".join(e.value for e in value.elts) + ")"
             if isinstance(value, P.Dict):
                 # ``by={"a": "b"}`` → ``c("a" = "b")``.
                 parts = []
@@ -1244,7 +1242,7 @@ def _is_gaussian_family(value: P.expr) -> bool:
     return False
 
 
-def _strip_hea_prefix(func: P.expr) -> Optional[str]:
+def _strip_hea_prefix(func: P.expr) -> str | None:
     """If ``func`` is ``hea.X``, ``hea.<sub>.X``, or ``selectors.X``,
     return the bare ``X`` name. Otherwise return ``None``.
 

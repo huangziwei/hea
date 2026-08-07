@@ -410,7 +410,7 @@ def interaction_plot(
     show_line = type in ("l", "b", "o", "c")
     show_pts = type in ("p", "b", "o")
     for ti, tl in enumerate(t_levels):
-        ls = r_lty(((ti % 6) + 1)) if show_line else "None"
+        ls = r_lty((ti % 6) + 1) if show_line else "None"
         marker = "o" if show_pts else None
         ax.plot(
             x_pos, cells[ti], color="black", linestyle=ls, marker=marker, label=str(tl)

@@ -60,7 +60,6 @@ import math
 import platform
 import sys
 
-
 from ._shared import _rfma
 
 # Accelerate is R's BLAS only on macOS, and its n=4 pair tree was

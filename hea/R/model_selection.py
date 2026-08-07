@@ -21,14 +21,12 @@ import itertools
 
 import numpy as np
 import polars as pl
-from . import distributions as _dist
 
-from ._shared import _caller_names
 from ..formula import deparse
 from ..models.gam import gam
 from ..models.glm import glm
-from ..models.lm import lm
 from ..models.gmm import gmm
+from ..models.lm import lm
 from ..utils import (
     _dig_tst,
     format_df,
@@ -36,6 +34,8 @@ from ..utils import (
     format_signif,
     significance_code,
 )
+from . import distributions as _dist
+from ._shared import _caller_names
 
 
 def anova(

@@ -23,7 +23,6 @@ import numpy as np
 from ..aes import split_layer_kwargs
 from .geom import Geom
 
-
 _PT_PER_MM = 72.27 / 25.4
 
 
@@ -298,13 +297,13 @@ class GeomLabel(GeomText):
                 rotation=float(angle[i]),
                 ha=_hjust_to_ha(_resolve_just(hjust[i], x[i], x_range, axis="h")),
                 va=_vjust_to_va(_resolve_just(vjust[i], y[i], y_range, axis="v")),
-                bbox=dict(
-                    boxstyle=f"round,pad={float(self.label_padding)},"
+                bbox={
+                    "boxstyle": f"round,pad={float(self.label_padding)},"
                     f"rounding_size={float(self.label_r)}",
-                    facecolor=r_color(fill[i]),
-                    edgecolor=r_color(colour[i]),
-                    linewidth=border_pt,
-                ),
+                    "facecolor": r_color(fill[i]),
+                    "edgecolor": r_color(colour[i]),
+                    "linewidth": border_pt,
+                },
             )
 
 
@@ -402,13 +401,13 @@ class GeomLabelRepel(GeomLabel):
             rotation=float(angle),
             ha=ha,
             va=va,
-            bbox=dict(
-                boxstyle=f"round,pad={float(self.label_padding)},"
+            bbox={
+                "boxstyle": f"round,pad={float(self.label_padding)},"
                 f"rounding_size={float(self.label_r)}",
-                facecolor=r_color(fill),
-                edgecolor=r_color(colour),
-                linewidth=border_pt,
-            ),
+                "facecolor": r_color(fill),
+                "edgecolor": r_color(colour),
+                "linewidth": border_pt,
+            },
             zorder=10,
         )
 
@@ -777,8 +776,8 @@ def _do_repel(
 
     from matplotlib.patches import FancyArrowPatch
 
-    from .._util import r_color
     from ...plot._util import r_lty
+    from .._util import r_color
 
     n = len(text_artists)
     if n == 0:
