@@ -172,6 +172,22 @@ pub fn syrk_ln_strip(
 /// each `C(i,j)` still accumulates over `l` ascending, exactly as the netlib
 /// reference does. Writing `C` once at the end rather than `k` times is what
 /// the register file buys.
+///
+/// **The `MR` values of `A` are read into `av` before the `jj` loop, and that
+/// is load-bearing rather than tidy.** Written as `a[ao + ii]` inside the two
+/// nested loops — where it is invariant in `jj`, so any reader would expect it
+/// hoisted — LLVM instead half-vectorized the tile: at `MR = 8, NR = 4` it
+/// emitted 12 `fmla.2d` *plus 8 scalar* `fmla.d`/`fmadd`, two `ext.16b` lane
+/// shuffles to realign, and 7 loads, for arithmetic that wants 16 `fmla.2d`
+/// and 4 loads. It could not prove the base 16-byte aligned, so it fell back
+/// to `ldur` at odd offsets and gave up on the tail. That is 22 FP-pipe ops
+/// where 16 will do, and it capped the kernel at ~69% of this machine's
+/// measured f64 FMA ceiling — while [`tile_sub`], structurally the same loop,
+/// got the clean form. Hoisting by hand removes the choice. [`tile_tn`] has
+/// always been written this way.
+///
+/// Pure code motion: `A (i,l)` is the same value however many times it is
+/// read, so the loads move and no rounding does.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn tile_nt<const MR: usize, const NR: usize>(
@@ -189,10 +205,14 @@ fn tile_nt<const MR: usize, const NR: usize>(
     let mut acc = [[0.0f64; MR]; NR];
     for l in 0..k {
         let (ao, bo) = (ia + l * lda, jb + l * ldb);
+        let mut av = [0.0f64; MR];
+        for (ii, v) in av.iter_mut().enumerate() {
+            *v = a[ao + ii];
+        }
         for (jj, accj) in acc.iter_mut().enumerate() {
             let bv = b[bo + jj];
             for (ii, x) in accj.iter_mut().enumerate() {
-                *x = rfma(bv, a[ao + ii], *x);
+                *x = rfma(bv, av[ii], *x);
             }
         }
     }
