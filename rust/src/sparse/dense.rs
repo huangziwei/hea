@@ -48,6 +48,34 @@
 //! *linked to these same kernels*, which is what isolates a structural defect
 //! from a summation-order difference.
 //!
+//! **Every multiply-accumulate goes through [`rfma`], the crate's one
+//! FP-contraction policy** — fuse on `aarch64`, two roundings everywhere else.
+//! That is not a speed decision dressed up as a correctness one; it is what the
+//! reference does. The reference writes these loops as a single expression
+//! (`C(I,J) = C(I,J) + TEMP*A(I,L)`, `dgemm.f:250-262`, and likewise in the
+//! others), a Fortran compiler's `-ffp-contract` defaults to on, and on an ISA
+//! with a baseline FMA that is one rounding. Two receipts, both on aarch64:
+//!
+//!   * `gfortran -O2` with no flags on netlib's reference BLAS emits `fmadd`
+//!     inside `dgemm`/`dsyrk`/`dgemv`/`ddot` and `fmsub` inside
+//!     `dtrsm`/`dtrsv` — `dtrsv`'s inner loops contain *no* unfused multiply.
+//!   * R's shipped `libRblas`, which is that same source built by R's own
+//!     toolchain, disassembles the same way.
+//!
+//! So an un-fused port is the departure, not the fusion, and it is the same
+//! departure [`super::numeric::mulsub`] documents for the simplicial path. That
+//! one was caught because `L` can be compared against upstream entry for entry;
+//! this one could not be, because these kernels are their own oracle. It cost a
+//! measured **1.4-1.5x** across the whole kernel mix a factorization issues.
+//! `rfma` keys on `target_arch`, not on `target_feature = "fma"`, for the
+//! reason its own docstring gives: the reference build is a baseline build.
+//!
+//! Fusing changes values without changing *order*, so this contract and the
+//! summation-order one above are independent and both hold. Note that the
+//! linked-kernel gate below cannot see a change of this kind — it moves both
+//! sides together — so an arithmetic change here has to be checked by
+//! digesting the port's own output before and after.
+//!
 //! **The reference's `IF (X(J).NE.ZERO)` guards are not ported.** They skip a
 //! source column whose multiplier is exactly zero, which is a data-dependent
 //! branch in the hot loop for a case the supernodal factorization does not
@@ -55,6 +83,8 @@
 //! infinity or a NaN.
 
 use rayon::prelude::*;
+
+use crate::nmath::util::rfma;
 
 use super::ws::Ws;
 
@@ -162,7 +192,7 @@ fn tile_nt<const MR: usize, const NR: usize>(
         for (jj, accj) in acc.iter_mut().enumerate() {
             let bv = b[bo + jj];
             for (ii, x) in accj.iter_mut().enumerate() {
-                *x += bv * a[ao + ii];
+                *x = rfma(bv, a[ao + ii], *x);
             }
         }
     }
@@ -283,7 +313,7 @@ fn tile_sub<const MR: usize, const NR: usize>(
         for (jj, accj) in acc.iter_mut().enumerate() {
             let bv = x[bo + jj];
             for (ii, v) in accj.iter_mut().enumerate() {
-                *v -= bv * x[ao + ii];
+                *v = rfma(-bv, x[ao + ii], *v);
             }
         }
     }
@@ -386,7 +416,7 @@ fn tile_scat<const MR: usize, const NR: usize>(
         for (jj, accj) in acc.iter_mut().enumerate() {
             let bv = b[bo + jj];
             for (ii, v) in accj.iter_mut().enumerate() {
-                *v -= bv * a[ao + ii];
+                *v = rfma(-bv, a[ao + ii], *v);
             }
         }
     }
@@ -663,7 +693,7 @@ fn strip_sub<const LR: usize>(
         for (q, &tq) in t.iter().enumerate() {
             let xq = xo[q] + i;
             for (ii, vv) in v.iter_mut().enumerate() {
-                *vv -= tq * x[xq + ii];
+                *vv = rfma(-tq, x[xq + ii], *vv);
             }
         }
         for (ii, &vv) in v.iter().enumerate() {
@@ -674,7 +704,7 @@ fn strip_sub<const LR: usize>(
     while i < m {
         let mut v = x[yo + i];
         for (q, &tq) in t.iter().enumerate() {
-            v -= tq * x[xo[q] + i];
+            v = rfma(-tq, x[xo[q] + i], v);
         }
         x[yo + i] = v;
         i += 1;
@@ -785,7 +815,7 @@ fn potf2_panel(m: usize, n: usize, a: &mut Ws<f64>, off: usize, lda: usize) -> i
         let mut ajj = a[off + j + j * lda];
         for l in 0..j {
             let x = a[off + j + l * lda];
-            ajj -= x * x;
+            ajj = rfma(-x, x, ajj);
         }
         if !(ajj > 0.0) {
             /* also catches NaN, as dpotf2's `.LE. ZERO .OR. DISNAN` does */
@@ -920,7 +950,7 @@ pub fn trsv_ln(n: usize, a: &[f64], lda: usize, x: &mut [f64]) {
         let t = x[j] / a[j + j * lda];
         x[j] = t;
         for i in j + 1..n {
-            x[i] -= t * a[i + j * lda];
+            x[i] = rfma(-t, a[i + j * lda], x[i]);
         }
     }
 }
@@ -938,7 +968,7 @@ pub fn trsv_lt(n: usize, a: &[f64], lda: usize, x: &mut [f64]) {
     for j in (0..n).rev() {
         let mut t = x[j];
         for i in (j + 1..n).rev() {
-            t -= a[i + j * lda] * x[i];
+            t = rfma(-a[i + j * lda], x[i], t);
         }
         x[j] = t / a[j + j * lda];
     }
@@ -1000,7 +1030,7 @@ fn gemv_n_nb<const NR: usize>(
         for (jj, &tj) in t.iter().enumerate() {
             let ao = i + (j0 + jj) * lda;
             for (ii, vv) in v.iter_mut().enumerate() {
-                *vv -= tj * a[ao + ii];
+                *vv = rfma(-tj, a[ao + ii], *vv);
             }
         }
         for (ii, &vv) in v.iter().enumerate() {
@@ -1011,7 +1041,7 @@ fn gemv_n_nb<const NR: usize>(
     while i < m {
         let mut v = y[i];
         for (jj, &tj) in t.iter().enumerate() {
-            v -= tj * a[i + (j0 + jj) * lda];
+            v = rfma(-tj, a[i + (j0 + jj) * lda], v);
         }
         y[i] = v;
         i += 1;
@@ -1062,7 +1092,7 @@ fn gemv_t_nb<const NR: usize>(
     for i in 0..m {
         let xv = x[i];
         for (jj, v) in acc.iter_mut().enumerate() {
-            *v += a[i + (j0 + jj) * lda] * xv;
+            *v = rfma(a[i + (j0 + jj) * lda], xv, *v);
         }
     }
     for (jj, &v) in acc.iter().enumerate() {
@@ -1125,7 +1155,7 @@ fn trsm_lln_nb<const NR: usize>(
         for i in k + 1..m {
             let aik = a[i + k * lda];
             for (jj, &tj) in t.iter().enumerate() {
-                b[i + (j0 + jj) * ldb] -= tj * aik;
+                b[i + (j0 + jj) * ldb] = rfma(-tj, aik, b[i + (j0 + jj) * ldb]);
             }
         }
     }
@@ -1179,7 +1209,7 @@ fn trsm_llt_nb<const NR: usize>(
         for k in i + 1..m {
             let aki = a[k + i * lda];
             for (jj, tj) in t.iter_mut().enumerate() {
-                *tj -= aki * b[k + (j0 + jj) * ldb];
+                *tj = rfma(-aki, b[k + (j0 + jj) * ldb], *tj);
             }
         }
         let aii = a[i + i * lda];
@@ -1260,7 +1290,7 @@ fn tile_nn<const MR: usize, const NR: usize>(
         for (jj, accj) in acc.iter_mut().enumerate() {
             let t = b[l + (j0 + jj) * ldb];
             for (ii, v) in accj.iter_mut().enumerate() {
-                *v -= t * a[ao + ii];
+                *v = rfma(-t, a[ao + ii], *v);
             }
         }
     }
@@ -1373,7 +1403,7 @@ fn tile_tn<const MR: usize, const NR: usize>(
         for (jj, accj) in acc.iter_mut().enumerate() {
             let bv = b[l + (j0 + jj) * ldb];
             for (ii, v) in accj.iter_mut().enumerate() {
-                *v += av[ii] * bv;
+                *v = rfma(av[ii], bv, *v);
             }
         }
     }
