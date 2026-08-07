@@ -21,6 +21,11 @@ numpy = "0.23"
 # per-unit float ops are unchanged so 0-ulp parity holds (parallel == serial
 # bit-for-bit; no cross-unit reduction). hclust/kmns are serial — never rayon.
 rayon = "1"
+# macOS only, and for exactly one call: `sysctlbyname ("hw.perflevel0.
+# physicalcpu")`, so the sparse factorization can size its pool to the
+# performance cores. See `sparse::super_numeric::numeric_pool`.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 
 [profile.release]
 opt-level = 3

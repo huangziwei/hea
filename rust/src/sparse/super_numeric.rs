@@ -1436,59 +1436,147 @@ pub fn super_numeric(
 
     l.schedule.ensure(&l.sym, supermap);
 
-    let ctx = Ctx {
-        ap: Ws::new_ref(&a.p),
-        ai: Ws::new_ref(&a.i),
-        ax: Ws::new_ref(&a.x),
-        ls: Ws::new_ref(&l.sym.s),
-        lpi: Ws::new_ref(&l.sym.pi),
-        lpx: Ws::new_ref(&l.sym.px),
-        sup: Ws::new_ref(&l.sym.sup),
-        beta,
-        n,
-        nsuper,
-        xsize: l.sym.xsize,
-        par_flops: *par_flops,
-        tree_flops: *tree_flops,
-        threads: rayon::current_num_threads() > 1,
-        nthreads: rayon::current_num_threads(),
-        counters,
+    /* Inside [`numeric_pool`], so `current_num_threads` is the pool that will
+     * actually run this and not the process-wide one — `ctx.nthreads` is what
+     * the panel kernels split against, so reading it outside would size every
+     * fork for a width the workers do not have. */
+    let mut run = || {
+        let ctx = Ctx {
+            ap: Ws::new_ref(&a.p),
+            ai: Ws::new_ref(&a.i),
+            ax: Ws::new_ref(&a.x),
+            ls: Ws::new_ref(&l.sym.s),
+            lpi: Ws::new_ref(&l.sym.pi),
+            lpx: Ws::new_ref(&l.sym.px),
+            sup: Ws::new_ref(&l.sym.sup),
+            beta,
+            n,
+            nsuper,
+            xsize: l.sym.xsize,
+            par_flops: *par_flops,
+            tree_flops: *tree_flops,
+            threads: rayon::current_num_threads() > 1,
+            nthreads: rayon::current_num_threads(),
+            counters,
+        };
+
+        let sched = &l.schedule;
+        if sched.postordered
+            && !*force_serial
+            && par_numeric(&ctx, &sched.tree, &sched.plan, pool, &mut l.x)
+        {
+            l.minor = n;
+            return;
+        }
+
+        /* Either the tree could not be used, or a supernode was not positive
+         * definite and L->x is garbage.  Upstream's loop rewrites every entry of
+         * L->x before reading it, so re-running it from the top is a clean slate
+         * and not a repair. */
+        let mut tw = pool.take();
+        worker(
+            &ctx,
+            &mut l.x,
+            &mut l.minor,
+            &mut tw,
+            supermap,
+            Ws::new(next),
+            Ws::new(lpos),
+            Ws::new(next_save),
+            Ws::new(lpos_save),
+            head,
+            descs,
+            QUICK_RETURN_IF_NOT_POSDEF,
+        );
+        pool.give(tw);
     };
-
-    let sched = &l.schedule;
-    if sched.postordered
-        && !*force_serial
-        && par_numeric(&ctx, &sched.tree, &sched.plan, pool, &mut l.x)
-    {
-        l.minor = n;
-        return Ok(());
+    match numeric_pool() {
+        Some(p) => p.install(run),
+        None => run(),
     }
-
-    /* Either the tree could not be used, or a supernode was not positive
-     * definite and L->x is garbage.  Upstream's loop rewrites every entry of
-     * L->x before reading it, so re-running it from the top is a clean slate
-     * and not a repair. */
-    let mut tw = pool.take();
-    worker(
-        &ctx,
-        &mut l.x,
-        &mut l.minor,
-        &mut tw,
-        supermap,
-        Ws::new(next),
-        Ws::new(lpos),
-        Ws::new(next_save),
-        Ws::new(lpos_save),
-        head,
-        descs,
-        QUICK_RETURN_IF_NOT_POSDEF,
-    );
-    pool.give(tw);
     Ok(())
 }
 
 /// `Common->quick_return_if_not_posdef` (`t_cholmod_defaults.c:48`).
 const QUICK_RETURN_IF_NOT_POSDEF: bool = false;
+
+/// The pool the numeric factorization runs in — the *performance* cores, not
+/// every logical CPU.
+///
+/// `rayon`'s default pool is one worker per logical CPU, which on a
+/// heterogeneous machine means workers on cores several times slower than the
+/// rest. This factorization forks over the elimination tree and again inside a
+/// supernode's panel, and both joins wait on their slowest task, so a worker on
+/// a slow core does not add its share — it sets the pace. Measured on an M4 Pro
+/// (8 performance + 4 efficiency cores), refactorize against thread count:
+///
+/// | threads       | 1 | 2 | 4 | 6 | 8 | 10 | 12 |
+/// |---------------|---|---|---|---|---|----|----|
+/// | gridfit 110²  | 1.00 | 1.70 | 2.10 | **2.34** | 2.17 | 1.99 | 1.90 |
+/// | gridfit 320²  | 1.00 | 1.71 | 2.87 | 3.36 | **3.89** | 3.80 | 3.67 |
+/// | pywarper AtA  | 1.00 | 1.73 | 2.56 | 2.82 | 2.83 | **2.92** | 2.66 |
+///
+/// Every one of them peaks at or below the performance-core count and is worse
+/// at 12 than at 8 — by 6% on the two large ones and 23% on the small one. So
+/// the extra four workers are not merely low-yield, they cost.
+///
+/// **A private pool, not a resize of the global one.** `hea` is a library and
+/// the global pool belongs to the process; the nmath element-wise maps use it
+/// and want every core, since those are equal-sized independent chunks with no
+/// join in the middle. Only this one caller has the problem, so only this one
+/// caller gets the smaller pool.
+///
+/// `RAYON_NUM_THREADS` still wins: when it is set, the count is left at
+/// `rayon`'s default so an explicit request is honoured. Anywhere the query
+/// does not apply — a homogeneous machine, or any target but macOS — this
+/// returns `None` and the global pool is used unchanged. x86-64 is *not* capped
+/// to physical cores here: that would be a guess about hyperthreading, and
+/// there is no measurement behind it.
+fn numeric_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        if std::env::var_os("RAYON_NUM_THREADS").is_some() {
+            return None;
+        }
+        let nt = perf_cores()?;
+        if nt >= rayon::current_num_threads() || nt < 2 {
+            return None;
+        }
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(nt)
+            .thread_name(|i| format!("hea-sparse-{i}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
+/// `sysctl hw.perflevel0.physicalcpu` — the number of performance cores.
+///
+/// Level 0 is the fastest cluster on Apple Silicon; the key is absent on Intel
+/// Macs, which is the "homogeneous, leave it alone" answer.
+#[cfg(target_os = "macos")]
+fn perf_cores() -> Option<usize> {
+    let mut v: i32 = 0;
+    let mut len = std::mem::size_of::<i32>();
+    // SAFETY: `sysctlbyname` writes at most `len` bytes into `v`, and `len` is
+    // `size_of::<i32>()`; the name is a NUL-terminated literal.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"hw.perflevel0.physicalcpu".as_ptr(),
+            (&raw mut v).cast(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (rc == 0 && v > 0).then_some(v as usize)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn perf_cores() -> Option<usize> {
+    None
+}
 
 /// `cholmod_factorize_p`'s supernodal branch (`cholmod_factorize.c:172-266`),
 /// for a symmetric `A`.

@@ -739,10 +739,33 @@ fn strip_sub<const LR: usize>(
 /// 1` and `nscol_new = info - 1` (`:1093,1114`) — so its base and its
 /// "non-positive" test are part of the contract, not an implementation detail.
 ///
-/// This is `dpotrf ("L")`'s blocking around the unblocked left-looking
-/// [`potf2_panel`]: the columns to the left of a panel arrive through one
-/// [`gemm_sub`], and only the panel's own columns go through the rank-1 ladder.
-/// A destination entry still sees every source once, `l` ascending, so the
+/// This is `dpotrf ("L")`'s blocking, loop for loop. Per panel `dpotrf.f:216-232`
+/// issues four calls, and the port maps onto them like this:
+///
+///   * `DSYRK ("L","N", JB, J-1, …)` and `DGEMM ("N","T", N-J-JB+1, JB, J-1, …)`
+///     update the diagonal block and the rows below it with the same `-A A'`
+///     over the same `J-1` columns, differing only in which rows they cover. One
+///     [`gemm_sub`] over the whole `n-j0` rows does both — the one deviation,
+///     and it is a fusion of two calls rather than a change of arithmetic, since
+///     `dsyrk ("L","N")` and `dgemm ("N","T")` sum a destination entry
+///     identically. It writes the diagonal block's strict upper triangle, which
+///     neither reference call touches, so that triangle is saved and put back.
+///   * `DPOTRF2 ("L", JB, …)` factorizes the `JB`-by-`JB` **diagonal block
+///     only** → [`potf2_panel`] with `m = n = nb`.
+///   * `DTRSM ("R","L","T","N", N-J-JB+1, JB, …)` solves the rows below against
+///     it → [`trsm_rlt`], which is already that call.
+///
+/// **The rows below the diagonal block belong to `DTRSM`, not to the ladder.**
+/// Running the unblocked ladder over all `n-j0` rows — as this did before —
+/// computes the same `L` entry for entry, but it charges `m·nb²` flops to a
+/// rank-1 loop that reloads its destination strip every few sources, where the
+/// reference charges them to a blocked, splittable kernel. On `gmm`'s
+/// 1021-column supernode that was 0.83 ms of unsplittable work in a 7.0 ms
+/// factorization at one thread, and 0.97 of 3.6 ms at eight — the whole of
+/// Amdahl's serial term, and none of it inherent.
+///
+/// A destination entry still sees every source once, `l` ascending, whether it
+/// arrives through the block update, the ladder, or the solve, so all of this
 /// blocking is a scheduling change and `L` is unchanged entry for entry.
 pub fn potrf_l(n: usize, a: &mut [f64], lda: usize, nt: usize) -> i64 {
     debug_assert!(n == 0 || a.len() >= (n - 1) * lda + n);
@@ -785,9 +808,21 @@ pub fn potrf_l(n: usize, a: &mut [f64], lda: usize, nt: usize) -> i64 {
                 }
             }
         }
-        let info = potf2_panel(n - j0, nb, a, j0 + j0 * lda, lda);
+        /* DPOTRF2 ("L", JB, A (J,J), LDA, INFO) — the diagonal block alone */
+        let info = potf2_panel(nb, nb, a, j0 + j0 * lda, lda);
         if info != 0 {
+            /* the reference goes straight to `INFO = INFO + J - 1` and returns,
+             * leaving this panel's DTRSM undone, so the rows below keep their
+             * post-update values. The supernodal worker zeroes the whole
+             * supernode and replays it on `info != 0` (`:1297`), so nothing
+             * written here survives either way. */
             return j0 as i64 + info;
+        }
+
+        /* DTRSM ("R","L","T","N", N-J-JB+1, JB, 1.0, A (J,J), LDA, A (J+JB,J), LDA) */
+        if j0 + nb < n {
+            let (_, below) = a.split_at_mut(j0 + j0 * lda);
+            trsm_rlt(n - j0 - nb, nb, below, lda, nt);
         }
         j0 += nb;
     }
