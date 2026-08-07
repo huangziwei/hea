@@ -66,7 +66,7 @@ impl SuperSolveWork {
     }
 }
 
-/// `t_cholmod_super_lsolve_worker.c:20-303` — `X := L \ X`.
+/// `t_cholmod_super_solve_worker.c:20-303` (`cholmod_super_lsolve_worker`) — `X := L \ X`.
 ///
 /// `x` is `n`-by-`nrhs` column-major with leading dimension `d`, overwritten in
 /// place. `e` is scratch of at least `nrhs * maxesize` doubles; its contents
@@ -129,7 +129,7 @@ pub fn lsolve(l: &SuperFactor, x: &mut [f64], nrhs: usize, d: usize, e: &mut [f6
     }
 }
 
-/// `t_cholmod_super_ltsolve_worker.c:309-580` — `X := L' \ X`.
+/// `t_cholmod_super_solve_worker.c:309-580` (`cholmod_super_ltsolve_worker`) — `X := L' \ X`.
 ///
 /// The back substitution: supernodes in reverse, and each one's off-diagonal
 /// rows are *read* from `X` rather than written to it, so there is no scatter

@@ -697,10 +697,48 @@ fn update_c(lx: &[f64], base: i64, g: &Desc, c: &mut [f64]) {
     update_strip(lx, base, g, 0, g.ndrow1 as usize, c);
 }
 
+/// `Common->chunk` (`Utility/t_cholmod_start.c:44`) — the work one thread must
+/// be given before a second is worth adding.
+const CHUNK: f64 = 128000.0;
+
+/// `cholmod_nthreads (work, Common)` (`Include/cholmod_internal.h:566-587`).
+///
+/// `floor (work / chunk)`, clamped to `[1, nthreads_max]`. Deliberately
+/// conservative — most of the loops upstream guards with it never reach two
+/// threads at these shapes, and that is upstream's answer, not an oversight to
+/// correct. Porting the *rule* rather than a threshold of our own is the point:
+/// hea's own `PAR_FLOPS`/`TREE_FLOPS`/`STRIP_FLOPS` gate the tree and strip
+/// splits, which upstream does not have at all, but a loop upstream *does*
+/// thread is gated the way upstream gates it.
+#[inline]
+fn nthreads(work: f64, max: usize) -> usize {
+    (work.max(1.0) / CHUNK).floor().clamp(1.0, max as f64) as usize
+}
+
 /// The relative map and the scatter of one `C` into the supernode — `:1037-1050`.
 ///
 /// `sx` is `L->x` from `psx` on, so upstream's `psx + RelativeMap [j] * nsrow`
 /// loses its `psx`.
+///
+/// **Both loops are `#pragma omp parallel for` upstream** (`:897` over `ndrow2`
+/// with `if (ndrow2 > 64)`, `:915` over `ndrow1` with `if (ndrow1 > 64)`), and
+/// the `j` loop is safe to split for a reason worth stating rather than
+/// re-deriving: `px = RelativeMap [j] * nsrow`, so **iteration `j` writes column
+/// `RelativeMap [j]` and nothing else**. `RelativeMap` is injective — `Map` is a
+/// bijection from `s`'s rows onto `0 .. nsrow`, and `Ls [pdi1 ..]` are distinct
+/// — so distinct `j` touch distinct columns and no entry is written twice.
+/// Nothing accumulates across `j`, so there is no summation order to preserve
+/// and the split is bit-exact by construction, not by argument.
+///
+/// It is in fact strictly *increasing*, since `Ls` is ascending within a
+/// supernode and `Map` is order-preserving on it. That is what lets the columns
+/// be carved out of `sx` in one forward pass with `chunks_mut`, with no `unsafe`
+/// and no second lookup.
+///
+/// This is only about the `j` loop of *one* descendant. Two descendants can hit
+/// the same entry of `s`, so [`apply_updates`] still assembles them one at a
+/// time in link-list order — see its docstring. The two were conflated once, and
+/// the outer constraint was wrongly inherited by the inner loop.
 fn assemble(
     g: &Desc,
     c: &[f64],
@@ -709,11 +747,19 @@ fn assemble(
     ls: &Ws,
     map: &Ws,
     relative_map: &mut Ws,
+    nt: usize,
 ) {
     /* construct relative map to supernode s */
     for i in 0..g.ndrow2 {
         relative_map[i] = map[ls[g.pdi1 + i]];
         debug_assert!(relative_map[i] >= 0 && relative_map[i] < nsrow);
+    }
+
+    /* work = ndcol * ndrow2 (`:911`), and `if (ndrow1 > 64)` */
+    let work = g.ndcol as f64 * g.ndrow2 as f64;
+    if g.ndrow1 > 64 && nthreads(work, nt) > 1 {
+        assemble_par(g, c, sx, nsrow, relative_map);
+        return;
     }
 
     let sx = Ws::new(sx);
@@ -729,15 +775,53 @@ fn assemble(
     }
 }
 
+/// [`assemble`]'s `j` loop with the columns split across threads.
+///
+/// Same entries, same values, same single `-=` per entry — only the thread that
+/// performs it changes. The `i` loop starts at `j`, so the columns are unequal
+/// (the first does `ndrow2` rows, the last does one); `par_iter_mut` steals, so
+/// they do not need to be equal.
+fn assemble_par(g: &Desc, c: &[f64], sx: &mut [f64], nsrow: i64, relative_map: &Ws) {
+    /* `RelativeMap` is strictly increasing, so one forward pass over the
+     * supernode's columns picks out the ones this descendant writes. */
+    let mut cols: Vec<&mut [f64]> = Vec::with_capacity(g.ndrow1 as usize);
+    let mut rest = sx;
+    let mut at = 0i64;
+    for j in 0..g.ndrow1 {
+        let want = relative_map[j];
+        debug_assert!(want >= at, "RelativeMap must ascend");
+        let skip = ((want - at) * nsrow) as usize;
+        let (_, tail) = rest.split_at_mut(skip);
+        let (col, tail) = tail.split_at_mut(nsrow as usize);
+        cols.push(col);
+        rest = tail;
+        at = want + 1;
+    }
+
+    let cw = Ws::new_ref(c);
+    cols.par_iter_mut().enumerate().for_each(|(j, col)| {
+        let col = Ws::new(col);
+        let j = j as i64;
+        for i in j..g.ndrow2 {
+            col[relative_map[i]] -= cw[i + g.ndrow2 * j];
+        }
+    });
+}
+
 /// Apply every pending update of one supernode, in the link list's order.
 ///
 /// The updates are independent — each reads a different descendant's block of
 /// `L` and writes its own `C` — but their assemblies are not, because two
 /// descendants can hit the same entry of the supernode. So `C` is what goes
-/// wide and the assembly stays serial and in order, which is what keeps `L->x`
+/// wide and *this* loop stays serial and in order, which is what keeps `L->x`
 /// bit-for-bit what the one-at-a-time loop produces. It is also why the batch
 /// is a batch: the buffers are live simultaneously, so their total size is
 /// capped.
+///
+/// **That constraint stops here.** Inside one [`assemble`] the column loop is
+/// disjoint and upstream threads it; this docstring used to be read as
+/// "assembly is serial", which quietly made an un-ported `#pragma omp` look
+/// like a deliberate bit-exactness decision.
 ///
 /// The parallel and serial arms differ only in *which* `C` buffer each update
 /// gets. Both call [`update_c`] and [`assemble`] with the same arguments.
@@ -802,7 +886,7 @@ fn apply_updates(
             }
             ctx.counters.wide.fetch_add(batch.len(), Atomic::Relaxed);
             for (buf, g) in bufs.iter().zip(batch) {
-                assemble(g, buf, sx, nsrow, ctx.ls, map, relative_map);
+                assemble(g, buf, sx, nsrow, ctx.ls, map, relative_map, ctx.nthreads);
             }
         } else {
             for g in batch {
@@ -810,7 +894,7 @@ fn apply_updates(
                     c.resize(g.csize(), 0.0);
                 }
                 update_c(lower, base, g, c);
-                assemble(g, c, sx, nsrow, ctx.ls, map, relative_map);
+                assemble(g, c, sx, nsrow, ctx.ls, map, relative_map, ctx.nthreads);
             }
         }
         i0 = i1;
@@ -1622,6 +1706,67 @@ mod tests {
     use super::super::testcorpus::{corpus, spd_triangle};
     use super::super::ws::{columns_are_sorted, Work};
     use super::*;
+
+    /// [`assemble_par`] writes exactly what [`assemble`]'s serial `j` loop
+    /// writes, bit for bit.
+    ///
+    /// Worth a direct test rather than corpus coverage: upstream's gate
+    /// (`ndrow1 > 64` and `cholmod_nthreads (ndcol * ndrow2) > 1`, i.e.
+    /// `ndcol * ndrow2 >= 256000`) fires on **2 of 11446** descendant updates
+    /// across the largest matrix in `dev/`, and on none at all in the smaller
+    /// ones — so the factorization gates cannot be relied on to reach this arm.
+    #[test]
+    fn the_parallel_assembly_writes_what_the_serial_one_writes() {
+        for &(ndrow1, ndrow2, ndcol) in &[(1i64, 1i64, 1i64), (5, 9, 3), (70, 300, 900)] {
+            /* `RelativeMap` is derived from `Map ∘ Ls`; feed it a strictly
+             * increasing map with gaps, which is the shape it really has. */
+            let nsrow = 2 * ndrow2 + 3;
+            let ls: Vec<i64> = (0..ndrow2).map(|i| 2 * i + 1).collect();
+            let mut map = vec![EMPTY; (2 * ndrow2 + 3) as usize];
+            for (i, &r) in ls.iter().enumerate() {
+                map[r as usize] = 2 * i as i64 + 1;
+            }
+            let g = Desc {
+                pdx1: 0,
+                pdi1: 0,
+                ndrow: ndrow2,
+                ndcol,
+                ndrow1,
+                ndrow2,
+            };
+            let c: Vec<f64> = (0..g.csize())
+                .map(|i| ((i % 97) as f64 - 48.0) / 7.0)
+                .collect();
+            let base: Vec<f64> = (0..(nsrow * (2 * ndrow2 + 3)) as usize)
+                .map(|i| ((i % 31) as f64) / 3.0)
+                .collect();
+
+            let mut ser = base.clone();
+            let mut rm = vec![0i64; ndrow2 as usize];
+            assemble(
+                &g,
+                &c,
+                &mut ser,
+                nsrow,
+                Ws::new_ref(&ls),
+                Ws::new_ref(&map),
+                Ws::new(&mut rm),
+                1, /* nt = 1 keeps the serial arm regardless of the gate */
+            );
+
+            let mut par = base.clone();
+            let mut rm2 = vec![0i64; ndrow2 as usize];
+            {
+                let rmw = Ws::new(&mut rm2);
+                for i in 0..ndrow2 {
+                    rmw[i] = map[ls[i as usize] as usize];
+                }
+                assemble_par(&g, &c, &mut par, nsrow, rmw);
+            }
+
+            assert_eq!(ser, par, "shape {ndrow1}x{ndrow2}x{ndcol}");
+        }
+    }
 
     /// One corpus matrix, scaled by `scale`, and the symbolic factor and
     /// workspace `mod.rs` would hand the numeric path.
