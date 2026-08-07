@@ -77,7 +77,10 @@ dev = [
     "pyyaml>=6.0.3",
     "ipykernel>=7.2.0",
     "nbconvert>=7.17.1",
-    "ruff>=0.15.13",
+    # >=0.16: the lint config deliberately carries no `select`, so it inherits
+    # ruff's defaults — 413 rules in 0.16, 59 before it. An older ruff would
+    # silently check a twentieth of the rules the tree is actually clean under.
+    "ruff>=0.16.1",
     "build",
     "twine",
 ]

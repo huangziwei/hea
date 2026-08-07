@@ -15,6 +15,21 @@ on:
     branches: [ "main" ]
 
 jobs:
+  # Lint is its own job: it needs neither Rust nor R, so it reports in seconds
+  # instead of waiting on the 5-way build matrix. Replaces the old
+  # tests/test_flake8.py, which ran a `--select=E9,F63,F7,F82` subset inside
+  # pytest. Keep the pin in step with the `ruff` floor in the dev group.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+    - run: python -m pip install 'ruff==0.16.1'
+    - run: ruff check .
+    - run: ruff format --check .
+
   build:
 
     runs-on: ubuntu-latest
@@ -68,21 +83,26 @@ jobs:
         fi
         Rscript -e 'cat("mgcv", as.character(packageVersion("mgcv")), "\n"); stopifnot(packageVersion("mgcv") == "1.9.4")'
     - name: Install dependencies
+      # maturin is the build backend, so this single command already compiles
+      # the hea-rs crate into the installed wheel — there is no separate build
+      # step, and adding one would compile the crate twice.
+      #
+      # `.[data]`, not `.[fast]`: the `fast` extra is an empty stub kept only so
+      # old `hea[fast]` pins keep resolving (the sparse Cholesky is in the wheel
+      # now). Installing the `data` extra from the local tree is also what
+      # satisfies the dev group's `hea[data]` self-reference — otherwise pip has
+      # to resolve that name, and `hea` exists on PyPI.
       run: |
         python -m pip install --upgrade pip
-        python -m pip install '.[fast]' --group dev
-    - name: Build hea._rs (Rust extension) into the source tree
-      # build-backend is still hatchling, so `pip install .` ships no Rust.
-      # Build the crate with maturin and copy the compiled module into hea/,
-      # where pytest's `pythonpath = ["."]` import resolution finds it
-      # (mirrors rust/rebuild.sh). abi3-py310 means one build is portable
-      # across the whole 3.10–3.14 matrix.
+        python -m pip install '.[data]' --group dev
+    - name: Put hea._rs next to the sources
+      # pytest's `pythonpath = ["."]` makes the repo-root `hea/` shadow the
+      # installed package, so the compiled module has to exist in-tree as well
+      # (mirrors rust/rebuild.sh). Copy the module pip just built rather than
+      # rebuilding it. abi3-py310 means one build covers the whole 3.10–3.14
+      # matrix.
       run: |
-        python -m pip install 'maturin==1.14.0'
-        maturin build --release --interpreter python -o dist
-        whl="$(ls -t dist/hea-*.whl | head -1)"
-        python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall('dist/extract')" "$whl"
-        cp dist/extract/hea/_rs*.so hea/
+        python -c "import pathlib,shutil,sysconfig as s; d={s.get_paths()[k] for k in ('purelib','platlib')}; f=next(p for x in d for p in pathlib.Path(x).glob('hea/_rs*.so')); shutil.copy(f,'hea/'+f.name); print('copied',f)"
         ls -l hea/_rs*.so
     - name: Verify the Rust extension is active (no silent fallback)
       # Hard-fail if hea._rs is missing: otherwise the parity tests would
@@ -102,5 +122,8 @@ jobs:
       # tests/translate/ exercises the R<->Python translator end-to-end against
       # tidyverse (library(dplyr)/…), which isn't installed here and takes far too
       # long to install in CI. Those run locally where tidyverse is present.
-      # tests/test_rs_parity.py skips here (macOS-only gate, run locally not in CI).
+      # tests/test_rs_parity.py DOES run here: it `importorskip`s hea._rs (present,
+      # and the step above hard-fails otherwise) and only its bit-exact assertions
+      # are darwin-gated (`_STRICT = sys.platform == "darwin"`), so on Linux it
+      # gates the x86-64 Rust path as a tolerance check.
       run: pytest -n auto --dist worksteal --ignore=tests/translate
