@@ -113,10 +113,19 @@ pub const SYRK_NB: usize = 8;
 /// starts at column `j0` — its own contiguous `jn * ldc` slice, so a caller can
 /// hand several strips to several threads without any of them aliasing.
 ///
-/// `j0` must be a multiple of [`SYRK_NB`]. Then the strip's blocks are exactly
-/// the blocks the unsplit call makes, every element is still one `gemm_nt`
-/// entry accumulated over `l` ascending, and splitting is a scheduling decision
-/// rather than a numerical one.
+/// `j0` must be a multiple of [`SYRK_NB`]. Every element is one `gemm_nt` entry
+/// accumulated over `l` ascending wherever the strip boundary and the block
+/// decomposition fall, so both are scheduling decisions rather than numerical
+/// ones.
+///
+/// **The strip is a trapezoid split into one rectangle and a triangle.** The
+/// rows below the strip's own square are a plain `A * B'` on the strip's whole
+/// width, which is what lets [`gemm_nt`] pack: a block column `SYRK_NB` wide
+/// would re-stream all of `A` once per eight columns, and on a supernode with
+/// `ndrow1` in the thousands that is one byte of traffic per flop. The square
+/// that is left is halved recursively — rectangle in the middle, two triangles
+/// at the ends — down to [`SYRK_LEAF`], below which the eight-wide ladder costs
+/// nothing because the operand is small.
 #[allow(clippy::too_many_arguments)]
 pub fn syrk_ln_strip(
     n: usize,
@@ -130,35 +139,93 @@ pub fn syrk_ln_strip(
 ) {
     debug_assert!(k == 0 || a.len() >= (k - 1) * lda + n);
     debug_assert!(j0.is_multiple_of(SYRK_NB) && j0 + jn <= n);
+    if jn == 0 {
+        return;
+    }
 
-    /* `C (jb:n-1, jb:jb+NB-1)` is a plain `A * A'`, so a block column of the
-     * lower triangle goes straight through [`gemm_nt`]'s register-blocked
-     * kernel — including its diagonal `NB`-by-`NB` square, computed whole
-     * rather than as a triangle.
-     *
-     * That writes the strict upper triangle of each diagonal square, which a
-     * real `dsyrk ("L", ...)` promises not to touch. It is dead storage: the
-     * only reader is `t_cholmod_super_numeric_worker.c:1042-1050`, whose
-     * assembly loop is `for (i = j ; i < ndrow2 ; i++)` — lower only — and the
-     * `dgemm` that fills the rest of `C` starts at row `ndrow1`. The waste is
-     * `NB(NB-1)/2` extra dot products per block column, i.e. `~NB/(2n)` of the
-     * work, in exchange for the whole kernel being the vectorized one. */
-    let mut jb = j0;
-    while jb < j0 + jn {
-        let jbn = SYRK_NB.min(j0 + jn - jb);
+    /* rows below the strip: a full-width rectangle, no triangle in it */
+    if n > j0 + jn {
         gemm_nt(
-            n - jb,
-            jbn,
+            n - j0 - jn,
+            jn,
             k,
-            &a[jb..],
+            &a[j0 + jn..],
             lda,
-            &a[jb..],
+            &a[j0..],
             lda,
-            &mut c[(jb - j0) * ldc + jb..],
+            &mut c[j0 + jn..],
             ldc,
         );
-        jb += jbn;
     }
+    syrk_tri(k, a, lda, c, ldc, j0, j0, j0 + jn);
+}
+
+/// Width at which [`syrk_tri`] stops halving. The leaf re-streams its `A`
+/// (`SYRK_LEAF`-by-`k`) once per [`SYRK_NB`] columns, so it is chosen small
+/// enough that those re-reads come out of cache, and the leaves are a
+/// `2 * SYRK_LEAF / n` share of the triangle's flops.
+const SYRK_LEAF: usize = 64;
+
+/// The lower triangle of `C [lo..hi, lo..hi]`, where `c` is the strip that
+/// starts at column `j0`.
+fn syrk_tri(
+    k: usize,
+    a: &[f64],
+    lda: usize,
+    c: &mut [f64],
+    ldc: usize,
+    j0: usize,
+    lo: usize,
+    hi: usize,
+) {
+    if hi - lo <= SYRK_LEAF {
+        /* `C (jb:hi-1, jb:jb+NB-1)` is a plain `A * A'`, so a block column goes
+         * straight through [`gemm_nt`] — including its diagonal `NB`-by-`NB`
+         * square, computed whole rather than as a triangle.
+         *
+         * That writes the strict upper triangle of each diagonal square, which
+         * a real `dsyrk ("L", ...)` promises not to touch. It is dead storage:
+         * the only reader is `t_cholmod_super_numeric_worker.c:1042-1050`,
+         * whose assembly loop is `for (i = j ; i < ndrow2 ; i++)` — lower only
+         * — and the `dgemm` that fills the rest of `C` starts at row `ndrow1`.
+         * The waste is `NB(NB-1)/2` extra dot products per block column, in
+         * exchange for the whole kernel being the vectorized one. */
+        let mut jb = lo;
+        while jb < hi {
+            let jbn = SYRK_NB.min(hi - jb);
+            gemm_nt(
+                hi - jb,
+                jbn,
+                k,
+                &a[jb..],
+                lda,
+                &a[jb..],
+                lda,
+                &mut c[(jb - j0) * ldc + jb..],
+                ldc,
+            );
+            jb += jbn;
+        }
+        return;
+    }
+
+    /* `hi - lo > SYRK_LEAF >= 2 * SYRK_NB`, so the rounded half is strictly
+     * inside and both halves shrink */
+    let mid = lo + ((hi - lo) / 2).next_multiple_of(SYRK_NB);
+    debug_assert!(lo < mid && mid < hi);
+    syrk_tri(k, a, lda, c, ldc, j0, lo, mid);
+    gemm_nt(
+        hi - mid,
+        mid - lo,
+        k,
+        &a[mid..],
+        lda,
+        &a[lo..],
+        lda,
+        &mut c[(lo - j0) * ldc + mid..],
+        ldc,
+    );
+    syrk_tri(k, a, lda, c, ldc, j0, mid, hi);
 }
 
 /// One `MR`-by-`NR` tile of `C := A * B'`, accumulated in registers.
@@ -188,9 +255,15 @@ pub fn syrk_ln_strip(
 ///
 /// Pure code motion: `A (i,l)` is the same value however many times it is
 /// read, so the loads move and no rounding does.
+///
+/// `ACC` starts the accumulators from `C` instead of from zero, which is what
+/// lets [`gemm_nt`] cut `k` into blocks: the running sum is stored and reloaded
+/// between blocks, and an `f64` store/reload is exact, so `C (i,j)` still sees
+/// its sources in one unbroken ascending-`l` chain. The same argument
+/// [`k_block`] makes for `C -= A B'`.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn tile_nt<const MR: usize, const NR: usize>(
+fn tile_nt<const MR: usize, const NR: usize, const ACC: bool>(
     k: usize,
     a: &Ws<f64>,
     ia: usize,
@@ -203,6 +276,13 @@ fn tile_nt<const MR: usize, const NR: usize>(
     ldc: usize,
 ) {
     let mut acc = [[0.0f64; MR]; NR];
+    if ACC {
+        for (jj, accj) in acc.iter_mut().enumerate() {
+            for (ii, x) in accj.iter_mut().enumerate() {
+                *x = c[ic + ii + jj * ldc];
+            }
+        }
+    }
     for l in 0..k {
         let (ao, bo) = (ia + l * lda, jb + l * ldb);
         let mut av = [0.0f64; MR];
@@ -226,10 +306,11 @@ fn tile_nt<const MR: usize, const NR: usize>(
 /// The `m` direction of one `NR`-wide column block, tiled 8/4/2/1.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn cols_nt<const NR: usize>(
+fn cols_nt<const NR: usize, const ACC: bool>(
     m: usize,
     k: usize,
     a: &Ws<f64>,
+    ia0: usize,
     lda: usize,
     b: &Ws<f64>,
     jb: usize,
@@ -240,19 +321,50 @@ fn cols_nt<const NR: usize>(
 ) {
     let mut i = 0;
     while i + 8 <= m {
-        tile_nt::<8, NR>(k, a, i, lda, b, jb, ldb, c, ic0 + i, ldc);
+        tile_nt::<8, NR, ACC>(k, a, ia0 + i, lda, b, jb, ldb, c, ic0 + i, ldc);
         i += 8;
     }
     if i + 4 <= m {
-        tile_nt::<4, NR>(k, a, i, lda, b, jb, ldb, c, ic0 + i, ldc);
+        tile_nt::<4, NR, ACC>(k, a, ia0 + i, lda, b, jb, ldb, c, ic0 + i, ldc);
         i += 4;
     }
     if i + 2 <= m {
-        tile_nt::<2, NR>(k, a, i, lda, b, jb, ldb, c, ic0 + i, ldc);
+        tile_nt::<2, NR, ACC>(k, a, ia0 + i, lda, b, jb, ldb, c, ic0 + i, ldc);
         i += 2;
     }
     if i < m {
-        tile_nt::<1, NR>(k, a, i, lda, b, jb, ldb, c, ic0 + i, ldc);
+        tile_nt::<1, NR, ACC>(k, a, ia0 + i, lda, b, jb, ldb, c, ic0 + i, ldc);
+    }
+}
+
+/// The `n` direction, tiled 4/2/1 over [`cols_nt`].
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn block_nt<const ACC: bool>(
+    m: usize,
+    n: usize,
+    k: usize,
+    a: &Ws<f64>,
+    ia0: usize,
+    lda: usize,
+    b: &Ws<f64>,
+    jb0: usize,
+    ldb: usize,
+    c: &mut Ws<f64>,
+    ic0: usize,
+    ldc: usize,
+) {
+    let mut j = 0;
+    while j + 4 <= n {
+        cols_nt::<4, ACC>(m, k, a, ia0, lda, b, jb0 + j, ldb, c, ic0 + j * ldc, ldc);
+        j += 4;
+    }
+    if j + 2 <= n {
+        cols_nt::<2, ACC>(m, k, a, ia0, lda, b, jb0 + j, ldb, c, ic0 + j * ldc, ldc);
+        j += 2;
+    }
+    if j < n {
+        cols_nt::<1, ACC>(m, k, a, ia0, lda, b, jb0 + j, ldb, c, ic0 + j * ldc, ldc);
     }
 }
 
@@ -260,6 +372,14 @@ fn cols_nt<const NR: usize>(
 /// ldc)`.
 ///
 /// `a` is `m`-by-`k`, `b` is `n`-by-`k`, `c` is `m`-by-`n`. `beta` is 0.
+///
+/// Two paths over the same register tile. The direct one walks `C` in tiles and
+/// re-streams the whole of `A` once per four columns of `B`; that is right while
+/// `A` and `B` stay resident, and it is what the supernodal update issues for
+/// the overwhelming majority of its calls. The blocked one — [`gemm_nt_packed`]
+/// — is for the handful that do not: on a 3.4M-row system the largest thousand
+/// of 2.26M `dgemm`/`dsyrk` calls carry 83% of the flops, with `m`, `n` and `k`
+/// all in the thousands and operands tens of megabytes wide.
 pub fn gemm_nt(
     m: usize,
     n: usize,
@@ -273,21 +393,302 @@ pub fn gemm_nt(
 ) {
     debug_assert!(k == 0 || (a.len() >= (k - 1) * lda + m && b.len() >= (k - 1) * ldb + n));
     debug_assert!(n == 0 || c.len() >= (n - 1) * ldc + m);
+    if wants_packing(m, n, k) {
+        gemm_nt_packed(m, n, k, a, lda, b, ldb, c, ldc);
+    } else {
+        gemm_nt_direct(m, n, k, a, lda, b, ldb, c, ldc);
+    }
+}
+
+/// [`gemm_nt`] with the operands read where they lie.
+fn gemm_nt_direct(
+    m: usize,
+    n: usize,
+    k: usize,
+    a: &[f64],
+    lda: usize,
+    b: &[f64],
+    ldb: usize,
+    c: &mut [f64],
+    ldc: usize,
+) {
     let (a, b) = (Ws::new_ref(a), Ws::new_ref(b));
     let c = Ws::new(c);
+    block_nt::<false>(m, n, k, a, 0, lda, b, 0, ldb, c, 0, ldc);
+}
 
-    let mut j = 0;
-    while j + 4 <= n {
-        cols_nt::<4>(m, k, a, lda, b, j, ldb, c, j * ldc, ldc);
-        j += 4;
+//------------------------------------------------------------------------------
+// gemm_nt for operands that do not fit a cache
+//------------------------------------------------------------------------------
+
+/// The `MR` and `NR` of the packed path — the register tile [`cols_nt`] leads
+/// its ladder with, so a packed panel is exactly what [`tile_nt`] already reads
+/// with `lda` set to the panel's row count.
+const PACK_MR: usize = 8;
+const PACK_NR: usize = 4;
+
+/// Rows of `A` per packed block. `PACK_MC * PACK_KC * 8` bytes have to sit in
+/// L2 while every column panel of `B` is driven past them.
+const PACK_MC: usize = 256;
+
+/// Columns of `C` per pass. Bounds the packed `B` at `PACK_NC * PACK_KC * 8`.
+const PACK_NC: usize = 1024;
+
+/// Length of the `k` block. Bounds both packed operands, and bounds the
+/// micro-panels — `PACK_MR * PACK_KC * 8` and `PACK_NR * PACK_KC * 8` — at 16
+/// and 8 KB, which is what keeps the innermost loop inside L1.
+///
+/// **Free to choose, for the same reason [`k_block`] is.** Each `C (i,j)`
+/// accumulates its `k` block in registers, is stored, and is reloaded by the
+/// next block to carry on; an `f64` store and reload is exact, so the chain
+/// `(((0 + a₀b₀) + a₁b₁) + …)` over all of `k` in index order is the same at
+/// any block size, and the same as the unblocked path's.
+const PACK_KC: usize = 256;
+
+/// Below this the direct path wins: packing costs a copy of both operands, and
+/// there is nothing to buy back while they stay resident.
+///
+/// Sized against the working set rather than the flops, because the defect it
+/// avoids is a working-set one. The direct path re-streams `A` once per `PACK_NR`
+/// columns of `B` and `B` once per `PACK_MR` rows of `A`, so what matters is
+/// whether an operand survives between re-reads.
+const PACK_MIN_BYTES: usize = 1 << 20;
+
+/// Whether [`gemm_nt`] should pack.
+fn wants_packing(m: usize, n: usize, k: usize) -> bool {
+    m >= PACK_MR * 4
+        && n >= PACK_NR * 2
+        && k >= 64
+        && (m.saturating_mul(k) + n.saturating_mul(k)) * 8 >= PACK_MIN_BYTES
+}
+
+/// `ceil (x / q) * q`.
+#[inline]
+fn round_up(x: usize, q: usize) -> usize {
+    x.div_ceil(q) * q
+}
+
+/// Copy `a [i0 .. i0+mb, l0 .. l0+kb]` into `PACK_MR`-row panels.
+///
+/// Panel `p` occupies `out [p*PACK_MR*kb ..]` and is column-major with leading
+/// dimension `PACK_MR`, which is the layout [`tile_nt`] reads when it is handed
+/// `lda = PACK_MR`. The last panel may hold fewer than `PACK_MR` rows; the
+/// ladder that consumes it never reads past them.
+fn pack_rows(
+    mb: usize,
+    kb: usize,
+    a: &Ws<f64>,
+    i0: usize,
+    l0: usize,
+    lda: usize,
+    out: &mut Ws<f64>,
+) {
+    let mut p = 0;
+    let mut i = 0;
+    while i < mb {
+        let mr = (mb - i).min(PACK_MR);
+        for l in 0..kb {
+            let src = i0 + i + (l0 + l) * lda;
+            let dst = p + l * PACK_MR;
+            for ii in 0..mr {
+                out[dst + ii] = a[src + ii];
+            }
+        }
+        p += PACK_MR * kb;
+        i += PACK_MR;
     }
-    if j + 2 <= n {
-        cols_nt::<2>(m, k, a, lda, b, j, ldb, c, j * ldc, ldc);
+}
+
+/// [`pack_rows`] with `PACK_NR`, for `B`. Same layout, different panel height:
+/// `B` is `n`-by-`k` and enters the tile the same way `A` does, one contiguous
+/// run of rows per column.
+fn pack_cols(
+    nb: usize,
+    kb: usize,
+    b: &Ws<f64>,
+    j0: usize,
+    l0: usize,
+    ldb: usize,
+    out: &mut Ws<f64>,
+) {
+    let mut p = 0;
+    let mut j = 0;
+    while j < nb {
+        let nr = (nb - j).min(PACK_NR);
+        for l in 0..kb {
+            let src = j0 + j + (l0 + l) * ldb;
+            let dst = p + l * PACK_NR;
+            for jj in 0..nr {
+                out[dst + jj] = b[src + jj];
+            }
+        }
+        p += PACK_NR * kb;
+        j += PACK_NR;
+    }
+}
+
+/// The `m` ladder over one packed column panel — 8, then 4/2/1 for whatever the
+/// last row panel holds.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn rows_packed_nt<const NR: usize, const ACC: bool>(
+    mb: usize,
+    kb: usize,
+    ap: &Ws<f64>,
+    bp: &Ws<f64>,
+    pb: usize,
+    c: &mut Ws<f64>,
+    ic0: usize,
+    ldc: usize,
+) {
+    let (mut i, mut pa) = (0usize, 0usize);
+    while i + PACK_MR <= mb {
+        tile_nt::<PACK_MR, NR, ACC>(kb, ap, pa, PACK_MR, bp, pb, PACK_NR, c, ic0 + i, ldc);
+        pa += PACK_MR * kb;
+        i += PACK_MR;
+    }
+    let rem = mb - i;
+    let mut o = 0;
+    if rem & 4 != 0 {
+        tile_nt::<4, NR, ACC>(
+            kb,
+            ap,
+            pa + o,
+            PACK_MR,
+            bp,
+            pb,
+            PACK_NR,
+            c,
+            ic0 + i + o,
+            ldc,
+        );
+        o += 4;
+    }
+    if rem & 2 != 0 {
+        tile_nt::<2, NR, ACC>(
+            kb,
+            ap,
+            pa + o,
+            PACK_MR,
+            bp,
+            pb,
+            PACK_NR,
+            c,
+            ic0 + i + o,
+            ldc,
+        );
+        o += 2;
+    }
+    if rem & 1 != 0 {
+        tile_nt::<1, NR, ACC>(
+            kb,
+            ap,
+            pa + o,
+            PACK_MR,
+            bp,
+            pb,
+            PACK_NR,
+            c,
+            ic0 + i + o,
+            ldc,
+        );
+    }
+}
+
+/// One packed `mb`-by-`nb`-by-`kb` block into `C [ic0 ..]`.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn block_packed_nt<const ACC: bool>(
+    mb: usize,
+    nb: usize,
+    kb: usize,
+    ap: &Ws<f64>,
+    bp: &Ws<f64>,
+    c: &mut Ws<f64>,
+    ic0: usize,
+    ldc: usize,
+) {
+    let (mut j, mut pb) = (0usize, 0usize);
+    while j + PACK_NR <= nb {
+        rows_packed_nt::<PACK_NR, ACC>(mb, kb, ap, bp, pb, c, ic0 + j * ldc, ldc);
+        pb += PACK_NR * kb;
+        j += PACK_NR;
+    }
+    let rem = nb - j;
+    /* the last one to three columns share a single packed panel of stride
+     * `PACK_NR`, so the tail advances *within* it — `+= 2`, not `+= 2 * kb` */
+    if rem & 2 != 0 {
+        rows_packed_nt::<2, ACC>(mb, kb, ap, bp, pb, c, ic0 + j * ldc, ldc);
+        pb += 2;
         j += 2;
     }
-    if j < n {
-        cols_nt::<1>(m, k, a, lda, b, j, ldb, c, j * ldc, ldc);
+    if rem & 1 != 0 {
+        rows_packed_nt::<1, ACC>(mb, kb, ap, bp, pb, c, ic0 + j * ldc, ldc);
     }
+}
+
+thread_local! {
+    /// The two packing buffers, kept per thread across calls.
+    ///
+    /// A `RefCell` and not a pool: [`gemm_nt`] forks nothing and calls nothing
+    /// that could re-enter it, so the borrow cannot overlap with itself the way
+    /// `super_numeric`'s task workspace can.
+    static PACK_BUF: core::cell::RefCell<(Vec<f64>, Vec<f64>)> =
+        const { core::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
+/// [`gemm_nt`] with both operands copied into contiguous register-tile panels
+/// and the loop nest blocked so the copies are what the tile reads.
+///
+/// The order is `jc` (columns of `C`), then `pc` (the `k` block), then `ic`
+/// (rows of `C`): `B`'s panel is packed once per `(jc, pc)` and `A`'s once per
+/// `(jc, pc, ic)`, and the `pc` loop ascends so the accumulation into `C` stays
+/// in index order — see [`PACK_KC`].
+fn gemm_nt_packed(
+    m: usize,
+    n: usize,
+    k: usize,
+    a: &[f64],
+    lda: usize,
+    b: &[f64],
+    ldb: usize,
+    c: &mut [f64],
+    ldc: usize,
+) {
+    let (a, b) = (Ws::new_ref(a), Ws::new_ref(b));
+    let c = Ws::new(c);
+    PACK_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        let (ap, bp) = &mut *buf;
+        ap.resize(round_up(PACK_MC, PACK_MR) * PACK_KC, 0.0);
+        bp.resize(round_up(PACK_NC, PACK_NR) * PACK_KC, 0.0);
+        let ap = Ws::new(ap);
+        let bp = Ws::new(bp);
+
+        let mut jc = 0;
+        while jc < n {
+            let nb = (n - jc).min(PACK_NC);
+            let mut pc = 0;
+            while pc < k {
+                let kb = (k - pc).min(PACK_KC);
+                pack_cols(nb, kb, b, jc, pc, ldb, bp);
+                let mut ic = 0;
+                while ic < m {
+                    let mb = (m - ic).min(PACK_MC);
+                    pack_rows(mb, kb, a, ic, pc, lda, ap);
+                    let ic0 = ic + jc * ldc;
+                    if pc == 0 {
+                        block_packed_nt::<false>(mb, nb, kb, ap, bp, c, ic0, ldc);
+                    } else {
+                        block_packed_nt::<true>(mb, nb, kb, ap, bp, c, ic0, ldc);
+                    }
+                    ic += PACK_MC;
+                }
+                pc += PACK_KC;
+            }
+            jc += PACK_NC;
+        }
+    });
 }
 
 /// One `MR`-by-`NR` tile of `C -= A * B'`, where `A`, `B` and `C` are three
@@ -1564,6 +1965,111 @@ mod tests {
                 for i in 0..m {
                     let want: f64 = (0..k).map(|l| a[i + l * lda] * b[j + l * ldb]).sum();
                     assert!((c[i + j * ldc] - want).abs() < 1e-13, "({i},{j})");
+                }
+            }
+        }
+    }
+
+    /// `C (i,j)` as the reference computes it: an ascending-`l` chain of
+    /// [`rfma`] from zero. Both `gemm_nt` paths and every `syrk_ln_strip`
+    /// block decomposition have to reproduce it bit for bit, which is a
+    /// stronger statement than any tolerance and the one the module's
+    /// summation-order contract actually makes.
+    fn dot_nt(k: usize, a: &[f64], ia: usize, lda: usize, b: &[f64], jb: usize, ldb: usize) -> f64 {
+        let mut acc = 0.0f64;
+        for l in 0..k {
+            acc = rfma(b[jb + l * ldb], a[ia + l * lda], acc);
+        }
+        acc
+    }
+
+    #[test]
+    fn gemm_is_bit_identical_across_the_blocking() {
+        for &(m, n, k) in &[
+            (64usize, 33usize, 70usize),
+            (PACK_MC + 3, PACK_NR * 2 + 1, PACK_KC + 5),
+            (PACK_MC * 2 + 7, 70, PACK_KC * 2 + 1),
+            (37, PACK_NC + 6, 90),
+        ] {
+            let (lda, ldb, ldc) = (m + 5, n + 7, m + 3);
+            let a = mat(m, k, lda, 4242);
+            let b = mat(n, k, ldb, 2424);
+            let mut got = vec![f64::NAN; ldc * n + m];
+            gemm_nt(m, n, k, &a, lda, &b, ldb, &mut got, ldc);
+            for j in 0..n {
+                for i in 0..m {
+                    assert_eq!(
+                        got[i + j * ldc].to_bits(),
+                        dot_nt(k, &a, i, lda, &b, j, ldb).to_bits(),
+                        "m={m} n={n} k={k} at ({i},{j})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The recursive trapezoid has to agree with the same chain, at every strip
+    /// boundary and across `SYRK_LEAF`.
+    #[test]
+    fn syrk_is_bit_identical_across_the_blocking() {
+        for &(n, k) in &[
+            (8usize, 5usize),
+            (67, 40),
+            (200, 90),
+            (SYRK_LEAF * 4 + 8, 70),
+        ] {
+            let (lda, ldc) = (n + 4, n + 2);
+            let a = mat(n, k, lda, 31337);
+            for &jn in &[n, SYRK_NB, SYRK_LEAF, SYRK_LEAF + SYRK_NB] {
+                let mut c = vec![f64::NAN; ldc * n + n];
+                let mut j0 = 0;
+                while j0 < n {
+                    let w = jn.min(n - j0);
+                    syrk_ln_strip(n, k, &a, lda, &mut c[j0 * ldc..], ldc, j0, w);
+                    j0 += w;
+                }
+                for j in 0..n {
+                    for i in j..n {
+                        assert_eq!(
+                            c[i + j * ldc].to_bits(),
+                            dot_nt(k, &a, i, lda, &a, j, lda).to_bits(),
+                            "n={n} k={k} jn={jn} at ({i},{j})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Packing must not move a rounding: it copies operands and cuts the loop
+    /// nest, and the `k` blocks accumulate into `C` in ascending order, so every
+    /// entry sees the same sources in the same sequence as the direct path.
+    /// Sizes cross `PACK_MC`, `PACK_NC` and `PACK_KC` and land off every
+    /// multiple, which is where a mis-set panel offset shows up.
+    #[test]
+    fn packed_gemm_is_bit_identical_to_the_direct_one() {
+        for &(m, n, k) in &[
+            (64usize, 33usize, 70usize),
+            (300, 17, 300),
+            (PACK_MC + 3, PACK_NR * 2 + 1, PACK_KC + 5),
+            (PACK_MC * 2 + 7, 70, PACK_KC * 2 + 1),
+            (37, PACK_NC + 6, 90),
+            (PACK_MR * 4, PACK_NR * 2, 64),
+        ] {
+            let (lda, ldb, ldc) = (m + 5, n + 7, m + 3);
+            let a = mat(m, k, lda, 4242);
+            let b = mat(n, k, ldb, 2424);
+            let mut want = vec![f64::NAN; ldc * n + m];
+            let mut got = vec![f64::NAN; ldc * n + m];
+            gemm_nt_direct(m, n, k, &a, lda, &b, ldb, &mut want, ldc);
+            gemm_nt_packed(m, n, k, &a, lda, &b, ldb, &mut got, ldc);
+            for j in 0..n {
+                for i in 0..m {
+                    assert_eq!(
+                        got[i + j * ldc].to_bits(),
+                        want[i + j * ldc].to_bits(),
+                        "m={m} n={n} k={k} at ({i},{j})"
+                    );
                 }
             }
         }

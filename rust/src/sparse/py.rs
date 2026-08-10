@@ -190,6 +190,12 @@ fn analyze_and_factorize(
             work,
         )
         .map_err(|e| e.to_string())?;
+        /* `a2` is the pattern-only `P A P'` the supernodal *symbolic* needs and
+         * nothing after it does: `super_factorize` builds its own numeric
+         * `tril (P A P')`. Rust would keep it to the end of the block, so it
+         * would be live across the allocation of `L->x` — 0.4 GB against 4.7 on
+         * a 3.4M-row system. */
+        drop(a2);
         let mut l = SuperFactor::new(&s, sym);
         let mut cwork = SuperWork::new();
         super_numeric::super_factorize(a, beta, &mut l, work, &mut cwork)

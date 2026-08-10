@@ -177,22 +177,27 @@ impl Schedule {
 struct TaskWork {
     /// `Map`, size `n`.
     map: Vec<i64>,
-    /// `RelativeMap`, size `n`.
+    /// `RelativeMap`. Upstream's is a size-`n` slice of the shared `Iwork`;
+    /// here there is one per task, and it is indexed `0 .. ndrow2`, so it is
+    /// sized `L->maxesize` instead — `ndrow2` counts a descendant's rows
+    /// outside its own columns, which is what `maxesize` bounds. At `n` it was
+    /// 27 MB per task on a 3.4M-row system, for 33 KB of use.
     relative_map: Vec<i64>,
     /// `C`, grown to whatever this task's largest update needs rather than to
     /// `L->maxcsize`: the big `C`s belong to the supernodes near the root, and
     /// sizing every task's buffer for those would cost `nthreads` times the
-    /// largest one.
+    /// largest one. Anything over [`C_KEEP_DOUBLES`] is released when the
+    /// workspace goes back to the pool — see [`WorkPool::give`].
     c: Vec<f64>,
     /// One `C` per concurrently-computed descendant; see [`apply_updates`].
     bufs: Vec<Vec<f64>>,
 }
 
 impl TaskWork {
-    fn new(n: usize) -> TaskWork {
+    fn new(n: usize, esize: usize) -> TaskWork {
         TaskWork {
             map: vec![EMPTY; n],
-            relative_map: vec![0; n],
+            relative_map: vec![0; esize],
             c: Vec::new(),
             bufs: Vec::new(),
         }
@@ -210,14 +215,17 @@ impl TaskWork {
 #[derive(Debug, Default)]
 struct WorkPool {
     n: usize,
+    esize: usize,
     free: Mutex<Vec<TaskWork>>,
 }
 
 impl WorkPool {
-    /// Size the pool for an `n`-by-`n` factor, discarding it if `n` changed.
-    fn ensure(&mut self, n: usize) {
-        if self.n != n {
+    /// Size the pool for an `n`-by-`n` factor, discarding it if the shape
+    /// changed.
+    fn ensure(&mut self, n: usize, esize: usize) {
+        if self.n != n || self.esize != esize {
             self.n = n;
+            self.esize = esize;
             self.free
                 .get_mut()
                 .unwrap_or_else(|e| e.into_inner())
@@ -230,13 +238,35 @@ impl WorkPool {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .pop()
-            .unwrap_or_else(|| TaskWork::new(self.n))
+            .unwrap_or_else(|| TaskWork::new(self.n, self.esize))
     }
 
-    fn give(&self, w: TaskWork) {
+    /// Return a workspace, dropping any `C` big enough to be worth not keeping.
+    ///
+    /// The big `C`s belong to the supernodes near the root, and only a couple of
+    /// tasks are inside one of those at a time — but every task that has *ever*
+    /// held one keeps it, and the pool grows to whatever concurrency the joins
+    /// reached. On a 3.4M-row system that was ~13 workspaces retaining a 139 MB
+    /// `C` each: 1.8 GB held for a few hundred milliseconds' use. Re-allocating
+    /// is `alloc_zeroed`, so the pages come from the kernel already zero and
+    /// cost the same first-touch faults the writes would take anyway.
+    fn give(&self, mut w: TaskWork) {
+        if w.c.len() > C_KEEP_DOUBLES {
+            w.c = Vec::new();
+        }
+        for b in w.bufs.iter_mut() {
+            if b.len() > C_KEEP_DOUBLES {
+                *b = Vec::new();
+            }
+        }
         self.free.lock().unwrap_or_else(|e| e.into_inner()).push(w);
     }
 }
+
+/// The largest `C` a returned [`TaskWork`] keeps, in doubles. Big enough that
+/// the overwhelming majority of supernodes — whose updates are a few rows by a
+/// few columns — never re-allocate.
+const C_KEEP_DOUBLES: usize = 1 << 16;
 
 /// What the last factorization did, so that "the parallel path ran" is a number
 /// rather than an assumption.
@@ -636,12 +666,63 @@ const MAX_FORK_DEPTH: u32 = 48;
 /// strip is worth being a task.
 const STRIP_FLOPS: f64 = 1.0e5;
 
-/// How many columns of one update's `C` go in a strip — [`STRIP_FLOPS`] worth,
-/// rounded up to [`SYRK_NB`] so the strip's block columns are the ones the
-/// unsplit call would use.
-fn strip_width(g: &Desc) -> usize {
+/// The narrowest strip worth cutting once the descendant's `L1` no longer fits
+/// a cache.
+///
+/// A strip `w` columns wide re-reads the whole of the descendant's `L1` and uses
+/// each element `w` times, so `w` *is* the update's arithmetic intensity.
+/// Measured at the shapes a 3.4M-row system's flop-heavy updates have
+/// (`dev/sparse_gates/dstrip.py`, `m` 2534-4174, `k` 1306-1578, one core):
+///
+/// | columns | 8 | 16 | 32 | 64 | 128 | 256 | 1024 |
+/// |---|---|---|---|---|---|---|---|
+/// | GF/s | 29 | 38 | 45 | 51 | 53 | 55 | 56 |
+///
+/// [`STRIP_FLOPS`] alone put those descendants at the left end of it — millions
+/// of flops per column, so a single column already met the budget — and cut a
+/// 1306-column update into 163 strips.
+const STRIP_MIN_COLS: usize = 128;
+
+/// How big the operand a strip re-reads has to be before [`STRIP_MIN_COLS`]
+/// applies at all. Below this the re-read comes out of cache and costs nothing,
+/// so the strip may be as narrow as [`STRIP_FLOPS`] wants and the extra tasks
+/// are free.
+///
+/// The gate is on the mechanism rather than on a size threshold for the matrix,
+/// because the mechanism is what differs: applying [`STRIP_MIN_COLS`]
+/// unconditionally cost 10-16% on gridfit and pywarper, whose descendants stream
+/// a few hundred kilobytes and want every task the flop budget will give them.
+const STRIP_RESIDENT_BYTES: usize = 2 << 20;
+
+/// The most strips a *non-resident* descendant is cut into, per thread — a
+/// bound on the count, where [`STRIP_MIN_COLS`] is a bound on the width.
+/// Measured: 2 cost gridfit 320² 12% and 8 cost the 3.4M-row system 15%.
+const STRIP_OVER: usize = 4;
+
+/// How many columns of one update's `C` go in a strip.
+///
+/// [`STRIP_FLOPS`] worth, rounded up to [`SYRK_NB`] so the strip's block columns
+/// are the ones the unsplit call would use. A descendant whose `L1`/`L2` no
+/// longer fits a cache — see [`STRIP_RESIDENT_BYTES`] — additionally gets at
+/// least [`STRIP_MIN_COLS`] columns and at most [`STRIP_OVER`] strips per
+/// thread, because for those the re-read is the cost and the flop budget alone
+/// cuts far too fine. Below that size nothing changes: the extra tasks are free
+/// and the systems made of them want every one.
+///
+/// On one thread there is nothing to balance, so the strip is the whole update
+/// and the kernel gets its widest call.
+fn strip_width(g: &Desc, nt: usize) -> usize {
+    let ndrow1 = g.ndrow1 as usize;
+    if nt <= 1 {
+        return ndrow1.max(1);
+    }
     let per_col = 2.0 * g.ndrow2 as f64 * g.ndcol as f64;
-    let cols = (STRIP_FLOPS / per_col).ceil().max(1.0) as usize;
+    let mut cols = (STRIP_FLOPS / per_col).ceil().max(1.0) as usize;
+    if 8 * g.ndrow2 as usize * g.ndcol as usize > STRIP_RESIDENT_BYTES {
+        cols = cols
+            .max(STRIP_MIN_COLS)
+            .max(ndrow1.div_ceil(nt * STRIP_OVER));
+    }
     cols.div_ceil(SYRK_NB) * SYRK_NB
 }
 
@@ -808,6 +889,22 @@ fn assemble_par(g: &Desc, c: &[f64], sx: &mut [f64], nsrow: i64, relative_map: &
     });
 }
 
+/// Make `buf` at least `need` long, discarding what is in it.
+///
+/// A fresh allocation and not `Vec::resize`, because nothing in the old
+/// contents is wanted: `update_c` writes every entry `assemble` reads, and
+/// `resize` would `realloc` — copying the stale bytes — and then `memset` the
+/// tail. `vec![0.0; n]` goes through `alloc_zeroed`, so for a `C` in the tens of
+/// megabytes the pages arrive already zero and are faulted in by the writes that
+/// were going to happen anyway. Growing a 139 MB `C` a supernode at a time was
+/// 12% of the factorization's busy samples in `__bzero`/`memmove`/`memset`.
+#[inline]
+fn grow_c(buf: &mut Vec<f64>, need: usize) {
+    if buf.len() < need {
+        *buf = vec![0.0; need];
+    }
+}
+
 /// Apply every pending update of one supernode, in the link list's order.
 ///
 /// The updates are independent — each reads a different descendant's block of
@@ -824,7 +921,16 @@ fn assemble_par(g: &Desc, c: &[f64], sx: &mut [f64], nsrow: i64, relative_map: &
 /// like a deliberate bit-exactness decision.
 ///
 /// The parallel and serial arms differ only in *which* `C` buffer each update
-/// gets. Both call [`update_c`] and [`assemble`] with the same arguments.
+/// gets, and in whether its columns are cut into strips. Both compute the same
+/// `C` entries the same way and hand them to [`assemble`] in the same order.
+///
+/// **The arm is chosen on the work, not on the batch size.** It used to require
+/// `batch.len() > 1`, which reads like a concurrency test and is really a
+/// statement about buffer count: the batch loop stops once the live `C`s reach
+/// [`BATCH_DOUBLES`], so a descendant whose own `C` exceeds that is always alone
+/// in its batch — and that is precisely the descendant with the most flops in
+/// it. On a 3.4M-row system the largest `C` is 139 MB and every update of that
+/// size took the serial arm.
 fn apply_updates(
     ctx: &Ctx,
     descs: &[Desc],
@@ -853,23 +959,31 @@ fn apply_updates(
         }
         let batch = &descs[i0..i1];
 
-        if batch.len() > 1 && flops >= ctx.par_flops {
-            if bufs.len() < batch.len() {
-                bufs.resize_with(batch.len(), Vec::new);
-            }
-            for (buf, g) in bufs.iter_mut().zip(batch) {
-                if buf.len() < g.csize() {
-                    buf.resize(g.csize(), 0.0);
+        if ctx.threads && flops >= ctx.par_flops {
+            /* One `C` per descendant, and for a lone one the serial path's own
+             * buffer — a descendant whose `C` is already over `BATCH_DOUBLES`
+             * is a batch of one, and it is exactly the descendant with the most
+             * flops in it. Giving that case the serial arm left the largest
+             * updates in the factorization single-threaded. */
+            let bufs: &mut [Vec<f64>] = if batch.len() == 1 {
+                core::slice::from_mut(c)
+            } else {
+                if bufs.len() < batch.len() {
+                    bufs.resize_with(batch.len(), Vec::new);
                 }
+                &mut bufs[..batch.len()]
+            };
+            for (buf, g) in bufs.iter_mut().zip(batch) {
+                grow_c(buf, g.csize());
             }
             {
                 /* One task per strip rather than per descendant: a supernode's
                  * descendants differ in size by orders of magnitude, and a
                  * batch cannot finish before its largest member does. */
                 let mut tasks: Vec<(Desc, usize, usize, &mut [f64])> = Vec::new();
-                for (buf, g) in bufs[..batch.len()].iter_mut().zip(batch) {
+                for (buf, g) in bufs.iter_mut().zip(batch) {
                     let (ndrow1, ndrow2) = (g.ndrow1 as usize, g.ndrow2 as usize);
-                    let width = strip_width(g);
+                    let width = strip_width(g, ctx.nthreads);
                     let mut rest = &mut buf[..ndrow1 * ndrow2];
                     let mut j0 = 0;
                     while j0 < ndrow1 {
@@ -890,9 +1004,7 @@ fn apply_updates(
             }
         } else {
             for g in batch {
-                if c.len() < g.csize() {
-                    c.resize(g.csize(), 0.0);
-                }
+                grow_c(c, g.csize());
                 update_c(lower, base, g, c);
                 assemble(g, c, sx, nsrow, ctx.ls, map, relative_map, ctx.nthreads);
             }
@@ -1099,6 +1211,16 @@ fn node(
 /// subtree the interval `first [s] ..= s`, so ascending index order is a
 /// topological order, and running it iteratively is what keeps a long chain of
 /// supernodes off the stack.
+///
+/// **A single-child node is walked through, not given up on.** `s` with one
+/// child has nothing to fork *at `s`*, but the branching may be one link down,
+/// and taking the serial arm there hands the whole subtree — every branch under
+/// it — to one thread. Near the root of an AMD tree those chains are common and
+/// they carry most of the flops. So the chain is followed to the first node that
+/// does branch, that node forks, and the chain itself runs afterwards in
+/// ascending index order: a node whose only child is `c` is `c + 1` under
+/// postorder, so "the chain" is a contiguous run of indices and running it
+/// after `c`'s subtree is the same topological order the serial arm uses.
 #[allow(clippy::too_many_arguments)]
 fn subtree(
     ctx: &Ctx,
@@ -1111,13 +1233,25 @@ fn subtree(
     lx: &mut [f64],
     depth: u32,
 ) {
-    let kids = tree.kids(s);
-    let fork = ctx.threads
-        && depth < MAX_FORK_DEPTH
-        && kids.len() > 1
-        && tree.subwork[s] - tree.work[s] >= ctx.tree_flops;
+    let worth =
+        ctx.threads && depth < MAX_FORK_DEPTH && tree.subwork[s] - tree.work[s] >= ctx.tree_flops;
 
-    if !fork {
+    /* follow single-child links down to the first branch */
+    let mut top = s;
+    if worth {
+        while tree.kids(top).len() == 1 {
+            let c = tree.kids(top)[0] as usize;
+            debug_assert_eq!(
+                c + 1,
+                top,
+                "postorder makes a single child the previous index"
+            );
+            top = c;
+        }
+    }
+    let kids = tree.kids(top);
+
+    if !worth || kids.len() < 2 {
         let mut tw = pool.take();
         for t in tree.first[s]..=s {
             node(ctx, plan, failed, t, base, lx, &mut tw);
@@ -1127,8 +1261,11 @@ fn subtree(
     }
 
     {
+        /* the fork only reaches `px [top+1]`; the reborrow ends with this
+         * block, so the chain below gets `lx` whole again */
+        let head = &mut lx[..(ctx.lpx[top + 1] - base) as usize];
         let mut jobs: Vec<(usize, i64, &mut [f64])> = Vec::with_capacity(kids.len());
-        let mut rest = &mut lx[..];
+        let mut rest = &mut head[..];
         let mut cur = base;
         for &c in kids {
             let c = c as usize;
@@ -1138,14 +1275,18 @@ fn subtree(
             rest = tail;
             cur = end;
         }
-        debug_assert_eq!(cur, ctx.lpx[s]);
+        debug_assert_eq!(cur, ctx.lpx[top]);
         jobs.par_iter_mut()
             .for_each(|(c, b, sl)| subtree(ctx, tree, plan, pool, failed, *c, *b, sl, depth + 1));
     }
     ctx.counters.forked.fetch_add(1, Atomic::Relaxed);
 
+    /* `top`, then the chain that led down to it — ascending index order, which
+     * postorder makes a topological one */
     let mut tw = pool.take();
-    node(ctx, plan, failed, s, base, lx, &mut tw);
+    for t in top..=s {
+        node(ctx, plan, failed, t, base, lx, &mut tw);
+    }
     pool.give(tw);
 }
 
@@ -1471,7 +1612,7 @@ pub fn super_numeric(
      * upstream carves for them go unused; the request is left at upstream's
      * size because Work is shared and only ever grows. */
     work.ensure_iwork(2 * n + 5 * nsuper);
-    cwork.pool.ensure(n);
+    cwork.pool.ensure(n, l.sym.maxesize.max(1));
 
     /* get the current factor L and allocate numerical part, if needed */
     if !l.numeric {

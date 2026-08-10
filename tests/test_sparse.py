@@ -670,7 +670,9 @@ def test_analyze_best_selects_but_does_not_invent(name, M):
     """
     best = analyze(M, ordering="best")
     amd = analyze(M, ordering="amd")
-    same_as = amd if best["ordering"] == "amd" else analyze(M, ordering=best["ordering"])
+    same_as = (
+        amd if best["ordering"] == "amd" else analyze(M, ordering=best["ordering"])
+    )
 
     np.testing.assert_array_equal(best["perm"], same_as["perm"])
     np.testing.assert_array_equal(best["colcount"], same_as["colcount"])

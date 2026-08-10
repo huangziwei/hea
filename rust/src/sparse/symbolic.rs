@@ -26,7 +26,7 @@
 
 use super::amd::{self, AmdInfo, IntWidth, DEFAULT_AGGRESSIVE, DEFAULT_DENSE};
 use super::metis_order;
-use super::ws::{validate_csc, CscError, Work, WorkRef, Ws, EMPTY};
+use super::ws::{columns_are_sorted, validate_csc, CscError, Work, WorkRef, Ws, EMPTY};
 
 /// Why an analysis could not be performed.
 #[derive(Debug)]
@@ -1124,7 +1124,7 @@ pub fn analyze(
         x: Vec::new(),
         numeric: false,
         stype,
-        sorted: true,
+        sorted: columns_are_sorted(n, indptr, indices),
     };
     analyze_sparse(&a, method, width)
 }

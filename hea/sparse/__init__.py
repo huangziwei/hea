@@ -21,6 +21,16 @@ and in memory, so it pays for a factor that is solved against repeatedly or
 refactorized through :meth:`Factor.factorize`; for a single factorize-and-solve
 at that size, ``order="amd"`` finishes sooner.
 
+**The numeric factorization is parallel, and it needs the cores.** It runs over
+the supernodal elimination tree and again inside a supernode's panel, on a
+private pool sized to the machine's performance cores (``RAYON_NUM_THREADS``
+overrides it). That is where it gets its speed: CHOLMOD hands one supernode at a
+time to a vendor BLAS and relies on the BLAS to thread, which on a matrix made
+of many small supernodes it barely can. The other side of that is a real
+single-thread cost — on a 3.4M-row system the same factorization is 16 s at one
+thread and 3 s at eight — so pinning ``RAYON_NUM_THREADS=1`` for reproducibility,
+or running in a one-core container, gives up most of the difference.
+
 The API mirrors the slice of ``sksparse.cholmod`` hea and pywarper use, with two
 additions CHOLMOD has and scikit-sparse 0.5.0 does not expose:
 ``system="P"`` / ``"Pt"``, which is what any caller doing its own triangular
