@@ -4,9 +4,9 @@
 //! `gk_mcoreMalloc`) with a push/pop stack: `WCOREPUSH` marks, `iwspacemalloc`
 //! carves, `WCOREPOP` releases everything since the mark. It is an allocator,
 //! not an algorithm — and the port measured that nothing depends on what it
-//! hands back before it is written (`dev/sparse_gates/metis/mnd.c`'s
-//! `mnd_poison`: five different fill bytes, identical permutation on all 23
-//! corpus matrices).
+//! hands back before it is written: upstream driven with five different fill
+//! bytes in place of the bump core gives an identical permutation on all 23
+//! corpus matrices.
 //!
 //! So the port carves scratch as owned `Vec`s at the same points, and Rust's
 //! scopes are `WCOREPUSH`/`WCOREPOP`. That is the one mechanical deviation in

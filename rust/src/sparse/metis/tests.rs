@@ -3,8 +3,8 @@
 //! Two jobs, and the second is the load-bearing one:
 //!
 //! 1. **Correctness.** Each graph's `perm` and `iperm` are pinned as FNV-1a
-//!    digests taken from `dev/sparse_gates/metis`'s oracle — upstream METIS
-//!    5.1.0 compiled through `cholmod_metis_wrapper.c`. The private gates check
+//!    digests taken from upstream METIS 5.1.0, compiled through
+//!    `cholmod_metis_wrapper.c`. The private parity gates check
 //!    the same thing over a much larger corpus; these are what ships, so a
 //!    change that moves any ordering fails here without a C toolchain.
 //! 2. **Bounds.** The kernels below index through [`super::Ws`], which elides
@@ -185,8 +185,8 @@ fn corpus() -> Vec<(&'static str, (Idx, Vec<Idx>, Vec<Idx>))> {
     ]
 }
 
-/// `(name, n, fnv(perm), fnv(iperm))` from upstream METIS 5.1.0, via
-/// `dev/sparse_gates/metis`. Regenerate only against that oracle.
+/// `(name, n, fnv(perm), fnv(iperm))` from upstream METIS 5.1.0, compiled
+/// through `cholmod_metis_wrapper.c`. Regenerate only against that oracle.
 const PINS: &[(&str, Idx, u64, u64)] = &[
     ("grid2d-12", 144, 10606858657682727653, 6667631166029426853),
     ("grid2d-25", 625, 4525716102406086647, 621647128482809903),

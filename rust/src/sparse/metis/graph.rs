@@ -139,7 +139,7 @@ impl Graph {
     ///
     /// Upstream leaves the arrays uninitialized; here they are zeroed, which is
     /// unobservable — `SplitGraphOrder` overwrites every entry it later reads,
-    /// and the allocator-residue check in `dev/sparse_gates/metis` confirms it.
+    /// and the allocator-residue check against upstream confirms it.
     pub fn setup_split(&self, snvtxs: Idx, snedges: Idx) -> Graph {
         let mut s = Graph::new();
         s.nvtxs = snvtxs;

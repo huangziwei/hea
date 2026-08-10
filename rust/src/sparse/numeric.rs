@@ -20,6 +20,12 @@
 //! only for LPDASA (`cholmod_rowfac.c:610,637`) and are unreachable through
 //! `cholmod_factorize`.
 //!
+//! **Memory contract.** `A` is borrowed for the call and not kept; the
+//! workspace is the caller's [`super::ws::Work`], which is `Common`; `L`'s
+//! arrays are grown by `reallocate_column`/`reallocate_factor` exactly where
+//! upstream grows them and never shrunk, so a refactorization of the same
+//! pattern allocates nothing.
+//!
 //! The `Int` width is upstream's `int64_t` build, i.e. `cholmod_l_rowfac`.
 //! Nothing here is width-observable the way AMD's `hash` is — the only place
 //! `Int_max` appears is [`grow_l`]'s clamp, which no reachable problem size
@@ -172,16 +178,21 @@ pub struct Factor {
 impl Factor {
     /// `cholmod_alloc_factor` (`t_cholmod_alloc_factor.c:26-97`) followed by
     /// what `cholmod_analyze` writes into it: the simplicial symbolic factor.
-    pub fn from_symbolic(s: &Symbolic) -> Factor {
+    ///
+    /// Takes the [`Symbolic`] by value for the reason
+    /// [`super::super_numeric::SuperFactor::new`] gives: `Lperm = L->Perm`, so
+    /// upstream's winner *is* the factor's ordering and there is nothing to
+    /// copy from.
+    pub fn from_symbolic(s: Symbolic) -> Factor {
         Factor {
             n: s.perm.len(),
-            perm: s.perm.clone(),
-            colcount: s.colcount.clone(),
+            minor: s.perm.len(),
+            perm: s.perm,
+            colcount: s.colcount,
             ordering: s.ordering,
             /* calloc'd header: LDL', not supernodal */
             is_ll: false,
             is_monotonic: true,
-            minor: s.perm.len(),
             numeric: false,
             p: Vec::new(),
             nz: Vec::new(),
@@ -1374,7 +1385,7 @@ mod tests {
     use crate::sparse::ws::Work;
 
     /// `A`, its symbolic analysis, and the factor it produces.
-    fn setup(n: usize, edges: &[(usize, usize)], stype: i32) -> (Sparse, Symbolic) {
+    fn setup(n: usize, edges: &[(usize, usize)], stype: i32) -> (Sparse<'static>, Symbolic) {
         let (p, i, x) = spd_triangle(n, edges, stype < 0);
         let s = analyze(
             n,
@@ -1388,9 +1399,9 @@ mod tests {
         (
             Sparse {
                 n,
-                p,
-                i,
-                x,
+                p: p.into(),
+                i: i.into(),
+                x: x.into(),
                 numeric: true,
                 stype,
                 sorted: true,
@@ -1481,7 +1492,7 @@ mod tests {
             for stype in [1i32, -1] {
                 for final_ll in [false, true] {
                     let (a, s) = setup(n, &edges, stype);
-                    let mut l = Factor::from_symbolic(&s);
+                    let mut l = Factor::from_symbolic(s);
                     let mut work = Work::new(n);
                     let params = Params {
                         final_ll,
@@ -1528,7 +1539,7 @@ mod tests {
             )
             .unwrap();
             let (a, _) = setup(n, &edges, 1);
-            let mut l = Factor::from_symbolic(&s);
+            let mut l = Factor::from_symbolic(s);
             let mut work = Work::new(n);
             factorize(&a, 0.0, &mut l, &Params::default(), &mut work).unwrap();
             assert_eq!(l.minor, n, "{name}");
@@ -1559,7 +1570,7 @@ mod tests {
     fn converting_between_ll_and_ldl_preserves_the_factorization() {
         for (name, n, edges) in corpus() {
             let (a, s) = setup(n, &edges, 1);
-            let mut l = Factor::from_symbolic(&s);
+            let mut l = Factor::from_symbolic(s);
             let mut work = Work::new(n);
             factorize(&a, 0.0, &mut l, &Params::default(), &mut work).unwrap();
             let before = dense_ldl(&l);
@@ -1587,9 +1598,9 @@ mod tests {
         /* [[1,2],[2,1]] is symmetric with eigenvalues 3 and -1 */
         let a = Sparse {
             n: 2,
-            p: vec![0, 1, 3],
-            i: vec![0, 0, 1],
-            x: vec![1.0, 2.0, 1.0],
+            p: vec![0, 1, 3].into(),
+            i: vec![0, 0, 1].into(),
+            x: vec![1.0, 2.0, 1.0].into(),
             numeric: true,
             stype: 1,
             sorted: true,
@@ -1603,7 +1614,7 @@ mod tests {
             IntWidth::I64,
         )
         .unwrap();
-        let mut l = Factor::from_symbolic(&s);
+        let mut l = Factor::from_symbolic(s.clone());
         let mut work = Work::new(2);
         /* LDL' only fails on an exactly zero pivot, so this one succeeds with a
          * negative D — that is the documented behaviour, not a miss */
@@ -1612,7 +1623,7 @@ mod tests {
         assert_eq!(l.x[l.p[1] as usize], -3.0);
 
         /* LL' cannot represent it, and stops at the offending column */
-        let mut l = Factor::from_symbolic(&s);
+        let mut l = Factor::from_symbolic(s);
         let params = Params {
             final_ll: true,
             ..Params::default()
@@ -1626,9 +1637,9 @@ mod tests {
     fn beta_shifts_the_diagonal() {
         let (a, s) = setup(60, &corpus()[4].2, 1);
         let mut work = Work::new(60);
-        let mut plain = Factor::from_symbolic(&s);
+        let mut plain = Factor::from_symbolic(s.clone());
         factorize(&a, 0.0, &mut plain, &Params::default(), &mut work).unwrap();
-        let mut shifted = Factor::from_symbolic(&s);
+        let mut shifted = Factor::from_symbolic(s);
         factorize(&a, 2.5, &mut shifted, &Params::default(), &mut work).unwrap();
         assert_eq!(plain.nz, shifted.nz);
         assert_eq!(plain.i, shifted.i);
@@ -1645,9 +1656,9 @@ mod tests {
         let mut work = Work::new(1);
         let pattern_only = Sparse {
             n: 1,
-            p: vec![0, 1],
-            i: vec![0],
-            x: Vec::new(),
+            p: vec![0, 1].into(),
+            i: vec![0].into(),
+            x: Vec::new().into(),
             numeric: false,
             stype: 1,
             sorted: true,
@@ -1661,7 +1672,7 @@ mod tests {
             IntWidth::I64,
         )
         .unwrap();
-        let mut l = Factor::from_symbolic(&s);
+        let mut l = Factor::from_symbolic(s);
         assert!(matches!(
             rowfac(
                 &pattern_only,
@@ -1675,7 +1686,7 @@ mod tests {
             Err(NumericError::Invalid(_))
         ));
         let lower = Sparse {
-            x: vec![1.0],
+            x: vec![1.0].into(),
             numeric: true,
             stype: -1,
             ..pattern_only

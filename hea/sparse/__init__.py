@@ -31,6 +31,20 @@ single-thread cost — on a 3.4M-row system the same factorization is 16 s at on
 thread and 3 s at eight — so pinning ``RAYON_NUM_THREADS=1`` for reproducibility,
 or running in a one-core container, gives up most of the difference.
 
+**On macOS, set ``MallocSpaceEfficient=1`` in the environment for a large
+factorization.** A parallel factorization makes many large short-lived
+allocations from every worker, and libmalloc's default per-thread magazines hold
+the freed blocks rather than returning them: on the same 3.4M-row system that is
+**2.7 GB of a 9.2 GB peak**, recovered at no measurable cost in time. It has to
+be an environment variable — libmalloc reads it before ``main`` — so a library
+cannot set it for you::
+
+    MallocSpaceEfficient=1 python fit.py
+
+The factor itself is sized by the matrix, not by the thread count: ``L`` is
+4.7 GB there, and what hea holds beyond it is one workspace, one ``Map`` per
+worker, and ``A``'s pattern.
+
 The API mirrors the slice of ``sksparse.cholmod`` hea and pywarper use, with two
 additions CHOLMOD has and scikit-sparse 0.5.0 does not expose:
 ``system="P"`` / ``"Pt"``, which is what any caller doing its own triangular
@@ -77,6 +91,13 @@ def _as_csc(A):
     which half is the stored one, and entries in the other half are ignored
     rather than folded in — the same contract as ``A->stype``. So there is no
     triangle to extract, which matters when refactorizing 742 times per fit.
+
+    The three arrays are handed to the extension as **views**, not copies —
+    ``cholmod_sparse`` is a view onto the caller's buffers and so is this. The
+    exception is the index type: the port is ``int64`` throughout, one ``itype``
+    the way each CHOLMOD build has one, while scipy uses ``int32`` below 2³¹
+    nonzeros. That upcast is a real copy of ``indices`` per call — 197 MB on a
+    3.4M-row system — and it is the price of the single-itype scope.
     """
     if not issparse(A):
         A = csc_array(np.asarray(A, dtype=np.float64))
@@ -98,7 +119,13 @@ class Factor:
 
     Holds its own workspace, so a sequence of ``factorize``/``solve`` calls
     against one symbolic analysis pays for it once. That is the property
-    ``gmm`` depends on and the one scikit-sparse 0.5.0 gives up.
+    ``gmm`` depends on and the one scikit-sparse 0.5.0 gives up. It is also what
+    scikit-sparse 0.4.15 does — a ``Common`` per ``analyze`` call, kept on the
+    returned factor — so the workspace is not an extra cost against that bar.
+
+    It does **not** keep ``A``: the values are read straight out of the caller's
+    arrays and the factorization keeps only ``A``'s pattern, which
+    :attr:`L` needs to prune the supernodal factor.
     """
 
     __slots__ = ("_F", "_lower", "_n")
@@ -184,6 +211,12 @@ class Factor:
 
         For an ``LDL'`` factorization the diagonal holds ``D``, not ones — the
         same convention CHOLMOD's ``L`` uses.
+
+        The supernodal factor is **pruned** on the way out, so this is the same
+        matrix whichever path ran. ``scikit-sparse`` does not prune — its
+        ``L()`` is ``cholmod_factor_to_sparse`` alone — and so returns the extra
+        entries relaxed supernode amalgamation put in the dense blocks. Pruning
+        is why the factorization keeps ``A``'s pattern.
         """
         indptr, indices, data = self._F.factor_csc()
         out = csc_array((data, indices, indptr), shape=(self._n, self._n))

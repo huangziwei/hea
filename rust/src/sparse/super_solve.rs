@@ -23,6 +23,11 @@
 //! applies through `perm`/`iperm` rather than `ptrans`/`iptrans`, and there is
 //! no blocking over columns — the whole right-hand side goes through at once.
 //!
+//! **Memory contract.** `Y` and `E` are [`SuperSolveWork`], owned by the
+//! caller and grown never shrunk, for the reason [`super::solve`] gives:
+//! `cholmod_solve2` takes them as handles (`cholmod_solve.c:669-679`) so that
+//! a caller issuing many solves allocates once.
+//!
 //! **`E` is the gather buffer.** A supernode's rows below its diagonal block
 //! are scattered through `X`, so the off-diagonal update cannot be a strided
 //! block operation. Upstream gathers those `nsrow2` rows into a dense
@@ -301,19 +306,23 @@ mod tests {
 
     /// A corpus matrix, factorized supernodally the way `mod.rs` does it, with
     /// the triangle it was built from kept for the residual check.
-    fn factor(n: usize, edges: &[(usize, usize)], ordering: Ordering) -> (SuperFactor, Sparse) {
+    fn factor(
+        n: usize,
+        edges: &[(usize, usize)],
+        ordering: Ordering,
+    ) -> (SuperFactor, Sparse<'static>) {
         let (p, i, v) = spd_triangle(n, edges, false);
         let a = Sparse {
             n,
-            p: p.clone(),
-            i: i.clone(),
-            x: v.clone(),
+            p: p.clone().into(),
+            i: i.clone().into(),
+            x: v.clone().into(),
             numeric: true,
             stype: 1,
             sorted: columns_are_sorted(n, &p, &i),
         };
-        let s = analyze_sparse(&a, Method::Pinned(ordering), IntWidth::I64).unwrap();
         let mut w = Work::new(n);
+        let s = analyze_sparse(&a, Method::Pinned(ordering), IntWidth::I64, &mut w).unwrap();
         let a2 = permute_sym(&a, s.ordering, &s.perm, false, false, &mut w.all());
         let sym = super_symbolic(
             a2.as_ref().unwrap_or(&a),
@@ -323,7 +332,7 @@ mod tests {
             &mut w,
         )
         .unwrap();
-        let mut l = SuperFactor::new(&s, sym);
+        let mut l = SuperFactor::new(s, sym);
         let mut cw = SuperWork::new();
         super_factorize(&a, 0.0, &mut l, &mut w, &mut cw).unwrap();
         (l, a)

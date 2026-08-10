@@ -189,26 +189,25 @@ pub struct Work {
 }
 
 impl Work {
-    /// `cholmod_allocate_work (n, 6*n, 0, Common)`, the call
-    /// `cholmod_analyze` opens with, followed by the `cholmod_alloc_work (n, n,
-    /// n, ...)` that `cholmod_rowfac` adds on top of it — `alloc_work` only
-    /// ever grows (`t_cholmod_alloc_work.c:59,81,99`), so one factor's
-    /// workspace is the union.
+    /// `cholmod_start` followed by the `cholmod_allocate_work (n, 6*n, n, …)`
+    /// that one factor's routines add up to — see [`Work::allocate`], which is
+    /// what every entry point calls with its own requirement.
     pub fn new(n: usize) -> Work {
-        Work {
-            iwork: vec![0; 6 * n],
-            flag: vec![EMPTY; n],
-            head: vec![EMPTY; n + 1],
-            /* `alloc_work` zeroes Xwork once, at allocation (`:106-108`) */
-            xwork: vec![0.0; n],
+        let mut w = Work {
+            iwork: Vec::new(),
+            flag: Vec::new(),
+            head: Vec::new(),
+            xwork: Vec::new(),
             /* `Common->mark = 0` accompanies a fresh `Flag` (`:71`) */
             mark: 0,
-        }
+        };
+        w.allocate(n, 6 * n, n);
+        w
     }
 
     /// The whole workspace. Only the ordering routines may take this
-    /// (`cholmod_analyze.c:511-514`); everything else goes through
-    /// [`Work::split_analyze`].
+    /// (`cholmod_analyze.c:511-514`); everything else uses `Iwork [0..2n)` and
+    /// leaves the last `4n` to `Parent`/`First`/`Level`/`Post`.
     pub(super) fn all(&mut self) -> WorkRef<'_> {
         WorkRef {
             iwork: &mut self.iwork,
@@ -219,19 +218,65 @@ impl Work {
         }
     }
 
-    /// `cholmod_allocate_work (n, len, 0, Common)` where `n` is unchanged —
-    /// grow `Iwork` if it is short, and leave it alone otherwise
-    /// (`t_cholmod_alloc_work.c:81`). The supernodal numeric factorization
-    /// needs `2n + 5*nsuper`, which exceeds the `6n` [`Work::new`] starts with
-    /// once `nsuper > 4n/5`.
+    /// `cholmod_allocate_work (nrow, iworksize, xworksize, Common)` —
+    /// `t_cholmod_alloc_work.c:50-109`. Each of the four arrays grows if it is
+    /// short and is left alone otherwise; **none of them ever shrinks**, which
+    /// is why one workspace serves a whole session and why its size is the
+    /// union of what every routine asked for.
     ///
-    /// Growing *discards* the contents, as `alloc_work`'s free-then-malloc
-    /// does — which is why `cholmod_super_numeric` fills `SuperMap` only after
-    /// calling it (`:266-287`) and says so at
+    /// Growing *discards* the contents, as the C's free-then-malloc does —
+    /// which is why `cholmod_super_numeric` fills `SuperMap` only after calling
+    /// it (`:266-287`) and says so at
     /// `t_cholmod_super_numeric_worker.c:204-208`.
-    pub(super) fn ensure_iwork(&mut self, len: usize) {
-        if self.iwork.len() < len {
-            self.iwork = vec![0; len];
+    pub(super) fn allocate(&mut self, nrow: usize, iworksize: usize, xworksize: usize) {
+        /* the C's `MAX (1, nrow)`, `MAX (1, iworksize)` and `MAX (2,
+         * xworksize)` (`:54,80,95`) */
+        let nrow = nrow.max(1);
+        if nrow > self.flag.len() {
+            self.flag = vec![EMPTY; nrow];
+            self.head = vec![EMPTY; nrow + 1];
+            self.mark = 0;
+        }
+        if iworksize.max(1) > self.iwork.len() {
+            self.iwork = vec![0; iworksize.max(1)];
+        }
+        if xworksize.max(2) > self.xwork.len() {
+            /* `alloc_work` zeroes Xwork once, at allocation (`:106-108`) */
+            self.xwork = vec![0.0; xworksize.max(2)];
+        }
+    }
+
+    /// `Iwork` split the way `cholmod_analyze_p2` splits it
+    /// (`cholmod_analyze.c:509-526`): `Parent`, `First`, `Level` and `Post` are
+    /// the **last `4n`**, and everything the analysis calls between them gets a
+    /// [`WorkRef`] over the first `2n`.
+    ///
+    /// The split is what makes the four survive calls that are meanwhile
+    /// scratching in `Iwork [0..2n)` — the C gets that for free from raw
+    /// pointers into one block, and Rust needs to be shown the disjointness.
+    ///
+    /// **The ordering routines are the exception and must not take this.** AMD
+    /// uses all `6n` (`amd.rs`'s `Degree`/`Wi`/`Len`/`Nv`/`Next`/`Elen`), which
+    /// upstream permits precisely because none of the four is needed across
+    /// such a call (`:511-514`). Re-split afterwards; every one of the four is
+    /// written before it is read again.
+    pub(super) fn split_analyze(&mut self, n: usize) -> Analyze<'_> {
+        let (scratch, tail) = self.iwork.split_at_mut(2 * n);
+        let (parent, tail) = tail.split_at_mut(n);
+        let (first, tail) = tail.split_at_mut(n);
+        let (level, post) = tail.split_at_mut(n);
+        Analyze {
+            work: WorkRef {
+                iwork: scratch,
+                flag: &mut self.flag,
+                head: &mut self.head,
+                xwork: &mut self.xwork,
+                mark: &mut self.mark,
+            },
+            parent,
+            first,
+            level,
+            post: &mut post[..n],
         }
     }
 
@@ -245,6 +290,16 @@ impl Work {
             && self.head.iter().all(|&h| h == EMPTY)
             && self.xwork.iter().all(|&x| x == 0.0)
     }
+}
+
+/// [`Work::split_analyze`]'s four `n`-vectors and the scratch that goes with
+/// them — `Work4n` in `cholmod_analyze.c:516-521`.
+pub(super) struct Analyze<'a> {
+    pub(super) work: WorkRef<'a>,
+    pub(super) parent: &'a mut [i64],
+    pub(super) first: &'a mut [i64],
+    pub(super) level: &'a mut [i64],
+    pub(super) post: &'a mut [i64],
 }
 
 /// A borrowed [`Work`] — what the kernels take, so that a caller holding a

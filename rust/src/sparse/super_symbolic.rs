@@ -22,6 +22,11 @@
 //! in column form, which [`super::numeric::factorize`] builds with the same two
 //! transposes. It does not permute anything itself and does not look at
 //! `L->Perm`.
+//!
+//! **Memory contract.** `A` is borrowed for the call. What comes back is
+//! `L->super`/`pi`/`px`/`s` and the two size bounds — allocated once per
+//! analysis, owned by the factor, and never rebuilt by a refactorization.
+//! The scratch is the caller's [`Work`], as upstream's is `Common`.
 
 use super::symbolic::Sparse;
 use super::ws::{clear_flag, Work, Ws, EMPTY};
@@ -661,15 +666,16 @@ mod tests {
                     let (p, i) = triangle_csc(n, &edges, stype < 0);
                     let a = Sparse {
                         n,
-                        p,
-                        i,
-                        x: Vec::new(),
+                        p: p.into(),
+                        i: i.into(),
+                        x: Vec::new().into(),
                         numeric: false,
                         stype,
                         sorted: true,
                     };
-                    let s = analyze_sparse(&a, Method::Pinned(order), IntWidth::I64).unwrap();
                     let mut work = Work::new(n);
+                    let s = analyze_sparse(&a, Method::Pinned(order), IntWidth::I64, &mut work)
+                        .unwrap();
                     let a2 = permute_sym(&a, s.ordering, &s.perm, false, false, &mut work.all());
                     let ss = super_symbolic(
                         a2.as_ref().unwrap_or(&a),
@@ -767,15 +773,16 @@ mod tests {
         let (p, i) = triangle_csc(n, &edges, false);
         let a = Sparse {
             n,
-            p,
-            i,
-            x: Vec::new(),
+            p: p.into(),
+            i: i.into(),
+            x: Vec::new().into(),
             numeric: false,
             stype: 1,
             sorted: true,
         };
-        let s = analyze_sparse(&a, Method::Pinned(Ordering::Amd), IntWidth::I64).unwrap();
         let mut work = Work::new(n);
+        let s =
+            analyze_sparse(&a, Method::Pinned(Ordering::Amd), IntWidth::I64, &mut work).unwrap();
         let a2 = permute_sym(&a, s.ordering, &s.perm, false, false, &mut work.all());
         assert!(
             work.is_pristine(),
@@ -799,9 +806,9 @@ mod tests {
         for stype in [-1i32, 0] {
             let a = Sparse {
                 n: 1,
-                p: vec![0, 1],
-                i: vec![0],
-                x: Vec::new(),
+                p: vec![0, 1].into(),
+                i: vec![0].into(),
+                x: Vec::new().into(),
                 numeric: false,
                 stype,
                 sorted: true,
@@ -821,9 +828,9 @@ mod tests {
     fn an_empty_matrix_analyzes_to_no_supernodes() {
         let a = Sparse {
             n: 0,
-            p: vec![0],
-            i: Vec::new(),
-            x: Vec::new(),
+            p: vec![0].into(),
+            i: Vec::new().into(),
+            x: Vec::new().into(),
             numeric: false,
             stype: 1,
             sorted: true,

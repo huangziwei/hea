@@ -23,6 +23,17 @@
 //! the `fset` machinery, and no consumer of this crate asks for it, so the
 //! `stype == 0` branches of `etree`/`rowcolcounts` are not ported and
 //! [`SymbolicError::Unsymmetric`] is returned instead.
+//!
+//! **Memory contract.** [`Sparse`] is a `Cow` because `cholmod_sparse` holds
+//! bare pointers and leaves ownership to the caller: [`analyze_sparse`]'s `A`
+//! borrows, [`transpose_sym`] and [`ptranspose`] build and own. The workspace
+//! is the caller's [`Work`] — `cholmod_analyze` takes the caller's `Common` —
+//! and `Parent`/`First`/`Level`/`Post` are the last `4n` of its `Iwork`, not
+//! buffers of their own. What [`analyze_sparse`] returns is the three
+//! `n`-vectors upstream leaves in `L`, plus `Post`, which upstream discards
+//! and this port hands back because `_rs.analyze` reports it.
+
+use std::borrow::Cow;
 
 use super::amd::{self, AmdInfo, IntWidth, DEFAULT_AGGRESSIVE, DEFAULT_DENSE};
 use super::metis_order;
@@ -72,14 +83,23 @@ impl core::fmt::Display for SymbolicError {
 /// produces, and what arrives from scipy. The upstream templates select their
 /// `pend` with `#ifdef PACKED` at compile time, so the unpacked arms are a
 /// different instantiation rather than a branch, and are simply not built here.
-pub struct Sparse {
+///
+/// **Ownership.** `cholmod_sparse` declares `void *p ; void *i ; void *x ;` and
+/// leaves it to the caller whether it owns them: `cholmod_allocate_sparse` mallocs,
+/// and `scikit-sparse` builds one pointing straight at the numpy buffers.
+/// The [`Cow`] is that choice made explicit — `transpose_sym` and friends
+/// *build* matrices and hand back `Sparse<'static>`, while the one the caller
+/// passes in borrows. Owning unconditionally was 760 MiB of copied input on a
+/// 3.4M-row system, and it read as faithful because the C's declaration does
+/// not say which it is.
+pub struct Sparse<'a> {
     pub n: usize,
     /// `A->p`, size `n + 1`.
-    pub p: Vec<i64>,
+    pub p: Cow<'a, [i64]>,
     /// `A->i`, size `p[n]`.
-    pub i: Vec<i64>,
+    pub i: Cow<'a, [i64]>,
     /// `A->x`, size `p[n]`, and empty when [`Sparse::numeric`] is false.
-    pub x: Vec<f64>,
+    pub x: Cow<'a, [f64]>,
     /// `A->xtype != CHOLMOD_PATTERN`. A field rather than `!x.is_empty()`,
     /// because upstream's discriminator is `A->xtype` and a real matrix with no
     /// entries still has a non-NULL `A->x`; deriving it would make an empty
@@ -120,7 +140,7 @@ pub fn transpose_sym(
     values: bool,
     perm: Option<&[i64]>,
     work: &mut WorkRef<'_>,
-) -> Sparse {
+) -> Sparse<'static> {
     let n = a.n;
     /* C = A(p,p)' A is symmetric, or C=A' where A is any matrix */
     let cnz = a.p[n] as usize;
@@ -208,9 +228,9 @@ pub fn transpose_sym(
 
     Sparse {
         n,
-        p: cp,
-        i: ci,
-        x: cx,
+        p: cp.into(),
+        i: ci.into(),
+        x: cx.into(),
         numeric: values,
         stype: -a.stype.signum(),
         /* `C->sorted = (Perm == NULL)` (`t_cholmod_transpose_sym.c:240`): the
@@ -329,7 +349,7 @@ pub fn ptranspose(
     values: bool,
     perm: Option<&[i64]>,
     work: &mut WorkRef<'_>,
-) -> Sparse {
+) -> Sparse<'static> {
     transpose_sym(a, values, perm, work)
 }
 
@@ -367,7 +387,7 @@ pub fn permute_sym(
     values: bool,
     lower: bool,
     work: &mut WorkRef<'_>,
-) -> Option<Sparse> {
+) -> Option<Sparse<'static>> {
     /* `A` is stored in the wanted triangle already iff (stype > 0) != lower */
     let as_wanted = (a.stype > 0) != lower;
     if ordering == Ordering::Natural {
@@ -939,8 +959,8 @@ pub const DEFAULT_METHODS: [Ordering; 2] = [Ordering::Amd, Ordering::Metis];
 /// Keeping that distinction is the whole point of the type — on the natural
 /// path one of `S`/`F` is `A` itself, so only one transpose gets built.
 struct Permuted {
-    a1: Option<Sparse>,
-    a2: Option<Sparse>,
+    a1: Option<Sparse<'static>>,
+    a2: Option<Sparse<'static>>,
     /// `S`, the upper form `cholmod_etree` needs.
     s: Handle,
     /// `F`, the lower form `cholmod_rowcolcounts` needs.
@@ -956,7 +976,7 @@ enum Handle {
 }
 
 impl Permuted {
-    fn get<'a>(&'a self, a: &'a Sparse, h: Handle) -> &'a Sparse {
+    fn get<'a, 'b>(&'a self, a: &'a Sparse<'b>, h: Handle) -> &'a Sparse<'b> {
         match h {
             Handle::A => a,
             Handle::A1 => self.a1.as_ref().expect("A1 was not built"),
@@ -1119,51 +1139,47 @@ pub fn analyze(
     let nz = validate_csc(n, indptr, indices)?;
     let a = Sparse {
         n,
-        p: indptr[..n + 1].to_vec(),
-        i: indices[..nz].to_vec(),
-        x: Vec::new(),
+        p: Cow::Borrowed(&indptr[..n + 1]),
+        i: Cow::Borrowed(&indices[..nz]),
+        x: Cow::Borrowed(&[]),
         numeric: false,
         stype,
         sorted: columns_are_sorted(n, indptr, indices),
     };
-    analyze_sparse(&a, method, width)
+    analyze_sparse(&a, method, width, &mut Work::new(n))
 }
 
-/// [`analyze`] for a matrix the caller already holds.
+/// [`analyze`] for a matrix and a workspace the caller already holds.
 ///
-/// The two exist separately because a caller that goes on to factorize has the
-/// matrix in hand and should not pay to have it copied twice: `cholmod_analyze`
-/// takes the same `cholmod_sparse *A` that `cholmod_factorize` does.
+/// The two exist separately because a caller that goes on to factorize has both
+/// in hand and should not pay to have either copied twice: `cholmod_analyze`
+/// takes the same `cholmod_sparse *A` that `cholmod_factorize` does, and the
+/// same `cholmod_common *Common`. Building a `Work` here instead was 262 MB on
+/// a 3.4M-row system, live alongside the caller's for the whole analysis.
 pub fn analyze_sparse(
     a: &Sparse,
     method: Method,
     width: IntWidth,
+    work: &mut Work,
 ) -> Result<Symbolic, SymbolicError> {
     if a.stype == 0 {
         return Err(SymbolicError::Unsymmetric);
     }
     let n = a.n;
 
-    /* allocate workspace.  Note: enough space needs to be allocated here so
-     * that routines called by cholmod_analyze do not reallocate the space. */
-    let mut work = Work::new(n);
+    /* `cholmod_allocate_work (nrow, 6*nrow + uncol, 0, Common)` (`:487-496`):
+     * enough that the routines called below never reallocate.  `uncol` is 0
+     * for the symmetric case this port takes. */
+    work.allocate(n, 6 * n, 0);
 
-    /* Upstream carves First and Level out of the last 4n Ints of Iwork because
-     * the kernels below use only the first 2n (`:515-520`).  The ordering
-     * routines may use all 6n, and here they run *inside* the method loop, so
-     * these get buffers of their own instead — strictly more workspace, and
-     * trivially disjoint from what the kernels scratch in. */
-    let mut first = vec![0i64; n];
-    let mut level = vec![0i64; n];
-
-    /* the candidate the loop is working on: upstream's Perm/Parent/ColCount
+    /* the candidate the loop is working on: upstream's Perm/ColCount
      * workspace, against the Lperm/Lparent/Lcolcount that hold the best so
-     * far.  Post is workspace for both — the composition below recomputes it
-     * from the winner's tree. */
+     * far.  Parent, First, Level and Post are the last 4n of Iwork — see
+     * `Work::split_analyze`, and note that the ordering routines run inside
+     * this loop and clobber all four, which is exactly what upstream permits
+     * at `:511-514`. */
     let mut perm = vec![0i64; n];
-    let mut parent = vec![EMPTY; n];
     let mut colcount = vec![0i64; n];
-    let mut post = vec![0i64; n];
 
     let mut lperm = vec![0i64; n];
     let mut lparent = vec![EMPTY; n];
@@ -1246,6 +1262,7 @@ pub fn analyze_sparse(
         /* analyze the ordering.  AMD is exempt: cholmod_amd has already left
          * its own fl/lnz estimates in Common, and the exact counts are wanted
          * only for the ordering that wins (`:715-725`, `:814-822`). */
+        let mut w = work.split_analyze(n);
         let (fl, lnz) = if skip_analysis {
             let info = amd_ran.expect("cholmod_amd sets its Info before returning");
             (info.fl(n), info.lnz(n))
@@ -1254,12 +1271,12 @@ pub fn analyze_sparse(
                 a,
                 ordering,
                 &perm,
-                &mut parent,
-                &mut post,
+                w.parent,
+                w.post,
                 &mut colcount,
-                &mut first,
-                &mut level,
-                &mut work.all(),
+                w.first,
+                w.level,
+                &mut w.work,
             ) {
                 Ok(counts) => {
                     anz = counts.anz;
@@ -1284,7 +1301,7 @@ pub fn analyze_sparse(
             skip_best = skip_analysis;
             if !skip_analysis {
                 lcolcount.copy_from_slice(&colcount);
-                lparent.copy_from_slice(&parent);
+                lparent.copy_from_slice(w.parent);
             }
         }
 
@@ -1313,17 +1330,18 @@ pub fn analyze_sparse(
      * Common->fl and Common->lnz with the exact counts, so the supernodal
      * switch downstream never sees AMD's estimate. */
     let mut ordering = best_ordering;
+    let mut w = work.split_analyze(n);
     if skip_best {
         let counts = analyze_ordering(
             a,
             ordering,
             &lperm,
             &mut lparent,
-            &mut post,
+            w.post,
             &mut lcolcount,
-            &mut first,
-            &mut level,
-            &mut work.all(),
+            w.first,
+            w.level,
+            &mut w.work,
         )?;
         anz = counts.anz;
         best_fl = counts.fl;
@@ -1332,12 +1350,11 @@ pub fn analyze_sparse(
 
     /* postorder the etree, weighted by the column counts, and combine the
      * fill-reducing ordering with it */
-    let mut w = work.all();
-    let (first, level) = (&mut first[..], &mut level[..]);
-    let k = postorder(&lparent, n, Some(&lcolcount), &mut post, &mut w);
+    let post = &mut *w.post;
+    let k = postorder(&lparent, n, Some(&lcolcount), post, &mut w.work);
     if k == n {
         /* use First and Level as workspace */
-        let (wi, invpost) = (first, level);
+        let (wi, invpost) = (w.first, w.level);
 
         for k in 0..n {
             wi[k] = lperm[post[k] as usize];
@@ -1375,7 +1392,10 @@ pub fn analyze_sparse(
         perm: lperm,
         colcount: lcolcount,
         parent: lparent,
-        post,
+        /* `Post` is workspace upstream and is never kept; this port hands it
+         * back because `_rs.analyze` reports it, so it is copied out of `Iwork`
+         * rather than living in a buffer of its own for the whole analysis. */
+        post: post.to_vec(),
         fl: best_fl,
         lnz: lnz_best,
         anz,
@@ -1541,9 +1561,9 @@ mod tests {
             let x: Vec<f64> = (0..indices.len()).map(|p| p as f64 + 0.5).collect();
             let a = Sparse {
                 n,
-                p: indptr,
-                i: indices,
-                x,
+                p: indptr.into(),
+                i: indices.into(),
+                x: x.into(),
                 numeric: true,
                 stype: -1,
                 sorted: true,
@@ -1562,14 +1582,14 @@ mod tests {
             assert_eq!(got.p[n], a.p[n], "{name}: permuting changed nnz");
             for j in 0..n {
                 let (lo, hi) = (got.p[j] as usize, got.p[j + 1] as usize);
-                got.i[lo..hi].sort_unstable();
+                got.i.to_mut()[lo..hi].sort_unstable();
                 /* C->stype is +1, and an upper-stored column holds rows <= j */
                 for &i in &got.i[lo..hi] {
                     assert!(i <= j as i64, "{name}: C({i},{j}) is not in the upper half");
                 }
             }
             /* a value-carrying transpose moves the same multiset of values */
-            let (mut before, mut after) = (a.x.clone(), got.x.clone());
+            let (mut before, mut after) = (a.x.to_vec(), got.x.to_vec());
             before.sort_by(f64::total_cmp);
             after.sort_by(f64::total_cmp);
             assert_eq!(before, after, "{name}: values were not carried");
@@ -1585,9 +1605,9 @@ mod tests {
             let (indptr, indices) = triangle_csc(n, &edges, false);
             let a = Sparse {
                 n,
-                p: indptr,
-                i: indices,
-                x: Vec::new(),
+                p: indptr.into(),
+                i: indices.into(),
+                x: Vec::new().into(),
                 numeric: false,
                 stype: 1,
                 sorted: true,
@@ -1644,9 +1664,9 @@ mod tests {
         ));
         let lower = Sparse {
             n: 1,
-            p: vec![0, 1],
-            i: vec![0],
-            x: Vec::new(),
+            p: vec![0, 1].into(),
+            i: vec![0].into(),
+            x: Vec::new().into(),
             numeric: false,
             stype: -1,
             sorted: true,

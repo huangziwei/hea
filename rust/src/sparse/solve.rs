@@ -22,6 +22,12 @@
 //! templates (`t_cholmod_lsolve_template.c:800-841`) is unreachable here and is
 //! not ported.
 //!
+//! **Memory contract.** `Y` is [`SolveWork`], owned by the caller and grown
+//! never shrunk — `cholmod_solve2`'s contract, not `cholmod_solve`'s, which
+//! allocates and frees it per call (`cholmod_solve.c:115-116`). That is the
+//! whole point of `solve2` and it is why `gmm`'s 1486 solves per fit pay for
+//! the workspace once.
+//!
 //! **`Y` is the transpose of the right-hand side.** `cholmod_solve` blocks the
 //! columns of `B` four at a time and hands the kernels `Y`, an `nk`-by-`n`
 //! array with `nk` in `1..=4` — so consecutive right-hand sides are *adjacent*
@@ -646,20 +652,22 @@ mod tests {
         let (p, i, v) = spd_triangle(n, edges, false);
         let a = Sparse {
             n,
-            p: p.clone(),
-            i: i.clone(),
-            x: v.clone(),
+            p: p.clone().into(),
+            i: i.clone().into(),
+            x: v.clone().into(),
             numeric: true,
             stype: 1,
             sorted: columns_are_sorted(n, &p, &i),
         };
+        let mut work = Work::new(n);
         let s = analyze_sparse(
             &a,
             Method::Pinned(Ordering::Amd),
             super::super::amd::IntWidth::I64,
+            &mut work,
         )
         .unwrap();
-        let mut l = Factor::from_symbolic(&s);
+        let mut l = Factor::from_symbolic(s);
         let params = numeric::Params {
             final_ll: ll,
             ..numeric::Params::default()
@@ -774,9 +782,9 @@ mod tests {
         let (p, i, x) = spd_triangle(4, &[(0, 1), (1, 2), (2, 3)], false);
         let a = Sparse {
             n: 4,
-            p: p.clone(),
-            i: i.clone(),
-            x,
+            p: p.clone().into(),
+            i: i.clone().into(),
+            x: x.into(),
             numeric: true,
             stype: 1,
             sorted: columns_are_sorted(4, &p, &i),
@@ -785,9 +793,10 @@ mod tests {
             &a,
             Method::Pinned(Ordering::Amd),
             super::super::amd::IntWidth::I64,
+            &mut Work::new(4),
         )
         .unwrap();
-        let l = Factor::from_symbolic(&s);
+        let l = Factor::from_symbolic(s);
         let mut w = SolveWork::new();
         assert!(solve(Sys::A, &l, &[0.0; 4], 1, &mut [0.0; 4], &mut w).is_err());
     }

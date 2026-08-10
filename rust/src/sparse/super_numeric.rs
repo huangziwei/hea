@@ -19,6 +19,18 @@
 //! parallelize loops whose results do not depend on the order, so dropping them
 //! changes nothing but speed.
 //!
+//! **Memory contract.** `A` is borrowed and nothing here keeps it; `L->x` is
+//! allocated once per factor and reused by every refactorization. The one
+//! deviation is the per-supernode scratch: upstream has exactly one `Map`
+//! (aliased onto `Common->Flag`), one `RelativeMap` (a slice of `Common->Iwork`)
+//! and one `C` (`cholmod_super_numeric.c:245`), which is correct **only because
+//! its supernode loop is serial**. Here they come from a [`WorkPool`], one set
+//! per concurrently-running task, and the pool retains one set per worker plus
+//! nothing over [`C_KEEP_DOUBLES`]. On a 3.4M-row system that is 210 MB of
+//! `Map` held and up to `nthreads × maxcsize` of `C` in flight against
+//! upstream's one — the price of the parallelism, and it is a price rather than
+//! an accident.
+//!
 //! **`S` is the *lower* triangle here**, not the upper one the simplicial
 //! `rowfac` takes. `cholmod_factorize_p`'s supernodal branch builds
 //! `S = tril (P A P')` (`:216-238`) where its simplicial branch builds
@@ -104,15 +116,22 @@ pub struct SuperFactor {
 impl SuperFactor {
     /// The supernodal symbolic factor, as `cholmod_analyze` returns it: the
     /// pattern, with no numeric part yet.
-    pub fn new(s: &Symbolic, sym: SuperSymbolic) -> SuperFactor {
+    ///
+    /// Takes the [`Symbolic`] **by value**, because upstream's analysis has no
+    /// separate object to take it from: `Lperm = L->Perm` at
+    /// `cholmod_analyze.c:542`, so the trial loop's winner *is* the factor's
+    /// ordering and no copy exists. A caller that needs the analysis afterwards
+    /// clones it and can see what that costs — `2n` int64s, 52 MiB on a
+    /// 3.4M-row system.
+    pub fn new(s: Symbolic, sym: SuperSymbolic) -> SuperFactor {
         SuperFactor {
             n: sym.n,
-            perm: s.perm.clone(),
-            colcount: s.colcount.clone(),
+            minor: s.perm.len(),
+            perm: s.perm,
+            colcount: s.colcount,
             ordering: s.ordering,
             sym,
             x: Vec::new(),
-            minor: s.perm.len(),
             numeric: false,
             schedule: Schedule::default(),
         }
@@ -684,7 +703,7 @@ const STRIP_FLOPS: f64 = 1.0e5;
 /// A strip `w` columns wide re-reads the whole of the descendant's `L1` and uses
 /// each element `w` times, so `w` *is* the update's arithmetic intensity.
 /// Measured at the shapes a 3.4M-row system's flop-heavy updates have
-/// (`dev/sparse_gates/dstrip.py`, `m` 2534-4174, `k` 1306-1578, one core):
+/// (`m` 2534-4174, `k` 1306-1578, one core):
 ///
 /// | columns | 8 | 16 | 32 | 64 | 128 | 256 | 1024 |
 /// |---|---|---|---|---|---|---|---|
@@ -1623,7 +1642,7 @@ pub fn super_numeric(
      * RelativeMap are per-task here (see TaskWork), so the two n-sized slots
      * upstream carves for them go unused; the request is left at upstream's
      * size because Work is shared and only ever grows. */
-    work.ensure_iwork(2 * n + 5 * nsuper);
+    work.allocate(n, 2 * n + 5 * nsuper, 0);
     /* One workspace per worker is what a refactorization can reuse without
      * hoarding: more than that only ever exist because a worker blocked on a
      * join stole another task, and those are transient. */
@@ -1933,19 +1952,19 @@ mod tests {
         edges: &[(usize, usize)],
         ordering: Ordering,
         scale: f64,
-    ) -> (Sparse, SuperFactor, Work) {
+    ) -> (Sparse<'static>, SuperFactor, Work) {
         let (p, i, v) = spd_triangle(n, edges, false);
         let a = Sparse {
             n,
-            p: p.clone(),
-            i: i.clone(),
+            p: p.clone().into(),
+            i: i.clone().into(),
             x: v.iter().map(|x| x * scale).collect(),
             numeric: true,
             stype: 1,
             sorted: columns_are_sorted(n, &p, &i),
         };
-        let s = analyze_sparse(&a, Method::Pinned(ordering), IntWidth::I64).unwrap();
         let mut w = Work::new(n);
+        let s = analyze_sparse(&a, Method::Pinned(ordering), IntWidth::I64, &mut w).unwrap();
         let a2 = permute_sym(&a, s.ordering, &s.perm, false, false, &mut w.all());
         let sym = super_symbolic(
             a2.as_ref().unwrap_or(&a),
@@ -1955,7 +1974,7 @@ mod tests {
             &mut w,
         )
         .unwrap();
-        let l = SuperFactor::new(&s, sym);
+        let l = SuperFactor::new(s, sym);
         (a, l, w)
     }
 

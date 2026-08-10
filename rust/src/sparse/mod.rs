@@ -28,6 +28,8 @@ pub mod symbolic;
 pub mod testcorpus;
 pub mod ws;
 
+use std::borrow::Cow;
+
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -255,21 +257,22 @@ fn factorize(
                     data.len()
                 ));
             }
-            /* one copy, analyzed and factorized from — `cholmod_analyze` and
-             * `cholmod_factorize` take the same `cholmod_sparse *A` */
+            /* a view onto the caller's arrays, analyzed and factorized from —
+             * `cholmod_analyze` and `cholmod_factorize` take the same
+             * `cholmod_sparse *A`, and it points at what the caller allocated */
             let a = symbolic::Sparse {
                 n,
-                p: indptr[..n + 1].to_vec(),
-                i: indices[..nz].to_vec(),
-                x: data[..nz].to_vec(),
+                p: Cow::Borrowed(&indptr[..n + 1]),
+                i: Cow::Borrowed(&indices[..nz]),
+                x: Cow::Borrowed(&data[..nz]),
                 numeric: true,
                 stype,
                 sorted: ws::columns_are_sorted(n, indptr, indices),
             };
-            let s =
-                symbolic::analyze_sparse(&a, method, IntWidth::I64).map_err(|e| e.to_string())?;
-            let mut l = numeric::Factor::from_symbolic(&s);
             let mut work = ws::Work::new(n);
+            let s = symbolic::analyze_sparse(&a, method, IntWidth::I64, &mut work)
+                .map_err(|e| e.to_string())?;
+            let mut l = numeric::Factor::from_symbolic(s);
             let fl = numeric::factorize(&a, beta, &mut l, &params, &mut work)
                 .map_err(|e| e.to_string())?;
             Ok((l, fl))
@@ -317,16 +320,16 @@ fn super_analyze(
             let nz = ws::validate_csc(n, indptr, indices).map_err(|e| e.to_string())?;
             let a = symbolic::Sparse {
                 n,
-                p: indptr[..n + 1].to_vec(),
-                i: indices[..nz].to_vec(),
-                x: Vec::new(),
+                p: Cow::Borrowed(&indptr[..n + 1]),
+                i: Cow::Borrowed(&indices[..nz]),
+                x: Cow::Borrowed(&[]),
                 numeric: false,
                 stype,
                 sorted: ws::columns_are_sorted(n, indptr, indices),
             };
-            let s =
-                symbolic::analyze_sparse(&a, method, IntWidth::I64).map_err(|e| e.to_string())?;
             let mut work = ws::Work::new(n);
+            let s = symbolic::analyze_sparse(&a, method, IntWidth::I64, &mut work)
+                .map_err(|e| e.to_string())?;
             /* the supernodal branch permutes A a second time, for pattern
              * only: `permute_matrices (..., FALSE, ...)` */
             let a2 = symbolic::permute_sym(&a, s.ordering, &s.perm, false, false, &mut work.all());
@@ -405,16 +408,16 @@ fn super_factorize(
             }
             let a = symbolic::Sparse {
                 n,
-                p: indptr[..n + 1].to_vec(),
-                i: indices[..nz].to_vec(),
-                x: data[..nz].to_vec(),
+                p: Cow::Borrowed(&indptr[..n + 1]),
+                i: Cow::Borrowed(&indices[..nz]),
+                x: Cow::Borrowed(&data[..nz]),
                 numeric: true,
                 stype,
                 sorted: ws::columns_are_sorted(n, indptr, indices),
             };
-            let s =
-                symbolic::analyze_sparse(&a, method, IntWidth::I64).map_err(|e| e.to_string())?;
             let mut work = ws::Work::new(n);
+            let s = symbolic::analyze_sparse(&a, method, IntWidth::I64, &mut work)
+                .map_err(|e| e.to_string())?;
             let a2 = symbolic::permute_sym(&a, s.ordering, &s.perm, false, false, &mut work.all());
             let sym = super_symbolic::super_symbolic(
                 a2.as_ref().unwrap_or(&a),
@@ -424,7 +427,7 @@ fn super_factorize(
                 &mut work,
             )
             .map_err(|e| e.to_string())?;
-            let mut l = super_numeric::SuperFactor::new(&s, sym);
+            let mut l = super_numeric::SuperFactor::new(s, sym);
             let mut cwork = super_numeric::SuperWork::new();
             super_numeric::super_factorize(&a, beta, &mut l, &mut work, &mut cwork)
                 .map_err(|e| e.to_string())?;
@@ -514,16 +517,16 @@ fn supernodal_solve(
             }
             let a = symbolic::Sparse {
                 n,
-                p: indptr[..n + 1].to_vec(),
-                i: indices[..nz].to_vec(),
-                x: data[..nz].to_vec(),
+                p: Cow::Borrowed(&indptr[..n + 1]),
+                i: Cow::Borrowed(&indices[..nz]),
+                x: Cow::Borrowed(&data[..nz]),
                 numeric: true,
                 stype,
                 sorted: ws::columns_are_sorted(n, indptr, indices),
             };
-            let s =
-                symbolic::analyze_sparse(&a, method, IntWidth::I64).map_err(|e| e.to_string())?;
             let mut work = ws::Work::new(n);
+            let s = symbolic::analyze_sparse(&a, method, IntWidth::I64, &mut work)
+                .map_err(|e| e.to_string())?;
             let a2 = symbolic::permute_sym(&a, s.ordering, &s.perm, false, false, &mut work.all());
             let sym = super_symbolic::super_symbolic(
                 a2.as_ref().unwrap_or(&a),
@@ -533,7 +536,7 @@ fn supernodal_solve(
                 &mut work,
             )
             .map_err(|e| e.to_string())?;
-            let mut l = super_numeric::SuperFactor::new(&s, sym);
+            let mut l = super_numeric::SuperFactor::new(s, sym);
             let mut cwork = super_numeric::SuperWork::new();
             super_numeric::super_factorize(&a, beta, &mut l, &mut work, &mut cwork)
                 .map_err(|e| e.to_string())?;
