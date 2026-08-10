@@ -216,13 +216,17 @@ impl TaskWork {
 struct WorkPool {
     n: usize,
     esize: usize,
+    /// How many workspaces the free list keeps between calls — the pool may
+    /// still hand out more than this at once, it just does not hoard them.
+    keep: usize,
     free: Mutex<Vec<TaskWork>>,
 }
 
 impl WorkPool {
     /// Size the pool for an `n`-by-`n` factor, discarding it if the shape
     /// changed.
-    fn ensure(&mut self, n: usize, esize: usize) {
+    fn ensure(&mut self, n: usize, esize: usize, keep: usize) {
+        self.keep = keep;
         if self.n != n || self.esize != esize {
             self.n = n;
             self.esize = esize;
@@ -241,15 +245,20 @@ impl WorkPool {
             .unwrap_or_else(|| TaskWork::new(self.n, self.esize))
     }
 
-    /// Return a workspace, dropping any `C` big enough to be worth not keeping.
+    /// Return a workspace, keeping only what is worth keeping.
     ///
-    /// The big `C`s belong to the supernodes near the root, and only a couple of
-    /// tasks are inside one of those at a time — but every task that has *ever*
-    /// held one keeps it, and the pool grows to whatever concurrency the joins
-    /// reached. On a 3.4M-row system that was ~13 workspaces retaining a 139 MB
-    /// `C` each: 1.8 GB held for a few hundred milliseconds' use. Re-allocating
-    /// is `alloc_zeroed`, so the pages come from the kernel already zero and
-    /// cost the same first-touch faults the writes would take anyway.
+    /// Two separate hoards, and both were real on a 3.4M-row system. The big
+    /// `C`s belong to the supernodes near the root and only a couple of tasks
+    /// are inside one at a time, but every task that had *ever* held one kept
+    /// it — ~13 × 139 MB. And the pool itself grows to whatever concurrency the
+    /// joins reached, so `Map` alone (size `n`, 27 MB here) was held that many
+    /// times over for the rest of the process. Re-allocating either is
+    /// `alloc_zeroed`, so the pages come from the kernel already zero and cost
+    /// the same first-touch faults the writes would take anyway.
+    ///
+    /// The cap is on what is *retained*, never on what is handed out: `take`
+    /// still allocates on demand, so a burst of concurrency cannot deadlock
+    /// against it.
     fn give(&self, mut w: TaskWork) {
         if w.c.len() > C_KEEP_DOUBLES {
             w.c = Vec::new();
@@ -259,7 +268,10 @@ impl WorkPool {
                 *b = Vec::new();
             }
         }
-        self.free.lock().unwrap_or_else(|e| e.into_inner()).push(w);
+        let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        if free.len() < self.keep {
+            free.push(w);
+        }
     }
 }
 
@@ -1612,7 +1624,12 @@ pub fn super_numeric(
      * upstream carves for them go unused; the request is left at upstream's
      * size because Work is shared and only ever grows. */
     work.ensure_iwork(2 * n + 5 * nsuper);
-    cwork.pool.ensure(n, l.sym.maxesize.max(1));
+    /* One workspace per worker is what a refactorization can reuse without
+     * hoarding: more than that only ever exist because a worker blocked on a
+     * join stole another task, and those are transient. */
+    cwork
+        .pool
+        .ensure(n, l.sym.maxesize.max(1), rayon::current_num_threads());
 
     /* get the current factor L and allocate numerical part, if needed */
     if !l.numeric {

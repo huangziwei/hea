@@ -197,6 +197,10 @@ fn analyze_and_factorize(
          * a 3.4M-row system. */
         drop(a2);
         let mut l = SuperFactor::new(&s, sym);
+        /* likewise the analysis: `SuperFactor` took the copies of `Perm` and
+         * `ColCount` it keeps, and `parent`/`post` are the analysis's own
+         * scratch that nothing numeric reads */
+        drop(s);
         let mut cwork = SuperWork::new();
         super_numeric::super_factorize(a, beta, &mut l, work, &mut cwork)
             .map_err(|e| e.to_string())?;
