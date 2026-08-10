@@ -661,10 +661,16 @@ def test_analyze_best_selects_but_does_not_invent(name, M):
     than pinning AMD; and when AMD's break check fires it never *looks* past
     AMD, which is what keeps the default as cheap as the pinned path on the
     matrices — every one here — where AMD already wins.
+
+    The second method is METIS, which is upstream's own; it used to be the
+    natural ordering, because this port had no METIS. Selecting METIS is
+    therefore not free the way selecting natural was — it runs
+    ``METIS_NodeND`` — so "never looks past AMD when the break check fires"
+    now guards real work.
     """
     best = analyze(M, ordering="best")
     amd = analyze(M, ordering="amd")
-    same_as = amd if best["ordering"] == "amd" else analyze(M, ordering="natural")
+    same_as = amd if best["ordering"] == "amd" else analyze(M, ordering=best["ordering"])
 
     np.testing.assert_array_equal(best["perm"], same_as["perm"])
     np.testing.assert_array_equal(best["colcount"], same_as["colcount"])
@@ -694,7 +700,7 @@ def test_analyze_rejects_bad_input():
     with pytest.raises(ValueError, match="stype must be nonzero"):
         _rs.analyze(5, indptr, indices, 0)
     with pytest.raises(ValueError, match="ordering must be"):
-        _rs.analyze(5, indptr, indices, 1, "metis")
+        _rs.analyze(5, indptr, indices, 1, "nesdis")
     with pytest.raises(ValueError, match="indptr has length"):
         _rs.analyze(6, indptr, indices, 1)
 
@@ -1153,7 +1159,7 @@ def test_factorize_rejects_bad_input():
     with pytest.raises(ValueError, match="stype must be nonzero"):
         _rs.factorize(2, ip, ii, ax, 0)
     with pytest.raises(ValueError, match="ordering must be"):
-        _rs.factorize(2, ip, ii, ax, 1, ordering="metis")
+        _rs.factorize(2, ip, ii, ax, 1, ordering="nesdis")
     with pytest.raises(ValueError, match="indptr"):
         _rs.factorize(2, np.array([0, 2, 1], dtype=np.int64), ii, ax, 1)
     with pytest.raises(ValueError, match="row index"):

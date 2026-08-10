@@ -88,8 +88,10 @@ impl<T> Ws<T> {
     }
 }
 
-/// `i64` is how the C spells a subscript; `usize` is how the loop counters
-/// arrive. Both land on the same unchecked access.
+/// `i64` is how the C spells a subscript, `usize` is how the loop counters
+/// arrive, and `i32` is what an unannotated literal infers to — `pwgts[0]` is
+/// written just that way in `metis`, following the C. All three land on the
+/// same unchecked access.
 macro_rules! ws_index {
     ($t:ty) => {
         impl<T> core::ops::Index<$t> for Ws<T> {
@@ -123,6 +125,7 @@ macro_rules! ws_index {
 
 ws_index!(i64);
 ws_index!(usize);
+ws_index!(i32);
 
 /// `cholmod_internal.h` / `amd_internal.h` — `EMPTY` is `(-1)`.
 pub const EMPTY: i64 = -1;

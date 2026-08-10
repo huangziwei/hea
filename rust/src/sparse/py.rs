@@ -61,9 +61,10 @@ pub(super) fn parse_method(s: &str) -> PyResult<Method> {
         "best" => Method::Default,
         "amd" => Method::Pinned(Ordering::Amd),
         "natural" => Method::Pinned(Ordering::Natural),
+        "metis" => Method::Pinned(Ordering::Metis),
         other => {
             return Err(PyValueError::new_err(format!(
-                "ordering must be 'best', 'amd' or 'natural', not {other:?}"
+                "ordering must be 'best', 'amd', 'metis' or 'natural', not {other:?}"
             )));
         }
     })
@@ -74,6 +75,7 @@ pub(super) fn parse_method(s: &str) -> PyResult<Method> {
 pub(super) fn ordering_name(o: Ordering) -> &'static str {
     match o {
         Ordering::Amd => "amd",
+        Ordering::Metis => "metis",
         Ordering::Natural => "natural",
         Ordering::Postordered => "postordered",
     }

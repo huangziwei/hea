@@ -25,6 +25,7 @@
 //! [`SymbolicError::Unsymmetric`] is returned instead.
 
 use super::amd::{self, AmdInfo, IntWidth, DEFAULT_AGGRESSIVE, DEFAULT_DENSE};
+use super::metis_order;
 use super::ws::{validate_csc, CscError, Work, WorkRef, Ws, EMPTY};
 
 /// Why an analysis could not be performed.
@@ -888,6 +889,9 @@ pub enum Ordering {
     Natural,
     /// `CHOLMOD_AMD`.
     Amd,
+    /// `CHOLMOD_METIS` — `METIS_NodeND` through
+    /// [`super::metis_order::cholmod_metis`].
+    Metis,
     /// `CHOLMOD_POSTORDERED` — what [`Ordering::Natural`] becomes once the
     /// weighted postorder has been composed in. Never requested; it is only an
     /// output. The distinction is load-bearing: `permute_matrices` tests
@@ -911,28 +915,22 @@ pub enum Method {
     Pinned(Ordering),
 }
 
-/// The default strategy's method list, and **the one place this port
-/// deliberately departs from upstream's**.
+/// The default strategy's method list — now exactly upstream's.
 ///
 /// `cholmod_analyze.c:452-455` sets `{CHOLMOD_GIVEN, CHOLMOD_AMD,
-/// CHOLMOD_METIS}` (or `NESDIS` for `Common->default_nesdis`). Of those:
+/// CHOLMOD_METIS}` (or `NESDIS` for `Common->default_nesdis`), and
+/// `CHOLMOD_GIVEN` is skipped whenever `UserPerm` is `NULL` (`:609-613`). This
+/// port has no user-permutation argument, so its effective list is the same
+/// two methods upstream runs.
 ///
-/// * `CHOLMOD_GIVEN` is skipped whenever `UserPerm` is `NULL` (`:609-613`), and
-///   this port has no user-permutation argument, so it has nothing to port.
-/// * `CHOLMOD_METIS` needs the Partition module. This port has no METIS, and
-///   the slot is filled with `CHOLMOD_NATURAL` instead.
-///
-/// Substituting rather than leaving the slot empty is worth stating plainly:
-/// it means hea can select an ordering CHOLMOD's default never would. It is a
-/// deviation in the *candidate set*, not in the rule — selection is still
-/// smallest `lnz` (`:736`) and the break check that decides whether a third
-/// method runs at all is still AMD's (`:767-781`), so a matrix on which
-/// upstream would not have looked past AMD does not get looked past here
-/// either. Natural earns the slot: on the crossed random-effects matrices
-/// `hea.models.gmm` factorizes hundreds of times per fit it beats AMD outright,
-/// and on the matrices where it is hopeless — banded, Laplacian — AMD's break
-/// check has already fired and it is never tried.
-pub const DEFAULT_METHODS: [Ordering; 2] = [Ordering::Amd, Ordering::Natural];
+/// This slot used to hold `CHOLMOD_NATURAL`, because the port had no METIS.
+/// That substitution was the one documented deviation in the candidate set, and
+/// it was not free: on the SAC conformal system at `conformal_jump = 1` it cost
+/// 523.0M `nnz(L)` against METIS's 380.5M, i.e. 3.0x on the numeric
+/// factorization. Natural's own case — `hea.models.gmm`'s crossed
+/// random-effects matrices, where it beat AMD outright — is now covered by
+/// METIS, which beats both there.
+pub const DEFAULT_METHODS: [Ordering; 2] = [Ordering::Amd, Ordering::Metis];
 
 /// What `permute_matrices` hands back (`cholmod_analyze.c:172-176`).
 ///
@@ -1236,6 +1234,13 @@ pub fn analyze_sparse(
                 }
                 skip_analysis = true;
             }
+            Ordering::Metis => match metis_order::cholmod_metis(n, &a.p, &a.i, a.stype) {
+                Ok((p, _anz)) => perm.copy_from_slice(&p),
+                Err(e) => {
+                    failure.get_or_insert(SymbolicError::from(e));
+                    continue;
+                }
+            },
         }
 
         /* analyze the ordering.  AMD is exempt: cholmod_amd has already left
@@ -1474,7 +1479,7 @@ mod tests {
     /// whether the loop looked past AMD at all, so when it is false the answer
     /// must be AMD's *bit for bit* — that is what keeps the default cheap on
     /// the matrices upstream would not have looked past AMD on either. When it
-    /// is true, natural was tried, and the selection rule is smallest `lnz`.
+    /// is true, METIS was tried, and the selection rule is smallest `lnz`.
     #[test]
     fn the_trial_loop_selects_and_never_invents() {
         for (name, n, edges) in corpus() {
@@ -1483,6 +1488,7 @@ mod tests {
 
             let same_as = match best.ordering {
                 Ordering::Amd => &amd,
+                Ordering::Metis => &analyzed(n, &edges, true, Ordering::Metis),
                 /* natural is relabelled postordered on the way out */
                 Ordering::Postordered => &analyzed(n, &edges, true, Ordering::Natural),
                 Ordering::Natural => panic!("{name}: natural was not relabelled"),

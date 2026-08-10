@@ -15,6 +15,8 @@
 
 pub mod amd;
 pub mod dense;
+pub mod metis;
+pub mod metis_order;
 pub mod numeric;
 pub mod py;
 pub mod solve;
@@ -105,6 +107,40 @@ fn amd_order(
     d.set_item("lnz", info.lnz(n))?;
     d.set_item("fl", info.fl(n))?;
     Ok((perm.into_pyarray(py).unbind(), d.unbind()))
+}
+
+/// `cholmod_metis` — `METIS_NodeND`'s fill-reducing permutation for a symmetric
+/// matrix, before any symbolic analysis.
+///
+/// `indptr`/`indices` are a CSC pattern and `stype` selects the stored half the
+/// way CHOLMOD's `A->stype` does. The counterpart of [`amd_order`], and the
+/// second method [`analyze`]'s `"best"` tries.
+///
+/// Returns `Perm`, with `Perm[k] = i` if row/column `i` of `A` is the `k`th of
+/// `P A P'`. This is `cholmod_metis`'s output with `postorder = FALSE`, which
+/// is how `cholmod_analyze` calls it (`cholmod_analyze.c:664`) — the postorder
+/// is composed in later, over the selected ordering only.
+#[pyfunction]
+#[pyo3(signature = (n, indptr, indices, stype))]
+fn metis_perm(
+    py: Python<'_>,
+    n: usize,
+    indptr: PyReadonlyArray1<'_, i64>,
+    indices: PyReadonlyArray1<'_, i64>,
+    stype: i32,
+) -> PyResult<Py<PyArray1<i64>>> {
+    let indptr = indptr.as_slice()?;
+    let indices = indices.as_slice()?;
+    if stype == 0 {
+        return Err(PyValueError::new_err(
+            "stype must be nonzero: cholmod_metis orders a symmetric matrix, \
+             and stype selects which triangle is the stored half",
+        ));
+    }
+    let (perm, _anz) = py
+        .allow_threads(|| metis_order::cholmod_metis(n, indptr, indices, stype))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(perm.into_pyarray(py).unbind())
 }
 
 /// `cholmod_analyze` for a symmetric matrix — the fill-reducing ordering, the
@@ -525,6 +561,7 @@ fn supernodal_solve(
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(amd_order, m)?)?;
+    m.add_function(wrap_pyfunction!(metis_perm, m)?)?;
     m.add_function(wrap_pyfunction!(analyze, m)?)?;
     m.add_function(wrap_pyfunction!(factorize, m)?)?;
     m.add_function(wrap_pyfunction!(super_analyze, m)?)?;
