@@ -921,6 +921,15 @@ fn slab_sub<const MR: usize>(
 /// column instead leaves `NR` checks per end and hands LLVM a fixed-size copy;
 /// the vector form comes back and with it the scaling (2 threads 1.00x → 1.60x,
 /// 8 threads 2.13x → 2.60x).
+///
+/// `A`'s `MR` values are hoisted into `av` for the same reason [`tile_nt`] does
+/// it, though **here it measured neutral** — 0.1-1% across the `dtrsm` shapes,
+/// inside the noise, so LLVM was already hoisting. It stays because this
+/// function is the one with a two-times codegen collapse in its history, and the
+/// idiom is what pins it; do not re-measure expecting a win.
+///
+/// Also the packed scattered path's tile: a packed panel is what it already
+/// reads, with `lda` set to [`PACK_MR`] and `ldb` to [`PACK_NR`].
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn tile_scat<const MR: usize, const NR: usize>(
@@ -941,10 +950,14 @@ fn tile_scat<const MR: usize, const NR: usize>(
     }
     for l in 0..k {
         let (ao, bo) = (ia + l * lda, jb + l * ldb);
+        let mut av = [0.0f64; MR];
+        for (ii, x) in av.iter_mut().enumerate() {
+            *x = a[ao + ii];
+        }
         for (jj, accj) in acc.iter_mut().enumerate() {
-            let bv = b[bo + jj];
+            let bv = -b[bo + jj];
             for (ii, v) in accj.iter_mut().enumerate() {
-                *v = rfma(-bv, a[ao + ii], *v);
+                *v = rfma(bv, av[ii], *v);
             }
         }
     }
@@ -986,11 +999,36 @@ fn slab_scat<const MR: usize>(
 /// One task of [`gemm_sub_par`]: every column of `C`, over the rows this task
 /// was handed.
 ///
-/// Same shape as [`gemm_sub`], so a task runs the tiles the serial path would
-/// have run over the same entries — including the slab reuse, which is why a
-/// task carries all of `C`'s columns rather than a group of them.
+/// Same shape as [`gemm_sub`], including its dispatch — a task packs on exactly
+/// the condition the serial path packs on, so threading a call does not change
+/// which kernel runs it. **Leaving the aliasing arm out of this one made adding
+/// a thread a pessimization**, not merely a missed gain: on `dtrsm` 1024×1024,
+/// whose `ld` is `n + m` = 2048 and therefore aliases, the serial path packs and
+/// the parallel path did not, so two threads ran 1.6x *slower* than one (24.6 →
+/// 40.2 ms) and eight recovered only 1.75x. At `ld` = 4096 eight threads were
+/// worth **1.17x**. The non-aliasing neighbour scales 3.55x on the same code.
 #[allow(clippy::too_many_arguments)]
 fn block_scat(
+    k: usize,
+    a: &Ws<f64>,
+    ia: usize,
+    lda: usize,
+    b: &Ws<f64>,
+    jb: usize,
+    ldb: usize,
+    c: &mut [&mut [f64]],
+) {
+    let (m, n) = (c[0].len(), c.len());
+    if strides_want_packing(m, n, k, lda, ldb) {
+        block_scat_packed(k, a, ia, lda, b, jb, ldb, c);
+    } else {
+        block_scat_direct(k, a, ia, lda, b, jb, ldb, c);
+    }
+}
+
+/// [`block_scat`] with the operands read where they lie.
+#[allow(clippy::too_many_arguments)]
+fn block_scat_direct(
     k: usize,
     a: &Ws<f64>,
     ia: usize,
@@ -1023,6 +1061,128 @@ fn block_scat(
         }
         l0 += kb;
     }
+}
+
+/// [`rows_packed_nt`]'s ladder writing through column slices instead of a flat
+/// `C`, so a [`gemm_sub_par`] task can use the packed kernel.
+///
+/// [`tile_scat`] is already `C -= A B'` accumulated from `C` — the `ACC` and
+/// `SUB` [`tile_nt`] takes as parameters, fixed — and a packed panel is what it
+/// reads with `lda` set to [`PACK_MR`] and `ldb` to [`PACK_NR`]. So the packed
+/// and direct scattered paths share their tile, exactly as the flat pair do.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn rows_packed_scat<const NR: usize>(
+    mb: usize,
+    kb: usize,
+    ap: &Ws<f64>,
+    bp: &Ws<f64>,
+    pb: usize,
+    c: &mut [&mut [f64]],
+    j0: usize,
+    i0: usize,
+) {
+    let (mut i, mut pa) = (0usize, 0usize);
+    while i + PACK_MR <= mb {
+        tile_scat::<PACK_MR, NR>(kb, ap, pa, PACK_MR, bp, pb, PACK_NR, c, j0, i0 + i);
+        pa += PACK_MR * kb;
+        i += PACK_MR;
+    }
+    /* the last panel is packed to `PACK_MR` stride however few rows it holds,
+     * so the tail walks *within* it — `pa + o`, not `pa + o * kb` */
+    let rem = mb - i;
+    let mut o = 0;
+    if rem & 4 != 0 {
+        tile_scat::<4, NR>(kb, ap, pa + o, PACK_MR, bp, pb, PACK_NR, c, j0, i0 + i + o);
+        o += 4;
+    }
+    if rem & 2 != 0 {
+        tile_scat::<2, NR>(kb, ap, pa + o, PACK_MR, bp, pb, PACK_NR, c, j0, i0 + i + o);
+        o += 2;
+    }
+    if rem & 1 != 0 {
+        tile_scat::<1, NR>(kb, ap, pa + o, PACK_MR, bp, pb, PACK_NR, c, j0, i0 + i + o);
+    }
+}
+
+/// [`block_packed_nt`]'s column ladder over [`rows_packed_scat`].
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn block_packed_scat(
+    mb: usize,
+    nb: usize,
+    kb: usize,
+    ap: &Ws<f64>,
+    bp: &Ws<f64>,
+    c: &mut [&mut [f64]],
+    j0: usize,
+    i0: usize,
+) {
+    let (mut j, mut pb) = (0usize, 0usize);
+    while j + PACK_NR <= nb {
+        rows_packed_scat::<PACK_NR>(mb, kb, ap, bp, pb, c, j0 + j, i0);
+        pb += PACK_NR * kb;
+        j += PACK_NR;
+    }
+    let rem = nb - j;
+    if rem & 2 != 0 {
+        rows_packed_scat::<2>(mb, kb, ap, bp, pb, c, j0 + j, i0);
+        pb += 2;
+        j += 2;
+    }
+    if rem & 1 != 0 {
+        rows_packed_scat::<1>(mb, kb, ap, bp, pb, c, j0 + j, i0);
+    }
+}
+
+/// [`block_scat`] with both operands copied into [`tile_scat`]'s panel layout.
+///
+/// [`gemm_sub_packed`]'s loop nest with the destination reached through column
+/// slices, so the rounding argument is the same one: the `pc` loop ascends, each
+/// block loads `C`, subtracts its sources in ascending `l`, and stores, and an
+/// `f64` store and reload is exact.
+///
+/// [`PACK_BUF`] is thread-local, so every task packs into its own pair of
+/// buffers and no two tasks contend for one.
+#[allow(clippy::too_many_arguments)]
+fn block_scat_packed(
+    k: usize,
+    a: &Ws<f64>,
+    ia: usize,
+    lda: usize,
+    b: &Ws<f64>,
+    jb: usize,
+    ldb: usize,
+    c: &mut [&mut [f64]],
+) {
+    let (m, n) = (c[0].len(), c.len());
+    PACK_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        let (apv, bpv) = &mut *buf;
+        apv.resize(round_up(PACK_MC, PACK_MR) * PACK_KC, 0.0);
+        bpv.resize(round_up(PACK_NC, PACK_NR) * PACK_KC, 0.0);
+        let ap = Ws::new(apv);
+        let bp = Ws::new(bpv);
+
+        let mut jc = 0;
+        while jc < n {
+            let nb = (n - jc).min(PACK_NC);
+            let mut pc = 0;
+            while pc < k {
+                let kb = (k - pc).min(PACK_KC);
+                pack_cols(nb, kb, b, jb + jc, pc, ldb, bp);
+                let mut i0 = 0;
+                while i0 < m {
+                    let mb = (m - i0).min(PACK_MC);
+                    pack_rows(mb, kb, a, ia + i0, pc, lda, ap);
+                    block_packed_scat(mb, nb, kb, ap, bp, c, jc, i0);
+                    i0 += PACK_MC;
+                }
+                pc += PACK_KC;
+            }
+            jc += PACK_NC;
+        }
+    });
 }
 
 /// How many flops a `C -= A B'` must carry before [`gemm_sub_par`] is worth a
@@ -2369,6 +2529,70 @@ mod tests {
             for (q, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
                 assert_eq!(g.to_bits(), w.to_bits(), "m={m} n={n} k={k} ld={ld} at {q}");
             }
+        }
+    }
+
+    /// The scattered path has two arms of its own now, and the same blind spot:
+    /// both compute the same values, so only a direct comparison can see one of
+    /// them go wrong. `C` is carved into per-column slices exactly as
+    /// [`gemm_sub_par`] carves it for a task.
+    #[test]
+    fn the_packed_scattered_block_matches_the_direct_one() {
+        for &(m, n, k, ld) in &[
+            (64usize, 16usize, 20usize, 0usize),
+            (40, PACK_NR * 4 + 2, 9, 0),
+            (PACK_MC + 3, 33, PACK_KC + 5, 0),
+            (512, 32, 16, 2048), /* an aliasing stride, which is the live case */
+        ] {
+            let ld = if ld == 0 { m + n + k + 6 } else { ld };
+            let base = mat(ld, k + n, ld, 5150);
+            let (ia, jb, ic) = (0usize, m, k * ld);
+            let mut out = [base.clone(), base.clone()];
+            for (q, x) in out.iter_mut().enumerate() {
+                let (src, dst) = Ws::new(x).split_at_mut(ic);
+                let mut cols: Vec<&mut [f64]> = Vec::with_capacity(n);
+                let mut rest = dst;
+                for j in 0..n {
+                    let col = if j + 1 < n {
+                        let (c, tail) = rest.split_at_mut(ld);
+                        rest = tail;
+                        c
+                    } else {
+                        std::mem::take(&mut rest)
+                    };
+                    cols.push(&mut col[..m]);
+                }
+                if q == 0 {
+                    block_scat_direct(k, src, ia, ld, src, jb, ld, &mut cols);
+                } else {
+                    block_scat_packed(k, src, ia, ld, src, jb, ld, &mut cols);
+                }
+            }
+            for (q, (&g, &w)) in out[1].iter().zip(out[0].iter()).enumerate() {
+                assert_eq!(g.to_bits(), w.to_bits(), "m={m} n={n} k={k} ld={ld} at {q}");
+            }
+        }
+    }
+
+    /// Threading a call must not change which kernel runs it. It did: the
+    /// serial path packed on an aliasing stride and the parallel one could not,
+    /// so two threads ran slower than one. The `rows` here is
+    /// [`gemm_sub_par`]'s own block height, so the assertion is that this shape
+    /// really does reach the packed arm — a test that silently missed it would
+    /// pass for the wrong reason.
+    #[test]
+    fn the_parallel_update_packs_like_the_serial_one_at_an_aliasing_stride() {
+        let (m, n, k, ld, nt) = (512usize, 32usize, 16usize, 2048usize, 2usize);
+        let rows = m.div_ceil(nt * PAR_OVER).max(8);
+        assert!(strides_want_packing(rows, n, k, ld, ld));
+        let base = mat(ld, k + n, ld, 90210);
+        let (ia, jb, ic) = (0usize, m, k * ld);
+        let mut serial = base.clone();
+        let mut wide = base.clone();
+        gemm_sub(m, n, k, Ws::new(&mut serial), ia, ld, jb, ld, ic, ld);
+        gemm_sub_par(m, n, k, Ws::new(&mut wide), ia, ld, jb, ld, ic, ld, nt);
+        for (q, (&g, &w)) in wide.iter().zip(serial.iter()).enumerate() {
+            assert_eq!(g.to_bits(), w.to_bits(), "at {q}");
         }
     }
 
