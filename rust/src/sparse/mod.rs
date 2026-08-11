@@ -14,6 +14,8 @@
 //! coincides when that postorder is the identity.
 
 pub mod amd;
+#[cfg(feature = "blas")]
+pub mod blas;
 pub mod dense;
 pub mod metis;
 pub mod metis_order;

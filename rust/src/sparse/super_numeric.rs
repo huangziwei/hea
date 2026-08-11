@@ -744,7 +744,9 @@ const STRIP_OVER: usize = 4;
 /// and the kernel gets its widest call.
 fn strip_width(g: &Desc, nt: usize) -> usize {
     let ndrow1 = g.ndrow1 as usize;
-    if nt <= 1 {
+    /* A threaded BLAS wants upstream's whole call, and the split exists only
+     * because hea's own kernels are one thread each. */
+    if nt <= 1 || cfg!(feature = "blas") {
         return ndrow1.max(1);
     }
     let per_col = 2.0 * g.ndrow2 as f64 * g.ndcol as f64;
@@ -1890,7 +1892,7 @@ mod tests {
     /// Worth a direct test rather than corpus coverage: upstream's gate
     /// (`ndrow1 > 64` and `cholmod_nthreads (ndcol * ndrow2) > 1`, i.e.
     /// `ndcol * ndrow2 >= 256000`) fires on **2 of 11446** descendant updates
-    /// across the largest matrix in `dev/`, and on none at all in the smaller
+    /// across the largest matrix measured, and on none at all in the smaller
     /// ones — so the factorization gates cannot be relied on to reach this arm.
     #[test]
     fn the_parallel_assembly_writes_what_the_serial_one_writes() {

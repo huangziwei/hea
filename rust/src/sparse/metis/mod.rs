@@ -1,7 +1,7 @@
 //! METIS 5.1.0's nested-dissection ordering, `METIS_NodeND`.
 //!
 //! Mechanical port of the METIS that SuiteSparse 7.6.0 vendors and CHOLMOD
-//! compiles into itself — `ref/suitesparse/CHOLMOD/SuiteSparse_metis`, driven
+//! compiles into itself — CHOLMOD's vendored `SuiteSparse_metis`, driven
 //! through `CHOLMOD/Partition/cholmod_metis_wrapper.c`. One module per upstream
 //! `.c` file, so a citation is a file name plus a line.
 //!

@@ -137,6 +137,27 @@ pub fn syrk_ln_strip(
     j0: usize,
     jn: usize,
 ) {
+    /* The vendor gets upstream's own decomposition of the trapezoid — one
+     * `dgemm` for the rows below the strip's square and one `dsyrk` for the
+     * square — where the recursive halving below exists to give hea's
+     * one-thread-per-call kernels a shape a threaded BLAS does not need. */
+    #[cfg(feature = "blas")]
+    if jn > 0 && super::blas::worth_it(2.0 * n as f64 * jn as f64 * k as f64) {
+        if n > j0 + jn {
+            super::blas::gemm_nt(
+                n - j0 - jn,
+                jn,
+                k,
+                &a[j0 + jn..],
+                lda,
+                &a[j0..],
+                lda,
+                &mut c[j0 + jn..],
+                ldc,
+            );
+        }
+        return super::blas::syrk_ln(jn, k, &a[j0..], lda, &mut c[j0..], ldc);
+    }
     debug_assert!(k == 0 || a.len() >= (k - 1) * lda + n);
     debug_assert!(j0.is_multiple_of(SYRK_NB) && j0 + jn <= n);
     if jn == 0 {
@@ -400,6 +421,10 @@ pub fn gemm_nt(
 ) {
     debug_assert!(k == 0 || (a.len() >= (k - 1) * lda + m && b.len() >= (k - 1) * ldb + n));
     debug_assert!(n == 0 || c.len() >= (n - 1) * ldc + m);
+    #[cfg(feature = "blas")]
+    if super::blas::worth_it(2.0 * m as f64 * n as f64 * k as f64) {
+        return super::blas::gemm_nt(m, n, k, a, lda, b, ldb, c, ldc);
+    }
     if wants_packing(m, n, k) || strides_want_packing(m, n, k, lda, ldb) {
         gemm_nt_packed(m, n, k, a, lda, b, ldb, c, ldc);
     } else {
@@ -1576,6 +1601,11 @@ fn strip_sub<const LR: usize>(
 /// blocking is a scheduling change and `L` is unchanged entry for entry.
 pub fn potrf_l(n: usize, a: &mut [f64], lda: usize, nt: usize) -> i64 {
     debug_assert!(n == 0 || a.len() >= (n - 1) * lda + n);
+    #[cfg(feature = "blas")]
+    if super::blas::worth_it((n as f64).powi(3) / 3.0) {
+        let _ = nt;
+        return super::blas::potrf_l(n, a, lda);
+    }
     let a = Ws::new(a);
 
     let mut save = [0.0f64; POTRF_NB * (POTRF_NB - 1) / 2];
@@ -1742,6 +1772,11 @@ fn potf2_panel(m: usize, n: usize, a: &mut Ws<f64>, off: usize, lda: usize) -> i
 /// in index order.
 pub fn trsm_rlt(m: usize, n: usize, x: &mut [f64], ld: usize, nt: usize) {
     debug_assert!(n == 0 || x.len() >= (n - 1) * ld + n + m);
+    #[cfg(feature = "blas")]
+    if super::blas::worth_it(m as f64 * (n as f64).powi(2)) {
+        let _ = nt;
+        return super::blas::trsm_rlt(m, n, x, ld);
+    }
     let x = Ws::new(x);
 
     /* B (:, j) = (B (:, j) - B (:, 0:j-1) * A (j, 0:j-1)') / A (j,j)
@@ -2416,6 +2451,12 @@ mod tests {
 
     /// The recursive trapezoid has to agree with the same chain, at every strip
     /// boundary and across `SYRK_LEAF`.
+    /// Not run against a vendor BLAS: the property is that *hea's own* blocking
+    /// is a scheduling decision and never a numerical one, which holds because
+    /// every arm sums a destination entry over `l` ascending in one place. A
+    /// vendor's summation order is not ours to pin, and under `blas` the
+    /// blocking this asserts about is not compiled in.
+    #[cfg(not(feature = "blas"))]
     #[test]
     fn syrk_is_bit_identical_across_the_blocking() {
         for &(n, k) in &[
