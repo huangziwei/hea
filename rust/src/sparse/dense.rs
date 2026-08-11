@@ -400,7 +400,7 @@ pub fn gemm_nt(
 ) {
     debug_assert!(k == 0 || (a.len() >= (k - 1) * lda + m && b.len() >= (k - 1) * ldb + n));
     debug_assert!(n == 0 || c.len() >= (n - 1) * ldc + m);
-    if wants_packing(m, n, k) {
+    if wants_packing(m, n, k) || strides_want_packing(m, n, k, lda, ldb) {
         gemm_nt_packed(m, n, k, a, lda, b, ldb, c, ldc);
     } else {
         gemm_nt_direct(m, n, k, a, lda, b, ldb, c, ldc);
@@ -459,14 +459,114 @@ const PACK_KC: usize = 256;
 /// avoids is a working-set one. The direct path re-streams `A` once per `PACK_NR`
 /// columns of `B` and `B` once per `PACK_MR` rows of `A`, so what matters is
 /// whether an operand survives between re-reads.
+///
+/// Swept rather than left derived, against a build with no residency bound at
+/// all, one core, non-aliasing `lda`, packed/direct — the bound is where packing
+/// stops costing, and it never becomes a gain:
+///
+/// | `A`+`B` KB | 120 | 192 | 288 | 480 | 864 | 1632 | 2560 |
+/// |---|---|---|---|---|---|---|---|
+/// | packed/direct | 0.67 | 0.85 | 0.90 | 0.94 | 0.96 | 0.99 | 1.01 |
+///
+/// So packing is not a win left on the table below a megabyte; it is a copy that
+/// pays only once the operand would not have survived anyway — or once the
+/// strides collide, which is a different question and
+/// [`strides_want_packing`]'s.
 const PACK_MIN_BYTES: usize = 1 << 20;
 
-/// Whether [`gemm_nt`] should pack.
+/// Whether [`gemm_nt`] should pack because its operands are too big to stay
+/// resident.
 fn wants_packing(m: usize, n: usize, k: usize) -> bool {
     m >= PACK_MR * 4
         && n >= PACK_NR * 2
         && k >= 64
         && (m.saturating_mul(k) + n.saturating_mul(k)) * 8 >= PACK_MIN_BYTES
+}
+
+/// Bytes between two addresses that land in the same L1 set — the cache's size
+/// over its associativity, 128 KB / 8 on an M-series performance core.
+const L1_WAY_BYTES: usize = 16 << 10;
+
+/// The associativity. A stride that repeats a set only after this many columns
+/// still has one way for each of them, so it does not thrash.
+const L1_WAYS: usize = 8;
+
+/// How close two columns of a `k` walk may land, in bytes, before the operands
+/// stop being read where they lie.
+///
+/// Measured on a 2048-column `dpotrf` at `lda` = 2048 + {0, 1, 2, 4, 8}, whose
+/// closest pair of columns within eight is {0, 8, 16, 32, 64} bytes apart:
+/// [`gemm_sub_direct`] runs at 13.7, 14.1, 38.3, 54.6 and 55.4 GFLOP/s, and
+/// [`gemm_sub_packed`] at 41.5, 38.4, 42.0, 46.0 and 45.5 — flat, because a
+/// packed panel has no `lda` in it. The crossing is between 16 and 32.
+const ALIAS_BYTES: usize = 32;
+
+/// Whether a stride-`ld` walk collides on too few L1 sets to run at speed.
+///
+/// The columns of a `k` walk sit `ld` doubles apart, so column `q` lands
+/// `q · ld · 8` bytes on — and, modulo [`L1_WAY_BYTES`], in the same set as
+/// column 0 whenever that product comes back near zero. A supernode whose
+/// `nsrow` happens to be 2048 puts *every* column in one set: on this machine
+/// that is a 4x cliff, 13.7 GFLOP/s against the 55 the same code gets one row
+/// wider.
+///
+/// Only the first [`L1_WAYS`] columns are examined, and that is the whole
+/// argument for the bound rather than a sampling shortcut: a stride that takes
+/// eight or more columns to repeat a set has spread them over eight sets, which
+/// is exactly as many ways as there are. Checking further would flag `lda`
+/// = 2304 (which repeats at `q = 8`) and cost it 23%, measured.
+#[inline]
+fn strides_alias(ld: usize) -> bool {
+    let s = (ld * 8) % L1_WAY_BYTES;
+    let mut d = 0;
+    for _ in 1..L1_WAYS {
+        d = (d + s) % L1_WAY_BYTES;
+        if d.min(L1_WAY_BYTES - d) < ALIAS_BYTES {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether to pack because the strides collide, rather than because the
+/// operands are large.
+///
+/// **[`wants_packing`] is a residency test and this is not.** Set aliasing bites
+/// at 128 KB exactly as hard as at 43 MB, so gating it behind
+/// [`PACK_MIN_BYTES`] — as [`gemm_sub`] originally did, and as [`gemm_nt`] did
+/// by having no aliasing arm at all — left every smaller call on the cliff. On
+/// the corpus's own flop-weighted median `dgemm`, `m` = 255, `n` = 149,
+/// `k` = 106, that is 27.9 GFLOP/s against the 47.2 the packed path gets.
+///
+/// Each bound is where the measured gain crosses 1, against a build that packs
+/// on [`strides_alias`] alone with no shape test whatever, both timed in one
+/// process at an aliasing `lda = ldb`:
+///
+/// | `k`, at 512×128 | 6 | 7 | 8 | **9** | 10 | 12 | 14 | 16 |
+/// |---|---|---|---|---|---|---|---|---|
+/// | packed/direct | 1.00 | 1.03 | 1.03 | **1.15** | 1.21 | 1.48 | 1.68 | 1.66 |
+///
+/// | `n`, at 512×·×64 | 4 | 6 | 8 | 10 | 12 | **16** | 20 | 24 |
+/// |---|---|---|---|---|---|---|---|---|
+/// | packed/direct | 0.62 | 0.86 | 0.83 | 0.99 | 1.00 | **1.08** | 1.15 | 1.12 |
+///
+/// | `m`, at ·×128×64 | 16 | 20 | 24 | 28 | **32** | 40 | 48 | 64 |
+/// |---|---|---|---|---|---|---|---|---|
+/// | packed/direct | 0.81 | 1.07 | 0.95 | 1.09 | **1.03** | 1.09 | 1.16 | 1.24 |
+///
+/// **`k > L1_WAYS` is the mechanism's own floor, not a fitted one**, and the
+/// table is what confirms the mechanism: a walk of eight or fewer columns has a
+/// way for each of them however they collide, so there is nothing to win, and
+/// the gain is 1.00-1.03 up to exactly eight and climbs from exactly nine.
+///
+/// The shape tests come first so a call that could not benefit never pays for
+/// the address arithmetic — the majority of calls in a sparse factorization are
+/// a few columns wide.
+fn strides_want_packing(m: usize, n: usize, k: usize, lda: usize, ldb: usize) -> bool {
+    m >= PACK_MR * 4
+        && n >= PACK_NR * 4
+        && k > L1_WAYS
+        && (strides_alias(lda) || strides_alias(ldb))
 }
 
 /// `ceil (x / q) * q`.
@@ -977,51 +1077,6 @@ const PAR_OVER: usize = 4;
 /// far *down a column* a pass walks, and `n` does not enter that.
 const KB_SUB: usize = 16;
 
-/// Bytes between two addresses that land in the same L1 set — the cache's size
-/// over its associativity, 128 KB / 8 on an M-series performance core.
-const L1_WAY_BYTES: usize = 16 << 10;
-
-/// The associativity. A stride that repeats a set only after this many columns
-/// still has one way for each of them, so it does not thrash.
-const L1_WAYS: usize = 8;
-
-/// How close two columns of a `k` block may land, in bytes, before
-/// [`gemm_sub`] stops reading the operands where they lie.
-///
-/// Measured on a 2048-column `dpotrf` at `lda` = 2048 + {0, 1, 2, 4, 8}, whose
-/// closest pair of columns within eight is {0, 8, 16, 32, 64} bytes apart:
-/// [`gemm_sub_direct`] runs at 13.7, 14.1, 38.3, 54.6 and 55.4 GFLOP/s, and
-/// [`gemm_sub_packed`] at 41.5, 38.4, 42.0, 46.0 and 45.5 — flat, because a
-/// packed panel has no `lda` in it. The crossing is between 16 and 32.
-const ALIAS_BYTES: usize = 32;
-
-/// Whether a stride-`ld` walk collides on too few L1 sets to run at speed.
-///
-/// The columns of a `k` block sit `ld` doubles apart, so column `q` lands
-/// `q · ld · 8` bytes on — and, modulo [`L1_WAY_BYTES`], in the same set as
-/// column 0 whenever that product comes back near zero. A supernode whose
-/// `nsrow` happens to be 2048 puts *every* column of the block in one set: on
-/// this machine that is a 4x cliff, 13.7 GFLOP/s against the 55 the same code
-/// gets one row wider.
-///
-/// Only the first [`L1_WAYS`] columns are examined, and that is the whole
-/// argument for the bound rather than a sampling shortcut: a stride that takes
-/// eight or more columns to repeat a set has spread them over eight sets, which
-/// is exactly as many ways as there are. Checking further would flag `lda`
-/// = 2304 (which repeats at `q = 8`) and cost it 23%, measured.
-#[inline]
-fn strides_alias(ld: usize) -> bool {
-    let s = (ld * 8) % L1_WAY_BYTES;
-    let mut d = 0;
-    for _ in 1..L1_WAYS {
-        d = (d + s) % L1_WAY_BYTES;
-        if d.min(L1_WAY_BYTES - d) < ALIAS_BYTES {
-            return true;
-        }
-    }
-    false
-}
-
 /// [`gemm_sub`] with the rows of `C` split across threads.
 ///
 /// **Row blocks, not column blocks.** A row block reads only its own rows of
@@ -1107,11 +1162,11 @@ fn gemm_sub_par(
 /// `B` is `n`-by-`k` at `jb`, `C` is `m`-by-`n` at `ic`.
 ///
 /// Two paths over the same register tile, but **not** the split [`gemm_nt`]
-/// makes. `gemm_nt` packs once its operands stop fitting a cache; this one
-/// packs only when they *alias*, because the direct path with [`KB_SUB`] behind
-/// it beats the packed one at every size — 53-56 GFLOP/s against 42-47 on the
-/// same shapes. What packing buys here is not locality, it is the removal of
-/// `lda` from the inner loop, and only [`strides_alias`] can want that.
+/// makes. `gemm_nt` packs on either condition; this one packs *only* when the
+/// strides alias, because the direct path with [`KB_SUB`] behind it beats the
+/// packed one at every size — 53-56 GFLOP/s against 42-47 on the same shapes.
+/// What packing buys here is not locality, it is the removal of `lda` from the
+/// inner loop, and only [`strides_want_packing`] can want that.
 ///
 /// **`C` must not overlap `A` or `B`.** Both callers satisfy it the same way —
 /// everything read lies in columns left of the panel and everything written in
@@ -1131,7 +1186,7 @@ fn gemm_sub(
     ic: usize,
     ldc: usize,
 ) {
-    if wants_packing(m, n, k) && (strides_alias(lda) || strides_alias(ldb)) {
+    if strides_want_packing(m, n, k, lda, ldb) {
         gemm_sub_packed(m, n, k, x, ia, lda, jb, ldb, ic, ldc);
     } else {
         gemm_sub_direct(m, n, k, x, ia, lda, jb, ldb, ic, ldc);
@@ -2265,6 +2320,79 @@ mod tests {
                 assert_eq!(g.to_bits(), w.to_bits(), "m={m} n={n} k={k} at {q}");
             }
         }
+    }
+
+    /// Both dispatchers change path on the *address* of their operands, which
+    /// nothing about the values can predict: two calls with identical `m`, `n`,
+    /// `k` and identical contents run different code because one supernode is a
+    /// row taller. So the aliasing arm needs its own entry-for-entry check,
+    /// against the explicit ascending-`l` chain rather than against the other
+    /// path, and the assertion that the gate fired at all — without it the test
+    /// would pass by never reaching the code it names.
+    #[test]
+    fn the_aliasing_dispatch_does_not_move_a_rounding() {
+        for &(m, n, k, ld) in &[
+            (64usize, 33usize, 70usize, 512usize),
+            (200, 64, 90, 1024),
+            (300, 17, 40, 2048),
+            (PACK_MR * 4, PACK_NR * 4, L1_WAYS + 1, 512),
+        ] {
+            assert!(
+                strides_want_packing(m, n, k, ld, ld),
+                "m={m} n={n} k={k} ld={ld}"
+            );
+            let a = mat(m, k, ld, 4242);
+            let b = mat(n, k, ld, 2424);
+            let ldc = m + 3;
+            let mut got = vec![f64::NAN; ldc * n + m];
+            gemm_nt(m, n, k, &a, ld, &b, ld, &mut got, ldc);
+            for j in 0..n {
+                for i in 0..m {
+                    assert_eq!(
+                        got[i + j * ldc].to_bits(),
+                        dot_nt(k, &a, i, ld, &b, j, ld).to_bits(),
+                        "m={m} n={n} k={k} ld={ld} at ({i},{j})"
+                    );
+                }
+            }
+
+            /* the same shapes through `C -= A B'`, laid out as its callers do:
+             * one array whose *own* leading dimension is the aliasing one, `A`
+             * at row 0 and `B` at row `m` of columns `0..k`, `C` in the panel */
+            assert!(m + n <= ld);
+            let base = mat(ld, k + n, ld, 1234);
+            let (ia, jb, ic) = (0usize, m, k * ld);
+            let mut want = base.clone();
+            let mut got = base.clone();
+            gemm_sub_direct(m, n, k, Ws::new(&mut want), ia, ld, jb, ld, ic, ld);
+            gemm_sub(m, n, k, Ws::new(&mut got), ia, ld, jb, ld, ic, ld);
+            for (q, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+                assert_eq!(g.to_bits(), w.to_bits(), "m={m} n={n} k={k} ld={ld} at {q}");
+            }
+        }
+    }
+
+    /// Where the measured gain crosses 1, one bound at a time. Each pair is the
+    /// last shape that did not pay for packing and the first that did, at an
+    /// aliasing `lda`; moving one is moving a measurement.
+    #[test]
+    fn the_packing_bounds_sit_where_the_gain_crosses_one() {
+        let al = 2048; /* aliases */
+        let no = 2052; /* does not */
+        /* `k`: 1.03 at eight columns, 1.15 at nine — a walk with no more
+         * columns than the cache has ways cannot thrash, however they collide */
+        assert!(!strides_want_packing(512, 128, L1_WAYS, al, al));
+        assert!(strides_want_packing(512, 128, L1_WAYS + 1, al, al));
+        /* `n`: 0.83 at eight columns of `C`, 1.08 at sixteen */
+        assert!(!strides_want_packing(512, PACK_NR * 2, 64, al, al));
+        assert!(strides_want_packing(512, PACK_NR * 4, 64, al, al));
+        /* `m`: 0.81 at sixteen rows, 1.03 at thirty-two */
+        assert!(!strides_want_packing(PACK_MR * 2, 128, 64, al, al));
+        assert!(strides_want_packing(PACK_MR * 4, 128, 64, al, al));
+        /* either operand alone is enough: `A` costs 10-25% and `B` 27-41% */
+        assert!(!strides_want_packing(512, 128, 64, no, no));
+        assert!(strides_want_packing(512, 128, 64, al, no));
+        assert!(strides_want_packing(512, 128, 64, no, al));
     }
 
     /// The leading dimensions the `dpotrf`/`dtrsm` sweep measured, and which
