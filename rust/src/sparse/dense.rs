@@ -476,9 +476,40 @@ const PACK_MIN_BYTES: usize = 1 << 20;
 
 /// Whether [`gemm_nt`] should pack because its operands are too big to stay
 /// resident.
+///
+/// [`PACK_MIN_BYTES`] asks whether the operand *survives* between re-reads; the
+/// shape tests ask whether the copy is *amortised*, and they are not the same
+/// question. The direct path re-streams `A` once per [`PACK_NR`] columns of
+/// `B`, so a call reuses each copied element of `A` about `n / PACK_NR` times
+/// against a copy that costs one write plus one read. At `n = PACK_NR * 2` that
+/// is two re-streams against a copy of two: packing cannot win there however
+/// large the operand, and a size test alone lets it try.
+///
+/// Which is what happened. On eight threads `strip_width` cuts a descendant's
+/// update into narrow strips, and [`syrk_ln_strip`]'s rectangle then issues
+/// `gemm_nt` with `n` equal to the strip width — on gridfit 320², 124 calls with
+/// a *median `n` of 8* and `m` of 620, so `m · k · 8` clears a megabyte on its
+/// own and the copy is spread over eight uses. Timing only those calls, inside
+/// the real factorization, total ms across the arm:
+///
+/// | `n` floor | 8 (was) | 16 | 32 | 64 | 128 | never pack |
+/// |---|---|---|---|---|---|---|
+/// | 8 threads | 13.87 | **10.91** | 10.83 | 10.95 | 10.66 | 11.76 |
+/// | 1 thread | 14.06 | 14.02 | 14.08 | 14.01 | 14.15 | 17.41 |
+///
+/// Flat from 16 on, so the whole effect is the `n = 8` calls and `PACK_NR * 4`
+/// is the crossing rather than a fitted constant. Note the last column: never
+/// packing is *worse* than packing at `n >= 16`, so the answer was never to
+/// switch the arm off — and note the one-thread row, where the floor costs
+/// nothing and packing is still worth 3.4 ms. A bound swept on one core missed
+/// this because one core never produces the narrow strips.
+///
+/// [`strides_want_packing`] already required `PACK_NR * 4`, measured (0.83 at
+/// 8, 1.08 at 16). The two arms now agree, which they had no reason not to: the
+/// amortisation argument is about the copy, and both arms make the same copy.
 fn wants_packing(m: usize, n: usize, k: usize) -> bool {
     m >= PACK_MR * 4
-        && n >= PACK_NR * 2
+        && n >= PACK_NR * 4
         && k >= 64
         && (m.saturating_mul(k) + n.saturating_mul(k)) * 8 >= PACK_MIN_BYTES
 }
@@ -2617,6 +2648,36 @@ mod tests {
         assert!(!strides_want_packing(512, 128, 64, no, no));
         assert!(strides_want_packing(512, 128, 64, al, no));
         assert!(strides_want_packing(512, 128, 64, no, al));
+    }
+
+    /// The residency arm's `n` floor is the same crossing, and it has to be:
+    /// both arms make the same copy, so both amortise it over the same `n /
+    /// PACK_NR` re-streams. It was `PACK_NR * 2` for one release, where the
+    /// copy cannot win however large the operand — and eight threads issue
+    /// exactly that shape, because a narrow strip's rectangle has `n` equal to
+    /// the strip width. Timed on the calls themselves, 13.87 → 10.91 ms.
+    #[test]
+    fn the_residency_arm_amortises_its_copy() {
+        let big = 1024; /* `m` and `k` chosen so the byte test never decides */
+        assert!(!wants_packing(big, PACK_NR * 2, big));
+        assert!(wants_packing(big, PACK_NR * 4, big));
+        /* and the byte test still has to pass on its own */
+        assert!(!wants_packing(big, PACK_NR * 4, 64));
+        /* the two arms agree on both shape floors */
+        for n in [PACK_NR * 2, PACK_NR * 4] {
+            assert_eq!(
+                wants_packing(big, n, big),
+                strides_want_packing(big, n, big, 2048, 2048),
+                "the arms disagree at n={n}"
+            );
+        }
+        for m in [PACK_MR * 2, PACK_MR * 4] {
+            assert_eq!(
+                wants_packing(m, 128, big),
+                strides_want_packing(m, 128, big, 2048, 2048),
+                "the arms disagree at m={m}"
+            );
+        }
     }
 
     /// The leading dimensions the `dpotrf`/`dtrsm` sweep measured, and which
