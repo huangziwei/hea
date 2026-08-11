@@ -454,8 +454,17 @@ mod tests {
     /// The corpora these kernels run are only evidence if the check they rely
     /// on is live in this profile, so prove that separately rather than
     /// assuming it.
+    ///
+    /// `cargo test --release` is a profile where it is *not* live —
+    /// `debug_assertions` is off, so the index below reaches
+    /// `get_unchecked` and the process traps instead of unwinding, taking the
+    /// whole binary down with it rather than failing one test. Skipped there,
+    /// which is also the honest reading: this test asserts something about the
+    /// debug profile, and in a release run neither it nor the corpora beside it
+    /// are evidence of bounds safety.
     #[test]
     #[should_panic(expected = "out of range")]
+    #[cfg_attr(not(debug_assertions), ignore = "the bound is compiled out")]
     fn ws_still_checks_its_bound_under_cfg_test() {
         let mut buf = [0i64; 4];
         let ws = Ws::new(&mut buf);

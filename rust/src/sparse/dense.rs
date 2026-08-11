@@ -260,10 +260,17 @@ fn syrk_tri(
 /// lets [`gemm_nt`] cut `k` into blocks: the running sum is stored and reloaded
 /// between blocks, and an `f64` store/reload is exact, so `C (i,j)` still sees
 /// its sources in one unbroken ascending-`l` chain. The same argument
-/// [`k_block`] makes for `C -= A B'`.
+/// [`KB_SUB`] makes for `C -= A B'`.
+///
+/// `SUB` negates `B (j,l)` before the multiply-add, which turns `C += A B'`
+/// into `C -= A B'` — the form [`tile_sub`] computes, one negation per
+/// `(l, j)` and then the same `rfma`. With `SUB` and `ACC` both set this tile
+/// *is* `tile_sub`, entry for entry, on operands that have been packed rather
+/// than read where they lie; the hoist of `A` into `av` is pure code motion and
+/// moves no rounding either.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn tile_nt<const MR: usize, const NR: usize, const ACC: bool>(
+fn tile_nt<const MR: usize, const NR: usize, const ACC: bool, const SUB: bool>(
     k: usize,
     a: &Ws<f64>,
     ia: usize,
@@ -290,7 +297,7 @@ fn tile_nt<const MR: usize, const NR: usize, const ACC: bool>(
             *v = a[ao + ii];
         }
         for (jj, accj) in acc.iter_mut().enumerate() {
-            let bv = b[bo + jj];
+            let bv = if SUB { -b[bo + jj] } else { b[bo + jj] };
             for (ii, x) in accj.iter_mut().enumerate() {
                 *x = rfma(bv, av[ii], *x);
             }
@@ -306,7 +313,7 @@ fn tile_nt<const MR: usize, const NR: usize, const ACC: bool>(
 /// The `m` direction of one `NR`-wide column block, tiled 8/4/2/1.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn cols_nt<const NR: usize, const ACC: bool>(
+fn cols_nt<const NR: usize, const ACC: bool, const SUB: bool>(
     m: usize,
     k: usize,
     a: &Ws<f64>,
@@ -321,19 +328,19 @@ fn cols_nt<const NR: usize, const ACC: bool>(
 ) {
     let mut i = 0;
     while i + 8 <= m {
-        tile_nt::<8, NR, ACC>(k, a, ia0 + i, lda, b, jb, ldb, c, ic0 + i, ldc);
+        tile_nt::<8, NR, ACC, SUB>(k, a, ia0 + i, lda, b, jb, ldb, c, ic0 + i, ldc);
         i += 8;
     }
     if i + 4 <= m {
-        tile_nt::<4, NR, ACC>(k, a, ia0 + i, lda, b, jb, ldb, c, ic0 + i, ldc);
+        tile_nt::<4, NR, ACC, SUB>(k, a, ia0 + i, lda, b, jb, ldb, c, ic0 + i, ldc);
         i += 4;
     }
     if i + 2 <= m {
-        tile_nt::<2, NR, ACC>(k, a, ia0 + i, lda, b, jb, ldb, c, ic0 + i, ldc);
+        tile_nt::<2, NR, ACC, SUB>(k, a, ia0 + i, lda, b, jb, ldb, c, ic0 + i, ldc);
         i += 2;
     }
     if i < m {
-        tile_nt::<1, NR, ACC>(k, a, ia0 + i, lda, b, jb, ldb, c, ic0 + i, ldc);
+        tile_nt::<1, NR, ACC, SUB>(k, a, ia0 + i, lda, b, jb, ldb, c, ic0 + i, ldc);
     }
 }
 
@@ -356,15 +363,15 @@ fn block_nt<const ACC: bool>(
 ) {
     let mut j = 0;
     while j + 4 <= n {
-        cols_nt::<4, ACC>(m, k, a, ia0, lda, b, jb0 + j, ldb, c, ic0 + j * ldc, ldc);
+        cols_nt::<4, ACC, false>(m, k, a, ia0, lda, b, jb0 + j, ldb, c, ic0 + j * ldc, ldc);
         j += 4;
     }
     if j + 2 <= n {
-        cols_nt::<2, ACC>(m, k, a, ia0, lda, b, jb0 + j, ldb, c, ic0 + j * ldc, ldc);
+        cols_nt::<2, ACC, false>(m, k, a, ia0, lda, b, jb0 + j, ldb, c, ic0 + j * ldc, ldc);
         j += 2;
     }
     if j < n {
-        cols_nt::<1, ACC>(m, k, a, ia0, lda, b, jb0 + j, ldb, c, ic0 + j * ldc, ldc);
+        cols_nt::<1, ACC, false>(m, k, a, ia0, lda, b, jb0 + j, ldb, c, ic0 + j * ldc, ldc);
     }
 }
 
@@ -438,7 +445,7 @@ const PACK_NC: usize = 1024;
 /// micro-panels — `PACK_MR * PACK_KC * 8` and `PACK_NR * PACK_KC * 8` — at 16
 /// and 8 KB, which is what keeps the innermost loop inside L1.
 ///
-/// **Free to choose, for the same reason [`k_block`] is.** Each `C (i,j)`
+/// **Free to choose, for the same reason [`KB_SUB`] is.** Each `C (i,j)`
 /// accumulates its `k` block in registers, is stored, and is reloaded by the
 /// next block to carry on; an `f64` store and reload is exact, so the chain
 /// `(((0 + a₀b₀) + a₁b₁) + …)` over all of `k` in index order is the same at
@@ -531,7 +538,7 @@ fn pack_cols(
 /// last row panel holds.
 #[inline]
 #[allow(clippy::too_many_arguments)]
-fn rows_packed_nt<const NR: usize, const ACC: bool>(
+fn rows_packed_nt<const NR: usize, const ACC: bool, const SUB: bool>(
     mb: usize,
     kb: usize,
     ap: &Ws<f64>,
@@ -543,14 +550,14 @@ fn rows_packed_nt<const NR: usize, const ACC: bool>(
 ) {
     let (mut i, mut pa) = (0usize, 0usize);
     while i + PACK_MR <= mb {
-        tile_nt::<PACK_MR, NR, ACC>(kb, ap, pa, PACK_MR, bp, pb, PACK_NR, c, ic0 + i, ldc);
+        tile_nt::<PACK_MR, NR, ACC, SUB>(kb, ap, pa, PACK_MR, bp, pb, PACK_NR, c, ic0 + i, ldc);
         pa += PACK_MR * kb;
         i += PACK_MR;
     }
     let rem = mb - i;
     let mut o = 0;
     if rem & 4 != 0 {
-        tile_nt::<4, NR, ACC>(
+        tile_nt::<4, NR, ACC, SUB>(
             kb,
             ap,
             pa + o,
@@ -565,7 +572,7 @@ fn rows_packed_nt<const NR: usize, const ACC: bool>(
         o += 4;
     }
     if rem & 2 != 0 {
-        tile_nt::<2, NR, ACC>(
+        tile_nt::<2, NR, ACC, SUB>(
             kb,
             ap,
             pa + o,
@@ -580,7 +587,7 @@ fn rows_packed_nt<const NR: usize, const ACC: bool>(
         o += 2;
     }
     if rem & 1 != 0 {
-        tile_nt::<1, NR, ACC>(
+        tile_nt::<1, NR, ACC, SUB>(
             kb,
             ap,
             pa + o,
@@ -598,7 +605,7 @@ fn rows_packed_nt<const NR: usize, const ACC: bool>(
 /// One packed `mb`-by-`nb`-by-`kb` block into `C [ic0 ..]`.
 #[inline]
 #[allow(clippy::too_many_arguments)]
-fn block_packed_nt<const ACC: bool>(
+fn block_packed_nt<const ACC: bool, const SUB: bool>(
     mb: usize,
     nb: usize,
     kb: usize,
@@ -610,7 +617,7 @@ fn block_packed_nt<const ACC: bool>(
 ) {
     let (mut j, mut pb) = (0usize, 0usize);
     while j + PACK_NR <= nb {
-        rows_packed_nt::<PACK_NR, ACC>(mb, kb, ap, bp, pb, c, ic0 + j * ldc, ldc);
+        rows_packed_nt::<PACK_NR, ACC, SUB>(mb, kb, ap, bp, pb, c, ic0 + j * ldc, ldc);
         pb += PACK_NR * kb;
         j += PACK_NR;
     }
@@ -618,12 +625,12 @@ fn block_packed_nt<const ACC: bool>(
     /* the last one to three columns share a single packed panel of stride
      * `PACK_NR`, so the tail advances *within* it — `+= 2`, not `+= 2 * kb` */
     if rem & 2 != 0 {
-        rows_packed_nt::<2, ACC>(mb, kb, ap, bp, pb, c, ic0 + j * ldc, ldc);
+        rows_packed_nt::<2, ACC, SUB>(mb, kb, ap, bp, pb, c, ic0 + j * ldc, ldc);
         pb += 2;
         j += 2;
     }
     if rem & 1 != 0 {
-        rows_packed_nt::<1, ACC>(mb, kb, ap, bp, pb, c, ic0 + j * ldc, ldc);
+        rows_packed_nt::<1, ACC, SUB>(mb, kb, ap, bp, pb, c, ic0 + j * ldc, ldc);
     }
 }
 
@@ -678,9 +685,9 @@ fn gemm_nt_packed(
                     pack_rows(mb, kb, a, ic, pc, lda, ap);
                     let ic0 = ic + jc * ldc;
                     if pc == 0 {
-                        block_packed_nt::<false>(mb, nb, kb, ap, bp, c, ic0, ldc);
+                        block_packed_nt::<false, false>(mb, nb, kb, ap, bp, c, ic0, ldc);
                     } else {
-                        block_packed_nt::<true>(mb, nb, kb, ap, bp, c, ic0, ldc);
+                        block_packed_nt::<true, false>(mb, nb, kb, ap, bp, c, ic0, ldc);
                     }
                     ic += PACK_MC;
                 }
@@ -894,10 +901,9 @@ fn block_scat(
     c: &mut [&mut [f64]],
 ) {
     let (m, n) = (c[0].len(), c.len());
-    let kc = k_block(n);
     let mut l0 = 0;
     while l0 < k {
-        let kb = kc.min(k - l0);
+        let kb = KB_SUB.min(k - l0);
         let (ia, jb) = (ia + l0 * lda, jb + l0 * ldb);
         let mut i = 0;
         while i + 8 <= m {
@@ -933,13 +939,7 @@ const GEMM_PAR_FLOPS: f64 = 2.0e6;
 /// four, 6.2 at eight.
 const PAR_OVER: usize = 4;
 
-/// How much of `B` one pass over the rows may keep live, in doubles — 64 KB
-/// against the 128 KB L1 an M-series performance core has, leaving room for the
-/// slab of `A` beside it.
-const KC_DOUBLES: usize = 8192;
-
-/// How many columns of `A` (and of `B`) a pass covers, so that [`slab_sub`]'s
-/// reuse of `B` across row slabs is reuse out of L1 rather than out of L2.
+/// How many columns of `A` (and of `B`) one pass of [`gemm_sub_direct`] covers.
 ///
 /// **Free to choose, for the reason the panel width is.** A destination entry
 /// is loaded, has its sources for this `k` range subtracted in ascending order,
@@ -948,15 +948,78 @@ const KC_DOUBLES: usize = 8192;
 /// `(((c - a0 b0) - a1 b1) - ...)` over all of `k` in index order, at any block
 /// size.
 ///
-/// It is not free for speed, and the whole falloff at large `k` was this: `B`
-/// is `n`-by-`k` and gets re-read once per slab, so as soon as it outgrows L1
-/// every slab pays for it again. Measured on an `m`-by-32-by-`k` panel, hea ran
-/// at 30.8 GFLOP/s at `k = 256` (`B` = 64 KB), 22.2 at `k = 510` (130 KB) and
-/// 14.8 at `k = 1024` (262 KB) — a clean staircase down from the L1 boundary,
-/// not a gradual decay.
+/// It is not free for speed, and it is the single largest constant in this
+/// file. **What the block has to fit is not `B`'s doubles but the *cache lines*
+/// both operands touch.** A `k` block reads `kb` columns of each, and a column
+/// is a short contiguous run at a stride of `ld` doubles, so it costs whole
+/// lines however few of its bytes are wanted: one to two lines per column of
+/// `A`'s eight-row slab and two or more per column of `B`. The old value sized
+/// `B`'s *doubles* against L1 — 8192 of them, 64 KB — which is 256 columns at
+/// `n = 32` and, counted in lines, three to four times the L1 it was supposed to
+/// fit inside. Swept on the shapes `potrf_l` and `trsm_rlt` issue, one core,
+/// GFLOP/s:
+///
+/// | `kb` | 256 | 64 | 32 | **16** | 8 | 4 |
+/// |---|---|---|---|---|---|---|
+/// | `dpotrf` n=5344 | 33.8 | 47.8 | 49.6 | **53.3** | 39.0 | 28.6 |
+/// | `dpotrf` n=3000 | 47.5 | 53.8 | 54.2 | **56.4** | 43.6 | 35.5 |
+/// | `dtrsm` 4174×1170 | 38.7 | 51.4 | 51.7 | **55.5** | 41.5 | 33.3 |
+/// | `dpotrf` n=1239 | 50.4 | 53.6 | 53.7 | **53.9** | 43.3 | 36.9 |
+/// | `dtrsm` 832×387 | 47.1 | 49.5 | 50.9 | **51.1** | 40.3 | 33.2 |
+///
+/// Every shape peaks at 16 and every shape improves monotonically on the way
+/// down to it, so this is one optimum rather than a compromise between two
+/// regimes. Below 16 the register tile runs out of work to hide the reload of
+/// `C`: `MR·NR` loads and stores bracket `kb·MR·NR` multiply-adds, which is
+/// 2.3 flops per load at `kb = 16` and 1.6 at `kb = 4`.
+///
+/// Constant, where it used to divide `KC_DOUBLES` by `n`. It is a bound on how
+/// far *down a column* a pass walks, and `n` does not enter that.
+const KB_SUB: usize = 16;
+
+/// Bytes between two addresses that land in the same L1 set — the cache's size
+/// over its associativity, 128 KB / 8 on an M-series performance core.
+const L1_WAY_BYTES: usize = 16 << 10;
+
+/// The associativity. A stride that repeats a set only after this many columns
+/// still has one way for each of them, so it does not thrash.
+const L1_WAYS: usize = 8;
+
+/// How close two columns of a `k` block may land, in bytes, before
+/// [`gemm_sub`] stops reading the operands where they lie.
+///
+/// Measured on a 2048-column `dpotrf` at `lda` = 2048 + {0, 1, 2, 4, 8}, whose
+/// closest pair of columns within eight is {0, 8, 16, 32, 64} bytes apart:
+/// [`gemm_sub_direct`] runs at 13.7, 14.1, 38.3, 54.6 and 55.4 GFLOP/s, and
+/// [`gemm_sub_packed`] at 41.5, 38.4, 42.0, 46.0 and 45.5 — flat, because a
+/// packed panel has no `lda` in it. The crossing is between 16 and 32.
+const ALIAS_BYTES: usize = 32;
+
+/// Whether a stride-`ld` walk collides on too few L1 sets to run at speed.
+///
+/// The columns of a `k` block sit `ld` doubles apart, so column `q` lands
+/// `q · ld · 8` bytes on — and, modulo [`L1_WAY_BYTES`], in the same set as
+/// column 0 whenever that product comes back near zero. A supernode whose
+/// `nsrow` happens to be 2048 puts *every* column of the block in one set: on
+/// this machine that is a 4x cliff, 13.7 GFLOP/s against the 55 the same code
+/// gets one row wider.
+///
+/// Only the first [`L1_WAYS`] columns are examined, and that is the whole
+/// argument for the bound rather than a sampling shortcut: a stride that takes
+/// eight or more columns to repeat a set has spread them over eight sets, which
+/// is exactly as many ways as there are. Checking further would flag `lda`
+/// = 2304 (which repeats at `q = 8`) and cost it 23%, measured.
 #[inline]
-fn k_block(n: usize) -> usize {
-    (KC_DOUBLES / n.max(1)).max(64)
+fn strides_alias(ld: usize) -> bool {
+    let s = (ld * 8) % L1_WAY_BYTES;
+    let mut d = 0;
+    for _ in 1..L1_WAYS {
+        d = (d + s) % L1_WAY_BYTES;
+        if d.min(L1_WAY_BYTES - d) < ALIAS_BYTES {
+            return true;
+        }
+    }
+    false
 }
 
 /// [`gemm_sub`] with the rows of `C` split across threads.
@@ -1043,8 +1106,18 @@ fn gemm_sub_par(
 /// `C -= A * B'` for three sub-blocks of one array: `A` is `m`-by-`k` at `ia`,
 /// `B` is `n`-by-`k` at `jb`, `C` is `m`-by-`n` at `ic`.
 ///
-/// Row slabs outside, column groups inside — see [`slab_sub`] for why that way
-/// round.
+/// Two paths over the same register tile, but **not** the split [`gemm_nt`]
+/// makes. `gemm_nt` packs once its operands stop fitting a cache; this one
+/// packs only when they *alias*, because the direct path with [`KB_SUB`] behind
+/// it beats the packed one at every size — 53-56 GFLOP/s against 42-47 on the
+/// same shapes. What packing buys here is not locality, it is the removal of
+/// `lda` from the inner loop, and only [`strides_alias`] can want that.
+///
+/// **`C` must not overlap `A` or `B`.** Both callers satisfy it the same way —
+/// everything read lies in columns left of the panel and everything written in
+/// the panel — and the direct path has always needed it too, since its tiles
+/// interleave reads of `A` with writes of `C`. The packed path needs it one
+/// step further out: it copies `A` out of the array *between* writes to `C`.
 #[allow(clippy::too_many_arguments)]
 fn gemm_sub(
     m: usize,
@@ -1058,10 +1131,97 @@ fn gemm_sub(
     ic: usize,
     ldc: usize,
 ) {
-    let kc = k_block(n);
+    if wants_packing(m, n, k) && (strides_alias(lda) || strides_alias(ldb)) {
+        gemm_sub_packed(m, n, k, x, ia, lda, jb, ldb, ic, ldc);
+    } else {
+        gemm_sub_direct(m, n, k, x, ia, lda, jb, ldb, ic, ldc);
+    }
+}
+
+/// [`gemm_sub`] with both operands copied into [`tile_nt`]'s panel layout.
+///
+/// [`gemm_nt_packed`]'s loop nest with `ACC` forced on — a destination entry is
+/// always accumulated into here, where `gemm_nt` starts its first `k` block from
+/// zero — and `SUB` on, which is the `-` in `C -= A B'`.
+///
+/// **Same rounding as [`gemm_sub_direct`], for [`PACK_KC`]'s reason.** The `pc`
+/// loop ascends and each block loads `C`, subtracts its sources in ascending
+/// `l`, and stores; the intermediate `f64` store and reload is exact, so
+/// `C (i,j)` sees `(((c - a₀b₀) - a₁b₁) - …)` over all of `k` in index order at
+/// either block size. `tile_nt::<_, _, true, true>` is `tile_sub`'s arithmetic
+/// with `A` hoisted, which is pure code motion.
+///
+/// **Only worth running when the strides alias**, which is the whole of
+/// [`gemm_sub`]'s dispatch. A packed panel is contiguous, so its rate barely
+/// moves with `lda` — 38-47 GFLOP/s across the sweep in [`ALIAS_BYTES`] — where
+/// the direct path swings between 13.7 and 55.7 over the same eight values. The
+/// narrow `nb` is what holds the packed number at ~43 rather than
+/// [`gemm_nt`]'s 54: the same shapes at `nb` = 64, 128 and 256 run at 49, 52 and
+/// 54, so widening the panel is the way to raise this path's ceiling — see
+/// [`panel_width`].
+#[allow(clippy::too_many_arguments)]
+fn gemm_sub_packed(
+    m: usize,
+    n: usize,
+    k: usize,
+    x: &mut Ws<f64>,
+    ia: usize,
+    lda: usize,
+    jb: usize,
+    ldb: usize,
+    ic: usize,
+    ldc: usize,
+) {
+    PACK_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        let (apv, bpv) = &mut *buf;
+        apv.resize(round_up(PACK_MC, PACK_MR) * PACK_KC, 0.0);
+        bpv.resize(round_up(PACK_NC, PACK_NR) * PACK_KC, 0.0);
+        let ap = Ws::new(apv);
+        let bp = Ws::new(bpv);
+
+        let mut jc = 0;
+        while jc < n {
+            let nb = (n - jc).min(PACK_NC);
+            let mut pc = 0;
+            while pc < k {
+                let kb = (k - pc).min(PACK_KC);
+                pack_cols(nb, kb, x, jb + jc, pc, ldb, bp);
+                let mut i0 = 0;
+                while i0 < m {
+                    let mb = (m - i0).min(PACK_MC);
+                    pack_rows(mb, kb, x, ia + i0, pc, lda, ap);
+                    let ic0 = ic + i0 + jc * ldc;
+                    block_packed_nt::<true, true>(mb, nb, kb, ap, bp, x, ic0, ldc);
+                    i0 += PACK_MC;
+                }
+                pc += PACK_KC;
+            }
+            jc += PACK_NC;
+        }
+    });
+}
+
+/// [`gemm_sub`] with the operands read where they lie.
+///
+/// Row slabs outside, column groups inside — see [`slab_sub`] for why that way
+/// round.
+#[allow(clippy::too_many_arguments)]
+fn gemm_sub_direct(
+    m: usize,
+    n: usize,
+    k: usize,
+    x: &mut Ws<f64>,
+    ia: usize,
+    lda: usize,
+    jb: usize,
+    ldb: usize,
+    ic: usize,
+    ldc: usize,
+) {
     let mut l0 = 0;
     while l0 < k {
-        let kb = kc.min(k - l0);
+        let kb = KB_SUB.min(k - l0);
         let (ia, jb) = (ia + l0 * lda, jb + l0 * ldb);
         let mut i = 0;
         while i + 8 <= m {
@@ -2072,6 +2232,57 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The same question for `C -= A B'`, which has its own pair of paths and
+    /// its own reason to be blind-spotted: the whole point of the packed one is
+    /// that it is value-identical, so nothing the solve corpus checks can see it
+    /// go wrong.
+    ///
+    /// The three blocks are sub-blocks of one array, in the layout both callers
+    /// use — `A` and `B` in columns left of the panel, `C` in the panel — so the
+    /// test also pins the non-overlap [`gemm_sub_packed`] relies on.
+    #[test]
+    fn packed_gemm_sub_is_bit_identical_to_the_direct_one() {
+        for &(m, n, k) in &[
+            (64usize, 32usize, 70usize),
+            (300, 8, 300),
+            (PACK_MC + 3, PACK_NR * 2 + 1, PACK_KC + 5),
+            (PACK_MC * 2 + 7, 33, PACK_KC * 2 + 1),
+            (PACK_MR * 4, PACK_NR * 2, 64),
+        ] {
+            let ld = m + k + 6;
+            let base = mat(ld, k + n, ld, 1234);
+            /* A at row 0, B at row `m`, both over columns `0..k`; C at row 0 of
+             * columns `k..k+n`, which no source column touches */
+            let (ia, jb, ic) = (0usize, m, k * ld);
+            let mut want = base.clone();
+            let mut got = base.clone();
+            gemm_sub_direct(m, n, k, Ws::new(&mut want), ia, ld, jb, ld, ic, ld);
+            gemm_sub_packed(m, n, k, Ws::new(&mut got), ia, ld, jb, ld, ic, ld);
+            for (q, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+                assert_eq!(g.to_bits(), w.to_bits(), "m={m} n={n} k={k} at {q}");
+            }
+        }
+    }
+
+    /// The leading dimensions the `dpotrf`/`dtrsm` sweep measured, and which
+    /// side of the cliff each landed on. A change to [`ALIAS_BYTES`] or to
+    /// [`L1_WAYS`] that reclassifies one of these is a change to a measurement,
+    /// not to a constant.
+    #[test]
+    fn the_aliasing_test_agrees_with_the_measured_cliff() {
+        /* direct path 13.7-38.3 GFLOP/s, packed 38.4-44.5 */
+        for &ld in &[2048usize, 2049, 2050, 2731, 3072, 4096] {
+            assert!(strides_alias(ld), "lda={ld} should pack");
+        }
+        /* direct path 50.3-56.8, packed 42.0-47.3 */
+        for &ld in &[
+            1021usize, 1219, 1239, 1523, 2052, 2056, 2176, 2221, 2304, 2500, 2600, 2732, 2816,
+            3000, 3021, 4174, 5344,
+        ] {
+            assert!(!strides_alias(ld), "lda={ld} should not pack");
         }
     }
 
