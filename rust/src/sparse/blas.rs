@@ -45,6 +45,24 @@
 //! which is the point of the port, and the thing the wrapper it replaces cannot
 //! do without a system `libsuitesparse-dev`.
 //!
+//! # Choosing the backend, and testing the one you are not on
+//!
+//! `blas-openblas` forces the OpenBLAS arm on *any* target, macOS included.
+//! That is a real preference — someone may want one BLAS across a fleet — but it
+//! is here mostly so the arm that ships to Linux and Windows can be built and
+//! run on a machine that is neither: the `scipy-openblas32` wheel has a macOS
+//! build exporting the same prefixed symbols, so
+//!
+//! ```text
+//! HEA_BLAS_LIB_DIR=$(python -c "import scipy_openblas32 as s; print(s.get_lib_dir())") \
+//!     maturin develop --release --features blas,blas-openblas
+//! ```
+//!
+//! exercises these exact `link_name`s, this exact `build.rs` path and this exact
+//! call sequence, against the same library those platforms will load. What it
+//! cannot cover is the platform's own linker and loader, and the wheel-repair
+//! step that vendors the library — those need the real target, and belong in CI.
+//!
 //! # What it costs, and why it is off by default
 //!
 //! A digest taken against Accelerate is not the one OpenBLAS gives, so a pinned
@@ -89,10 +107,10 @@ pub fn worth_it(flops: f64) -> bool {
 // The character arguments carry hidden trailing lengths in the Fortran ABI;
 // every C and Rust caller omits them and every implementation ignores them,
 // reading only the first byte.
-#[cfg_attr(target_os = "macos", link(name = "Accelerate", kind = "framework"))]
-#[cfg_attr(not(target_os = "macos"), link(name = "scipy_openblas"))]
+#[cfg_attr(accelerate, link(name = "Accelerate", kind = "framework"))]
+#[cfg_attr(not(accelerate), link(name = "scipy_openblas"))]
 extern "C" {
-    #[cfg_attr(not(target_os = "macos"), link_name = "scipy_dgemm_")]
+    #[cfg_attr(not(accelerate), link_name = "scipy_dgemm_")]
     fn dgemm_(
         transa: *const c_char,
         transb: *const c_char,
@@ -108,7 +126,7 @@ extern "C" {
         c: *mut c_double,
         ldc: *const c_int,
     );
-    #[cfg_attr(not(target_os = "macos"), link_name = "scipy_dsyrk_")]
+    #[cfg_attr(not(accelerate), link_name = "scipy_dsyrk_")]
     fn dsyrk_(
         uplo: *const c_char,
         trans: *const c_char,
@@ -121,7 +139,7 @@ extern "C" {
         c: *mut c_double,
         ldc: *const c_int,
     );
-    #[cfg_attr(not(target_os = "macos"), link_name = "scipy_dtrsm_")]
+    #[cfg_attr(not(accelerate), link_name = "scipy_dtrsm_")]
     fn dtrsm_(
         side: *const c_char,
         uplo: *const c_char,
@@ -135,7 +153,7 @@ extern "C" {
         b: *mut c_double,
         ldb: *const c_int,
     );
-    #[cfg_attr(not(target_os = "macos"), link_name = "scipy_dpotrf_")]
+    #[cfg_attr(not(accelerate), link_name = "scipy_dpotrf_")]
     fn dpotrf_(
         uplo: *const c_char,
         n: *const c_int,
@@ -144,6 +162,38 @@ extern "C" {
         info: *mut c_int,
     );
 }
+
+/// OpenBLAS runs its own thread pool and, unlike Accelerate, does not stand down
+/// when it is called from inside one.
+///
+/// hea calls these kernels from `rayon` workers, so an OpenBLAS that threads
+/// underneath is nested parallelism: measured on a 102k-row system it read
+/// **17 threads and 4239 core-ms** against Accelerate's 4.3 and 90.3, a 47x
+/// increase in CPU for a 12x *worse* wall clock. The parallelism belongs to
+/// hea's tree here — upstream leans on the BLAS for it only because its own
+/// supernode loop is serial.
+///
+/// Called once, before any kernel. `OPENBLAS_NUM_THREADS` in the environment
+/// would do the same thing and be the caller's problem to remember, which is
+/// not a contract to ship.
+#[cfg(not(accelerate))]
+pub fn init() {
+    use std::sync::Once;
+    extern "C" {
+        #[link_name = "scipy_openblas_set_num_threads"]
+        fn openblas_set_num_threads(n: c_int);
+    }
+    static ONCE: Once = Once::new();
+    /* SAFETY: OpenBLAS's own documented entry point for this, and `Once` makes
+     * it a single call before any kernel runs. */
+    ONCE.call_once(|| unsafe { openblas_set_num_threads(1) });
+}
+
+/// Accelerate needs no such call: measured at 4.3-5.4 threads inside hea's pool,
+/// it already stands down.
+#[cfg(accelerate)]
+#[inline]
+pub fn init() {}
 
 /// A one-character F77 flag.
 #[inline]

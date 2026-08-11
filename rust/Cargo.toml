@@ -16,6 +16,10 @@ crate-type = ["cdylib", "rlib"]
 # See `sparse::blas`.
 [features]
 blas = []
+# Force the OpenBLAS arm even on macOS. A preference in its own right, and the
+# way the arm that ships to Linux and Windows gets built and run on a machine
+# that is neither — see `sparse::blas`.
+blas-openblas = ["blas"]
 
 [dependencies]
 # abi3-py310: one wheel works on CPython 3.10+ (matches requires-python).

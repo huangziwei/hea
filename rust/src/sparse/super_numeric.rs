@@ -744,9 +744,12 @@ const STRIP_OVER: usize = 4;
 /// and the kernel gets its widest call.
 fn strip_width(g: &Desc, nt: usize) -> usize {
     let ndrow1 = g.ndrow1 as usize;
-    /* A threaded BLAS wants upstream's whole call, and the split exists only
-     * because hea's own kernels are one thread each. */
-    if nt <= 1 || cfg!(feature = "blas") {
+    /* A threaded BLAS wants upstream's whole call, and the split exists only to
+     * give a one-thread-per-call kernel a shape. That is a statement about the
+     * *library*, not about the feature: Accelerate threads and stands down
+     * inside a pool, so it gets the whole call, but OpenBLAS is pinned to one
+     * thread here — see `blas::init` — and the pool needs the tasks. */
+    if nt <= 1 || cfg!(accelerate) {
         return ndrow1.max(1);
     }
     let per_col = 2.0 * g.ndrow2 as f64 * g.ndcol as f64;
@@ -1639,6 +1642,9 @@ pub fn super_numeric(
     if !a.numeric {
         return Err(NumericError::Invalid("A has no numeric values"));
     }
+
+    #[cfg(feature = "blas")]
+    super::blas::init();
 
     /* allocate workspace in Common: w = 2*nrow + 5*nsuper.  Map and
      * RelativeMap are per-task here (see TaskWork), so the two n-sized slots
