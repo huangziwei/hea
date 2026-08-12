@@ -681,7 +681,34 @@ const BATCH_DOUBLES: usize = 4 << 20;
 /// The kernels run at tens of GF/s, so this is tens of microseconds of work
 /// against a join that costs a few — and it has to be a *batch* total rather
 /// than a per-update one, because the batch is what rayon splits.
+#[cfg(not(accelerate))]
 const PAR_FLOPS: f64 = 5.0e5;
+
+/// **Four orders of magnitude higher when the BLAS threads the call itself**,
+/// which is the same predicate [`strip_width`] splits on and for the same
+/// reason: with Accelerate underneath, forking the descendants of one supernode
+/// puts a second scheduler on top of the vendor's own, and it is pure loss on
+/// both axes. Paired against the shipped value, five matrices, refactorize
+/// wall / core ms, `--features blas`:
+///
+/// | | 5.0e5 | 3.0e7 | 1.0e8 | **1.0e9** | never fork |
+/// |---|---|---|---|---|---|
+/// | gridfit 320² | 21.3 / 87.6 | 20.5 / 77.5 | 20.5 / 71.8 | **19.9 / 64.0** | 20.3 / 62.7 |
+/// | gridfit 220² | 8.5 / 37.3 | 8.3 / 28.7 | 8.4 / 24.1 | **8.3 / 22.4** | — |
+/// | gridfit 110² | 1.63 / 6.6 | 1.42 / 4.1 | 1.43 / 4.2 | **1.43 / 4.2** | — |
+/// | pywarper AtA | 5.6 / 23.4 | 5.2 / 16.7 | 5.1 / 15.6 | **5.1 / 15.0** | 5.0 / 15.3 |
+/// | gmm M | 2.03 / 3.2 | 1.63 / 1.7 | 1.64 / 1.6 | **1.63 / 1.5** | 1.64 / 1.5 |
+///
+/// The wall clock does not pay for it — it *improves* — and the CPU falls
+/// 1.37-2.17x, against a same-build control that read 0.95-1.03. At 3.4M rows
+/// (SAC j1) the whole sweep is inside the control on wall and 1.10x on core, so
+/// the large regime neither gains nor objects: its own updates are far above
+/// any of these thresholds and fork regardless.
+///
+/// Without a threaded BLAS this fork *is* the parallelism and raising it is a
+/// 1.75x wall regression on gridfit 320², which is why the two arms differ.
+#[cfg(accelerate)]
+const PAR_FLOPS: f64 = 1.0e9;
 
 /// Below this much work under a supernode, its children are walked in index
 /// order rather than forked.
@@ -746,9 +773,13 @@ fn strip_width(g: &Desc, nt: usize) -> usize {
     let ndrow1 = g.ndrow1 as usize;
     /* A threaded BLAS wants upstream's whole call, and the split exists only to
      * give a one-thread-per-call kernel a shape. That is a statement about the
-     * *library*, not about the feature: Accelerate threads and stands down
-     * inside a pool, so it gets the whole call, but OpenBLAS is pinned to one
-     * thread here — see `blas::init` — and the pool needs the tasks. */
+     * *library*, not about the feature: Accelerate threads, so it gets the whole
+     * call, but OpenBLAS is pinned to one thread here — see `blas::init` — and
+     * the pool needs the tasks. What Accelerate does *not* do is stand down
+     * inside a pool: measured, it takes 1.06-1.30 threads' worth of CPU at
+     * `RAYON_NUM_THREADS=1`, and pinning it with `VECLIB_MAXIMUM_THREADS=1`
+     * costs the 3.4M-row system 12% of its wall clock for 21% of its CPU. That
+     * trade is the caller's to make, so it stays an environment variable. */
     if nt <= 1 || cfg!(accelerate) {
         return ndrow1.max(1);
     }
