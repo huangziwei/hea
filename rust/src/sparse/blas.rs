@@ -95,7 +95,26 @@ use std::os::raw::{c_char, c_double, c_int};
 ///
 /// The wall clock is flat across all of it and only the core column moves, so
 /// this buys CPU rather than latency — which is the column hea is behind on.
+#[cfg(not(feature = "blas-all"))]
 pub const MIN_FLOPS: f64 = 1.0e5;
+
+/// The `0` column of that table, and the only build where this path can be
+/// checked for bit-exactness.
+///
+/// The claim this feature exists to test is that hea on a vendor BLAS issues
+/// *upstream's* call sequence — one `dsyrk` and one `dgemm` per descendant, one
+/// `dpotrf` and one `dtrsm` per supernode, all full width — rather than the
+/// column strips and blocked `potrf` its own kernels need. If that holds, then
+/// hea linked to Accelerate and CHOLMOD linked to Accelerate are doing the same
+/// arithmetic in the same order and `L->x` must agree **to the bit**.
+///
+/// At the shipped cutoff it cannot be tested, because the calls below the
+/// crossing stay on hea's kernels and `L` is then a blend of two libraries'
+/// rounding. At zero there is one library and `==` is available: measured, 92
+/// of 92 cases over the SPD corpus, both stypes and both orderings, exactly
+/// equal — no tolerance anywhere.
+#[cfg(feature = "blas-all")]
+pub const MIN_FLOPS: f64 = 0.0;
 
 /// Whether a call of this many flops is worth the vendor's dispatch.
 #[inline]

@@ -20,6 +20,12 @@ blas = []
 # way the arm that ships to Linux and Windows gets built and run on a machine
 # that is neither — see `sparse::blas`.
 blas-openblas = ["blas"]
+# Hand the vendor *every* call rather than only those above `blas::MIN_FLOPS`.
+# Slower on purpose — the tiny calls pay the vendor's dispatch for nothing — and
+# it exists so the `blas` path can be gated for bit-exactness at all: at any
+# cutoff above zero `L->x` is a mix of two libraries' rounding and there is
+# nothing to compare with `==`. See `blas::MIN_FLOPS`.
+blas-all = ["blas"]
 
 [dependencies]
 # abi3-py310: one wheel works on CPython 3.10+ (matches requires-python).

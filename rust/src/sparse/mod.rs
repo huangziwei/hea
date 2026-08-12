@@ -564,7 +564,39 @@ fn supernodal_solve(
     Ok(d.unbind())
 }
 
+/// Which dense-kernel path this extension was compiled with.
+///
+/// `backend` is `None` on the portable-NEON build and the library name on a
+/// `blas` one; `min_flops` is [`blas::MIN_FLOPS`], the flop count above which a
+/// call is handed to the vendor, so `0.0` means every call is. Three
+/// build-time constants read once — there is nothing here a caller can set, and
+/// nothing on any hot path.
+///
+/// It exists because a wheel's arithmetic is not visible from Python otherwise:
+/// which kernels ran decides which pinned digest applies, and the bit-exactness
+/// gate for the vendor path has to *refuse* to run on a build whose routing
+/// cutoff is not zero rather than report the resulting differences as failures.
+#[pyfunction]
+fn build_info(py: Python<'_>) -> PyResult<Py<PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("blas", cfg!(feature = "blas"))?;
+    d.set_item(
+        "backend",
+        match (cfg!(feature = "blas"), cfg!(accelerate)) {
+            (false, _) => None,
+            (true, true) => Some("accelerate"),
+            (true, false) => Some("openblas"),
+        },
+    )?;
+    #[cfg(feature = "blas")]
+    d.set_item("min_flops", blas::MIN_FLOPS)?;
+    #[cfg(not(feature = "blas"))]
+    d.set_item("min_flops", py.None())?;
+    Ok(d.unbind())
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(build_info, m)?)?;
     m.add_function(wrap_pyfunction!(amd_order, m)?)?;
     m.add_function(wrap_pyfunction!(metis_perm, m)?)?;
     m.add_function(wrap_pyfunction!(analyze, m)?)?;

@@ -293,6 +293,18 @@ def cho_factor(
     METIS's own cost outruns the fill it saves. :attr:`Factor.order` reports
     what ``"best"`` chose.
 
+    **What that trade is worth**, on a 3.4M-row conformal system where the
+    strategy selects METIS: the ordering costs **10.4 s against AMD's 0.64**,
+    and buys 380.5M nonzeros in ``L`` against 523.0M — so every subsequent
+    :meth:`Factor.refactorize` does **2.2x less work**. The up-front cost pays
+    for itself somewhere around **five to ten factorizations** (the range is
+    real: the numeric side of this system is memory-bound, so how many depends
+    on how much of a 3-4 GB factor stays resident). Below that, ``"amd"`` wins
+    the whole job — 2.4x faster for a single factorize-and-solve. The strategy
+    cannot see how many times you will reuse the factor, so on a large one-shot
+    solve it is the caller who has to say. None of this is visible at small
+    sizes, where the whole analysis is milliseconds either way.
+
     ``use_ll`` defaults to ``True`` here, where CHOLMOD's own default is
     ``LDL'``, because that is what ``sksparse.cholmod.cho_factor`` does and this
     is its replacement: it makes :attr:`Factor.L` the Cholesky factor with unit
