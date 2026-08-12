@@ -112,23 +112,23 @@ use std::os::raw::{c_char, c_double, c_int};
 /// mean of CHOLMOD-on-Accelerate's solve time over hea's, above 1 meaning hea
 /// is ahead:
 ///
-/// | cutoff, kflop | ∞ | 4000 | 1000 | 250 | **100** | 50 | 25 | 0 |
-/// |---|---|---|---|---|---|---|---|---|
-/// | wall | 0.852 | 0.897 | 0.923 | 0.978 | **1.014** | 1.020 | 1.008 | 0.950 |
-/// | core | 0.858 | 0.914 | 0.913 | 0.984 | **1.028** | 1.022 | 1.032 | 0.938 |
+/// | cutoff, kflop | ∞ | 1000 | 250 | **100** | 50 | 25 | 0 |
+/// |---|---|---|---|---|---|---|---|
+/// | wall | 0.935 | 1.018 | 1.087 | **1.123** | 1.139 | 1.117 | 1.067 |
+/// | core | 0.929 | 1.022 | 1.106 | **1.126** | 1.158 | 1.102 | 1.051 |
 ///
 /// `∞` is the control — no routing, which is what the solve did before these
-/// kernels were bound — and it is where the whole win is: routing at all is
-/// worth **19%**, and it is the difference between trailing the reference by
-/// 15% and leading it. Where inside the 25-100 kflop basin the cutoff sits is
-/// not: those three columns are one flat bottom, and their spread is smaller
-/// than the run-to-run spread of the same instrument.
+/// kernels were bound — and routing at all is worth **20%**, the difference
+/// between trailing the reference and leading it. Where inside the 25-100
+/// kflop basin the cutoff sits is not: those columns are one flat bottom whose
+/// spread is smaller than the same instrument's run-to-run spread, and repeat
+/// runs at 100 have read 1.123, 1.122 and 1.138.
 ///
 /// The win is concentrated where the ceiling says it should be. Measured in
 /// upstream's own C, linked once to Accelerate and once to hea's kernels so the
 /// ratio is the substitution and nothing else, the vendor is behind at
-/// `nrhs = 1` on the small-supernode systems (laplacian-220sq **0.86**) and
-/// ahead by **1.67x** at `nrhs = 32` on the large ones. A cutoff on flops
+/// `nrhs = 1` on the small-supernode systems (laplacian-220sq **0.85**) and
+/// ahead by **1.81x** at `nrhs = 32` on the large ones. A cutoff on flops
 /// separates those two without ever looking at `nrhs`, which is why one number
 /// covers all eight kernels.
 #[cfg(not(feature = "blas-all"))]

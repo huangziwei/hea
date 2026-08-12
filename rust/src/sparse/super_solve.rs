@@ -209,27 +209,41 @@ fn scatter1(ls: &[i64], ps2: usize, nsrow2: usize, e: &[f64], x: &mut [f64]) {
 }
 
 /// `Ex [ii + j*nsrow2] = Xx [i + j*d]`.
+///
+/// **`j` is hoisted outside `ii`, where upstream nests it inside.** This is a
+/// copy — no arithmetic, every destination written exactly once — so the order
+/// cannot change a value, and the two nests differ only in what they ask of the
+/// cache. Upstream's holds one row and walks the right-hand sides, which at
+/// `d = n` puts consecutive reads `n` doubles apart: on a 48400-row system with
+/// 32 right-hand sides that is a separate 387 KB stride per read, a line
+/// touched per element on both sides, and the whole set revisited for every
+/// row. Taking one right-hand side at a time makes the writes to `E`
+/// contiguous and leaves the reads an *ascending* gather inside a single column
+/// of `X`, since a supernode's row indices are sorted.
 #[inline]
 fn gather(ls: &[i64], ps2: usize, nsrow2: usize, nrhs: usize, d: usize, x: &[f64], e: &mut [f64]) {
     let (ls, x) = (Ws::new_ref(ls), Ws::new_ref(x));
     let e = Ws::new(e);
-    for ii in 0..nsrow2 {
-        let i = ls[ps2 + ii] as usize;
-        for j in 0..nrhs {
-            e[ii + j * nsrow2] = x[i + j * d];
+    for j in 0..nrhs {
+        let (xo, eo) = (j * d, j * nsrow2);
+        for ii in 0..nsrow2 {
+            e[eo + ii] = x[xo + ls[ps2 + ii] as usize];
         }
     }
 }
 
 /// `Xx [i + j*d] = Ex [ii + j*nsrow2]`.
+///
+/// Interchanged for the reason [`gather`] gives, with the contiguous side now
+/// the read.
 #[inline]
 fn scatter(ls: &[i64], ps2: usize, nsrow2: usize, nrhs: usize, d: usize, e: &[f64], x: &mut [f64]) {
     let (ls, e) = (Ws::new_ref(ls), Ws::new_ref(e));
     let x = Ws::new(x);
-    for ii in 0..nsrow2 {
-        let i = ls[ps2 + ii] as usize;
-        for j in 0..nrhs {
-            x[i + j * d] = e[ii + j * nsrow2];
+    for j in 0..nrhs {
+        let (xo, eo) = (j * d, j * nsrow2);
+        for ii in 0..nsrow2 {
+            x[xo + ls[ps2 + ii] as usize] = e[eo + ii];
         }
     }
 }
