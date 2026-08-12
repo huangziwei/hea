@@ -8,6 +8,32 @@
 # dry run that builds every wheel WITHOUT publishing (the publish job only runs
 # on a real release) — do that once before tagging, since release publishing is
 # one-shot.
+#
+# ## Every wheel carries a vendor BLAS, and it is per platform
+#
+# hea's sparse Cholesky hands its twelve BLAS calls to the platform's best
+# backend above `blas::MIN_FLOPS` — worth up to 2.4x the CPU on a large
+# factorization. The `blas` feature is ON by default, but it is an *intent*:
+# `rust/build.rs` falls back to the portable NEON kernels when no backend can be
+# found, so a user's source build cannot fail to link. **A release wheel must
+# never take that fallback**, and a wheel that did would pass every test and
+# look identical in a green run. So the wheel jobs pass `blas-required`, which
+# turns the fallback into a build failure, and then assert
+# `build_info()["backend"]` on the built wheel.
+#
+#   macOS      Accelerate, a system framework. Nothing to install or vendor.
+#   Linux      `scipy-openblas32` (a plain DYNAMIC_ARCH OpenBLAS with `scipy_`-
+#              prefixed symbols — the binary numpy and scipy already carry).
+#              `auditwheel`, which maturin runs for manylinux/musllinux, copies
+#              the .so into the wheel and rewrites the rpath.
+#   Windows    the same wheel; the DLL is not relocated by maturin, so
+#              `delvewheel` does it.
+#
+# musllinux is the exception and is deliberately NOT `blas-required`:
+# scipy-openblas32 publishes no musllinux wheel, so those builds take the
+# portable-kernel fallback on purpose. That is a real difference between the
+# Alpine wheel and the others, it is why the assertion below is skipped there,
+# and it should be revisited if a musl build appears upstream.
 name: Publish to PyPI
 
 on:
@@ -34,9 +60,36 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist
+          # `blas-required`: fail rather than silently ship the portable
+          # kernels — see the header. auditwheel (run by maturin for manylinux)
+          # vendors libscipy_openblas into the wheel and rewrites the rpath
+          # build.rs emitted, so the wheel needs nothing from the user's system.
+          args: --release --out dist --features blas-required
           manylinux: auto          # manylinux2014 container → glibc 2.17
           sccache: "true"
+          # Runs INSIDE the container, so the OpenBLAS has to be installed
+          # there rather than on the runner. `$HEA_BLAS_LIB_DIR` is read by
+          # rust/build.rs.
+          before-script-linux: |
+            python3 -m pip install scipy-openblas32
+            echo "HEA_BLAS_LIB_DIR=$(python3 -c 'import scipy_openblas32 as s; print(s.get_lib_dir())')" >> "$GITHUB_ENV"
+      - name: Assert the wheel carries OpenBLAS
+        # A wheel that took the fallback passes every test and is 2.4x more CPU
+        # on a large factorization. This is the only place that shows.
+        #
+        # Native target only: the aarch64 wheel is cross-compiled here and
+        # cannot be imported on an x86_64 runner. `blas-required` already
+        # covers it at build time — this step is the belt to that's braces, and
+        # it is the one that would catch a build.rs that emitted the link flags
+        # but not the cfg.
+        if: matrix.target == 'x86_64'
+        run: |
+          python -m pip install --no-index --find-links dist hea
+          python -c "
+          from hea import _rs
+          i = _rs.build_info(); print(i)
+          assert i['backend'] == 'openblas', i
+          "
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.target }}
@@ -54,6 +107,11 @@ jobs:
         with:
           python-version: "3.x"
       - name: Build wheels (musllinux / Alpine)
+        # NOT `blas-required`, and not by oversight: scipy-openblas32 publishes
+        # no musllinux wheel, so build.rs takes the portable-kernel fallback
+        # here. The Alpine wheel is therefore the one platform without a vendor
+        # BLAS — correct, tested, and slower on large sparse factorizations.
+        # Revisit if a musl build appears upstream.
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
@@ -85,8 +143,20 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist
+          # Accelerate is a system framework on both mac arches, so
+          # `blas-required` can never fail here and there is nothing to vendor.
+          args: --release --out dist --features blas-required
           sccache: "true"
+      - name: Assert the wheel carries Accelerate
+        # Native arch only — the x86_64 wheel is cross-compiled on this runner.
+        if: matrix.target == 'aarch64'
+        run: |
+          python -m pip install --no-index --find-links dist hea
+          python -c "
+          from hea import _rs
+          i = _rs.build_info(); print(i)
+          assert i['backend'] == 'accelerate', i
+          "
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.target }}
@@ -104,12 +174,43 @@ jobs:
         with:
           python-version: "3.x"
           architecture: ${{ matrix.target }}
+      - name: Install OpenBLAS
+        # Runs on the runner itself here, not in a container — maturin-action
+        # builds Windows natively.
+        run: |
+          python -m pip install --upgrade pip delvewheel scipy-openblas32
+          python -c "import scipy_openblas32 as s, os; open(os.environ['GITHUB_ENV'],'a').write('HEA_BLAS_LIB_DIR=' + s.get_lib_dir() + '\n')"
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist
+          args: --release --out dist --features blas-required
           sccache: "true"
+      - name: Vendor the OpenBLAS DLL into the wheel
+        # build.rs deliberately emits no rpath on Windows (link.exe rejects it)
+        # and maturin runs no repair step there, so the wheel would link at
+        # build time and fail to load on a machine without scipy_openblas32.
+        # delvewheel copies the DLL in and patches the import table — the
+        # Windows equivalent of what auditwheel does for us on Linux.
+        shell: bash
+        run: |
+          mkdir -p repaired
+          for w in dist/*.whl; do
+            delvewheel repair --add-path "$HEA_BLAS_LIB_DIR" -w repaired "$w"
+          done
+          rm -f dist/*.whl && mv repaired/*.whl dist/
+      - name: Assert the wheel carries OpenBLAS and loads without it on PATH
+        # Loading is the half that matters here: a wheel whose DLL was not
+        # vendored imports fine on THIS machine, because scipy_openblas32 is
+        # installed. Uninstall it first so the check is about the wheel.
+        run: |
+          python -m pip uninstall -y scipy-openblas32
+          python -m pip install --no-index --find-links dist hea
+          python -c "
+          from hea import _rs
+          i = _rs.build_info(); print(i)
+          assert i['backend'] == 'openblas', i
+          "
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-${{ matrix.target }}

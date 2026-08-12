@@ -14,7 +14,7 @@
 //! coincides when that postorder is the identity.
 
 pub mod amd;
-#[cfg(feature = "blas")]
+#[cfg(vendor_blas)]
 pub mod blas;
 pub mod dense;
 pub mod metis;
@@ -566,11 +566,19 @@ fn supernodal_solve(
 
 /// Which dense-kernel path this extension was compiled with.
 ///
-/// `backend` is `None` on the portable-NEON build and the library name on a
-/// `blas` one; `min_flops` is [`blas::MIN_FLOPS`], the flop count above which a
-/// call is handed to the vendor, so `0.0` means every call is. Three
-/// build-time constants read once — there is nothing here a caller can set, and
-/// nothing on any hot path.
+/// `backend` is the library actually linked — `"accelerate"`, `"openblas"`, or
+/// `None` for the portable NEON kernels; `min_flops` is [`blas::MIN_FLOPS`],
+/// the flop count above which a call is handed to the vendor, so `0.0` means
+/// every call is. Three build-time constants read once — there is nothing here
+/// a caller can set, and nothing on any hot path.
+///
+/// **`blas` and `backend` can disagree, and that is the useful case.** `blas`
+/// is the feature, i.e. what the build asked for; `backend` is what `build.rs`
+/// found. The `blas` feature is on by default and OpenBLAS may simply not be
+/// present on a machine building from the sdist, in which case the build
+/// succeeds on the portable kernels rather than failing to link — see
+/// `build.rs`. `blas: true, backend: None` is exactly that build, and this is
+/// the only place it is visible.
 ///
 /// It exists because a wheel's arithmetic is not visible from Python otherwise:
 /// which kernels ran decides which pinned digest applies, and the bit-exactness
@@ -582,15 +590,15 @@ fn build_info(py: Python<'_>) -> PyResult<Py<PyDict>> {
     d.set_item("blas", cfg!(feature = "blas"))?;
     d.set_item(
         "backend",
-        match (cfg!(feature = "blas"), cfg!(accelerate)) {
+        match (cfg!(vendor_blas), cfg!(accelerate)) {
             (false, _) => None,
             (true, true) => Some("accelerate"),
             (true, false) => Some("openblas"),
         },
     )?;
-    #[cfg(feature = "blas")]
+    #[cfg(vendor_blas)]
     d.set_item("min_flops", blas::MIN_FLOPS)?;
-    #[cfg(not(feature = "blas"))]
+    #[cfg(not(vendor_blas))]
     d.set_item("min_flops", py.None())?;
     Ok(d.unbind())
 }

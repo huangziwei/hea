@@ -10,12 +10,26 @@ name = "_rs"
 # cdylib → a Python-loadable shared object; rlib → usable from Rust unit tests.
 crate-type = ["cdylib", "rlib"]
 
-# `blas` routes the four kernels upstream calls the BLAS for to the platform's
-# own — Accelerate on macOS, OpenBLAS elsewhere. Off by default: it makes the
-# port's arithmetic the vendor's, which is a decision about what the pins mean.
-# See `sparse::blas`.
+# `blas` routes the twelve kernels upstream calls the BLAS for to the platform's
+# own — Accelerate on macOS, OpenBLAS elsewhere. **On by default**: it is worth
+# 2.4x the CPU on a large factorization, and both libraries are the same ones
+# CHOLMOD itself links, so the port gets *closer* to the reference rather than
+# further from it. See `sparse::blas`.
+#
+# The feature is an *intent*, not a guarantee. `build.rs` decides whether a
+# backend is actually reachable and emits `cfg(vendor_blas)` only then, so a
+# source build on a machine with no OpenBLAS gets the portable NEON kernels
+# instead of a link error — and `build_info()["backend"]` is None so it is
+# visible rather than silent. Use `blas-required` where the fallback would be a
+# defect (CI wheels).
 [features]
+default = ["blas"]
 blas = []
+# Refuse to build rather than fall back. What the wheel jobs pass: a release
+# wheel that quietly shipped the portable kernels because the container was
+# missing OpenBLAS is the exact failure this guards, and it is invisible in a
+# green CI run otherwise.
+blas-required = ["blas"]
 # Force the OpenBLAS arm even on macOS. A preference in its own right, and the
 # way the arm that ships to Linux and Windows gets built and run on a machine
 # that is neither — see `sparse::blas`.

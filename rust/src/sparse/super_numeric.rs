@@ -1674,7 +1674,7 @@ pub fn super_numeric(
         return Err(NumericError::Invalid("A has no numeric values"));
     }
 
-    #[cfg(feature = "blas")]
+    #[cfg(vendor_blas)]
     super::blas::init();
 
     /* allocate workspace in Common: w = 2*nrow + 5*nsuper.  Map and

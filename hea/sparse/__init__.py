@@ -3,10 +3,33 @@
 
 Every routine behind this module is a mechanical port of SuiteSparse 7.6.0, the
 version R's ``Matrix`` ships and therefore the one ``lme4`` factorizes with.
-Given the same fill-reducing ordering, the factor, its permutation and its
-numeric values are bit-identical to what ``cholmod_l_analyze`` +
-``cholmod_l_factorize_p`` + ``cholmod_l_solve`` produce — not equal to a
-tolerance, equal in every bit.
+Given the same fill-reducing ordering, the factor and its permutation are
+bit-identical to what ``cholmod_l_analyze`` + ``cholmod_l_factorize_p`` +
+``cholmod_l_solve`` produce — not equal to a tolerance, equal in every bit.
+
+The *values* carry one qualifier, and it is the same one CHOLMOD carries: a
+supernodal factorization is mostly dense BLAS calls, so ``L``'s bits are the
+BLAS's as much as the algorithm's, and two CHOLMOD builds on two BLAS libraries
+do not agree either. hea links the same libraries CHOLMOD does — see below — and
+against a CHOLMOD on the same one, every entry of ``L`` and of ``X`` is equal in
+every bit.
+
+**Which BLAS, and how to see it.** The dense kernels behind the factorization
+are the platform's own — Accelerate on macOS, OpenBLAS on Linux and Windows, the
+same ``scipy-openblas32`` binary numpy and scipy already carry, vendored into
+the wheel so nothing is needed from the system. Calls too small to be worth the
+vendor's dispatch stay on hea's own portable NEON kernels, which is worth 8–22%
+of the CPU on a sparse factorization made of many small supernodes.
+:func:`build_info` reports which backend a given build has::
+
+    >>> from hea.sparse import build_info
+    >>> build_info()
+    {'blas': True, 'backend': 'accelerate', 'min_flops': 100000.0}
+
+``backend`` is ``'openblas'`` on a Linux or Windows wheel, and ``None`` on a
+build with no vendor BLAS: the Alpine (musllinux) wheel, which has no OpenBLAS
+to vendor, and a source build on a machine where none was found. Those are
+correct and somewhat slower, never wrong.
 
 The ordering is the same too. ``order="best"`` is CHOLMOD's default strategy —
 try AMD, and try METIS only if AMD's own fill estimate says it is worth looking
@@ -24,12 +47,19 @@ at that size, ``order="amd"`` finishes sooner.
 **The numeric factorization is parallel, and it needs the cores.** It runs over
 the supernodal elimination tree and again inside a supernode's panel, on a
 private pool sized to the machine's performance cores (``RAYON_NUM_THREADS``
-overrides it). That is where it gets its speed: CHOLMOD hands one supernode at a
-time to a vendor BLAS and relies on the BLAS to thread, which on a matrix made
-of many small supernodes it barely can. The other side of that is a real
-single-thread cost — on a 3.4M-row system the same factorization is 16 s at one
-thread and 3 s at eight — so pinning ``RAYON_NUM_THREADS=1`` for reproducibility,
-or running in a one-core container, gives up most of the difference.
+overrides it). That is where the wall-clock difference comes from: CHOLMOD hands
+one supernode at a time to the BLAS and relies on the BLAS to thread, which on a
+matrix made of many small supernodes it barely can, so it runs at a little over
+one core however many are free. hea is 2.7–3.0× faster on wall clock than
+CHOLMOD called from C, on everything from a 12k-row system to a 3.4M-row one.
+
+The trade is CPU for wall clock, and past a point it stops being free. On the
+small and medium systems hea also uses *less* total CPU (1.05–1.17×). On a
+3.4M-row system it is ahead on CPU through two threads and behind at eight —
+0.72× there — because the machine's memory bandwidth saturates and the same
+traffic then costs more CPU. Pinning ``RAYON_NUM_THREADS`` is how a caller picks
+its point on that curve; ``=1`` gives up most of the wall-clock difference and
+is the cheapest per core.
 
 **On macOS, set ``MallocSpaceEfficient=1`` in the environment for a large
 factorization.** A parallel factorization makes many large short-lived
@@ -66,8 +96,41 @@ import numpy as np
 from scipy.sparse import csc_array, issparse
 
 from hea._rs import CholFactor as _CholFactor
+from hea._rs import build_info as _build_info
 
-__all__ = ["CholmodError", "Factor", "cho_factor", "cho_solve"]
+__all__ = ["CholmodError", "Factor", "build_info", "cho_factor", "cho_solve"]
+
+
+def build_info() -> dict:
+    """Which dense kernels this build's factorization uses.
+
+    Three build-time constants, read once:
+
+    ``backend``
+        ``"accelerate"``, ``"openblas"``, or ``None`` for hea's own portable
+        NEON kernels. Which one a wheel has depends on the platform it was built
+        for — see the module docstring.
+    ``min_flops``
+        The per-call flop count above which a dense kernel is handed to the
+        vendor. Calls below it stay on hea's kernels, which is faster: a sparse
+        factorization is mostly tiny calls and the vendor's dispatch costs more
+        than they do. ``None`` when there is no vendor backend.
+    ``blas``
+        Whether the build *asked* for a vendor backend. This can be ``True``
+        while ``backend`` is ``None``: the feature is on by default and a source
+        build simply may not find an OpenBLAS, in which case the portable
+        kernels are used rather than the build failing.
+
+    This is public because the answer varies per wheel and changes performance
+    by a factor of two on a large factorization, so "which one did I get" is a
+    question a caller can reasonably need answered — in a bug report, or when a
+    timing does not match a published one.
+
+        >>> from hea.sparse import build_info
+        >>> build_info()["backend"] in {"accelerate", "openblas", None}
+        True
+    """
+    return _build_info()
 
 #: The systems :meth:`Factor.solve` accepts, as ``cholmod_solve`` names them.
 #: ``D`` is the identity for an ``LL'`` factor, so ``LD``/``L`` and ``DLt``/``Lt``
