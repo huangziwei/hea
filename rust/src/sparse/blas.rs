@@ -10,8 +10,11 @@
 //! (`t_cholmod_super_numeric_worker.c`): one `dsyrk ("L","N")` and one
 //! `dgemm ("N","C")` per descendant update, at `:769` and `:824`, and one
 //! `dpotrf ("L")` and one `dtrsm ("R","L","C","N")` per supernode, at `:1023`
-//! and `:1175`. [`super::dense`]'s four entry points are those four calls, and
-//! this module hands each straight to the vendor.
+//! and `:1175`. Its supernodal solve is eight more
+//! (`t_cholmod_super_solve_worker.c`), a `trsv`/`gemv` pair per half at
+//! `nrhs == 1` and a `trsm`/`gemm` pair per half above it.
+//! [`super::dense`]'s twelve entry points are those twelve calls, and this
+//! module hands each straight to the vendor.
 //!
 //! Everything hea does *around* them — cutting a descendant's update into column
 //! strips, blocking `potrf_l` and `trsm_rlt` into panels — exists because hea's
@@ -95,6 +98,39 @@ use std::os::raw::{c_char, c_double, c_int};
 ///
 /// The wall clock is flat across all of it and only the core column moves, so
 /// this buys CPU rather than latency — which is the column hea is behind on.
+///
+/// # The solve crosses in the same place, which was not a given
+///
+/// The eight solve kernels share this cutoff, and the reason is a measurement
+/// rather than a convenience. Their regime is a different one — `trsv`/`gemv`
+/// are level 2 and move as many bytes as they do flops, so the coprocessor has
+/// nothing to offer them, while `trsm`/`gemm` widen with the right-hand sides
+/// until it does — so the crossing had no reason to land anywhere near the
+/// factorization's.
+///
+/// Swept over the benchmark corpus at `nrhs` 1, 4, 16 and 32, as the geometric
+/// mean of CHOLMOD-on-Accelerate's solve time over hea's, above 1 meaning hea
+/// is ahead:
+///
+/// | cutoff, kflop | ∞ | 4000 | 1000 | 250 | **100** | 50 | 25 | 0 |
+/// |---|---|---|---|---|---|---|---|---|
+/// | wall | 0.852 | 0.897 | 0.923 | 0.978 | **1.014** | 1.020 | 1.008 | 0.950 |
+/// | core | 0.858 | 0.914 | 0.913 | 0.984 | **1.028** | 1.022 | 1.032 | 0.938 |
+///
+/// `∞` is the control — no routing, which is what the solve did before these
+/// kernels were bound — and it is where the whole win is: routing at all is
+/// worth **19%**, and it is the difference between trailing the reference by
+/// 15% and leading it. Where inside the 25-100 kflop basin the cutoff sits is
+/// not: those three columns are one flat bottom, and their spread is smaller
+/// than the run-to-run spread of the same instrument.
+///
+/// The win is concentrated where the ceiling says it should be. Measured in
+/// upstream's own C, linked once to Accelerate and once to hea's kernels so the
+/// ratio is the substitution and nothing else, the vendor is behind at
+/// `nrhs = 1` on the small-supernode systems (laplacian-220sq **0.86**) and
+/// ahead by **1.67x** at `nrhs = 32` on the large ones. A cutoff on flops
+/// separates those two without ever looking at `nrhs`, which is why one number
+/// covers all eight kernels.
 #[cfg(not(feature = "blas-all"))]
 pub const MIN_FLOPS: f64 = 1.0e5;
 
@@ -110,9 +146,10 @@ pub const MIN_FLOPS: f64 = 1.0e5;
 ///
 /// At the shipped cutoff it cannot be tested, because the calls below the
 /// crossing stay on hea's kernels and `L` is then a blend of two libraries'
-/// rounding. At zero there is one library and `==` is available: measured, 92
-/// of 92 cases over the SPD corpus, both stypes and both orderings, exactly
-/// equal — no tolerance anywhere.
+/// rounding. At zero there is one library and `==` is available, and both
+/// halves of the pipeline pass it over the whole SPD corpus, both stypes and
+/// both orderings: **184 of 184** factorizations and **2484 of 2484** solves
+/// exactly equal, no tolerance anywhere.
 #[cfg(feature = "blas-all")]
 pub const MIN_FLOPS: f64 = 0.0;
 
@@ -179,6 +216,31 @@ extern "C" {
         a: *mut c_double,
         lda: *const c_int,
         info: *mut c_int,
+    );
+    #[cfg_attr(not(accelerate), link_name = "scipy_dtrsv_")]
+    fn dtrsv_(
+        uplo: *const c_char,
+        trans: *const c_char,
+        diag: *const c_char,
+        n: *const c_int,
+        a: *const c_double,
+        lda: *const c_int,
+        x: *mut c_double,
+        incx: *const c_int,
+    );
+    #[cfg_attr(not(accelerate), link_name = "scipy_dgemv_")]
+    fn dgemv_(
+        trans: *const c_char,
+        m: *const c_int,
+        n: *const c_int,
+        alpha: *const c_double,
+        a: *const c_double,
+        lda: *const c_int,
+        x: *const c_double,
+        incx: *const c_int,
+        beta: *const c_double,
+        y: *mut c_double,
+        incy: *const c_int,
     );
 }
 
@@ -334,4 +396,251 @@ pub fn potrf_l(n: usize, a: &mut [f64], lda: usize) -> i64 {
         dpotrf_(&ch(b'L'), &ni, a.as_mut_ptr(), &ldai, &mut info);
     }
     info as i64
+}
+
+/* ========================================================================= */
+/* === the solve, `t_cholmod_super_solve_worker.c` ========================= */
+/* ========================================================================= */
+
+/* Each of the eight below is one call site of that worker, with the same flags
+ * and the same `alpha`/`beta` it fixes there. `L` is only ever read, so `a` is
+ * shared and the destination is the exclusive `&mut` — none of these can alias,
+ * which is what makes the raw pointers sound. */
+
+/// `dtrsv ("L","N","N", n, a, lda, x, 1)` — solve worker `:93`.
+pub fn trsv_ln(n: usize, a: &[f64], lda: usize, x: &mut [f64]) {
+    if n == 0 {
+        return;
+    }
+    let (ni, ldai, inc) = (n as c_int, lda as c_int, 1 as c_int);
+    /* SAFETY: `a` is `n`-by-`n` at `lda` and `x` is `n` long, both bounded by
+     * `dense`'s debug asserts; they are separate arrays. */
+    unsafe {
+        dtrsv_(
+            &ch(b'L'),
+            &ch(b'N'),
+            &ch(b'N'),
+            &ni,
+            a.as_ptr(),
+            &ldai,
+            x.as_mut_ptr(),
+            &inc,
+        );
+    }
+}
+
+/// `dtrsv ("L","C","N", n, a, lda, x, 1)` — solve worker `:398`.
+pub fn trsv_lt(n: usize, a: &[f64], lda: usize, x: &mut [f64]) {
+    if n == 0 {
+        return;
+    }
+    let (ni, ldai, inc) = (n as c_int, lda as c_int, 1 as c_int);
+    /* SAFETY: as `trsv_ln` above. */
+    unsafe {
+        dtrsv_(
+            &ch(b'L'),
+            &ch(b'C'),
+            &ch(b'N'),
+            &ni,
+            a.as_ptr(),
+            &ldai,
+            x.as_mut_ptr(),
+            &inc,
+        );
+    }
+}
+
+/// `dgemv ("N", m, n, -1, a, lda, x, 1, 1, y, 1)` — solve worker `:99`.
+pub fn gemv_n(m: usize, n: usize, a: &[f64], lda: usize, x: &[f64], y: &mut [f64]) {
+    if m == 0 || n == 0 {
+        return;
+    }
+    let (mi, ni, ldai, inc) = (m as c_int, n as c_int, lda as c_int, 1 as c_int);
+    let (minus_one, one) = (-1.0f64, 1.0f64);
+    /* SAFETY: `a` is `m`-by-`n` at `lda`, `x` is `n` long and `y` is `m`, all
+     * bounded by `dense`'s debug asserts; `y` is `&mut` where the others are
+     * shared, so it aliases neither. */
+    unsafe {
+        dgemv_(
+            &ch(b'N'),
+            &mi,
+            &ni,
+            &minus_one,
+            a.as_ptr(),
+            &ldai,
+            x.as_ptr(),
+            &inc,
+            &one,
+            y.as_mut_ptr(),
+            &inc,
+        );
+    }
+}
+
+/// `dgemv ("C", m, n, -1, a, lda, x, 1, 1, y, 1)` — solve worker `:388`.
+///
+/// The transpose swaps the two extents against [`gemv_n`]: `x` is `m` long and
+/// `y` is `n`, while `a` is still `m`-by-`n` at `lda`.
+pub fn gemv_t(m: usize, n: usize, a: &[f64], lda: usize, x: &[f64], y: &mut [f64]) {
+    if m == 0 || n == 0 {
+        return;
+    }
+    let (mi, ni, ldai, inc) = (m as c_int, n as c_int, lda as c_int, 1 as c_int);
+    let (minus_one, one) = (-1.0f64, 1.0f64);
+    /* SAFETY: as `gemv_n` above, with `x` and `y` the other way round. */
+    unsafe {
+        dgemv_(
+            &ch(b'C'),
+            &mi,
+            &ni,
+            &minus_one,
+            a.as_ptr(),
+            &ldai,
+            x.as_ptr(),
+            &inc,
+            &one,
+            y.as_mut_ptr(),
+            &inc,
+        );
+    }
+}
+
+/// `dtrsm ("L","L","N","N", m, n, 1, a, lda, b, ldb)` — solve worker `:204`.
+pub fn trsm_lln(m: usize, n: usize, a: &[f64], lda: usize, b: &mut [f64], ldb: usize) {
+    if m == 0 || n == 0 {
+        return;
+    }
+    let (mi, ni) = (m as c_int, n as c_int);
+    let (ldai, ldbi) = (lda as c_int, ldb as c_int);
+    let one = 1.0f64;
+    /* SAFETY: `a` is `m`-by-`m` at `lda` and `b` is `m`-by-`n` at `ldb`, both
+     * bounded by `dense`'s debug asserts. Unlike `trsm_rlt`, which the numeric
+     * worker hands one array split by row, these are the factor and the
+     * right-hand side — separate allocations. */
+    unsafe {
+        dtrsm_(
+            &ch(b'L'),
+            &ch(b'L'),
+            &ch(b'N'),
+            &ch(b'N'),
+            &mi,
+            &ni,
+            &one,
+            a.as_ptr(),
+            &ldai,
+            b.as_mut_ptr(),
+            &ldbi,
+        );
+    }
+}
+
+/// `dtrsm ("L","L","C","N", m, n, 1, a, lda, b, ldb)` — solve worker `:505`.
+pub fn trsm_llt(m: usize, n: usize, a: &[f64], lda: usize, b: &mut [f64], ldb: usize) {
+    if m == 0 || n == 0 {
+        return;
+    }
+    let (mi, ni) = (m as c_int, n as c_int);
+    let (ldai, ldbi) = (lda as c_int, ldb as c_int);
+    let one = 1.0f64;
+    /* SAFETY: as `trsm_lln` above. */
+    unsafe {
+        dtrsm_(
+            &ch(b'L'),
+            &ch(b'L'),
+            &ch(b'C'),
+            &ch(b'N'),
+            &mi,
+            &ni,
+            &one,
+            a.as_ptr(),
+            &ldai,
+            b.as_mut_ptr(),
+            &ldbi,
+        );
+    }
+}
+
+/// `dgemm ("N","N", m, n, k, -1, a, lda, b, ldb, 1, c, ldc)` — solve worker
+/// `:213`.
+///
+/// `beta` is 1 here, not 0 as in [`gemm_nt`]: the solve accumulates into `E`
+/// rather than overwriting it.
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_nn(
+    m: usize,
+    n: usize,
+    k: usize,
+    a: &[f64],
+    lda: usize,
+    b: &[f64],
+    ldb: usize,
+    c: &mut [f64],
+    ldc: usize,
+) {
+    if m == 0 || n == 0 {
+        return;
+    }
+    let (mi, ni, ki) = (m as c_int, n as c_int, k as c_int);
+    let (ldai, ldbi, ldci) = (lda as c_int, ldb as c_int, ldc as c_int);
+    let (minus_one, one) = (-1.0f64, 1.0f64);
+    /* SAFETY: as `gemm_nt`; `c` is `&mut` where `a` and `b` are shared. */
+    unsafe {
+        dgemm_(
+            &ch(b'N'),
+            &ch(b'N'),
+            &mi,
+            &ni,
+            &ki,
+            &minus_one,
+            a.as_ptr(),
+            &ldai,
+            b.as_ptr(),
+            &ldbi,
+            &one,
+            c.as_mut_ptr(),
+            &ldci,
+        );
+    }
+}
+
+/// `dgemm ("C","N", m, n, k, -1, a, lda, b, ldb, 1, c, ldc)` — solve worker
+/// `:494`.
+///
+/// `a` is `k`-by-`m`, the transpose swapping its extents.
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_tn(
+    m: usize,
+    n: usize,
+    k: usize,
+    a: &[f64],
+    lda: usize,
+    b: &[f64],
+    ldb: usize,
+    c: &mut [f64],
+    ldc: usize,
+) {
+    if m == 0 || n == 0 {
+        return;
+    }
+    let (mi, ni, ki) = (m as c_int, n as c_int, k as c_int);
+    let (ldai, ldbi, ldci) = (lda as c_int, ldb as c_int, ldc as c_int);
+    let (minus_one, one) = (-1.0f64, 1.0f64);
+    /* SAFETY: as `gemm_nn` above. */
+    unsafe {
+        dgemm_(
+            &ch(b'C'),
+            &ch(b'N'),
+            &mi,
+            &ni,
+            &ki,
+            &minus_one,
+            a.as_ptr(),
+            &ldai,
+            b.as_ptr(),
+            &ldbi,
+            &one,
+            c.as_mut_ptr(),
+            &ldci,
+        );
+    }
 }

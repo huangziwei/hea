@@ -48,6 +48,14 @@
 //! *linked to these same kernels*, which is what isolates a structural defect
 //! from a summation-order difference.
 //!
+//! **Under `--features blas` each of the twelve hands off to the vendor**
+//! above [`super::blas::MIN_FLOPS`], and then the comparison *is* available:
+//! hea and upstream's C both linked to Accelerate are issuing the same twelve
+//! calls with the same arguments, so `L` and `X` must agree to the bit. They
+//! do, over the whole corpus and with no tolerance. That is a check on this
+//! mapping specifically — a kernel whose flags or extents were transcribed
+//! wrong here would still pass every residual test and would fail that one.
+//!
 //! **Every multiply-accumulate goes through [`rfma`], the crate's one
 //! FP-contraction policy** — fuse on `aarch64`, two roundings everywhere else.
 //! That is not a speed decision dressed up as a correctness one; it is what the
@@ -1840,6 +1848,10 @@ pub fn trsm_rlt(m: usize, n: usize, x: &mut [f64], ld: usize, nt: usize) {
 /// does it: divide, then push the solved entry down the column.
 pub fn trsv_ln(n: usize, a: &[f64], lda: usize, x: &mut [f64]) {
     debug_assert!(n == 0 || (a.len() >= (n - 1) * lda + n && x.len() >= n));
+    #[cfg(feature = "blas")]
+    if super::blas::worth_it((n as f64).powi(2)) {
+        return super::blas::trsv_ln(n, a, lda, x);
+    }
     let a = Ws::new_ref(a);
     let x = Ws::new(x);
 
@@ -1859,6 +1871,10 @@ pub fn trsv_ln(n: usize, a: &[f64], lda: usize, x: &mut [f64]) {
 /// reference's order and not the one [`trsm_llt`] uses for the same solve.
 pub fn trsv_lt(n: usize, a: &[f64], lda: usize, x: &mut [f64]) {
     debug_assert!(n == 0 || (a.len() >= (n - 1) * lda + n && x.len() >= n));
+    #[cfg(feature = "blas")]
+    if super::blas::worth_it((n as f64).powi(2)) {
+        return super::blas::trsv_lt(n, a, lda, x);
+    }
     let a = Ws::new_ref(a);
     let x = Ws::new(x);
 
@@ -1885,6 +1901,10 @@ pub fn trsv_lt(n: usize, a: &[f64], lda: usize, x: &mut [f64]) {
 pub fn gemv_n(m: usize, n: usize, a: &[f64], lda: usize, x: &[f64], y: &mut [f64]) {
     debug_assert!(n == 0 || (a.len() >= (n - 1) * lda + m && x.len() >= n));
     debug_assert!(y.len() >= m);
+    #[cfg(feature = "blas")]
+    if super::blas::worth_it(2.0 * m as f64 * n as f64) {
+        return super::blas::gemv_n(m, n, a, lda, x, y);
+    }
     let (a, x) = (Ws::new_ref(a), Ws::new_ref(x));
     let y = Ws::new(y);
 
@@ -1957,6 +1977,10 @@ fn gemv_n_nb<const NR: usize>(
 pub fn gemv_t(m: usize, n: usize, a: &[f64], lda: usize, x: &[f64], y: &mut [f64]) {
     debug_assert!(n == 0 || a.len() >= (n - 1) * lda + m);
     debug_assert!(x.len() >= m && y.len() >= n);
+    #[cfg(feature = "blas")]
+    if super::blas::worth_it(2.0 * m as f64 * n as f64) {
+        return super::blas::gemv_t(m, n, a, lda, x, y);
+    }
     let (a, x) = (Ws::new_ref(a), Ws::new_ref(x));
     let y = Ws::new(y);
 
@@ -2013,6 +2037,10 @@ fn gemv_t_nb<const NR: usize>(
 pub fn trsm_lln(m: usize, n: usize, a: &[f64], lda: usize, b: &mut [f64], ldb: usize) {
     debug_assert!(m == 0 || a.len() >= (m - 1) * lda + m);
     debug_assert!(n == 0 || m == 0 || b.len() >= (n - 1) * ldb + m);
+    #[cfg(feature = "blas")]
+    if super::blas::worth_it((m as f64).powi(2) * n as f64) {
+        return super::blas::trsm_lln(m, n, a, lda, b, ldb);
+    }
     let a = Ws::new_ref(a);
     let b = Ws::new(b);
 
@@ -2070,6 +2098,10 @@ fn trsm_lln_nb<const NR: usize>(
 pub fn trsm_llt(m: usize, n: usize, a: &[f64], lda: usize, b: &mut [f64], ldb: usize) {
     debug_assert!(m == 0 || a.len() >= (m - 1) * lda + m);
     debug_assert!(n == 0 || m == 0 || b.len() >= (n - 1) * ldb + m);
+    #[cfg(feature = "blas")]
+    if super::blas::worth_it((m as f64).powi(2) * n as f64) {
+        return super::blas::trsm_llt(m, n, a, lda, b, ldb);
+    }
     let a = Ws::new_ref(a);
     let b = Ws::new(b);
 
@@ -2144,6 +2176,10 @@ pub fn gemm_nn(
 ) {
     debug_assert!(k == 0 || (a.len() >= (k - 1) * lda + m && b.len() >= (n - 1) * ldb + k));
     debug_assert!(n == 0 || c.len() >= (n - 1) * ldc + m);
+    #[cfg(feature = "blas")]
+    if super::blas::worth_it(2.0 * m as f64 * n as f64 * k as f64) {
+        return super::blas::gemm_nn(m, n, k, a, lda, b, ldb, c, ldc);
+    }
     let (a, b) = (Ws::new_ref(a), Ws::new_ref(b));
     let c = Ws::new(c);
 
@@ -2255,6 +2291,10 @@ pub fn gemm_tn(
     debug_assert!(m == 0 || k == 0 || a.len() >= (m - 1) * lda + k);
     debug_assert!(n == 0 || k == 0 || b.len() >= (n - 1) * ldb + k);
     debug_assert!(n == 0 || c.len() >= (n - 1) * ldc + m);
+    #[cfg(feature = "blas")]
+    if super::blas::worth_it(2.0 * m as f64 * n as f64 * k as f64) {
+        return super::blas::gemm_tn(m, n, k, a, lda, b, ldb, c, ldc);
+    }
     let (a, b) = (Ws::new_ref(a), Ws::new_ref(b));
     let c = Ws::new(c);
 
