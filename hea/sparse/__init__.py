@@ -132,6 +132,7 @@ def build_info() -> dict:
     """
     return _build_info()
 
+
 #: The systems :meth:`Factor.solve` accepts, as ``cholmod_solve`` names them.
 #: ``D`` is the identity for an ``LL'`` factor, so ``LD``/``L`` and ``DLt``/``Lt``
 #: name the same solve there.

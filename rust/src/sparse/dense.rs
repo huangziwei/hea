@@ -2456,6 +2456,7 @@ mod tests {
     /// block decomposition have to reproduce it bit for bit, which is a
     /// stronger statement than any tolerance and the one the module's
     /// summation-order contract actually makes.
+    #[cfg(not(vendor_blas))]
     fn dot_nt(k: usize, a: &[f64], ia: usize, lda: usize, b: &[f64], jb: usize, ldb: usize) -> f64 {
         let mut acc = 0.0f64;
         for l in 0..k {
@@ -2464,6 +2465,29 @@ mod tests {
         acc
     }
 
+    /// # The blocking contract, and why this whole group is portable-arm only
+    ///
+    /// The tests below assert that *hea's own* blocking is a scheduling
+    /// decision and never a numerical one: every arm sums a destination entry
+    /// over `l` ascending in one place, so each reproduces `dot_nt`'s reference
+    /// FMA chain bit for bit. That is a stronger statement than any tolerance
+    /// and it is the contract `dense.rs` actually makes.
+    ///
+    /// **It is a statement about code the vendor build does not run.** Above
+    /// [`super::blas::MIN_FLOPS`] the call goes to Accelerate or OpenBLAS,
+    /// whose summation order is not ours to pin — so on a vendor build these
+    /// ask whether someone else's BLAS happens to round like our chain.
+    /// Whether it does is luck, and the luck is per-machine: on one arm three
+    /// of these failed and on another only one, because OpenBLAS is
+    /// `DYNAMIC_ARCH` and picks a different kernel per CPU. Gating the ones
+    /// that happened to fail would leave the rest waiting to fail somewhere
+    /// else, so the whole class is gated.
+    ///
+    /// The portable arm is not a second-class run: `cargo test
+    /// --no-default-features` is in CI beside the default one for exactly this,
+    /// and hea's kernels still execute on a vendor build for every call below
+    /// the cutoff, which is most of a sparse factorization.
+    #[cfg(not(vendor_blas))]
     #[test]
     fn gemm_is_bit_identical_across_the_blocking() {
         for &(m, n, k) in &[
@@ -2533,6 +2557,7 @@ mod tests {
     /// entry sees the same sources in the same sequence as the direct path.
     /// Sizes cross `PACK_MC`, `PACK_NC` and `PACK_KC` and land off every
     /// multiple, which is where a mis-set panel offset shows up.
+    #[cfg(not(vendor_blas))]
     #[test]
     fn packed_gemm_is_bit_identical_to_the_direct_one() {
         for &(m, n, k) in &[
@@ -2570,6 +2595,7 @@ mod tests {
     /// The three blocks are sub-blocks of one array, in the layout both callers
     /// use — `A` and `B` in columns left of the panel, `C` in the panel — so the
     /// test also pins the non-overlap [`gemm_sub_packed`] relies on.
+    #[cfg(not(vendor_blas))]
     #[test]
     fn packed_gemm_sub_is_bit_identical_to_the_direct_one() {
         for &(m, n, k) in &[
@@ -2601,6 +2627,7 @@ mod tests {
     /// against the explicit ascending-`l` chain rather than against the other
     /// path, and the assertion that the gate fired at all — without it the test
     /// would pass by never reaching the code it names.
+    #[cfg(not(vendor_blas))]
     #[test]
     fn the_aliasing_dispatch_does_not_move_a_rounding() {
         for &(m, n, k, ld) in &[
@@ -2648,6 +2675,7 @@ mod tests {
     /// both compute the same values, so only a direct comparison can see one of
     /// them go wrong. `C` is carved into per-column slices exactly as
     /// [`gemm_sub_par`] carves it for a task.
+    #[cfg(not(vendor_blas))]
     #[test]
     fn the_packed_scattered_block_matches_the_direct_one() {
         for &(m, n, k, ld) in &[
@@ -2692,6 +2720,7 @@ mod tests {
     /// [`gemm_sub_par`]'s own block height, so the assertion is that this shape
     /// really does reach the packed arm — a test that silently missed it would
     /// pass for the wrong reason.
+    #[cfg(not(vendor_blas))]
     #[test]
     fn the_parallel_update_packs_like_the_serial_one_at_an_aliasing_stride() {
         let (m, n, k, ld, nt) = (512usize, 32usize, 16usize, 2048usize, 2usize);

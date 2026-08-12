@@ -359,7 +359,7 @@ impl SuperWork {
     /// how the corpus tests drive every arm rather than whichever one the
     /// defaults happen to select on a small matrix. All four combinations have
     /// to produce the same `L->x`, bit for bit.
-    #[cfg(test)]
+    #[cfg(all(test, not(vendor_blas)))]
     pub(super) fn pinned(par_flops: f64, tree_flops: f64, force_serial: bool) -> SuperWork {
         SuperWork {
             par_flops,
@@ -370,7 +370,7 @@ impl SuperWork {
     }
 
     /// Updates computed on the batched arm, and supernodes that forked.
-    #[cfg(test)]
+    #[cfg(all(test, not(vendor_blas)))]
     pub(super) fn counts(&self) -> (usize, usize) {
         (
             self.counters.wide.load(Atomic::Relaxed),
@@ -2020,6 +2020,7 @@ mod tests {
     /// One corpus matrix, factorized supernodally with both thresholds and the
     /// driver pinned. Returns the factor, how many updates took the batched arm
     /// and how many supernodes forked.
+    #[cfg(not(vendor_blas))]
     fn factor(
         n: usize,
         edges: &[(usize, usize)],
@@ -2047,6 +2048,12 @@ mod tests {
     /// pinned rather than left at their defaults so every arm is exercised on
     /// every corpus matrix, and the counters are asserted so no arm can pass
     /// vacuously.
+    /// Portable arm only, for the reason `dense.rs`'s blocking-contract
+    /// group gives: under a vendor build the wide arm's strips and the
+    /// serial arm's full-width call land on different sides of
+    /// `blas::MIN_FLOPS`, so the two are not the same arithmetic and are
+    /// not required to agree bit for bit.
+    #[cfg(not(vendor_blas))]
     #[test]
     fn going_wide_does_not_move_a_rounding() {
         let (mut batched, mut forks) = (0, 0);
