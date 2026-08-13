@@ -13,16 +13,6 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-    # `labeled` is here for `bench-min-flops` only, which is a development tool
-    # and never runs on `main`. A label event is also the trigger that actually
-    # works on a feature branch: `workflow_dispatch` reads its Run-workflow
-    # button off the default branch, so on a branch whose workflow file has not
-    # merged yet it is a trigger that does not exist. A `pull_request` run uses
-    # the workflow file from the PR's own merge ref, so this one does.
-    #
-    # The default list is replaced when `types` is given, so the normal three
-    # have to be spelled out or a push to the branch stops testing anything.
-    types: [ opened, synchronize, reopened, labeled ]
 
 jobs:
   # Lint is its own job: it needs neither Rust nor R, so it reports in seconds
@@ -31,9 +21,6 @@ jobs:
   # pytest. Keep the pin in step with the `ruff` floor in the dev group.
   lint:
     runs-on: ubuntu-latest
-    # Skipped on a label event, which exists only to reach `bench-min-flops`.
-    # A push or a PR runs this exactly as before.
-    if: github.event.action != 'labeled'
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
@@ -56,9 +43,6 @@ jobs:
   # happened when the default flipped.
   rust:
     runs-on: ubuntu-latest
-    # Skipped on a label event, which exists only to reach `bench-min-flops`.
-    # A push or a PR runs this exactly as before.
-    if: github.event.action != 'labeled'
     env:
       RUST_BACKTRACE: "1"
     steps:
@@ -101,15 +85,49 @@ jobs:
   # Accelerate. Linux and Windows ship that constant with neither true. This
   # runner is the only x86-64 hardware the project has, so the sweep lives here.
   #
-  # **A development tool, and it never runs on `main`.** It is a benchmark, not
-  # a gate: nothing about it should slow a push, and a shared runner's timings
-  # are noisy enough that a per-commit trend line would be a lie. Read the flat
+  # Decides whether the sweep below runs, by reading the head commit's message.
+  # Five seconds, so it is affordable on every PR where the ten-minute job it
+  # guards is not.
+  #
+  # It needs its own job because a job-level `if:` can only see the event
+  # payload, and a `pull_request` payload has no commit message in it — that is
+  # `push`-only. Hence the API call. And `actions/checkout` would not help: on a
+  # PR it checks out the *merge* commit, whose message is "Merge A into B".
+  bench-gate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+    - id: check
+      env:
+        GH_TOKEN: ${{ github.token }}
+        SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        msg=$(gh api "repos/${{ github.repository }}/commits/$SHA" --jq .commit.message)
+        echo "head commit ${SHA:0:7}:"
+        echo "$msg"
+        if printf '%s' "$msg" | grep -qi bench; then
+          echo "run=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::'bench' is in the commit message — running the MIN_FLOPS sweep"
+        else
+          echo "run=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::no 'bench' in the commit message — skipping the MIN_FLOPS sweep. Put the word bench in a commit message to run it."
+        fi
+
+  # **A development tool: pull requests only, never `main`, and only when the
+  # head commit's message contains `bench`.** It is ten-odd minutes, dominated
+  # by a release build of the crate, which is too much to spend on every push —
+  # and it is a benchmark rather than a gate, asserting nothing about the
+  # numbers, so it cannot fail a merge on a timing. A shared runner is noisy
+  # enough that a per-commit trend line would be a lie anyway. Read the flat
   # bottom of the curve, not the argmax.
   #
-  # Add the label **bench** to a PR and this job — and only this job — runs.
-  # Remove and re-add the label to run it again.
+  # When it does not run it shows as skipped, which looks the same as broken —
+  # so `bench-gate` above always runs and always prints which it decided.
   bench-min-flops:
-    if: github.event.label.name == 'bench'
+    needs: bench-gate
+    if: needs.bench-gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -156,9 +174,6 @@ jobs:
   build:
 
     runs-on: ubuntu-latest
-    # Skipped on a label event, which exists only to reach `bench-min-flops`.
-    # A push or a PR runs this exactly as before.
-    if: github.event.action != 'labeled'
     env:
       RUST_BACKTRACE: "1"
     strategy:
