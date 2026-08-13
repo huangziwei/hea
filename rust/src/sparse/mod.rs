@@ -567,10 +567,12 @@ fn supernodal_solve(
 /// Which dense-kernel path this extension was compiled with.
 ///
 /// `backend` is the library actually linked — `"accelerate"`, `"openblas"`, or
-/// `None` for the portable NEON kernels; `min_flops` is [`blas::MIN_FLOPS`],
+/// `None` for the portable NEON kernels; `min_flops` is the cutoff in force —
 /// the flop count above which a call is handed to the vendor, so `0.0` means
-/// every call is. Three build-time constants read once — there is nothing here
-/// a caller can set, and nothing on any hot path.
+/// every call is. Three build-time constants read once, with one exception:
+/// under the `blas-sweep` feature the cutoff comes from the environment, and
+/// this reports what is actually in force rather than what was compiled in,
+/// which is the whole reason the sweep can trust its own columns.
 ///
 /// **`blas` and `backend` can disagree, and that is the useful case.** `blas`
 /// is the feature, i.e. what the build asked for; `backend` is what `build.rs`
@@ -597,7 +599,7 @@ fn build_info(py: Python<'_>) -> PyResult<Py<PyDict>> {
         },
     )?;
     #[cfg(vendor_blas)]
-    d.set_item("min_flops", blas::MIN_FLOPS)?;
+    d.set_item("min_flops", blas::cutoff())?;
     #[cfg(not(vendor_blas))]
     d.set_item("min_flops", py.None())?;
     Ok(d.unbind())

@@ -40,6 +40,11 @@ blas-openblas = ["blas"]
 # cutoff above zero `L->x` is a mix of two libraries' rounding and there is
 # nothing to compare with `==`. See `blas::MIN_FLOPS`.
 blas-all = ["blas"]
+# Read the cutoff from `HEA_BLAS_MIN_FLOPS` at first use instead of compiling it
+# in. **Never ship this**: it exists so locating the crossing costs one build
+# rather than one per column, which is what makes the sweep affordable on a CI
+# runner — the only x86-64 hardware this project has. See `blas::MIN_FLOPS`.
+blas-sweep = ["blas"]
 
 [dependencies]
 # abi3-py310: one wheel works on CPython 3.10+ (matches requires-python).

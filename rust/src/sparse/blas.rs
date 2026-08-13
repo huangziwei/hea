@@ -71,6 +71,13 @@
 //! cannot cover is the platform's own linker and loader, and the wheel-repair
 //! step that vendors the library — those need the real target, and belong in CI.
 //!
+//! `blas-sweep` is the third of these and the only one that is not shippable:
+//! it moves [`MIN_FLOPS`] from a compiled-in constant to a `OnceLock` read of
+//! `HEA_BLAS_MIN_FLOPS`, so locating the crossing costs one build instead of one
+//! per column. That is what makes the sweep affordable on a CI runner, which is
+//! the only x86-64 hardware this project has — see the `bench-min-flops` job in
+//! `.github/workflows/python-package.yml` and `.github/bench/min_flops_sweep.py`.
+//!
 //! # What it costs the pins, which turned out to be nothing
 //!
 //! A digest taken against Accelerate is not the one OpenBLAS gives, so in
@@ -192,10 +199,44 @@ pub const MIN_FLOPS: f64 = 1.0e5;
 #[cfg(feature = "blas-all")]
 pub const MIN_FLOPS: f64 = 0.0;
 
+/// The cutoff in force. A `const` read, and the compiler folds the comparison
+/// in [`worth_it`] away, except under `blas-sweep`.
+#[cfg(not(feature = "blas-sweep"))]
+#[inline(always)]
+pub fn cutoff() -> f64 {
+    MIN_FLOPS
+}
+
+/// `HEA_BLAS_MIN_FLOPS`, read once, defaulting to [`MIN_FLOPS`].
+///
+/// Locating the crossing means measuring seven cutoffs, and compiling it in
+/// means seven builds of the crate to do it. That is affordable on a laptop and
+/// not on the CI runner that is this project's only x86-64 hardware, which is
+/// the machine the crossing has never been measured on. So under this feature —
+/// and only under it — the constant becomes a `OnceLock` seeded from the
+/// environment.
+///
+/// The added work is one relaxed load per call, identical in every column of
+/// the sweep, so it cancels in the comparison the sweep is actually making.
+/// It is still not free in absolute terms, which is why this is a feature and
+/// not the shipped path: `cfg(not(blas-sweep))` above keeps `worth_it` a
+/// constant comparison everywhere else.
+#[cfg(feature = "blas-sweep")]
+pub fn cutoff() -> f64 {
+    use std::sync::OnceLock;
+    static SWEPT: OnceLock<f64> = OnceLock::new();
+    *SWEPT.get_or_init(|| {
+        std::env::var("HEA_BLAS_MIN_FLOPS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(MIN_FLOPS)
+    })
+}
+
 /// Whether a call of this many flops is worth the vendor's dispatch.
 #[inline]
 pub fn worth_it(flops: f64) -> bool {
-    flops >= MIN_FLOPS
+    flops >= cutoff()
 }
 
 // The classic 32-bit-integer F77 BLAS and LAPACK, which both libraries export.

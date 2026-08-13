@@ -13,6 +13,9 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  # For `bench-min-flops` below, which is gated to this event and so costs
+  # nothing on a push or a PR.
+  workflow_dispatch:
 
 jobs:
   # Lint is its own job: it needs neither Rust nor R, so it reports in seconds
@@ -78,6 +81,61 @@ jobs:
         export RUSTFLAGS="-L $LIBDIR -C link-arg=-Wl,-undefined,dynamic_lookup"
         cargo test --manifest-path rust/Cargo.toml
         cargo test --manifest-path rust/Cargo.toml --no-default-features
+
+  # `sparse::blas::MIN_FLOPS` — the per-call flop count above which a dense
+  # kernel goes to the vendor — is 1.0e5, and every measurement behind it was
+  # taken on aarch64, where hea's kernels have a baseline FMA and the vendor is
+  # Accelerate. Linux and Windows ship that constant with neither true. This
+  # runner is the only x86-64 hardware the project has, so the sweep lives here.
+  #
+  # **Manual only.** It is a benchmark, not a gate: nothing about it should slow
+  # a push, and a shared runner's timings are noisy enough that a per-commit
+  # trend line would be a lie. Trigger it from the Actions tab when the question
+  # is open; read the flat bottom of the curve, not the argmax.
+  bench-min-flops:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: rust
+    - name: Which x86-64 this actually is
+      # OpenBLAS is DYNAMIC_ARCH and dispatches on the running CPU, so the
+      # answer depends on whether the runner gave us AVX2 or AVX-512. A number
+      # without this line cannot be compared against a later one.
+      run: |
+        lscpu | grep -E "^(Model name|Architecture|CPU\(s\)|Flags)" | cut -c1-400
+        echo "avx512: $(grep -c avx512f /proc/cpuinfo || true) cores report it"
+    - name: Build the sweep arm
+      # `blas-sweep` moves the cutoff to the environment so seven columns cost
+      # one build. `blas-required` refuses to fall back to the portable kernels,
+      # which would otherwise make every column identical and green.
+      #
+      # `maturin develop` wants a virtualenv, and `HEA_BLAS_LIB_DIR` has to be
+      # exported in the same step that builds — writing it to $GITHUB_ENV alone
+      # does not apply within the step that wrote it.
+      run: |
+        python -m venv /tmp/sweepenv
+        . /tmp/sweepenv/bin/activate
+        pip install --upgrade pip maturin scipy-openblas32 numpy scipy
+        export HEA_BLAS_LIB_DIR=$(python -c 'import scipy_openblas32 as s; print(s.get_lib_dir())')
+        maturin develop --release \
+          --manifest-path rust/Cargo.toml \
+          --features blas-sweep,blas-required
+        python -c "
+        from hea.sparse import build_info
+        i = build_info(); print(i)
+        assert i['backend'] == 'openblas', f'expected OpenBLAS, got {i}'
+        "
+    - name: Sweep
+      run: |
+        . /tmp/sweepenv/bin/activate
+        python .github/bench/min_flops_sweep.py
 
   build:
 
