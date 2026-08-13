@@ -269,8 +269,23 @@ pub fn worth_it(flops: f64) -> bool {
 // The character arguments carry hidden trailing lengths in the Fortran ABI;
 // every C and Rust caller omits them and every implementation ignores them,
 // reading only the first byte.
+//
+// **The library's name is not one string.** `-l scipy_openblas` makes the Unix
+// linkers look for `libscipy_openblas.{so,dylib,a}`, which is what the wheel
+// ships — but MSVC's `link.exe` adds no prefix and looks for
+// `scipy_openblas.lib`, while the Windows wheel ships
+// `libscipy_openblas.lib`, prefix and all. So the Windows build died at
+// `LNK1181: cannot open input file 'scipy_openblas.lib'` the first time it was
+// ever run, and only the literal name works there.
 #[cfg_attr(accelerate, link(name = "Accelerate", kind = "framework"))]
-#[cfg_attr(not(accelerate), link(name = "scipy_openblas"))]
+#[cfg_attr(
+    all(not(accelerate), target_env = "msvc"),
+    link(name = "libscipy_openblas")
+)]
+#[cfg_attr(
+    all(not(accelerate), not(target_env = "msvc")),
+    link(name = "scipy_openblas")
+)]
 extern "C" {
     #[cfg_attr(not(accelerate), link_name = "scipy_dgemm_")]
     fn dgemm_(

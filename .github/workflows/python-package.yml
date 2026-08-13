@@ -22,10 +22,11 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     needs: bench-gate
-    # The other side of `bench-gate`: a commit whose message says `bench` runs
-    # the sweep and nothing else, so a benchmark does not queue behind a 5-way
-    # matrix it is not measuring. Everything else runs the suite as before.
-    if: needs.bench-gate.outputs.run != 'true'
+    # The other side of `bench-gate`. `bench` runs the sweep and nothing else,
+    # `wheels` runs neither (that commit belongs to python-publish.yml), so a
+    # CI-plumbing commit never drags a 5-way matrix along with it. Anything
+    # else, and every push to `main`, runs the suite as before.
+    if: needs.bench-gate.outputs.suite == 'true'
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
@@ -49,10 +50,11 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     needs: bench-gate
-    # The other side of `bench-gate`: a commit whose message says `bench` runs
-    # the sweep and nothing else, so a benchmark does not queue behind a 5-way
-    # matrix it is not measuring. Everything else runs the suite as before.
-    if: needs.bench-gate.outputs.run != 'true'
+    # The other side of `bench-gate`. `bench` runs the sweep and nothing else,
+    # `wheels` runs neither (that commit belongs to python-publish.yml), so a
+    # CI-plumbing commit never drags a 5-way matrix along with it. Anything
+    # else, and every push to `main`, runs the suite as before.
+    if: needs.bench-gate.outputs.suite == 'true'
     env:
       RUST_BACKTRACE: "1"
     steps:
@@ -110,6 +112,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.check.outputs.run }}
+      suite: ${{ steps.check.outputs.suite }}
     steps:
     - id: check
       env:
@@ -118,18 +121,29 @@ jobs:
       run: |
         if [ "${{ github.event_name }}" != "pull_request" ]; then
           echo "run=false" >> "$GITHUB_OUTPUT"
+          echo "suite=true" >> "$GITHUB_OUTPUT"
           echo "::notice::not a pull request — the sweep is PR-only. Running the suite."
           exit 0
         fi
         msg=$(gh api "repos/${{ github.repository }}/commits/$SHA" --jq .commit.message)
         echo "head commit ${SHA:0:7}:"
         echo "$msg"
-        if printf '%s' "$msg" | grep -qi bench; then
+        # `wheels` belongs to python-publish.yml and means a four-platform wheel
+        # dry run. It suppresses the suite here for the same reason `bench`
+        # does: a CI-plumbing commit should buy the one thing it asked for, not
+        # that plus a five-way matrix.
+        if printf '%s' "$msg" | grep -qi wheels; then
+          echo "run=false" >> "$GITHUB_OUTPUT"
+          echo "suite=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::'wheels' is in the commit message — this run belongs to python-publish.yml. Skipping both the suite and the sweep."
+        elif printf '%s' "$msg" | grep -qi bench; then
           echo "run=true" >> "$GITHUB_OUTPUT"
+          echo "suite=false" >> "$GITHUB_OUTPUT"
           echo "::notice::'bench' is in the commit message — running the MIN_FLOPS sweep INSTEAD of the test suite. This commit gets no test coverage; do not read its green as a passing build."
         else
           echo "run=false" >> "$GITHUB_OUTPUT"
-          echo "::notice::no 'bench' in the commit message — running the test suite. Put the word bench in a commit message to sweep instead."
+          echo "suite=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::no 'bench' or 'wheels' in the commit message — running the test suite."
         fi
 
   # **A development tool: pull requests only, never `main`, and only when the
@@ -202,10 +216,11 @@ jobs:
 
     runs-on: ubuntu-latest
     needs: bench-gate
-    # The other side of `bench-gate`: a commit whose message says `bench` runs
-    # the sweep and nothing else, so a benchmark does not queue behind a 5-way
-    # matrix it is not measuring. Everything else runs the suite as before.
-    if: needs.bench-gate.outputs.run != 'true'
+    # The other side of `bench-gate`. `bench` runs the sweep and nothing else,
+    # `wheels` runs neither (that commit belongs to python-publish.yml), so a
+    # CI-plumbing commit never drags a 5-way matrix along with it. Anything
+    # else, and every push to `main`, runs the suite as before.
+    if: needs.bench-gate.outputs.suite == 'true'
     env:
       RUST_BACKTRACE: "1"
     strategy:

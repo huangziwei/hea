@@ -114,19 +114,17 @@ jobs:
           # site-packages would not exist in the container. `HEA_BLAS_LIB_DIR`
           # is read by rust/build.rs.
           #
-          # Exported *and* appended to $GITHUB_ENV because the two mechanisms
-          # cover different things and only one of them can be right: `export`
-          # reaches maturin if this script shares its shell, and $GITHUB_ENV
-          # reaches it only if it does not (a variable written to $GITHUB_ENV
-          # applies to *subsequent* steps, and the build is part of this one).
-          # Getting it wrong is not silent — `blas-required` turns a missing
-          # backend into a build failure — but there is no reason to find out
-          # the hard way.
+          # `export` only, and the belt-and-braces version of this is what broke
+          # the first run this job ever had. `$GITHUB_ENV` names a path on the
+          # *runner* that is not mounted in the container, so appending to it is
+          # not merely useless here — it fails with "No such file or directory",
+          # and the action's script runs under `set -e`, so docker exits 1 and
+          # the wheel never builds. Hedging between two mechanisms is only free
+          # when the wrong one is inert.
           before-script-linux: |
             python3 -m pip install scipy-openblas32
             HEA_BLAS_LIB_DIR=$(python3 -c 'import scipy_openblas32 as s; print(s.get_lib_dir())')
             export HEA_BLAS_LIB_DIR
-            echo "HEA_BLAS_LIB_DIR=$HEA_BLAS_LIB_DIR" >> "$GITHUB_ENV"
       - name: Assert the wheel carries OpenBLAS
         # A wheel that took the fallback passes every test and is 2.4x more CPU
         # on a large factorization. This is the only place that shows.
@@ -138,7 +136,13 @@ jobs:
         # but not the cfg.
         if: matrix.target == 'x86_64'
         run: |
-          python -m pip install --no-index --find-links dist hea
+          # `--no-deps` matters: `--no-index` pins the *wheel* to the one just
+          # built, which is the point, but it also blocks hea's own
+          # dependencies, and the first run of this step died on
+          # "No matching distribution found for matplotlib". Take the deps from
+          # the index and only the artifact from `dist`.
+          python -m pip install numpy scipy
+          python -m pip install --no-index --no-deps --find-links dist hea
           python -c "
           from hea.sparse import build_info
           i = build_info(); print(i)
@@ -209,7 +213,13 @@ jobs:
         # Native arch only — the x86_64 wheel is cross-compiled on this runner.
         if: matrix.target == 'aarch64'
         run: |
-          python -m pip install --no-index --find-links dist hea
+          # `--no-deps` matters: `--no-index` pins the *wheel* to the one just
+          # built, which is the point, but it also blocks hea's own
+          # dependencies, and the first run of this step died on
+          # "No matching distribution found for matplotlib". Take the deps from
+          # the index and only the artifact from `dist`.
+          python -m pip install numpy scipy
+          python -m pip install --no-index --no-deps --find-links dist hea
           python -c "
           from hea.sparse import build_info
           i = build_info(); print(i)
@@ -265,7 +275,13 @@ jobs:
         # installed. Uninstall it first so the check is about the wheel.
         run: |
           python -m pip uninstall -y scipy-openblas32
-          python -m pip install --no-index --find-links dist hea
+          # `--no-deps` matters: `--no-index` pins the *wheel* to the one just
+          # built, which is the point, but it also blocks hea's own
+          # dependencies, and the first run of this step died on
+          # "No matching distribution found for matplotlib". Take the deps from
+          # the index and only the artifact from `dist`.
+          python -m pip install numpy scipy
+          python -m pip install --no-index --no-deps --find-links dist hea
           python -c "
           from hea.sparse import build_info
           i = build_info(); print(i)
