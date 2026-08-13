@@ -75,7 +75,9 @@ jobs:
     - run: cargo fmt --manifest-path rust/Cargo.toml --check
     - name: Clippy, every feature arm
       run: |
-        for f in "" "--no-default-features" "--features blas-all" "--features blas-required"; do
+        for f in "" "--no-default-features" "--features blas-all" \
+                 "--features blas-required" "--features blas-sweep" \
+                 "--features profiling" "--no-default-features --features profiling"; do
           echo "::group::clippy $f"
           cargo clippy --manifest-path rust/Cargo.toml --release --all-targets $f -- -D warnings
           echo "::endgroup::"
@@ -92,10 +94,11 @@ jobs:
         cargo test --manifest-path rust/Cargo.toml --no-default-features
 
   # `sparse::blas::MIN_FLOPS` — the per-call flop count above which a dense
-  # kernel goes to the vendor — is 1.0e5, and every measurement behind it was
-  # taken on aarch64, where hea's kernels have a baseline FMA and the vendor is
-  # Accelerate. Linux and Windows ship that constant with neither true. This
-  # runner is the only x86-64 hardware the project has, so the sweep lives here.
+  # kernel goes to the vendor — is a ratio between hea's kernels and the
+  # vendor's, so it moves when either does, and both differ between aarch64 and
+  # x86-64. This runner is the only x86-64 hardware the project has, so the
+  # sweep lives here. It is worth re-running when a `dense.rs` kernel or the
+  # routing changes; scheduling constants are far below its resolution.
   #
   # Decides whether the sweep below runs, by reading the head commit's message.
   # Five seconds, so it is affordable on every PR where the ten-minute job it
