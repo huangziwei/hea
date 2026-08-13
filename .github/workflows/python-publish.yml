@@ -121,10 +121,22 @@ jobs:
           # and the action's script runs under `set -e`, so docker exits 1 and
           # the wheel never builds. Hedging between two mechanisms is only free
           # when the wrong one is inert.
+          #
+          # **`--platform`, because the container is x86_64 whatever the target
+          # is.** A plain `pip install` inside it resolves for the *container*,
+          # so an aarch64 build got the x86_64 OpenBLAS, `ld.bfd` skipped it as
+          # incompatible and reported `cannot find -lscipy_openblas`. pip
+          # requires `--target` alongside `--platform`, hence the explicit
+          # directory rather than `get_lib_dir()`. Both tags are passed because
+          # the wheel carries both and pip matches them literally.
           before-script-linux: |
-            python3 -m pip install scipy-openblas32
-            HEA_BLAS_LIB_DIR=$(python3 -c 'import scipy_openblas32 as s; print(s.get_lib_dir())')
-            export HEA_BLAS_LIB_DIR
+            python3 -m pip install --upgrade pip
+            python3 -m pip install scipy-openblas32 \
+              --no-deps --only-binary=:all: \
+              --platform manylinux2014_${{ matrix.target }} \
+              --platform manylinux_2_17_${{ matrix.target }} \
+              --target /opt/hea-openblas
+            export HEA_BLAS_LIB_DIR=/opt/hea-openblas/scipy_openblas32/lib
       - name: Assert the wheel carries OpenBLAS
         # A wheel that took the fallback passes every test and is 2.4x more CPU
         # on a large factorization. This is the only place that shows.
@@ -135,14 +147,20 @@ jobs:
         # it is the one that would catch a build.rs that emitted the link flags
         # but not the cfg.
         if: matrix.target == 'x86_64'
+        # **Run from outside the checkout.** `python -c` puts the cwd first on
+        # `sys.path`, so at the repo root the *source* `hea/` shadows the
+        # installed wheel and the import dies on `No module named 'hea._rs'` —
+        # which is what happened, and what a local rehearsal missed because a
+        # dev checkout has a built `_rs` sitting in it.
+        working-directory: ${{ runner.temp }}
         run: |
           # `--no-deps` matters: `--no-index` pins the *wheel* to the one just
           # built, which is the point, but it also blocks hea's own
-          # dependencies, and the first run of this step died on
-          # "No matching distribution found for matplotlib". Take the deps from
-          # the index and only the artifact from `dist`.
+          # dependencies, and a run of this step died on "No matching
+          # distribution found for matplotlib". Deps from the index, artifact
+          # from `dist`.
           python -m pip install numpy scipy
-          python -m pip install --no-index --no-deps --find-links dist hea
+          python -m pip install --no-index --no-deps --find-links ${{ github.workspace }}/dist hea
           python -c "
           from hea.sparse import build_info
           i = build_info(); print(i)
@@ -167,11 +185,17 @@ jobs:
         with:
           python-version: "3.x"
       - name: Build wheels (musllinux / Alpine)
-        # NOT `blas-required`, and not by oversight: scipy-openblas32 publishes
-        # no musllinux wheel, so build.rs takes the portable-kernel fallback
-        # here. The Alpine wheel is therefore the one platform without a vendor
-        # BLAS — correct, tested, and slower on large sparse factorizations.
-        # Revisit if a musl build appears upstream.
+        # NOT `blas-required`: build.rs takes the portable-kernel fallback here,
+        # so the Alpine wheel is the one platform without a vendor BLAS —
+        # correct, tested, and slower on large sparse factorizations.
+        #
+        # **The reason given for that is now out of date.** It read "scipy-
+        # openblas32 publishes no musllinux wheel"; as of 2026-08-13 it
+        # publishes `musllinux_1_2_x86_64` and `musllinux_1_2_aarch64`, and has
+        # since 0.3.31.22.1. So this is now a choice rather than a constraint,
+        # and the choice is only still here because turning it on is a change to
+        # what Alpine users get and belongs in its own dry run, not bundled into
+        # one verifying other fixes.
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
@@ -212,14 +236,20 @@ jobs:
       - name: Assert the wheel carries Accelerate
         # Native arch only — the x86_64 wheel is cross-compiled on this runner.
         if: matrix.target == 'aarch64'
+        # **Run from outside the checkout.** `python -c` puts the cwd first on
+        # `sys.path`, so at the repo root the *source* `hea/` shadows the
+        # installed wheel and the import dies on `No module named 'hea._rs'` —
+        # which is what happened, and what a local rehearsal missed because a
+        # dev checkout has a built `_rs` sitting in it.
+        working-directory: ${{ runner.temp }}
         run: |
           # `--no-deps` matters: `--no-index` pins the *wheel* to the one just
           # built, which is the point, but it also blocks hea's own
-          # dependencies, and the first run of this step died on
-          # "No matching distribution found for matplotlib". Take the deps from
-          # the index and only the artifact from `dist`.
+          # dependencies, and a run of this step died on "No matching
+          # distribution found for matplotlib". Deps from the index, artifact
+          # from `dist`.
           python -m pip install numpy scipy
-          python -m pip install --no-index --no-deps --find-links dist hea
+          python -m pip install --no-index --no-deps --find-links ${{ github.workspace }}/dist hea
           python -c "
           from hea.sparse import build_info
           i = build_info(); print(i)
@@ -273,15 +303,21 @@ jobs:
         # Loading is the half that matters here: a wheel whose DLL was not
         # vendored imports fine on THIS machine, because scipy_openblas32 is
         # installed. Uninstall it first so the check is about the wheel.
+        #
+        # **Run from outside the checkout**, like the other two: `python -c`
+        # puts the cwd first on `sys.path`, so at the repo root the source
+        # `hea/` shadows the installed wheel and the import dies on
+        # `No module named 'hea._rs'`.
+        working-directory: ${{ runner.temp }}
         run: |
           python -m pip uninstall -y scipy-openblas32
           # `--no-deps` matters: `--no-index` pins the *wheel* to the one just
           # built, which is the point, but it also blocks hea's own
-          # dependencies, and the first run of this step died on
-          # "No matching distribution found for matplotlib". Take the deps from
-          # the index and only the artifact from `dist`.
+          # dependencies, and a run of this step died on "No matching
+          # distribution found for matplotlib". Deps from the index, artifact
+          # from `dist`.
           python -m pip install numpy scipy
-          python -m pip install --no-index --no-deps --find-links dist hea
+          python -m pip install --no-index --no-deps --find-links ${{ github.workspace }}/dist hea
           python -c "
           from hea.sparse import build_info
           i = build_info(); print(i)
