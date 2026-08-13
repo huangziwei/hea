@@ -170,13 +170,32 @@ use std::os::raw::{c_char, c_double, c_int};
 ///   coprocessor round trip — which is what makes small calls cost 10 GF/s here
 ///   and is half of why this constant is not zero.
 ///
-/// So `1.0e5` is the crossing on the machine it was swept on, and on x86-64 the
-/// crossing is somewhere lower — plausibly at zero, where the vendor takes every
-/// call. **This is not yet measured**, and it wants an x86-64 Linux box rather
-/// than an argument: the same sweep, `0` through `10000` kflop, against the same
-/// corpus. Until then Linux and Windows ship a cutoff tuned for a different ISA,
-/// which costs speed and nothing else — every arm is correct, and
-/// `blas-all` still gates bit-exactness at zero.
+/// So `1.0e5` is the crossing on the machine it was swept on, and the reasoning
+/// above says x86-64's is lower. **That much is now measured, and the "plausibly
+/// at zero" half of it was wrong.** CI is the x86-64 box — `bench-min-flops` in
+/// `.github/workflows/python-package.yml`, sweeping this constant through
+/// `.github/bench/min_flops_sweep.py` — and on an AMD EPYC 9V74, 4 vCPU, no
+/// `avx512f`, geometric mean against the no-routing control:
+///
+/// | cutoff, kflop | ∞ | 1000 | 250 | **100** | 50 | 25 | 0 |
+/// |---|---|---|---|---|---|---|---|
+/// | x control | 1.000 | 0.997 | 1.050 | **1.071** | 1.087 | 1.116 | 0.993 |
+///
+/// Routing is worth up to 12% there, the curve keeps improving below the shipped
+/// value — and then **`0` collapses to 0.993, level with routing nothing at
+/// all**. The two regimes that make this constant exist are both visible in one
+/// column: at cutoff `0` the 320² factorize goes 36.8 → 64.5 ms, thousands of
+/// tiny calls each paying the vendor's dispatch, while `solve nrhs=32` goes
+/// 111.8 → 108.5, a few big ones finally winning. A floor at zero would need the
+/// first of those to stop being true, and it does not.
+///
+/// **The constant has not moved on the strength of it**, because that run
+/// carried no control column and 1.116 against 1.071 therefore has no scale.
+/// The harness now enters the shipped value twice and prints the gap. Until a
+/// controlled re-run, Linux and Windows ship a cutoff tuned on another ISA that
+/// is measurably in the right basin but not at its bottom, which costs speed and
+/// nothing else — every arm is correct, and `blas-all` still gates
+/// bit-exactness at zero.
 #[cfg(not(feature = "blas-all"))]
 pub const MIN_FLOPS: f64 = 1.0e5;
 

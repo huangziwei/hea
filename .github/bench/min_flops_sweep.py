@@ -36,10 +36,16 @@ import sys
 import numpy as np
 import scipy.sparse as sp
 
-# kflop, i.e. the value of `MIN_FLOPS` in thousands. `inf` is the control: no
-# routing at all, which is what the kernels did before the vendor was bound.
-# `0` hands the vendor every call. The shipped constant is 100.
-CUTOFFS = ("inf", "1000", "250", "100", "50", "25", "0")
+# kflop, i.e. the value of `MIN_FLOPS` in thousands. `inf` routes nothing, which
+# is what the kernels did before the vendor was bound; `0` hands the vendor every
+# call. The shipped constant is 100.
+#
+# `ctl` is 100 again, entered a second time and **last**, so the gap between it
+# and the `100` column is this run's resolution — including whatever the runner
+# drifted over the whole sweep. Without it the table is a row of numbers with no
+# scale, and every difference in it reads as a finding.
+CUTOFFS = ("inf", "1000", "250", "100", "50", "25", "0", "ctl")
+KFLOP = {"inf": "1e300", "ctl": "100"}
 
 # 2D grid Laplacians. The real corpus (pygridfit's LHS, pywarper's AtA) is not
 # in the repo -- `dev/` is ignored -- and does not need to be: a cutoff is a
@@ -109,8 +115,7 @@ def main():
     out = {}
     for c in CUTOFFS:
         env = dict(os.environ)
-        # `inf` is the control: no call ever clears it, so nothing is routed.
-        env["HEA_BLAS_MIN_FLOPS"] = "1e300" if c == "inf" else str(int(c) * 1000)
+        env["HEA_BLAS_MIN_FLOPS"] = KFLOP.get(c) or str(int(c) * 1000)
         r = subprocess.run(
             [sys.executable, __file__, "--child"],
             capture_output=True,
@@ -157,14 +162,24 @@ def main():
             rs += [a / max(b, 1e-12) for a, b in zip(ctl["solve"], cur["solve"])]
         ratios[c] = geomean(rs)
     print(f"{'x control':<16}" + "".join(f"{ratios[c]:>9.3f}" for c in CUTOFFS))
-    best = max(ratios, key=ratios.get)
-    print(f"\nbest column: {best} kflop at {ratios[best]:.3f}x")
-    print(f"shipped constant is 100 kflop, reading {ratios['100']:.3f}x")
+    res = abs(ratios["ctl"] - ratios["100"])
+    scored = {k: v for k, v in ratios.items() if k != "ctl"}
+    best = max(scored, key=scored.get)
     print(
-        "\nRead the flat bottom, not the argmax: on aarch64 the 25-100 basin is "
-        "one flat floor whose spread is under the instrument's own noise. What "
-        "this run settles is whether x86-64's floor sits at 0 -- i.e. hand the "
-        "vendor everything -- or somewhere above it."
+        f"\nresolution: the two 100-kflop columns differ by {100 * res:.1f}% "
+        f"({ratios['100']:.3f} against {ratios['ctl']:.3f}). Nothing narrower "
+        "than that is a finding."
+    )
+    print(f"best column: {best} kflop at {scored[best]:.3f}x")
+    print(f"shipped constant is 100 kflop, reading {ratios['100']:.3f}x")
+    gain = scored[best] - ratios["100"]
+    verdict = "inside the resolution" if abs(gain) <= res else "outside it"
+    print(f"moving 100 -> {best} would be {100 * gain:+.1f}%, {verdict}")
+    print(
+        "\nRead the flat bottom, not the argmax. Two regimes pull against each "
+        "other in every column: a factorization is thousands of tiny calls that "
+        "lose to the vendor's dispatch, and a wide solve is a few big ones that "
+        "win. That is why 0 is not the answer even where the crossing is low."
     )
 
 

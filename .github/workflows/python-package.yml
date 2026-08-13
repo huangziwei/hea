@@ -21,6 +21,11 @@ jobs:
   # pytest. Keep the pin in step with the `ruff` floor in the dev group.
   lint:
     runs-on: ubuntu-latest
+    needs: bench-gate
+    # The other side of `bench-gate`: a commit whose message says `bench` runs
+    # the sweep and nothing else, so a benchmark does not queue behind a 5-way
+    # matrix it is not measuring. Everything else runs the suite as before.
+    if: needs.bench-gate.outputs.run != 'true'
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
@@ -43,6 +48,11 @@ jobs:
   # happened when the default flipped.
   rust:
     runs-on: ubuntu-latest
+    needs: bench-gate
+    # The other side of `bench-gate`: a commit whose message says `bench` runs
+    # the sweep and nothing else, so a benchmark does not queue behind a 5-way
+    # matrix it is not measuring. Everything else runs the suite as before.
+    if: needs.bench-gate.outputs.run != 'true'
     env:
       RUST_BACKTRACE: "1"
     steps:
@@ -94,7 +104,9 @@ jobs:
   # `push`-only. Hence the API call. And `actions/checkout` would not help: on a
   # PR it checks out the *merge* commit, whose message is "Merge A into B".
   bench-gate:
-    if: github.event_name == 'pull_request'
+    # Named so the Actions list cannot be misread: this one is the five-second
+    # decision, the next one is the measurement.
+    name: "bench 1/2 — sweep, or suite?"
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.check.outputs.run }}
@@ -104,15 +116,20 @@ jobs:
         GH_TOKEN: ${{ github.token }}
         SHA: ${{ github.event.pull_request.head.sha }}
       run: |
+        if [ "${{ github.event_name }}" != "pull_request" ]; then
+          echo "run=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::not a pull request — the sweep is PR-only. Running the suite."
+          exit 0
+        fi
         msg=$(gh api "repos/${{ github.repository }}/commits/$SHA" --jq .commit.message)
         echo "head commit ${SHA:0:7}:"
         echo "$msg"
         if printf '%s' "$msg" | grep -qi bench; then
           echo "run=true" >> "$GITHUB_OUTPUT"
-          echo "::notice::'bench' is in the commit message — running the MIN_FLOPS sweep"
+          echo "::notice::'bench' is in the commit message — running the MIN_FLOPS sweep INSTEAD of the test suite. This commit gets no test coverage; do not read its green as a passing build."
         else
           echo "run=false" >> "$GITHUB_OUTPUT"
-          echo "::notice::no 'bench' in the commit message — skipping the MIN_FLOPS sweep. Put the word bench in a commit message to run it."
+          echo "::notice::no 'bench' in the commit message — running the test suite. Put the word bench in a commit message to sweep instead."
         fi
 
   # **A development tool: pull requests only, never `main`, and only when the
@@ -126,6 +143,7 @@ jobs:
   # When it does not run it shows as skipped, which looks the same as broken —
   # so `bench-gate` above always runs and always prints which it decided.
   bench-min-flops:
+    name: "bench 2/2 — MIN_FLOPS sweep (x86-64)"
     needs: bench-gate
     if: needs.bench-gate.outputs.run == 'true'
     runs-on: ubuntu-latest
@@ -140,11 +158,20 @@ jobs:
         workspaces: rust
     - name: Which x86-64 this actually is
       # OpenBLAS is DYNAMIC_ARCH and dispatches on the running CPU, so the
-      # answer depends on whether the runner gave us AVX2 or AVX-512. A number
-      # without this line cannot be compared against a later one.
+      # answer depends on which vector ISA the runner gave us. A number without
+      # this line cannot be compared against a later one.
+      #
+      # The ISA flags are pulled out by name rather than by printing the flags
+      # line, which is thousands of characters. Truncating it instead — the
+      # first version did `cut -c1-400`, and the line was 401 — silently drops
+      # exactly the flags being looked for and reports their absence.
       run: |
-        lscpu | grep -E "^(Model name|Architecture|CPU\(s\)|Flags)" | cut -c1-400
-        echo "avx512: $(grep -c avx512f /proc/cpuinfo || true) cores report it"
+        lscpu | grep -E "^(Model name|Architecture|CPU\(s\)|Thread|Core)"
+        echo -n "vector ISA:"
+        for f in sse4_2 avx avx2 fma avx512f avx512dq avx512vl; do
+          grep -qw "$f" /proc/cpuinfo && echo -n " $f"
+        done
+        echo
     - name: Build the sweep arm
       # `blas-sweep` moves the cutoff to the environment so seven columns cost
       # one build. `blas-required` refuses to fall back to the portable kernels,
@@ -174,6 +201,11 @@ jobs:
   build:
 
     runs-on: ubuntu-latest
+    needs: bench-gate
+    # The other side of `bench-gate`: a commit whose message says `bench` runs
+    # the sweep and nothing else, so a benchmark does not queue behind a 5-way
+    # matrix it is not measuring. Everything else runs the suite as before.
+    if: needs.bench-gate.outputs.run != 'true'
     env:
       RUST_BACKTRACE: "1"
     strategy:
