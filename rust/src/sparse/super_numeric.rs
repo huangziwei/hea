@@ -829,6 +829,7 @@ fn strip_width(g: &Desc, nt: usize, batch_flops: f64) -> usize {
 /// A strip changes which thread computes an entry and nothing else: the `gemm`
 /// calls are the same calls on the same block columns, so every entry is still
 /// accumulated over `l` ascending in one place.
+#[cfg_attr(feature = "profiling", inline(never))]
 fn update_strip(lx: &[f64], base: i64, g: &Desc, j0: usize, jn: usize, c: &mut [f64]) {
     let (ndrow, ndcol) = (g.ndrow as usize, g.ndcol as usize);
     let (ndrow1, ndrow2) = (g.ndrow1 as usize, g.ndrow2 as usize);
@@ -863,6 +864,7 @@ fn update_strip(lx: &[f64], base: i64, g: &Desc, j0: usize, jn: usize, c: &mut [
 }
 
 /// The whole of one descendant's `C`, i.e. [`update_strip`] over every column.
+#[cfg_attr(feature = "profiling", inline(never))]
 fn update_c(lx: &[f64], base: i64, g: &Desc, c: &mut [f64]) {
     update_strip(lx, base, g, 0, g.ndrow1 as usize, c);
 }

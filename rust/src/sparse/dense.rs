@@ -1041,6 +1041,7 @@ fn slab_scat<const MR: usize>(
 /// one and recovers only 1.75x on eight. The non-aliasing neighbour scales 3.55x
 /// on the same code.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(feature = "profiling", inline(never))]
 fn block_scat(
     k: usize,
     a: &Ws<f64>,
@@ -1061,6 +1062,7 @@ fn block_scat(
 
 /// [`block_scat`] with the operands read where they lie.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(feature = "profiling", inline(never))]
 fn block_scat_direct(
     k: usize,
     a: &Ws<f64>,
@@ -1178,6 +1180,7 @@ fn block_packed_scat(
 /// [`PACK_BUF`] is thread-local, so every task packs into its own pair of
 /// buffers and no two tasks contend for one.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(feature = "profiling", inline(never))]
 fn block_scat_packed(
     k: usize,
     a: &Ws<f64>,

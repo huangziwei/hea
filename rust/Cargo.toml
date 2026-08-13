@@ -45,6 +45,13 @@ blas-all = ["blas"]
 # rather than one per column, which is what makes the sweep affordable on a CI
 # runner — the only x86-64 hardware this project has. See `blas::MIN_FLOPS`.
 blas-sweep = ["blas"]
+# Keep the kernels that a rayon task calls out of line, so a sampler can name
+# them. **Never ship this either**, and never time with it: it forbids an
+# inlining the release build wants. Without it a stolen task's stack is
+# `<&F as FnMut>::call_mut` with the whole kernel inlined into it and no child
+# frame left, so `dprof.py` charged the arithmetic to the scheduler — see that
+# file's OPAQUE guard.
+profiling = []
 
 [dependencies]
 # abi3-py310: one wheel works on CPython 3.10+ (matches requires-python).
