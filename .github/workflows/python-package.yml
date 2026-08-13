@@ -13,9 +13,16 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-  # For `bench-min-flops` below, which is gated to this event and so costs
-  # nothing on a push or a PR.
-  workflow_dispatch:
+    # `labeled` is here for `bench-min-flops` only, which is a development tool
+    # and never runs on `main`. A label event is also the trigger that actually
+    # works on a feature branch: `workflow_dispatch` reads its Run-workflow
+    # button off the default branch, so on a branch whose workflow file has not
+    # merged yet it is a trigger that does not exist. A `pull_request` run uses
+    # the workflow file from the PR's own merge ref, so this one does.
+    #
+    # The default list is replaced when `types` is given, so the normal three
+    # have to be spelled out or a push to the branch stops testing anything.
+    types: [ opened, synchronize, reopened, labeled ]
 
 jobs:
   # Lint is its own job: it needs neither Rust nor R, so it reports in seconds
@@ -24,6 +31,9 @@ jobs:
   # pytest. Keep the pin in step with the `ruff` floor in the dev group.
   lint:
     runs-on: ubuntu-latest
+    # Skipped on a label event, which exists only to reach `bench-min-flops`.
+    # A push or a PR runs this exactly as before.
+    if: github.event.action != 'labeled'
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
@@ -46,6 +56,9 @@ jobs:
   # happened when the default flipped.
   rust:
     runs-on: ubuntu-latest
+    # Skipped on a label event, which exists only to reach `bench-min-flops`.
+    # A push or a PR runs this exactly as before.
+    if: github.event.action != 'labeled'
     env:
       RUST_BACKTRACE: "1"
     steps:
@@ -88,12 +101,15 @@ jobs:
   # Accelerate. Linux and Windows ship that constant with neither true. This
   # runner is the only x86-64 hardware the project has, so the sweep lives here.
   #
-  # **Manual only.** It is a benchmark, not a gate: nothing about it should slow
-  # a push, and a shared runner's timings are noisy enough that a per-commit
-  # trend line would be a lie. Trigger it from the Actions tab when the question
-  # is open; read the flat bottom of the curve, not the argmax.
+  # **A development tool, and it never runs on `main`.** It is a benchmark, not
+  # a gate: nothing about it should slow a push, and a shared runner's timings
+  # are noisy enough that a per-commit trend line would be a lie. Read the flat
+  # bottom of the curve, not the argmax.
+  #
+  # Add the label **bench** to a PR and this job — and only this job — runs.
+  # Remove and re-add the label to run it again.
   bench-min-flops:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event.label.name == 'bench'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -140,6 +156,9 @@ jobs:
   build:
 
     runs-on: ubuntu-latest
+    # Skipped on a label event, which exists only to reach `bench-min-flops`.
+    # A push or a PR runs this exactly as before.
+    if: github.event.action != 'labeled'
     env:
       RUST_BACKTRACE: "1"
     strategy:
