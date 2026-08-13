@@ -171,31 +171,38 @@ use std::os::raw::{c_char, c_double, c_int};
 ///   and is half of why this constant is not zero.
 ///
 /// So `1.0e5` is the crossing on the machine it was swept on, and the reasoning
-/// above says x86-64's is lower. **That much is now measured, and the "plausibly
-/// at zero" half of it was wrong.** CI is the x86-64 box — `bench-min-flops` in
-/// `.github/workflows/python-package.yml`, sweeping this constant through
-/// `.github/bench/min_flops_sweep.py` — and on an AMD EPYC 9V74, 4 vCPU, no
-/// `avx512f`, geometric mean against the no-routing control:
+/// above says x86-64's is lower. **Measured, and the "plausibly at zero" half of
+/// it is wrong — but `1.0e5` is inside the basin there too, so the constant does
+/// not move.** CI is the x86-64 box: `bench-min-flops` in
+/// `.github/workflows/python-package.yml` sweeps this constant through
+/// `.github/bench/min_flops_sweep.py`. AMD EPYC 9V74, 4 vCPU,
+/// `sse4_2 avx avx2 fma` and no AVX-512, geometric mean against the no-routing
+/// control, with the shipped value **entered twice** so the table has a scale:
 ///
-/// | cutoff, kflop | ∞ | 1000 | 250 | **100** | 50 | 25 | 0 |
-/// |---|---|---|---|---|---|---|---|
-/// | x control | 1.000 | 0.997 | 1.050 | **1.071** | 1.087 | 1.116 | 0.993 |
+/// | cutoff, kflop | ∞ | 1000 | 250 | **100** | 50 | 25 | 0 | **ctl** = 100 |
+/// |---|---|---|---|---|---|---|---|---|
+/// | x control | 1.000 | 1.058 | 1.110 | **1.187** | 1.163 | 1.224 | 1.044 | **1.129** |
 ///
-/// Routing is worth up to 12% there, the curve keeps improving below the shipped
-/// value — and then **`0` collapses to 0.993, level with routing nothing at
-/// all**. The two regimes that make this constant exist are both visible in one
-/// column: at cutoff `0` the 320² factorize goes 36.8 → 64.5 ms, thousands of
-/// tiny calls each paying the vendor's dispatch, while `solve nrhs=32` goes
-/// 111.8 → 108.5, a few big ones finally winning. A floor at zero would need the
-/// first of those to stop being true, and it does not.
+/// The two 100-kflop columns differ by **5.7%**, which is this runner's
+/// resolution, and nothing narrower than that is a finding. Two things clear it:
 ///
-/// **The constant has not moved on the strength of it**, because that run
-/// carried no control column and 1.116 against 1.071 therefore has no scale.
-/// The harness now enters the shipped value twice and prints the gap. Until a
-/// controlled re-run, Linux and Windows ship a cutoff tuned on another ISA that
-/// is measurably in the right basin but not at its bottom, which costs speed and
-/// nothing else — every arm is correct, and `blas-all` still gates
-/// bit-exactness at zero.
+/// * **Routing is worth 11-22%** over not routing, so the cutoff earns its
+///   keep on this ISA as much as on the other one.
+/// * **`0` is wrong** — 1.044, against 1.129-1.224 for the basin. On the raw
+///   320² factorize it is 65.3 ms at `0` against 37.4-49.7 across `25`, `100`
+///   and `ctl`, reproduced on a second run at 64.5 against 39.1. That is the
+///   two regimes in one column: at `0` every one of a factorization's thousands
+///   of tiny calls pays the vendor's dispatch, while `solve nrhs=32` improves
+///   (109.3 against 115.0) because a few big calls are all it issues. A floor at
+///   zero needs the first of those to stop being true, and it does not.
+///
+/// What does *not* clear it is where inside the basin to sit: `25` reads best
+/// but beats `100` by **+3.8%, inside the 5.7% resolution**. An earlier
+/// uncontrolled run made that gap look like a finding at +4.2%; it was not. So
+/// x86-64 lands where aarch64 did — one flat floor, the shipped value in it —
+/// and moving the constant would be tuning on noise. Resolving inside the basin
+/// needs a quieter machine or an alternating design like `dev/sparse_gates/dso.py`,
+/// and there is no reason to think the answer would be worth the 4%.
 #[cfg(not(feature = "blas-all"))]
 pub const MIN_FLOPS: f64 = 1.0e5;
 
