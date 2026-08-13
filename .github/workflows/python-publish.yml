@@ -37,6 +37,14 @@
 name: Publish to PyPI
 
 on:
+  # A pull request is a **dry run**: the five build jobs run, `publish` cannot
+  # (it requires `github.event_name == 'release'`). Gated on the word `wheels`
+  # in the commit message, because four platforms is not something to spend on
+  # every push — same switch as `bench` in python-package.yml, and for the same
+  # reason `workflow_dispatch` is not enough: its button is read off the default
+  # branch, so on a feature branch it is a trigger that does not exist.
+  pull_request:
+    branches: [ "main" ]
   release:
     types: [published]
   workflow_dispatch:
@@ -45,7 +53,41 @@ permissions:
   contents: read
 
 jobs:
+  # Decides whether the four platform builds run. Five seconds, against jobs
+  # that are minutes each on four runners.
+  #
+  # A release or a manual dispatch always builds. A pull request builds only if
+  # the head commit's message says `wheels` — the message is not in a
+  # `pull_request` payload (that is `push`-only), hence the API call.
+  wheels-gate:
+    name: "wheels 1/2 — build them?"
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ github.event_name }} — building wheels."
+            exit 0
+          fi
+          msg=$(gh api "repos/${{ github.repository }}/commits/$SHA" --jq .commit.message)
+          echo "head commit ${SHA:0:7}:"
+          echo "$msg"
+          if printf '%s' "$msg" | grep -qi wheels; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::'wheels' is in the commit message — dry-running all four platform builds. Nothing is published: the publish job requires a release event."
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::no 'wheels' in the commit message — skipping the wheel builds. Put the word wheels in a commit message to dry-run them."
+          fi
   linux:
+    needs: wheels-gate
+    if: needs.wheels-gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -108,6 +150,8 @@ jobs:
           path: dist
 
   musllinux:
+    needs: wheels-gate
+    if: needs.wheels-gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -136,6 +180,8 @@ jobs:
           path: dist
 
   macos:
+    needs: wheels-gate
+    if: needs.wheels-gate.outputs.run == 'true'
     # GitHub retired the macos-13 (Intel) runners, so build BOTH mac arches on
     # the Apple-Silicon runner: the macOS toolchain is universal, so x86_64
     # cross-compiles cleanly. The wheel is identical to a native Intel build —
@@ -175,6 +221,8 @@ jobs:
           path: dist
 
   windows:
+    needs: wheels-gate
+    if: needs.wheels-gate.outputs.run == 'true'
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -229,6 +277,8 @@ jobs:
           path: dist
 
   sdist:
+    needs: wheels-gate
+    if: needs.wheels-gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
