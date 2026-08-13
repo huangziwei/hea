@@ -4,10 +4,13 @@
 # the sdist and needs a Rust toolchain on the user's machine. The crate is
 # abi3-py310, so ONE wheel per (os, arch) covers CPython 3.10+ (no Python
 # matrix). Linux uses the manylinux2014 container (glibc 2.17 → broad
-# compatibility) + musllinux (Alpine). Run via `workflow_dispatch` for a no-op
-# dry run that builds every wheel WITHOUT publishing (the publish job only runs
-# on a real release) — do that once before tagging, since release publishing is
-# one-shot.
+# compatibility) + musllinux (Alpine).
+#
+# **Dry-run it before tagging — release publishing is one-shot.** Put `wheels`
+# in a commit message on a PR and every wheel builds without publishing; the
+# publish job requires a `release` event, so no pull request can reach it. The
+# first time that dry run was ever executed it found eight defects, so this is
+# not a formality.
 #
 # ## Every wheel carries a vendor BLAS, and it is per platform
 #
@@ -29,11 +32,14 @@
 #   Windows    the same wheel; the DLL is not relocated by maturin, so
 #              `delvewheel` does it.
 #
-# musllinux is the exception and is deliberately NOT `blas-required`:
-# scipy-openblas32 publishes no musllinux wheel, so those builds take the
-# portable-kernel fallback on purpose. That is a real difference between the
-# Alpine wheel and the others, it is why the assertion below is skipped there,
-# and it should be revisited if a musl build appears upstream.
+# musllinux is the exception and is deliberately NOT `blas-required`: those
+# builds take the portable-kernel fallback, which is a real difference between
+# the Alpine wheel and the others and why the assertion is skipped there.
+#
+# The reason recorded for that used to be "scipy-openblas32 publishes no
+# musllinux wheel". **It does** — `musllinux_1_2_{x86_64,aarch64}`, since
+# 0.3.31.22.1 — so this is now a choice and not a constraint, and turning it on
+# is a change to what Alpine users get that wants its own dry run.
 name: Publish to PyPI
 
 on:
@@ -85,14 +91,32 @@ jobs:
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "::notice::no 'wheels' in the commit message — skipping the wheel builds. Put the word wheels in a commit message to dry-run them."
           fi
+
   linux:
     needs: wheels-gate
     if: needs.wheels-gate.outputs.run == 'true'
-    runs-on: ubuntu-latest
+    # **Both arches build natively; neither is cross-compiled.** aarch64 used to
+    # be, on an x86_64 `manylinux2014-cross` container, and every stage of that
+    # broke in a different way: pip resolved the x86_64 OpenBLAS for an aarch64
+    # link, and once that was fixed maturin's *repair* could not locate the
+    # library again — it resolves the wheel's `DT_NEEDED` against an ELF the
+    # host loader cannot touch, so it read `libscipy_openblas.so => not found`
+    # with the rpath sitting right there and `LD_LIBRARY_PATH` exported.
+    #
+    # A native ARM runner deletes the whole class: pip resolves for the machine
+    # it is on, auditwheel resolves against its own architecture, and — the part
+    # that is a coverage gain rather than a fix — the wheel can be *imported*,
+    # so the "carries OpenBLAS" assertion runs on aarch64 too instead of being
+    # skipped. Free for public repositories.
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64, aarch64]
+        include:
+          - target: x86_64
+            runner: ubuntu-latest
+          - target: aarch64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -122,42 +146,24 @@ jobs:
           # the wheel never builds. Hedging between two mechanisms is only free
           # when the wrong one is inert.
           #
-          # **`--platform`, because the container is x86_64 whatever the target
-          # is.** A plain `pip install` inside it resolves for the *container*,
-          # so an aarch64 build got the x86_64 OpenBLAS, `ld.bfd` skipped it as
-          # incompatible and reported `cannot find -lscipy_openblas`. pip
-          # requires `--target` alongside `--platform`, hence the explicit
-          # directory rather than `get_lib_dir()`. Both tags are passed because
-          # the wheel carries both and pip matches them literally.
-          #
-          # `LD_LIBRARY_PATH` is for maturin's *repair* step, not for the
-          # compiler, and the two arches need different amounts of help. The
-          # link succeeds either way, and then auditwheel has to find the
-          # library again to copy it into the wheel: on x86_64 it resolves all
-          # three (`libscipy_openblas`, `libgfortran`, `libquadmath`) out of the
-          # rpath `build.rs` emitted, but the aarch64 wheel is **cross-built**,
-          # so that resolution runs on an ELF the host loader cannot touch and
-          # it reported `libscipy_openblas.so => not found` with the rpath sat
-          # right there. An explicit search path is what it reads instead.
+          # A plain install now that the container matches the target: pip picks
+          # the right wheel because it is resolving for the machine it is on.
+          # The `--platform`/`--target` version this replaced existed only to
+          # hand a cross-compiler the foreign-arch library, and it could not
+          # help the repair step regardless.
           before-script-linux: |
-            python3 -m pip install --upgrade pip
-            python3 -m pip install scipy-openblas32 \
-              --no-deps --only-binary=:all: \
-              --platform manylinux2014_${{ matrix.target }} \
-              --platform manylinux_2_17_${{ matrix.target }} \
-              --target /opt/hea-openblas
-            export HEA_BLAS_LIB_DIR=/opt/hea-openblas/scipy_openblas32/lib
-            export LD_LIBRARY_PATH="$HEA_BLAS_LIB_DIR:${LD_LIBRARY_PATH:-}"
+            python3 -m pip install scipy-openblas32
+            HEA_BLAS_LIB_DIR=$(python3 -c 'import scipy_openblas32 as s; print(s.get_lib_dir())')
+            export HEA_BLAS_LIB_DIR
       - name: Assert the wheel carries OpenBLAS
         # A wheel that took the fallback passes every test and is 2.4x more CPU
         # on a large factorization. This is the only place that shows.
         #
-        # Native target only: the aarch64 wheel is cross-compiled here and
-        # cannot be imported on an x86_64 runner. `blas-required` already
-        # covers it at build time — this step is the belt to that's braces, and
-        # it is the one that would catch a build.rs that emitted the link flags
-        # but not the cfg.
-        if: matrix.target == 'x86_64'
+        # Runs on **both** arches now that neither is cross-compiled. It used
+        # to be x86_64-only because an aarch64 wheel built here could not be
+        # imported here, which left the arch with only `blas-required`'s
+        # build-time check — and that would not catch a `build.rs` emitting the
+        # link flags but not the cfg.
         # **Run from outside the checkout.** `python -c` puts the cwd first on
         # `sys.path`, so at the repo root the *source* `hea/` shadows the
         # installed wheel and the import dies on `No module named 'hea._rs'` —
