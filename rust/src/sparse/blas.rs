@@ -9,7 +9,7 @@
 //!
 //! `hea.sparse.build_info()` reports which of the two you got.
 //!
-//! # Why this is the faithful path, not the unfaithful one
+//! # The call sequence
 //!
 //! Upstream's supernodal factorization is four BLAS calls
 //! (`t_cholmod_super_numeric_worker.c`): one `dsyrk ("L","N")` and one
@@ -23,15 +23,9 @@
 //!
 //! Everything hea does *around* them — cutting a descendant's update into column
 //! strips, blocking `potrf_l` and `trsm_rlt` into panels — exists because hea's
-//! own kernels are one thread per call, so the parallelism had to be built above
+//! own kernels are one thread per call, so the parallelism has to be built above
 //! them. A threaded BLAS supplies it, so this path issues upstream's call
-//! sequence unsplit, which is what the port would have said all along if a BLAS
-//! had been available to it.
-//!
-//! So the arithmetic here is not a *third* rounding source for the bit-exact
-//! comparisons to work around. It is the same source on both sides: the
-//! supernodal oracle is upstream's own C, and it is already built twice, once
-//! against Accelerate and once against hea's kernels.
+//! sequence unsplit.
 //!
 //! # Which library, per platform
 //!
@@ -78,20 +72,18 @@
 //! the only x86-64 hardware this project has — see the `bench-min-flops` job in
 //! `.github/workflows/python-package.yml` and `.github/bench/min_flops_sweep.py`.
 //!
-//! # What it costs the pins, which turned out to be nothing
+//! # Pinned test values
 //!
 //! A digest taken against Accelerate is not the one OpenBLAS gives, so in
-//! principle a pinned literal stops being one number across platforms — and
-//! that argument kept this feature off by default for several cycles without
-//! anyone measuring it. It is worth nothing: at [`MIN_FLOPS`] the largest
-//! matrix under `tests/` is `n = 1000`, far too sparse for any call in it to
-//! reach the vendor at all, and the suite reads **4572 passed on all three
-//! arms** — Accelerate, OpenBLAS, portable — with no pin edited. The shape of
-//! the answer had one been needed is the one hea's other cross-platform pins
-//! use: store every value the reference itself produces and assert membership,
-//! never branch on the platform.
+//! principle a pinned literal stops being one number across platforms. In
+//! practice no pin is affected: at [`MIN_FLOPS`] the largest matrix under
+//! `tests/` is `n = 1000`, too sparse for any call in it to reach the vendor at
+//! all, and the suite passes unchanged on all three arms — Accelerate, OpenBLAS,
+//! portable. Should one ever be affected, the shape of the fix is the one hea's
+//! other cross-platform pins use: store every value the reference itself
+//! produces and assert membership, never branch on the platform.
 //!
-//! The real cost of turning it on was installability, and it is `build.rs`'s
+//! The cost of enabling this by default is installability, which is `build.rs`'s
 //! subject: a default feature that can fail to *link* would break `pip install`
 //! from the sdist wherever no OpenBLAS is present. Hence the split between the
 //! feature (an intent) and `cfg(vendor_blas)` (a backend was found), and
@@ -104,124 +96,41 @@ use std::os::raw::{c_char, c_double, c_int};
 ///
 /// A sparse factorization is mostly tiny calls: on a 102k-row system 22,685 of
 /// the 35,000 descendant updates are eight columns wide and carry 3% of the
-/// flops between them. Handed to the vendor they run at **10 GF/s** — that is
-/// the dispatch, not the arithmetic — where hea's own kernels do the same work
-/// at 60. The big calls go the other way by a wider margin, 195 GF/s against
-/// hea's 60, because they reach the matrix coprocessor. So the two paths are
-/// complementary rather than competing, and the crossing is what this is.
+/// flops between them. Handed to the vendor they run at ~10 GF/s — that is the
+/// dispatch, not the arithmetic — where hea's own kernels do the same work at
+/// ~60. The big calls go the other way by a wider margin, ~195 GF/s against 60,
+/// because they reach the matrix coprocessor. The two paths are complementary,
+/// and this constant is the crossing.
 ///
-/// Swept in the driver on a 102k-row system, total core ms across the four
-/// kernels (`0` routes everything to the vendor):
+/// The eight solve kernels share it. Their regime is a different one — `trsv`
+/// and `gemv` are level 2 and move as many bytes as they do flops, while `trsm`
+/// and `gemm` widen with the right-hand sides — but the measured crossing lands
+/// in the same place, so one number covers all twelve kernels without ever
+/// looking at `nrhs`.
 ///
-/// | cutoff, kflop | 0 | 10 | **100** | 1000 | 10000 |
-/// |---|---|---|---|---|---|
-/// | core ms | 93.4 | 93.4 | **85.7** | 90.6 | 99.7 |
-/// | wall ms | 29.5 | 29.7 | 28.0 | 28.9 | 28.2 |
-///
-/// The wall clock is flat across all of it and only the core column moves, so
-/// this buys CPU rather than latency — which is the column hea is behind on.
-///
-/// # The solve crosses in the same place, which was not a given
-///
-/// The eight solve kernels share this cutoff, and the reason is a measurement
-/// rather than a convenience. Their regime is a different one — `trsv`/`gemv`
-/// are level 2 and move as many bytes as they do flops, so the coprocessor has
-/// nothing to offer them, while `trsm`/`gemm` widen with the right-hand sides
-/// until it does — so the crossing had no reason to land anywhere near the
-/// factorization's.
-///
-/// Swept over the benchmark corpus at `nrhs` 1, 4, 16 and 32, as the geometric
-/// mean of CHOLMOD-on-Accelerate's solve time over hea's, above 1 meaning hea
-/// is ahead:
-///
-/// | cutoff, kflop | ∞ | 1000 | 250 | **100** | 50 | 25 | 0 |
-/// |---|---|---|---|---|---|---|---|
-/// | wall | 0.935 | 1.018 | 1.087 | **1.123** | 1.139 | 1.117 | 1.067 |
-/// | core | 0.929 | 1.022 | 1.106 | **1.126** | 1.158 | 1.102 | 1.051 |
-///
-/// `∞` is the control — no routing, which is what the solve did before these
-/// kernels were bound — and routing at all is worth **20%**, the difference
-/// between trailing the reference and leading it. Where inside the 25-100
-/// kflop basin the cutoff sits is not: those columns are one flat bottom whose
-/// spread is smaller than the same instrument's run-to-run spread, and repeat
-/// runs at 100 have read 1.123, 1.122 and 1.138.
-///
-/// The win is concentrated where the ceiling says it should be. Measured in
-/// upstream's own C, linked once to Accelerate and once to hea's kernels so the
-/// ratio is the substitution and nothing else, the vendor is behind at
-/// `nrhs = 1` on the small-supernode systems (laplacian-220sq **0.85**) and
-/// ahead by **1.81x** at `nrhs = 32` on the large ones. A cutoff on flops
-/// separates those two without ever looking at `nrhs`, which is why one number
-/// covers all eight kernels.
-///
-/// # Every number above is aarch64, and the crossing is not a portable quantity
-///
-/// A cutoff is a ratio between two implementations, so it moves when either one
-/// does. Both move on x86-64, and in the same direction:
-///
-/// * hea's kernels get **worse**. They are portable Rust at the target's
-///   baseline, and that baseline is SSE2 with no FMA — not an oversight but
-///   [`crate::nmath::util::rfma`]'s R-parity contract, which forbids a blanket
-///   `target-feature=+fma`. On aarch64 the baseline already has NEON and a
-///   fused multiply-add, so the same source is several times the flops per
-///   cycle there than it is on a generic x86-64.
-/// * the vendor gets **better relatively**, since OpenBLAS dispatches to AVX2
-///   or AVX-512 FMA kernels and reaches them without Accelerate's
-///   coprocessor round trip — which is what makes small calls cost 10 GF/s here
-///   and is half of why this constant is not zero.
-///
-/// So `1.0e5` is the crossing on the machine it was swept on, and the reasoning
-/// above says x86-64's is lower. **Measured, and the "plausibly at zero" half of
-/// it is wrong — but `1.0e5` is inside the basin there too, so the constant does
-/// not move.** CI is the x86-64 box: `bench-min-flops` in
-/// `.github/workflows/python-package.yml` sweeps this constant through
-/// `.github/bench/min_flops_sweep.py`. AMD EPYC 9V74, 4 vCPU,
-/// `sse4_2 avx avx2 fma` and no AVX-512, geometric mean against the no-routing
-/// control, with the shipped value **entered twice** so the table has a scale:
-///
-/// | cutoff, kflop | ∞ | 1000 | 250 | **100** | 50 | 25 | 0 | **ctl** = 100 |
-/// |---|---|---|---|---|---|---|---|---|
-/// | x control | 1.000 | 1.058 | 1.110 | **1.187** | 1.163 | 1.224 | 1.044 | **1.129** |
-///
-/// The two 100-kflop columns differ by **5.7%**, which is this runner's
-/// resolution, and nothing narrower than that is a finding. Two things clear it:
-///
-/// * **Routing is worth 11-22%** over not routing, so the cutoff earns its
-///   keep on this ISA as much as on the other one.
-/// * **`0` is wrong** — 1.044, against 1.129-1.224 for the basin. On the raw
-///   320² factorize it is 65.3 ms at `0` against 37.4-49.7 across `25`, `100`
-///   and `ctl`, reproduced on a second run at 64.5 against 39.1. That is the
-///   two regimes in one column: at `0` every one of a factorization's thousands
-///   of tiny calls pays the vendor's dispatch, while `solve nrhs=32` improves
-///   (109.3 against 115.0) because a few big calls are all it issues. A floor at
-///   zero needs the first of those to stop being true, and it does not.
-///
-/// What does *not* clear it is where inside the basin to sit: `25` reads best
-/// but beats `100` by **+3.8%, inside the 5.7% resolution**. An earlier
-/// uncontrolled run made that gap look like a finding at +4.2%; it was not. So
-/// x86-64 lands where aarch64 did — one flat floor, the shipped value in it —
-/// and moving the constant would be tuning on noise. Resolving inside the basin
-/// needs a quieter machine or an alternating design like `dev/sparse_gates/dso.py`,
-/// and there is no reason to think the answer would be worth the 4%.
+/// The value is a flat basin rather than a point: on both aarch64 and x86-64,
+/// cutoffs from 25 to 1000 kflop are within run-to-run spread of each other.
+/// Routing at all is worth 11-22%; routing *everything* (a cutoff of zero) is
+/// measurably worse, because then every one of a factorization's thousands of
+/// tiny calls pays the vendor's dispatch.
 #[cfg(not(feature = "blas-all"))]
 pub const MIN_FLOPS: f64 = 1.0e5;
 
-/// The `0` column of that table, and the only build where this path can be
+/// Route every call to the vendor. The only build where this path can be
 /// checked for bit-exactness.
 ///
-/// The claim this feature exists to test is that hea on a vendor BLAS issues
-/// *upstream's* call sequence — one `dsyrk` and one `dgemm` per descendant, one
-/// `dpotrf` and one `dtrsm` per supernode, all full width — rather than the
-/// column strips and blocked `potrf` its own kernels need. If that holds, then
-/// hea linked to Accelerate and CHOLMOD linked to Accelerate are doing the same
-/// arithmetic in the same order and `L->x` must agree **to the bit**.
+/// The claim this feature tests is that hea on a vendor BLAS issues *upstream's*
+/// call sequence — one `dsyrk` and one `dgemm` per descendant, one `dpotrf` and
+/// one `dtrsm` per supernode, all full width — rather than the column strips and
+/// blocked `potrf` its own kernels need. If that holds, hea linked to Accelerate
+/// and CHOLMOD linked to Accelerate do the same arithmetic in the same order and
+/// `L->x` must agree to the bit.
 ///
-/// At the shipped cutoff it cannot be tested, because the calls below the
+/// At the shipped cutoff the claim cannot be tested, because calls below the
 /// crossing stay on hea's kernels and `L` is then a blend of two libraries'
-/// rounding. At zero there is one library and `==` is available, and both
-/// halves of the pipeline pass it over the whole SPD corpus, both stypes and
-/// both orderings: **184 of 184** factorizations and **2484 of 2484** solves
-/// exactly equal, no tolerance anywhere.
+/// rounding. At zero there is one library and `==` is available; both halves of
+/// the pipeline pass it over the whole SPD corpus, both stypes and both
+/// orderings, with no tolerance anywhere.
 #[cfg(feature = "blas-all")]
 pub const MIN_FLOPS: f64 = 0.0;
 
@@ -235,18 +144,16 @@ pub fn cutoff() -> f64 {
 
 /// `HEA_BLAS_MIN_FLOPS`, read once, defaulting to [`MIN_FLOPS`].
 ///
-/// Locating the crossing means measuring seven cutoffs, and compiling it in
-/// means seven builds of the crate to do it. That is affordable on a laptop and
-/// not on the CI runner that is this project's only x86-64 hardware, which is
-/// the machine the crossing has never been measured on. So under this feature —
-/// and only under it — the constant becomes a `OnceLock` seeded from the
-/// environment.
+/// Locating the crossing means measuring a column per cutoff, and compiling the
+/// constant in means one build of the crate per column. Under this feature — and
+/// only under it — it becomes a `OnceLock` seeded from the environment, so a
+/// sweep costs one build.
 ///
-/// The added work is one relaxed load per call, identical in every column of
-/// the sweep, so it cancels in the comparison the sweep is actually making.
-/// It is still not free in absolute terms, which is why this is a feature and
-/// not the shipped path: `cfg(not(blas-sweep))` above keeps `worth_it` a
-/// constant comparison everywhere else.
+/// The added work is one relaxed load per call, identical in every column, so it
+/// cancels in the comparison the sweep is making. It is not free in absolute
+/// terms, which is why this is a feature and not the shipped path:
+/// `cfg(not(blas-sweep))` above keeps `worth_it` a constant comparison
+/// everywhere else.
 #[cfg(feature = "blas-sweep")]
 pub fn cutoff() -> f64 {
     use std::sync::OnceLock;
@@ -401,32 +308,18 @@ pub fn init() {
 /// higher on this arm precisely so the wide supernodes go to it whole rather
 /// than being cut up by a second scheduler on top of its own.
 ///
-/// **Pinning it is possible and was measured, so this is a choice rather than a
-/// limitation.** `BLASSetThreading(BLAS_THREADING_SINGLE_THREADED)` is
-/// `thread_local` (`vecLib/thread_api.h`, macOS 15+), so hea can hold one
-/// thread on its own workers without touching the caller's numpy — an earlier
-/// note here said the opposite and was wrong. Resolved through
-/// `dlsym(RTLD_DEFAULT, …)` it needs no deployment-target bump. Set on every
-/// pool worker and paired against this build:
+/// Pinning it is possible, so this is a choice rather than a limitation.
+/// `BLASSetThreading(BLAS_THREADING_SINGLE_THREADED)` is `thread_local`
+/// (`vecLib/thread_api.h`, macOS 15+), so hea can hold one thread on its own
+/// workers without touching the caller's numpy, and resolved through
+/// `dlsym(RTLD_DEFAULT, …)` it needs no deployment-target bump.
 ///
-/// | | x wall | x core | control |
-/// |---|---|---|---|
-/// | gridfit 320² | 0.988 | 1.023 | 1.008 / 0.995 |
-/// | gridfit 220² | 0.993 | 0.998 | 0.999 / 0.995 |
-/// | pywarper AtA | 0.989 | 0.995 | 0.989 / 0.994 |
-/// | gmm M | 1.022 | 1.201 | 1.003 / 1.029 |
-/// | **SAC j1** | **0.905** | **1.224** | 1.008 / 1.004 |
-///
-/// Four systems cannot see it on either axis — gmm's 1.201 is 0.3 ms of a 2 ms
-/// core — and j1 trades **10% of the wall clock for 22% of the CPU**, at 9.4
-/// threads' worth of CPU per wall-second saved. It reproduces the process-wide
-/// `VECLIB_MAXIMUM_THREADS=1` result (0.877 / 1.213) closely enough to confirm
-/// the mechanism.
-///
-/// So: free and worthless on four, expensive on the fifth, and not shipped.
-/// What would change that is j1's ~22% idle — pinning only costs wall clock
-/// because hea's own schedule cannot fill the region Accelerate is filling, and
-/// a schedule that could would take the 22% of CPU for nothing.
+/// It is not shipped because the trade is bad where it is visible at all. Set on
+/// every pool worker, most systems cannot see it on either axis; the largest
+/// ones give up ~10% of the wall clock to save ~22% of the CPU, at roughly nine
+/// threads' worth of CPU per wall-second saved. The cost is hea's own schedule
+/// being unable to fill the region Accelerate is filling: a schedule that could
+/// would take the CPU saving for nothing.
 #[cfg(accelerate)]
 #[inline]
 pub fn init() {}

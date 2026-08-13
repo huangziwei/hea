@@ -20,22 +20,22 @@ Spec
   from the caller's frame plus a default math/model env.
 - Math axis labels: pass LaTeX strings directly
   (``xlab=r"$\\hat{\\epsilon}_i$"``); an ``r_expr()`` translator for R's
-  ``expression()`` mini-language ships in a later phase.
+  ``expression()`` mini-language is not implemented.
 
 Dispatch table
 --------------
 ``plot(formula_str, data=df)``  : route on RHS dtype
     num ~ num, with multi-RHS                          → scatter (one panel per RHS term)
     num ~ factor                                       → boxplot grouped by factor
-    factor ~ num                                       → spineplot (TODO; deferred)
-    factor ~ factor                                    → mosaic (TODO; deferred)
+    factor ~ num                                       → spineplot (unimplemented)
+    factor ~ factor                                    → mosaic (unimplemented)
 ``plot(x, y)``                  : two numeric vectors  → scatter
 ``plot(vec)``                   : single vector        → vec vs index
 ``plot(lm_or_glm)``             : 4-panel diagnostic   → resid-fit / QQ / scale-loc / leverage
 
-Later additions: annotations (``abline``/``points``/``lines``/``legend``/``segments``/
-``qqline``), Faraway helpers (``qqnorm``/``halfnorm``/``termplot``), and the
-long tail (``matplot``/``stripchart``/``interaction_plot``/``r_expr``).
+Unimplemented: annotations (``abline``/``points``/``lines``/``legend``/
+``segments``/``qqline``), Faraway helpers (``qqnorm``/``halfnorm``/
+``termplot``), and ``matplot``/``stripchart``/``interaction_plot``/``r_expr``.
 """
 
 from .annotate import abline, legend, lines, points, qqline, rug, segments

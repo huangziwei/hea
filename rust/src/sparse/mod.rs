@@ -51,8 +51,9 @@ use amd::IntWidth;
 /// Returns `(Perm, info)`, with `Perm[k] = i` if row/column `i` of `A` is the
 /// `k`th row/column of `P A P'`. `info` carries AMD's `Info` array under its
 /// upstream names, plus the two derived quantities CHOLMOD reads back —
-/// `lnz = n + Info[AMD_LNZ]` and `fl = Info[AMD_NDIV] + 2*Info[AMD_NMULTSUBS_LDL]
-/// + n` (`cholmod_amd.c:177-180`). Both are slight upper bounds, and both are
+/// `lnz = n + Info[AMD_LNZ]` and
+/// `fl = Info[AMD_NDIV] + 2*Info[AMD_NMULTSUBS_LDL] + n`
+/// (`cholmod_amd.c:177-180`). Both are slight upper bounds, and both are
 /// what `cholmod_analyze`'s ordering trial loop ranks candidate orderings by.
 #[pyfunction]
 #[pyo3(signature = (n, indptr, indices, stype, dense=amd::DEFAULT_DENSE,
@@ -377,9 +378,9 @@ fn super_analyze(
 /// `nsrow`-by-`nscol` column-major block, and `minor`.
 /// `numeric_reps > 0` also returns `numeric_ms`, the best of that many
 /// factorizations against one symbolic analysis — the *re*factorization cost,
-/// which is what a caller holding a factor pays and what the plan's acceptance
-/// bar is stated in. It cannot be had by differencing two whole-pipeline
-/// timings: the analysis is a third of them and the noise swamps the rest.
+/// which is what a caller holding a factor pays. It cannot be had by
+/// differencing two whole-pipeline timings: the analysis is a third of them and
+/// the noise swamps the rest.
 #[pyfunction]
 #[pyo3(signature = (n, indptr, indices, data, stype, beta=0.0, ordering="best",
                     numeric_reps=0))]

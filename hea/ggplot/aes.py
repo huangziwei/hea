@@ -14,7 +14,7 @@ An ``Aes`` is a dict from canonical aesthetic name (``"x"``, ``"y"``,
 Disambiguation between "bare column name" and "expression" is delegated
 to the formula parser: it produces a typed AST. A single :class:`Name`
 node whose identifier matches a column means column lookup; any other
-AST shape is evaluated as an expression. See plan §13 Q3.
+AST shape is evaluated as an expression.
 """
 
 from __future__ import annotations

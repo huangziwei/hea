@@ -493,16 +493,11 @@ const PACK_KC: usize = 256;
 /// columns of `B` and `B` once per `PACK_MR` rows of `A`, so what matters is
 /// whether an operand survives between re-reads.
 ///
-/// Swept rather than left derived, against a build with no residency bound at
-/// all, one core, non-aliasing `lda`, packed/direct — the bound is where packing
-/// stops costing, and it never becomes a gain:
-///
-/// | `A`+`B` KB | 120 | 192 | 288 | 480 | 864 | 1632 | 2560 |
-/// |---|---|---|---|---|---|---|---|
-/// | packed/direct | 0.67 | 0.85 | 0.90 | 0.94 | 0.96 | 0.99 | 1.01 |
-///
-/// So packing is not a win left on the table below a megabyte; it is a copy that
-/// pays only once the operand would not have survived anyway — or once the
+/// Swept rather than left derived, on one core with non-aliasing `lda` against a
+/// build with no residency bound at all: packing costs 33% at a 120 KB working
+/// set, and the cost decays to nothing at about a megabyte without ever becoming
+/// a gain. So packing is not a win left on the table below that; it is a copy
+/// that pays only once the operand would not have survived anyway — or once the
 /// strides collide, which is a different question and
 /// [`strides_want_packing`]'s.
 const PACK_MIN_BYTES: usize = 1 << 20;
@@ -518,24 +513,16 @@ const PACK_MIN_BYTES: usize = 1 << 20;
 /// is two re-streams against a copy of two: packing cannot win there however
 /// large the operand, and a size test alone lets it try.
 ///
-/// Which is what happened. On eight threads `strip_width` cuts a descendant's
-/// update into narrow strips, and [`syrk_ln_strip`]'s rectangle then issues
-/// `gemm_nt` with `n` equal to the strip width — on gridfit 320², 124 calls with
-/// a *median `n` of 8* and `m` of 620, so `m · k · 8` clears a megabyte on its
-/// own and the copy is spread over eight uses. Timing only those calls, inside
-/// the real factorization, total ms across the arm:
-///
-/// | `n` floor | 8 (was) | 16 | 32 | 64 | 128 | never pack |
-/// |---|---|---|---|---|---|---|
-/// | 8 threads | 13.87 | **10.91** | 10.83 | 10.95 | 10.66 | 11.76 |
-/// | 1 thread | 14.06 | 14.02 | 14.08 | 14.01 | 14.15 | 17.41 |
-///
-/// Flat from 16 on, so the whole effect is the `n = 8` calls and `PACK_NR * 4`
-/// is the crossing rather than a fitted constant. Note the last column: never
-/// packing is *worse* than packing at `n >= 16`, so the answer was never to
-/// switch the arm off — and note the one-thread row, where the floor costs
-/// nothing and packing is still worth 3.4 ms. A bound swept on one core missed
-/// this because one core never produces the narrow strips.
+/// A size test alone does let it try. On several threads `strip_width` cuts a
+/// descendant's update into narrow strips, and [`syrk_ln_strip`]'s rectangle
+/// then issues `gemm_nt` with `n` equal to the strip width — commonly a median
+/// `n` of 8 against an `m` in the hundreds, so `m · k · n` clears a megabyte on
+/// its own while the copy is spread over only eight uses. Timed inside the real
+/// factorization, a floor on `n` is worth ~20% of those calls and the curve is
+/// flat from 16 up, so the whole effect is the `n = 8` calls and `PACK_NR * 4`
+/// is the crossing rather than a fitted constant. Not packing at all is worse
+/// than either, on one thread by 20%, so the floor is the fix and switching the
+/// arm off is not.
 ///
 /// [`strides_want_packing`] already required `PACK_NR * 4`, measured (0.83 at
 /// 8, 1.08 at 16). The two arms now agree, which they had no reason not to: the
@@ -595,33 +582,18 @@ fn strides_alias(ld: usize) -> bool {
 /// Whether to pack because the strides collide, rather than because the
 /// operands are large.
 ///
-/// **[`wants_packing`] is a residency test and this is not.** Set aliasing bites
-/// at 128 KB exactly as hard as at 43 MB, so gating it behind
-/// [`PACK_MIN_BYTES`] — as [`gemm_sub`] originally did, and as [`gemm_nt`] did
-/// by having no aliasing arm at all — left every smaller call on the cliff. On
-/// the corpus's own flop-weighted median `dgemm`, `m` = 255, `n` = 149,
-/// `k` = 106, that is 27.9 GFLOP/s against the 47.2 the packed path gets.
+/// [`wants_packing`] is a residency test and this is not. Set aliasing bites at
+/// 128 KB exactly as hard as at 43 MB, so gating it behind [`PACK_MIN_BYTES`]
+/// leaves every smaller call on the cliff: on the corpus's own flop-weighted
+/// median `dgemm`, `m` = 255, `n` = 149, `k` = 106, that is 27.9 GFLOP/s against
+/// the 47.2 the packed path gets.
 ///
-/// Each bound is where the measured gain crosses 1, against a build that packs
-/// on [`strides_alias`] alone with no shape test whatever, both timed in one
-/// process at an aliasing `lda = ldb`:
-///
-/// | `k`, at 512×128 | 6 | 7 | 8 | **9** | 10 | 12 | 14 | 16 |
-/// |---|---|---|---|---|---|---|---|---|
-/// | packed/direct | 1.00 | 1.03 | 1.03 | **1.15** | 1.21 | 1.48 | 1.68 | 1.66 |
-///
-/// | `n`, at 512×·×64 | 4 | 6 | 8 | 10 | 12 | **16** | 20 | 24 |
-/// |---|---|---|---|---|---|---|---|---|
-/// | packed/direct | 0.62 | 0.86 | 0.83 | 0.99 | 1.00 | **1.08** | 1.15 | 1.12 |
-///
-/// | `m`, at ·×128×64 | 16 | 20 | 24 | 28 | **32** | 40 | 48 | 64 |
-/// |---|---|---|---|---|---|---|---|---|
-/// | packed/direct | 0.81 | 1.07 | 0.95 | 1.09 | **1.03** | 1.09 | 1.16 | 1.24 |
-///
-/// **`k > L1_WAYS` is the mechanism's own floor, not a fitted one**, and the
-/// table is what confirms the mechanism: a walk of eight or fewer columns has a
-/// way for each of them however they collide, so there is nothing to win, and
-/// the gain is 1.00-1.03 up to exactly eight and climbs from exactly nine.
+/// Each bound is where the measured gain crosses 1, swept against a build that
+/// packs on [`strides_alias`] alone with no shape test whatever. `k > L1_WAYS`
+/// is the mechanism's own floor rather than a fitted one, and the sweep confirms
+/// the mechanism: a walk of eight or fewer columns has a way for each of them
+/// however they collide, so there is nothing to win, and the measured gain is
+/// flat at 1.00-1.03 up to exactly eight and climbs from exactly nine.
 ///
 /// The shape tests come first so a call that could not benefit never pays for
 /// the address arithmetic — the majority of calls in a sparse factorization are
@@ -971,26 +943,23 @@ fn slab_sub<const MR: usize>(
 /// read into `acc` before the `l` loop and written back after it, so the loop
 /// itself touches only `a` and `b`, which are plain shared borrows.
 ///
-/// **The two ends move whole rows, and that is not a tidiness choice.** Written
-/// entry at a time, `c [j0 + jj] [i + ii]` is a bounds-checked double
+/// The two ends move whole rows, and that is load-bearing rather than tidy.
+/// Written an entry at a time, `c [j0 + jj] [i + ii]` is a bounds-checked double
 /// indirection, and `MR * NR` of them at each end put a panicking edge between
 /// every pair of writes into `acc`. LLVM will not promote an array that has to
-/// be consistent at that many exits, so `acc` stayed in memory and the `l` loop
-/// — which never touches `c` at all — came out **scalar and spilling**: 79
-/// `fsub` against [`tile_sub`]'s 49 `fsub.2d`, 218 loads against 73. That is an
-/// exact factor of two on a kernel that was already near the machine's ceiling,
-/// and it was the whole reason threading looked broken: each worker ran at
-/// 15.5 GFLOP/s where the serial path ran at 29, so two threads bought
-/// **nothing at all** and eight bought 2.1x. Slicing `[i .. i + MR]` once per
-/// column instead leaves `NR` checks per end and hands LLVM a fixed-size copy;
-/// the vector form comes back and with it the scaling (2 threads 1.00x → 1.60x,
-/// 8 threads 2.13x → 2.60x).
+/// be consistent at that many exits, so `acc` stays in memory and the `l` loop —
+/// which never touches `c` at all — comes out scalar and spilling: 79 `fsub`
+/// against [`tile_sub`]'s 49 `fsub.2d`, 218 loads against 73. That is a factor
+/// of two on a kernel already near the machine's ceiling, and it destroys
+/// threading rather than merely slowing the kernel: each worker runs at
+/// 15.5 GFLOP/s where the serial path runs at 29, so two threads buy nothing.
+/// Slicing `[i .. i + MR]` once per column leaves `NR` checks per end and hands
+/// LLVM a fixed-size copy; the vector form comes back and the scaling with it.
 ///
 /// `A`'s `MR` values are hoisted into `av` for the same reason [`tile_nt`] does
-/// it, though **here it measured neutral** — 0.1-1% across the `dtrsm` shapes,
-/// inside the noise, so LLVM was already hoisting. It stays because this
-/// function is the one with a two-times codegen collapse in its history, and the
-/// idiom is what pins it; do not re-measure expecting a win.
+/// it. It measures neutral here — 0.1-1% across the `dtrsm` shapes, inside the
+/// noise, so LLVM is already hoisting — but the idiom is what pins the codegen
+/// this function is fragile about, so it stays.
 ///
 /// Also the packed scattered path's tile: a packed panel is what it already
 /// reads, with `lda` set to [`PACK_MR`] and `ldb` to [`PACK_NR`].
@@ -1065,12 +1034,12 @@ fn slab_scat<const MR: usize>(
 ///
 /// Same shape as [`gemm_sub`], including its dispatch — a task packs on exactly
 /// the condition the serial path packs on, so threading a call does not change
-/// which kernel runs it. **Leaving the aliasing arm out of this one made adding
-/// a thread a pessimization**, not merely a missed gain: on `dtrsm` 1024×1024,
-/// whose `ld` is `n + m` = 2048 and therefore aliases, the serial path packs and
-/// the parallel path did not, so two threads ran 1.6x *slower* than one (24.6 →
-/// 40.2 ms) and eight recovered only 1.75x. At `ld` = 4096 eight threads were
-/// worth **1.17x**. The non-aliasing neighbour scales 3.55x on the same code.
+/// which kernel runs it. Omitting the aliasing arm here makes adding a thread a
+/// pessimization rather than merely a missed gain: on `dtrsm` 1024×1024, whose
+/// `ld` is `n + m` = 2048 and therefore aliases, the serial path packs, so a
+/// non-packing parallel path runs 1.6x *slower* on two threads than the serial
+/// one and recovers only 1.75x on eight. The non-aliasing neighbour scales 3.55x
+/// on the same code.
 #[allow(clippy::too_many_arguments)]
 fn block_scat(
     k: usize,
@@ -1272,33 +1241,24 @@ const PAR_OVER: usize = 4;
 /// `(((c - a0 b0) - a1 b1) - ...)` over all of `k` in index order, at any block
 /// size.
 ///
-/// It is not free for speed, and it is the single largest constant in this
-/// file. **What the block has to fit is not `B`'s doubles but the *cache lines*
-/// both operands touch.** A `k` block reads `kb` columns of each, and a column
-/// is a short contiguous run at a stride of `ld` doubles, so it costs whole
-/// lines however few of its bytes are wanted: one to two lines per column of
-/// `A`'s eight-row slab and two or more per column of `B`. The old value sized
-/// `B`'s *doubles* against L1 — 8192 of them, 64 KB — which is 256 columns at
-/// `n = 32` and, counted in lines, three to four times the L1 it was supposed to
-/// fit inside. Swept on the shapes `potrf_l` and `trsm_rlt` issue, one core,
-/// GFLOP/s:
+/// It is not free for speed, and it is the single largest constant in this file.
+/// What the block has to fit is not `B`'s doubles but the *cache lines* both
+/// operands touch. A `k` block reads `kb` columns of each, and a column is a
+/// short contiguous run at a stride of `ld` doubles, so it costs whole lines
+/// however few of its bytes are wanted: one to two lines per column of `A`'s
+/// eight-row slab and two or more per column of `B`. Sizing `B`'s doubles
+/// against L1 instead — 8192 of them, 64 KB — is 256 columns at `n = 32` and,
+/// counted in lines, three to four times the L1 it is supposed to fit inside.
 ///
-/// | `kb` | 256 | 64 | 32 | **16** | 8 | 4 |
-/// |---|---|---|---|---|---|---|
-/// | `dpotrf` n=5344 | 33.8 | 47.8 | 49.6 | **53.3** | 39.0 | 28.6 |
-/// | `dpotrf` n=3000 | 47.5 | 53.8 | 54.2 | **56.4** | 43.6 | 35.5 |
-/// | `dtrsm` 4174×1170 | 38.7 | 51.4 | 51.7 | **55.5** | 41.5 | 33.3 |
-/// | `dpotrf` n=1239 | 50.4 | 53.6 | 53.7 | **53.9** | 43.3 | 36.9 |
-/// | `dtrsm` 832×387 | 47.1 | 49.5 | 50.9 | **51.1** | 40.3 | 33.2 |
+/// Swept on the shapes `potrf_l` and `trsm_rlt` issue: every shape peaks at 16
+/// and improves monotonically on the way down to it, so this is one optimum
+/// rather than a compromise between two regimes. Below 16 the register tile runs
+/// out of work to hide the reload of `C` — `MR·NR` loads and stores bracket
+/// `kb·MR·NR` multiply-adds, which is 2.3 flops per load at `kb = 16` and 1.6 at
+/// `kb = 4`.
 ///
-/// Every shape peaks at 16 and every shape improves monotonically on the way
-/// down to it, so this is one optimum rather than a compromise between two
-/// regimes. Below 16 the register tile runs out of work to hide the reload of
-/// `C`: `MR·NR` loads and stores bracket `kb·MR·NR` multiply-adds, which is
-/// 2.3 flops per load at `kb = 16` and 1.6 at `kb = 4`.
-///
-/// Constant, where it used to divide `KC_DOUBLES` by `n`. It is a bound on how
-/// far *down a column* a pass walks, and `n` does not enter that.
+/// Constant rather than `KC_DOUBLES / n`: it bounds how far *down a column* a
+/// pass walks, and `n` does not enter that.
 const KB_SUB: usize = 16;
 
 /// [`gemm_sub`] with the rows of `C` split across threads.

@@ -25,9 +25,9 @@ from ._shared import _as_array, _fmt, _fmt_pval, _rfma
 # Module level closes a cycle: ``hea.family`` imports ``hea.R.nmath``, which
 # runs ``hea/R/__init__.py``, which imports this module, which would import
 # ``hea.models`` -- whose ``bam`` imports ``hea.family`` straight back. The
-# eager ``hea/__init__.py`` used to hide it by loading ``hea.R`` first; a lazy
-# one does not, and whichever of the two a caller touches first decides. It is
-# also weight: nothing in ``hea.R`` needs ``bam``/``gam``/``glm`` at import.
+# An eager ``hea/__init__.py`` hides that by loading ``hea.R`` first; a lazy one
+# does not, and whichever of the two a caller touches first decides. It is also
+# weight: nothing in ``hea.R`` needs ``bam``/``gam``/``glm`` at import.
 
 
 def _avg_rank(a) -> np.ndarray:

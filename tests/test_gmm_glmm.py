@@ -2470,8 +2470,7 @@ def test_glmer_predict_random_only_matches_lme4_poisson():
     """``random.only=True`` returns Z·b on the link scale (no X·β, no offset).
 
     Tolerance covers cross-BLAS drift in the Z·b dense multiplication path
-    (~3e-9 abs Linux-OpenBLAS vs reference); see top of test_gmm_glmm.py
-    "FP precision floor" note in the plan.
+    (~3e-9 abs Linux-OpenBLAS vs reference).
     """
     from hea.family import Poisson as PoissonFamily
     from hea.models.gmm import gmm
@@ -3306,8 +3305,7 @@ def test_bootMer_is_seed_reproducible():
     """Same seed ⇒ identical bootstrap draws. The simulated *responses* are
     bit-identical (the RNG is the bit-exact MT); the refit statistics agree to
     the BLAS cross-fit floor (~1e-12 — refits go through CHOLMOD/BLAS, whose
-    reductions aren't bit-stable across separate fits, see
-    [[cross-fit-deviance-residual-blas-flake]])."""
+    reductions aren't bit-stable across separate fits)."""
     m = gmm("Yield ~ 1 + (1|Batch)", load_dataset("lme4", "Dyestuff"))
     # the RNG-driven part is exactly reproducible
     s1 = m.simulate(nsim=15, seed=99).to_numpy()
@@ -3533,7 +3531,7 @@ def test_glmm_predicates_and_logLik_method():
     # logLik() == Laplace logLik (= loglike == −deviance_Laplace/2)
     assert m.logLik() == pytest.approx(m.loglike, abs=0)
     assert m.logLik() == pytest.approx(-0.5 * m.deviance_laplace, abs=0)
-    # the two deviances genuinely differ, so the old −residual_dev/2 was wrong
+    # the two deviances genuinely differ, so −residual_dev/2 is not logLik
     assert m.deviance != pytest.approx(m.deviance_laplace, abs=1e-6)
     # getME on a GLMM + generic routing
     np.testing.assert_array_equal(R.getME(m, "theta"), m.theta)

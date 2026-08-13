@@ -95,8 +95,8 @@ The factor itself is sized by the matrix, not by the thread count: ``L`` is
 4.7 GB there, and what hea holds beyond it is one workspace, one ``Map`` per
 worker, and ``A``'s pattern.
 
-The API mirrors the slice of ``sksparse.cholmod`` hea and pywarper use, with two
-additions CHOLMOD has and scikit-sparse 0.5.0 does not expose:
+The API mirrors the slice of ``sksparse.cholmod`` hea uses, with two additions
+CHOLMOD has and scikit-sparse 0.5.0 does not expose:
 ``system="P"`` / ``"Pt"``, which is what any caller doing its own triangular
 solve against :attr:`Factor.L` needs, since ``L @ L.T == A[p][:, p]`` rather
 than ``A``.
@@ -327,7 +327,7 @@ class Factor:
         estimate says it is worth looking further, METIS — keeping the one with
         the smaller ``nnz(L)`` — so this reports what it settled on. The
         difference is not cosmetic: on a crossed random-effects matrix METIS
-        gives 41% less fill than AMD, and on a 3.4M-row conformal system 27%.
+        gives 41% less fill than AMD, and 27% on a 3.4M-row mesh.
         """
         return self._F.ordering
 
@@ -377,17 +377,17 @@ def cho_factor(
     METIS's own cost outruns the fill it saves. :attr:`Factor.order` reports
     what ``"best"`` chose.
 
-    **What that trade is worth**, on a 3.4M-row conformal system where the
-    strategy selects METIS: the ordering costs **10.4 s against AMD's 0.64**,
-    and buys 380.5M nonzeros in ``L`` against 523.0M — so every subsequent
-    :meth:`Factor.refactorize` does **2.2x less work**. The up-front cost pays
-    for itself somewhere around **five to ten factorizations** (the range is
-    real: the numeric side of this system is memory-bound, so how many depends
-    on how much of a 3-4 GB factor stays resident). Below that, ``"amd"`` wins
-    the whole job — 2.4x faster for a single factorize-and-solve. The strategy
-    cannot see how many times you will reuse the factor, so on a large one-shot
-    solve it is the caller who has to say. None of this is visible at small
-    sizes, where the whole analysis is milliseconds either way.
+    What that trade is worth, on a 3.4M-row mesh where the strategy selects
+    METIS: the ordering costs 10.4 s against AMD's 0.64, and buys 380.5M
+    nonzeros in ``L`` against 523.0M, so every subsequent
+    :meth:`Factor.refactorize` does 2.2x less work. The up-front cost pays for
+    itself somewhere between five and ten factorizations — the spread is real,
+    since the numeric side of a system this size is memory-bound and depends on
+    how much of a 3-4 GB factor stays resident. Below that ``"amd"`` wins the
+    whole job, 2.4x faster for a single factorize-and-solve. The strategy cannot
+    see how many times the factor will be reused, so on a large one-shot solve
+    it is the caller who has to say. None of this is visible at small sizes,
+    where the whole analysis is milliseconds either way.
 
     ``use_ll`` defaults to ``True`` here, where CHOLMOD's own default is
     ``LDL'``, because that is what ``sksparse.cholmod.cho_factor`` does and this

@@ -935,21 +935,13 @@ pub enum Method {
     Pinned(Ordering),
 }
 
-/// The default strategy's method list — now exactly upstream's.
+/// The default strategy's method list — exactly upstream's.
 ///
 /// `cholmod_analyze.c:452-455` sets `{CHOLMOD_GIVEN, CHOLMOD_AMD,
 /// CHOLMOD_METIS}` (or `NESDIS` for `Common->default_nesdis`), and
 /// `CHOLMOD_GIVEN` is skipped whenever `UserPerm` is `NULL` (`:609-613`). This
 /// port has no user-permutation argument, so its effective list is the same
 /// two methods upstream runs.
-///
-/// This slot used to hold `CHOLMOD_NATURAL`, because the port had no METIS.
-/// That substitution was the one documented deviation in the candidate set, and
-/// it was not free: on the SAC conformal system at `conformal_jump = 1` it cost
-/// 523.0M `nnz(L)` against METIS's 380.5M, i.e. 3.0x on the numeric
-/// factorization. Natural's own case — `hea.models.gmm`'s crossed
-/// random-effects matrices, where it beat AMD outright — is now covered by
-/// METIS, which beats both there.
 pub const DEFAULT_METHODS: [Ordering; 2] = [Ordering::Amd, Ordering::Metis];
 
 /// What `permute_matrices` hands back (`cholmod_analyze.c:172-176`).

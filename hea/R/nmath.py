@@ -110,7 +110,7 @@ def _disp(name, scalar_fn, num_args, flags=()):
         return kern(*flat, *flags).reshape(shape)
     # No native extension: use the numpy-vectorized pure-Python kernel if one is
     # registered (bit-identical, ~C-speed); else the scalar loop (the bratio /
-    # Newton-quantile kernels are not vectorizable cheaply — see plan §5).
+    # Newton-quantile kernels are not vectorizable cheaply).
     py_vec = _PY_VEC.get(name)
     if py_vec is not None:
         r = py_vec(*num_args, *flags)

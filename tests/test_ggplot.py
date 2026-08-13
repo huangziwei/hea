@@ -233,7 +233,7 @@ def test_plus_list_adds_each_in_order():
 
 
 def test_aes_expression_evaluated_via_formula_parser():
-    """Per plan §13 Q3: aes value `"log(wt)"` parses as a Call node and is
+    """aes value `"log(wt)"` parses as a Call node and is
     evaluated, not treated as a (missing) column literally named `log(wt)`."""
     import numpy as np
 

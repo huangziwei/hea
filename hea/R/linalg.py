@@ -13,9 +13,9 @@ calls from ``lm.fit`` / ``lm.wfit`` via ``Cdqrls`` (``stats/src/lm.c``):
 
 This is the **pure-Python spec + oracle** for the Rust port (``hea/_rs`` →
 ``dqrls``); it mirrors the Fortran line-for-line (pivot order, rank rule, the
-1e-6 norm-recompute branch) so Rust ≡ Python ≡ live R is checkable per
-[[rng-rust-port-t2]]. Per [[mechanical-port-never-guess]]: ported against the
-real sources, not reverse-engineered. ``pivot`` is returned 1-based (R parity).
+1e-6 norm-recompute branch) so Rust ≡ Python ≡ live R is checkable. Ported
+against the real sources, not reverse-engineered. ``pivot`` is returned 1-based
+(R parity).
 """
 
 from __future__ import annotations

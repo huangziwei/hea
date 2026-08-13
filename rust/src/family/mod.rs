@@ -6,8 +6,7 @@
 //! with data-dependent control flow numpy can't vectorize (`cox`'s risk-set
 //! sweep) or a large temporary to eliminate (`tweedie`'s `(n, J)` series
 //! matrix). Plain element-wise deviance tables (`$Dd`) are NOT here: numpy's
-//! vectorized-SIMD `power`/`log` beat a scalar-libm rayon port for those
-//! (measured — see [[mgcv-perf-refactor]] W3.ext.2).
+//! vectorized-SIMD `power`/`log` beat a scalar-libm rayon port for those.
 
 use pyo3::prelude::*;
 

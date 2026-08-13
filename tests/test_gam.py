@@ -2270,7 +2270,7 @@ def test_get_difference_matches_itsadug(itsadug_fitted_model, case_id: str):
         )
 
         # crit is the empirical type-8 0.95 quantile of the MASD over
-        # n_sim=10000 MVN draws. hea now draws via mgcv::rmvn on R's *bit-exact*
+        # n_sim=10000 MVN draws. hea draws via mgcv::rmvn on R's *bit-exact*
         # MT stream (RMersenneTwister.rmvn, seeded with the fixture's
         # set.seed) — given identical Vc/p the quantile reproduces R's to
         # ~1e-12 (see test_rmvn_matches_r). The residual ~4e-3 here is NOT
@@ -2280,7 +2280,7 @@ def test_get_difference_matches_itsadug(itsadug_fitted_model, case_id: str):
         # off the same stream. Basis-invariant quantities (difference / CI /
         # se_fit above) match to ~5e-6; bit-exact crit would need full
         # column-for-column basis parity. 8e-3 covers the measured gap with
-        # margin and is ~6× tighter than the old cross-RNG bound.
+        # margin and is ~6× tighter than a cross-RNG bound would need to be.
         ref_crit = float(pl.read_csv(case_dir / "crit.csv")["crit"][0])
         np.testing.assert_allclose(
             res.crit,
@@ -2327,8 +2327,8 @@ def test_cohort_y_matches_basic(itsadug_fitted_model):
 #
 # Reference values: R mgcv 1.9-4 run locally on the exact CSV each numpy
 # generator below reproduces (tests never call R). The testStat pins
-# discriminate against the old single-statistic F-only path, which is ~15%
-# off on the low-p Gaussian case below.
+# discriminate against a single-statistic F-only path, which is ~15% off on
+# the low-p Gaussian case below.
 # =============================================================================
 
 
@@ -2627,10 +2627,10 @@ def test_id_singleton_is_noop():
 
 
 def test_bam_links_id_like_gam():
-    """bam grew gam's working-θ L-matrix layer (plan P9): id= now shares ONE
-    working λ across the linked smooths instead of being rejected. Full
-    mgcv-bam parity (sp/edf/criterion/fitted) lives in test_bam.py §7; here we
-    just confirm bam links the same structure gam does on the shared fixture."""
+    """bam has gam's working-θ L-matrix layer: id= shares ONE working λ across
+    the linked smooths. Full mgcv-bam parity (sp/edf/criterion/fitted) lives in
+    test_bam.py §7; this confirms bam links the same structure gam does on the
+    shared fixture."""
     from hea.models.bam import bam
 
     d = _id_linked_data()
@@ -3734,8 +3734,8 @@ def test_weights_gamma_log_reml_matches_mgcv():
     np.testing.assert_allclose(m.null_deviance, 193.5417200300, rtol=0, atol=1e-7)
     np.testing.assert_allclose(m.deviance, 69.7617899100, rtol=0, atol=1e-7)
     # storedaic (family aic + 2·edf) pins exactly; AIC adds 2·(edf2−edf).
-    # edf2 tightened post-B9 (Fisher-seed Vc2; Gamma-log is non-canonical
-    # so the old Newton-seed Vc2 was off here too — measured Δ 5.7e-12).
+    # edf2 uses the Fisher-seed Vc2; Gamma-log is non-canonical, so a
+    # Newton-seed Vc2 is off here by Δ 5.7e-12.
     np.testing.assert_allclose(m._mgcv_aic, 457.8559119000, rtol=0, atol=1e-5)
     np.testing.assert_allclose(m.AIC, 458.4093699300, rtol=0, atol=1e-6)
 
@@ -4680,8 +4680,8 @@ def test_plain_quasi_identity_link_full_newton_matches_mgcv():
 def _scat_fixture():
     # R-native (set.seed(2): runif bit-identical; rt within ~3e-15 from rgamma's
     # GD float-ordering gap, via rchisq — negligible vs the pins). Heavier-tailed seed
-    # ν≈4.24 (well-determined) replaces the old numpy seed-99 sample: R-native
-    # seed 99 lands ν≈26, a flat/ill-conditioned region. mgcv 1.9-4 pins below.
+    # ν≈4.24, well-determined. R-native seed 99 lands ν≈26, a flat and
+    # ill-conditioned region, so it is not used. mgcv 1.9-4 pins below.
     from hea.R.rng import RGenerator
 
     g = RGenerator(2)
@@ -5682,9 +5682,9 @@ def test_fit5_fully_penalized_summary_matches_mgcv():
     # reTest → recov (mgcv.r:3599), which consumes the model R factor
     # ``b$R`` verbatim — for general families that is
     # gam.fit5.post.proc's root with R'R = −lbb, not the PIRLS
-    # √W·X factor (which fit5 never stores; ``_recov`` used to read it
-    # unguarded and summary() crashed on any general fit with a cc/cp/re
-    # smooth). One fixture drives all three recov consumptions:
+    # √W·X factor, which fit5 never stores — reading it unguarded crashes
+    # summary() on any general fit with a cc/cp/re smooth. One fixture drives
+    # all three recov consumptions:
     #   m1 s(x,cc)        — reTest, no random siblings (LRB branch);
     #   m2 s(x,cc)        — reTest conditioning on s(g,re) as random
     #                       (the R1/R2 split + L-inflation branch);
@@ -9085,8 +9085,7 @@ def test_qq_gam_plot_and_gaulss_simulation():
         ["y ~ s(x) + w", "~ s(z)"], _fit5_fixture(), family=gaulss(), method="REML"
     )
     # gaulss HAS rd in mgcv (gamlss.r:1089) — qq.gam takes the
-    # simulation path (no qf → rep=50 via rd), NOT a qqnorm fallback
-    # (family-review A3; the old B2 record claimed otherwise).
+    # simulation path (no qf → rep=50 via rd), NOT a qqnorm fallback.
     qq = mg._qq_gam_quantiles(seed=0)
     assert qq["Dq"] is not None
     # Monte-Carlo-level: deviance residuals are (y−μ̂)·τ̂ ≈ N(0,1) at the
@@ -11799,8 +11798,8 @@ def test_check_reports_mgcv_method_and_optimizer():
     for m, expected in cases:
         assert hdr(m) == expected
 
-    # The discrete rail reports bgam.fitd's prop grad/hess (bam.r:884), not
-    # the fabricated "fixed by user" line the old code emitted.
+    # The discrete rail reports bgam.fitd's prop grad/hess (bam.r:884), not a
+    # fabricated "fixed by user" line.
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         bam("y ~ s(x)", d, method="fREML", discrete=True).check(plots=False)

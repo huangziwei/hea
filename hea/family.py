@@ -2123,7 +2123,8 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     ``m_dwpp`` (E[wp1·j/(1−p)+wpp]) — the same set as :func:`_tweedie_log_a_one`,
     matching mgcv ``tweedious`` (`wdlogwdp/wi`, `wdW2d2W/wi`, `dWpp/wi`,
     misc.c:346-503) BEFORE the θ-chain. Combining ``wp1²+wp2`` per term (rather
-    than the old separate ``E[(jψ)²]``/``E[j²ψ']`` moments + subtraction) avoids
+    than accumulating ``E[(jψ)²]`` and ``E[j²ψ']`` separately and subtracting)
+    avoids
     the ~1e-11 catastrophic cancellation in the 2nd derivatives. Entries with
     y==0 are 0 (the y=0 row uses the closed-form point mass, not the series).
     Per-obs phi handles weights via ``φ_i = φ/wt_i``.
@@ -4514,7 +4515,7 @@ class Tweedie(Family):
             # well-conditioned working accumulators: m_wp1 = E[∂logW/∂p],
             # m_comb = E[(∂logW/∂p)² + ∂²logW/∂p²], m_dwpp = E[∂logW/∂p·j/(1−p)
             # + ∂²logW/∂p∂logφ]. Combining (∂logW/∂p)²+∂²logW/∂p² PER TERM avoids
-            # the ~1e-11 cancellation the old separate-moment split incurred.
+            # the ~1e-11 cancellation a separate-moment split incurs.
             d2p_ser[~zero] = m_comb - m_wp1**2
             cross_ser[~zero] = m_dwpp - (jb / om1) * m_wp1
 

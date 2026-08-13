@@ -3,15 +3,15 @@ R-style formula parser + design-matrix generator.
 
 Consumes a formula string in R syntax — WR fixed-effects ops (+, -, *, :, /,
 ^, %in%, .), lme4 random-effect bars ((... | g), (... || g)), and mgcv smooth
-constructors (s, te, ti, t2) — and will eventually emit whatever design
-matrices the formula implies: X always, Z/Lambdat/theta if bars appear,
-per-smooth blocks if smooth constructors appear.
+constructors (s, te, ti, t2) — and emits whatever design matrices the formula
+implies: X always, Z/Lambdat/theta if bars appear, per-smooth blocks if smooth
+constructors appear.
 
-This module is the library's core. It replaces the old formulaic dependency.
-
-Current state: tokenizer + parser + term algebra. The term-expansion layer
-produces R-compatible term labels (used as ground truth in fixture X_meta.json)
-and separates fixed-effect terms from lme4 RE bars. No X/Z materialization yet.
+The layers are tokenizer (:func:`tokenize`), parser (:func:`parse`), term
+algebra (:func:`expand`, producing R-compatible term labels) and
+materialization (:func:`materialize`, :func:`materialize_bars`,
+:func:`materialize_smooths`). :func:`prepare_design` is the entry point every
+model class consumes.
 """
 
 from __future__ import annotations
@@ -1024,7 +1024,7 @@ def _contains_dot(node) -> bool:
 # Current scope: identity/log/exp/sqrt/abs/scale, I(…), arithmetic,
 # factor()/as.factor()/ordered()/C() with treatment/sum/helmert/SAS/poly,
 # raw-mode poly() (for matching R's `poly(x, n, raw = TRUE)` columns).
-# Not yet: bs(), ns(), orthogonal poly(), cut(), pmin/pmax.
+# Unhandled: bs(), ns(), orthogonal poly(), cut(), pmin/pmax.
 
 
 import contextlib
@@ -6414,9 +6414,9 @@ def _tp_eval_X_raw(
     mgcv's kernel-eval path (knots ≠ data; `XBuild`, tprs.c:560).
 
     Speed/memory: the radial table E is filled **row-chunked** so the (n, nu, d)
-    distance temporary (the old ½ GB allocation) never fully materialises, and
-    d=1 takes a 2-D ``diff`` (no length-1 axis to reduce). **Bit-identical to
-    the old unchunked build:** the chunked fill is elementwise (each E entry is
+    distance temporary (half a gigabyte at scale) never fully materialises, and
+    d=1 takes a 2-D ``diff`` (no length-1 axis to reduce). **Bit-identical to an
+    unchunked build:** the chunked fill is elementwise (each E entry is
     the same scalar regardless of chunking — for d=1 the 2-D diff equals the
     (n,nu,1) form reduced over a no-op axis), and the matmul is done **once on
     the full E** (NOT per chunk — a per-chunk matmul drifts ~1 ULP under
@@ -8597,7 +8597,7 @@ def _tensor_prod_S(
     carry several penalties: `Sm_lists[i]` is margin `i`'s penalty list (one for
     cr/ps/tp; several for ad). mgcv stops on multi-penalty margins
     (smooth.r:773); this is the hea extension that lifts each one. Single-penalty
-    margins reproduce the old output bit-for-bit (same order, same symmetrise).
+    margins are bit-for-bit what mgcv gives (same order, same symmetrise).
 
     Returns the lifted penalties (margin-grouped) and a parallel list giving each
     penalty's source-margin index (so fx margins can drop all their penalties).
@@ -9571,11 +9571,10 @@ def materialize_smooths(
 # (next to the RHS-eval primitives) so the formula compiler owns both
 # sides of the tilde.
 #
-# Lives here per the single-consumer rule: ``design`` was only consumed
-# by the model files and existed only because we previously split it out;
-# folding it removes a circular import (``formula`` had to do lazy
-# ``from .design import long_form_view`` / ``is_matrix_col`` to break
-# the cycle).
+# Lives here per the single-consumer rule: the model files are the only
+# consumers, and folding it in removes a circular import — as a separate
+# ``design`` module, ``formula`` needs lazy ``from .design import
+# long_form_view`` / ``is_matrix_col`` to break the cycle.
 #
 # Public symbols (``Design``, ``prepare_design``, ``normalize_data``,
 # ``is_matrix_col``, ``matrix_to_2d``, ``long_form_view``) are reachable as

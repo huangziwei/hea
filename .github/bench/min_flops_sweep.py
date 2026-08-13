@@ -1,26 +1,20 @@
 """Where does the vendor BLAS start beating hea's own kernels on this ISA?
 
 `sparse::blas::MIN_FLOPS` is the per-call flop count above which a dense kernel
-is handed to the vendor. It is `1.0e5`, and **every measurement behind that
-number was taken on aarch64** — where hea's kernels compile to a baseline that
-has NEON and a fused multiply-add, and where the vendor is Accelerate, whose
-coprocessor round trip is half of why the cutoff is not zero.
+is handed to the vendor. A cutoff is a ratio between two implementations, so it
+moves when either one does, and both move between aarch64 and x86-64: hea's
+kernels get worse there (the target baseline is SSE2 with no FMA, which
+`nmath::util::rfma`'s R-parity contract forbids widening), while OpenBLAS gets
+better (AVX2/AVX-512, dispatched at run time by `DYNAMIC_ARCH`). This sweep
+locates the crossing on whichever machine it runs on.
 
-Linux and Windows ship that constant with neither of those things true. Both
-sides of the ratio move on x86-64 and in the same direction: hea's kernels get
-worse (the target baseline is SSE2 with no FMA — not an oversight, but
-`nmath::util::rfma`'s R-parity contract, which forbids a blanket
-`target-feature=+fma`), and OpenBLAS gets better (AVX2/AVX-512, dispatched at
-run time by `DYNAMIC_ARCH`). So the x86-64 crossing is somewhere below `1.0e5`,
-plausibly at zero. This script is the receipt.
-
-**It does not need CHOLMOD, and that is the point.** The question is not "is hea
-faster than the reference" but "for a call of F flops, which of hea's own two
-paths is faster" — so the instrument is hea against hea, with only the cutoff
-moving. Nothing external to link, nothing to install, no corpus to fetch.
+It needs no CHOLMOD. The question is not "is hea faster than the reference" but
+"for a call of F flops, which of hea's own two paths is faster", so the
+instrument is hea against hea with only the cutoff moving — nothing external to
+link, nothing to install, no corpus to fetch.
 
 Requires a `blas-sweep` build, which reads the cutoff from the environment
-instead of compiling it in, so seven columns cost one build rather than seven:
+instead of compiling it in, so the whole sweep costs one build:
 
     maturin develop --release --features blas-sweep,blas-required,blas-openblas
     python .github/bench/min_flops_sweep.py
@@ -40,18 +34,16 @@ import scipy.sparse as sp
 # is what the kernels did before the vendor was bound; `0` hands the vendor every
 # call. The shipped constant is 100.
 #
-# `ctl` is 100 again, entered a second time and **last**, so the gap between it
-# and the `100` column is this run's resolution — including whatever the runner
+# `ctl` is 100 again, entered a second time and last, so the gap between it and
+# the `100` column is this run's resolution, including whatever the runner
 # drifted over the whole sweep. Without it the table is a row of numbers with no
 # scale, and every difference in it reads as a finding.
 CUTOFFS = ("inf", "1000", "250", "100", "50", "25", "0", "ctl")
 KFLOP = {"inf": "1e300", "ctl": "100"}
 
-# 2D grid Laplacians. The real corpus (pygridfit's LHS, pywarper's AtA) is not
-# in the repo -- `dev/` is ignored -- and does not need to be: a cutoff is a
-# property of the CALL SHAPES a factorization issues, and a banded 2D grid
-# issues the same spread of small-to-middling supernodes these consumers do.
-# Sizes bracket the corpus: 110², 220², 320².
+# 2D grid Laplacians, which need no data files. A cutoff is a property of the
+# call shapes a factorization issues, and a banded 2D grid issues the same
+# spread of small-to-middling supernodes real systems of this size do.
 SIZES = tuple(int(v) for v in os.environ.get("SWEEP_N", "110,220,320").split(","))
 REPS = int(os.environ.get("SWEEP_REPS", "5"))
 NRHS = (1, 4, 16, 32)

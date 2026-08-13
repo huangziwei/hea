@@ -73,11 +73,11 @@ This package is the result of splitting the legacy ``hea/R.py`` (one
 from __future__ import annotations
 
 #: Every name this namespace re-exports, mapped to the sub-module that defines
-#: it, so nothing is imported until it is touched. Eager re-export made a
+#: it, so nothing is imported until it is touched. Eager re-export makes a
 #: *cycle*: `hea.family` needs `hea.R.nmath`, importing it runs this file, and
-#: this file used to pull `htest` and `model_selection`, which import
-#: `hea.models` -- whose `bam` imports `hea.family` straight back. It survived
-#: only while `hea/__init__.py` happened to load `hea.R` before `hea.family`.
+#: this file would pull `htest` and `model_selection`, which import
+#: `hea.models` -- whose `bam` imports `hea.family` straight back. That survives
+#: only while `hea/__init__.py` happens to load `hea.R` before `hea.family`.
 #: It is also weight: nothing in the base-R namespace needs `bam`/`gam`/`glm`
 #: at import time, and `hea.R.nmath` is a numeric leaf that should not cost
 #: them.

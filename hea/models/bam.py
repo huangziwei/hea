@@ -6490,22 +6490,19 @@ class bam(gam):
                 #     loop (fast-REML.r:1740-1875), driving the SAME
                 #     ``_pi_fit_chol`` evaluator. The ``elif`` after this.
                 #
-                # Both reach the SAME optimum (verified: mgcv bgam.fit and
-                # bgam.fitd BOTH give Tweedie sp 0.258993) — cadence does not
-                # change the result. The FIX for plan item P19 (scale-UNKNOWN
-                # Gamma / inverse-Gaussian / fixed-p Tweedie / extended φ) is
-                # using *these* (Gaussian-working-REML) optimisers instead of
-                # the old ``_outer_newton``, which minimised ``_reml`` — the
-                # FULL non-Gaussian REML carrying the family's ``ls0(φ)``
+                # Both reach the SAME optimum (mgcv bgam.fit and bgam.fitd both
+                # give Tweedie sp 0.258993) — cadence does not change the
+                # result. Scale-UNKNOWN families (Gamma, inverse-Gaussian,
+                # fixed-p Tweedie, extended φ) must use *these*
+                # Gaussian-working-REML optimisers rather than
+                # ``_outer_newton``, which minimises ``_reml`` — the FULL
+                # non-Gaussian REML carrying the family's ``ls0(φ)``
                 # saturated-likelihood term (what mgcv-**gam** uses). On the
                 # reduced (R, f) that is a DIFFERENT objective with a different
-                # φ̂ optimum (Tweedie sp 0.207, not 0.259) — the divergence was
-                # the WRONG OBJECTIVE, not loose convergence (the tight
-                # ``√eps`` ``_fast_reml_fit`` reproduces 0.207 too when fed
-                # ``_reml``; only ``_pi_fit_chol``'s Gaussian working REML
-                # hits 0.259). ``_outer_newton`` now serves only
-                # ``method == "GCV.Cp"`` (no REML/φ formulas) — the final
-                # ``else``.
+                # φ̂ optimum (Tweedie sp 0.207, not 0.259); only
+                # ``_pi_fit_chol``'s Gaussian working REML hits 0.259.
+                # ``_outer_newton`` serves only ``method == "GCV.Cp"`` (no
+                # REML/φ formulas) — the final ``else``.
                 if method in ("REML", "ML") and self._discrete_design is not None:
                     # Lazily build the shared ``Sl`` (gam's ``Sl.setup``) on
                     # first PIRLS iter — depends only on the slot S matrices,
@@ -6578,7 +6575,7 @@ class bam(gam):
                             # bgam.fitd:696 `if (scale>0) log.phi <-
                             # log(scale)` — a FIXED φ ≠ 1 (bam(scale=))
                             # enters Sl.fitChol's criterion; φ=1 paths
-                            # give the old 0.
+                            # give 0.
                             log_phi_try = float(np.log(self._scale_fixed_value))
                         # ``Sl.initial.repara`` (fast-REML.r:517-588,
                         # bam.r:664-665) — reparameterize XX, Xy into mgcv's
@@ -7833,8 +7830,8 @@ def discrete_mf(
     # contributes one slot per marginal VARIABLE plus ``(by != None)``; each
     # parametric variable contributes 1. A multi-D margin (e.g. a 2-D ad/tp
     # space margin, ``d=c(1,2)``) has >1 variable and is jointly discretised one
-    # ``ik`` per variable, so counting per-margin (the old behaviour) undersizes
-    # ``nr``/``ks`` and crashes; count per-variable to match.
+    # ``ik`` per variable, so counting per-margin undersizes ``nr``/``ks`` and
+    # crashes; count per-variable to match.
     nk = 0
     for spec in smooth_specs:
         margins = spec.get("margins", [{"term": spec["term"]}])
@@ -8455,10 +8452,10 @@ def _append_smooth_discrete_term(
     # smooth folds too: its by-marginal has `p=1`, so it neither reorders nor
     # widens the term, and `by·(X_raw @ T) == absorb.apply(by·X_raw)`.
     #
-    # (Applying this used to take the n=438k factor-`by` fit from 36 to 121
-    # PIRLS builds. The cause was not the fold — it reassociates rounding, and
-    # a chol2qr round trip on the discrete rail was amplifying that; see
-    # `_bgam_fit_loop`, where X'WX now reaches Sl.fitChol as accumulated.)
+    # The fold reassociates rounding, which a chol2qr round trip on the
+    # discrete rail amplifies enough to triple the PIRLS build count on a
+    # large factor-`by` fit. `_bgam_fit_loop` avoids that by handing X'WX to
+    # Sl.fitChol as accumulated.
     fold_T = None
     if len(margin_raws) == 1 and (
         spec.absorb is not None or spec.keep_cols is not None

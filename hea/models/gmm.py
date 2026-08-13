@@ -3519,7 +3519,7 @@ class _NloptStopInfo:
 class _NloptResult:
     """scipy-``OptimizeResult``-shaped return from :func:`_nlopt_ln_bobyqa`
     (``.x``/``.fun``/``.nfev``/``.success``) so it drops into the LMM fit path
-    where the old ``scipy.optimize.minimize`` result was used."""
+    in place of a ``scipy.optimize.minimize`` result."""
 
     def __init__(self, x, fun, nfev, success, message):
         self.x = x

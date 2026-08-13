@@ -28,8 +28,7 @@
 //! per concurrently-running task, and the pool retains one set per worker plus
 //! nothing over [`C_KEEP_DOUBLES`]. On a 3.4M-row system that is 210 MB of
 //! `Map` held and up to `nthreads × maxcsize` of `C` in flight against
-//! upstream's one — the price of the parallelism, and it is a price rather than
-//! an accident.
+//! upstream's one. That is the memory cost of the parallelism.
 //!
 //! **`S` is the *lower* triangle here**, not the upper one the simplicial
 //! `rowfac` takes. `cholmod_factorize_p`'s supernodal branch builds
@@ -325,14 +324,14 @@ pub struct SuperWork {
     descs: Vec<Desc>,
     counters: Counters,
     /// The batch size, in flops, at which the updates of one supernode go
-    /// wide — [`PAR_FLOPS`], except in [`SuperWork::pinned`].
+    /// wide — [`PAR_FLOPS`], except under `SuperWork::pinned`.
     par_flops: f64,
     /// The subtree size, in flops, at which a supernode's children are forked
-    /// rather than run in index order — [`TREE_FLOPS`], except in
-    /// [`SuperWork::pinned`].
+    /// rather than run in index order — [`TREE_FLOPS`], except under
+    /// `SuperWork::pinned`.
     tree_flops: f64,
     /// Take [`worker`]'s fused link-list walk rather than [`par_numeric`]. Set
-    /// only by [`SuperWork::pinned`]; the fallback itself does not need it,
+    /// only by `SuperWork::pinned`; the fallback itself does not need it,
     /// since it is reached by [`par_numeric`] returning `false`.
     force_serial: bool,
 }
@@ -432,7 +431,7 @@ impl Desc {
 ///
 /// [`worker`] keeps its own fused walk rather than reading this, because on a
 /// non-positive-definite matrix upstream *replays* the walk for the failing
-/// supernode (`repeat_supernode`, `:301-318`) and the plan assumes success.
+/// supernode (`repeat_supernode`, `:301-318`) and [`Plan`] assumes success.
 #[derive(Debug, Clone, Default)]
 struct Plan {
     /// `descs [dptr [s] .. dptr [s+1])` are supernode `s`'s updates.
@@ -688,60 +687,24 @@ const BATCH_DOUBLES: usize = 4 << 20;
 /// *is* the parallelism, which is why the number is four orders of magnitude
 /// below the `accelerate` one below.
 ///
-/// Raising it was swept on both, paired against the shipped value with the
-/// reference build entered twice as its own control. Portable arm, wall / core
-/// ratios, above 1 meaning cheaper than 5.0e5:
-///
-/// | | control | 1.5e6 | 5.0e6 |
-/// |---|---|---|---|
-/// | gridfit 320² | 0.985 / 0.993 | 0.994 / 0.994 | 0.996 / 1.024 |
-/// | gridfit 220² | 1.005 / 1.015 | 1.001 / 1.019 | 1.004 / 1.038 |
-/// | pywarper AtA | 1.004 / 1.031 | 1.036 / 1.057 | 1.021 / 1.117 |
-/// | gmm M | 0.980 / 1.002 | 0.970 / 0.986 | 0.994 / 1.037 |
-/// | **SAC j1** | 0.970 / 0.995 | — | **0.929 / 0.966** |
-///
-/// The four small systems agree, weakly: 5.0e6 is a wash on wall and worth
-/// 2-8% of core net of the control, because a batch that no longer forks does
-/// not pay for the join. **At 3.4M rows it reverses** — 6% of the wall clock
-/// and 3% of the core, both outside the control — and the wall clock at scale
-/// outranks 3% of core on a 35 ms factorization. The OpenBLAS arm reads the
-/// same shape and smaller (320² core 1.039 against a 1.000 control, j1 not
-/// re-run), so nothing here separates the two backends.
-///
-/// One regime gaining what the other loses is what this constant has always
-/// done, so the sweep is recorded rather than acted on. What would settle it is
-/// a machine where OpenBLAS is the *right* backend, and this is not one:
-/// measured here it trails the portable kernels outright (320²: 49.6 ms against
-/// 34.9), because aarch64's baseline has NEON and an FMA while the coprocessor
-/// beyond it is Accelerate-only. On x86-64 the baseline is SSE2 with no FMA —
-/// deliberately, per [`crate::nmath::util::rfma`] — so the same two kernels
-/// stand in the opposite order and this sweep says nothing about them.
+/// Raising it trades the two regimes against each other, which is why it stays
+/// where it is. Small systems gain a few percent of core from batches that no
+/// longer fork and so no longer pay for the join; multi-million-row systems lose
+/// several percent of the wall clock, and the wall clock at scale outranks core
+/// on a 35 ms factorization. Both backends on this arm read the same shape.
 #[cfg(not(accelerate))]
 const PAR_FLOPS: f64 = 5.0e5;
 
-/// **Four orders of magnitude higher when the BLAS threads the call itself**,
-/// which is the same predicate [`strip_width`] splits on and for the same
-/// reason: with Accelerate underneath, forking the descendants of one supernode
-/// puts a second scheduler on top of the vendor's own, and it is pure loss on
-/// both axes. Paired against the shipped value, five matrices, refactorize
-/// wall / core ms, `--features blas`:
-///
-/// | | 5.0e5 | 3.0e7 | 1.0e8 | **1.0e9** | never fork |
-/// |---|---|---|---|---|---|
-/// | gridfit 320² | 21.3 / 87.6 | 20.5 / 77.5 | 20.5 / 71.8 | **19.9 / 64.0** | 20.3 / 62.7 |
-/// | gridfit 220² | 8.5 / 37.3 | 8.3 / 28.7 | 8.4 / 24.1 | **8.3 / 22.4** | — |
-/// | gridfit 110² | 1.63 / 6.6 | 1.42 / 4.1 | 1.43 / 4.2 | **1.43 / 4.2** | — |
-/// | pywarper AtA | 5.6 / 23.4 | 5.2 / 16.7 | 5.1 / 15.6 | **5.1 / 15.0** | 5.0 / 15.3 |
-/// | gmm M | 2.03 / 3.2 | 1.63 / 1.7 | 1.64 / 1.6 | **1.63 / 1.5** | 1.64 / 1.5 |
-///
-/// The wall clock does not pay for it — it *improves* — and the CPU falls
-/// 1.37-2.17x, against a same-build control that read 0.95-1.03. At 3.4M rows
-/// (SAC j1) the whole sweep is inside the control on wall and 1.10x on core, so
-/// the large regime neither gains nor objects: its own updates are far above
-/// any of these thresholds and fork regardless.
+/// Four orders of magnitude higher when the BLAS threads the call itself, which
+/// is the same predicate [`strip_width`] splits on and for the same reason: with
+/// Accelerate underneath, forking the descendants of one supernode puts a second
+/// scheduler on top of the vendor's own, and it is pure loss on both axes.
+/// Raising it to here costs nothing on the wall clock — it improves — and drops
+/// the CPU by 1.4-2.2x. Multi-million-row systems neither gain nor object: their
+/// own updates are far above any threshold in this range and fork regardless.
 ///
 /// Without a threaded BLAS this fork *is* the parallelism and raising it is a
-/// 1.75x wall regression on gridfit 320², which is why the two arms differ.
+/// 1.75x wall regression, which is why the two arms differ.
 #[cfg(accelerate)]
 const PAR_FLOPS: f64 = 1.0e9;
 
@@ -751,7 +714,7 @@ const TREE_FLOPS: f64 = 1.0e6;
 
 /// A valve, not a tuning knob: past this nesting the children are walked in
 /// index order whatever their weight, so a pathological tree cannot recurse the
-/// stack away. Measured nesting on the benchmark corpus is 9-23.
+/// stack away. Real elimination trees nest an order of magnitude below it.
 const MAX_FORK_DEPTH: u32 = 48;
 
 /// Roughly what one strip of one update should be worth. Small enough that the
@@ -763,17 +726,13 @@ const STRIP_FLOPS: f64 = 1.0e5;
 /// a cache.
 ///
 /// A strip `w` columns wide re-reads the whole of the descendant's `L1` and uses
-/// each element `w` times, so `w` *is* the update's arithmetic intensity.
-/// Measured at the shapes a 3.4M-row system's flop-heavy updates have
-/// (`m` 2534-4174, `k` 1306-1578, one core):
+/// each element `w` times, so `w` *is* the update's arithmetic intensity. On one
+/// core the kernel climbs steeply from 8 columns to 128 and is flat past it, so
+/// 128 is where the width stops paying for itself.
 ///
-/// | columns | 8 | 16 | 32 | 64 | 128 | 256 | 1024 |
-/// |---|---|---|---|---|---|---|---|
-/// | GF/s | 29 | 38 | 45 | 51 | 53 | 55 | 56 |
-///
-/// [`STRIP_FLOPS`] alone put those descendants at the left end of it — millions
-/// of flops per column, so a single column already met the budget — and cut a
-/// 1306-column update into 163 strips.
+/// [`STRIP_FLOPS`] alone puts the flop-heavy descendants of a large system at the
+/// left end of that curve — millions of flops per column, so a single column
+/// already meets the budget — and cuts a 1300-column update into 163 strips.
 const STRIP_MIN_COLS: usize = 128;
 
 /// How big the operand a strip re-reads has to be before [`STRIP_MIN_COLS`]
@@ -783,14 +742,37 @@ const STRIP_MIN_COLS: usize = 128;
 ///
 /// The gate is on the mechanism rather than on a size threshold for the matrix,
 /// because the mechanism is what differs: applying [`STRIP_MIN_COLS`]
-/// unconditionally cost 10-16% on gridfit and pywarper, whose descendants stream
-/// a few hundred kilobytes and want every task the flop budget will give them.
+/// unconditionally costs 10-16% on systems whose descendants stream a few
+/// hundred kilobytes and want every task the flop budget will give them.
 const STRIP_RESIDENT_BYTES: usize = 2 << 20;
 
 /// The most strips a *non-resident* descendant is cut into, per thread — a
-/// bound on the count, where [`STRIP_MIN_COLS`] is a bound on the width.
-/// Measured: 2 cost gridfit 320² 12% and 8 cost the 3.4M-row system 15%.
+/// bound on the count, where [`STRIP_MIN_COLS`] is a bound on the width. It is
+/// an interior optimum: halving it costs the small regime ~12% and doubling it
+/// costs the large one ~15%.
 const STRIP_OVER: usize = 4;
+
+/// Roughly how many strips per thread one batch of updates is cut into, and so
+/// where the relative budget in [`strip_width`] crosses [`STRIP_FLOPS`] and
+/// starts to bind at all.
+///
+/// A strip exists for load balance, and load balance wants a few tasks per
+/// thread — not a count proportional to the work. [`STRIP_FLOPS`] alone is an
+/// absolute budget, so a batch with a hundred times the flops in it gets a
+/// hundred times the tasks, all of which the pool has to hand out and collect.
+/// That is right where there is not enough work to go round and pure overhead
+/// where there is.
+///
+/// 16 is an interior optimum, and unusually for the width constants in this file
+/// it is not a trade between the two regimes: it is the best value on small and
+/// large systems alike, worth 2-6% of the wall clock over the plain absolute
+/// budget. At 64 a trade does reappear, costing the small regime ~9% of its core
+/// for the same wall clock, the strips having grown wide enough to unbalance the
+/// tail.
+///
+/// Only the `not(accelerate)` arm reaches this: [`strip_width`] hands the whole
+/// update to a threading BLAS before any of it runs.
+const STRIP_TASKS: usize = 16;
 
 /// How many columns of one update's `C` go in a strip.
 ///
@@ -804,7 +786,7 @@ const STRIP_OVER: usize = 4;
 ///
 /// On one thread there is nothing to balance, so the strip is the whole update
 /// and the kernel gets its widest call.
-fn strip_width(g: &Desc, nt: usize) -> usize {
+fn strip_width(g: &Desc, nt: usize, batch_flops: f64) -> usize {
     let ndrow1 = g.ndrow1 as usize;
     /* A threaded BLAS wants upstream's whole call, and the split exists only to
      * give a one-thread-per-call kernel a shape. That is a statement about the
@@ -819,7 +801,12 @@ fn strip_width(g: &Desc, nt: usize) -> usize {
         return ndrow1.max(1);
     }
     let per_col = 2.0 * g.ndrow2 as f64 * g.ndcol as f64;
-    let mut cols = (STRIP_FLOPS / per_col).ceil().max(1.0) as usize;
+    /* Relative to the batch and floored at the absolute budget, so a
+     * flop-heavy batch gets *wider* strips rather than more of them, and a
+     * batch below the crossing falls back to the absolute budget entry for
+     * entry. See `STRIP_TASKS`. */
+    let budget = (batch_flops / (STRIP_TASKS * nt) as f64).max(STRIP_FLOPS);
+    let mut cols = (budget / per_col).ceil().max(1.0) as usize;
     if 8 * g.ndrow2 as usize * g.ndcol as usize > STRIP_RESIDENT_BYTES {
         cols = cols
             .max(STRIP_MIN_COLS)
@@ -1017,22 +1004,20 @@ fn grow_c(buf: &mut Vec<f64>, need: usize) {
 /// is a batch: the buffers are live simultaneously, so their total size is
 /// capped.
 ///
-/// **That constraint stops here.** Inside one [`assemble`] the column loop is
-/// disjoint and upstream threads it; this docstring used to be read as
-/// "assembly is serial", which quietly made an un-ported `#pragma omp` look
-/// like a deliberate bit-exactness decision.
+/// That constraint stops here: inside one [`assemble`] the column loop is
+/// disjoint, and upstream threads it.
 ///
 /// The parallel and serial arms differ only in *which* `C` buffer each update
 /// gets, and in whether its columns are cut into strips. Both compute the same
 /// `C` entries the same way and hand them to [`assemble`] in the same order.
 ///
-/// **The arm is chosen on the work, not on the batch size.** It used to require
-/// `batch.len() > 1`, which reads like a concurrency test and is really a
+/// The arm is chosen on the work, not on the batch size. Requiring
+/// `batch.len() > 1` would read like a concurrency test but is really a
 /// statement about buffer count: the batch loop stops once the live `C`s reach
 /// [`BATCH_DOUBLES`], so a descendant whose own `C` exceeds that is always alone
 /// in its batch — and that is precisely the descendant with the most flops in
-/// it. On a 3.4M-row system the largest `C` is 139 MB and every update of that
-/// size took the serial arm.
+/// it. On a multi-million-row system the largest `C` runs to hundreds of
+/// megabytes, so every one of the heaviest updates would take the serial arm.
 fn apply_updates(
     ctx: &Ctx,
     descs: &[Desc],
@@ -1085,7 +1070,7 @@ fn apply_updates(
                 let mut tasks: Vec<(Desc, usize, usize, &mut [f64])> = Vec::new();
                 for (buf, g) in bufs.iter_mut().zip(batch) {
                     let (ndrow1, ndrow2) = (g.ndrow1 as usize, g.ndrow2 as usize);
-                    let width = strip_width(g, ctx.nthreads);
+                    let width = strip_width(g, ctx.nthreads, flops);
                     let mut rest = &mut buf[..ndrow1 * ndrow2];
                     let mut j0 = 0;
                     while j0 < ndrow1 {
@@ -1842,24 +1827,17 @@ const QUICK_RETURN_IF_NOT_POSDEF: bool = false;
 /// heterogeneous machine means workers on cores several times slower than the
 /// rest. This factorization forks over the elimination tree and again inside a
 /// supernode's panel, and both joins wait on their slowest task, so a worker on
-/// a slow core does not add its share — it sets the pace. Measured on an M4 Pro
-/// (8 performance + 4 efficiency cores), refactorize against thread count:
+/// a slow core does not add its share — it sets the pace. Swept against thread
+/// count on an 8 performance + 4 efficiency core machine, speedup peaks at or
+/// below the performance-core count on every system in the corpus and is 6-23%
+/// *worse* with all twelve workers than with eight. The extra workers are not
+/// merely low-yield, they cost.
 ///
-/// | threads       | 1 | 2 | 4 | 6 | 8 | 10 | 12 |
-/// |---------------|---|---|---|---|---|----|----|
-/// | gridfit 110²  | 1.00 | 1.70 | 2.10 | **2.34** | 2.17 | 1.99 | 1.90 |
-/// | gridfit 320²  | 1.00 | 1.71 | 2.87 | 3.36 | **3.89** | 3.80 | 3.67 |
-/// | pywarper AtA  | 1.00 | 1.73 | 2.56 | 2.82 | 2.83 | **2.92** | 2.66 |
-///
-/// Every one of them peaks at or below the performance-core count and is worse
-/// at 12 than at 8 — by 6% on the two large ones and 23% on the small one. So
-/// the extra four workers are not merely low-yield, they cost.
-///
-/// **A private pool, not a resize of the global one.** `hea` is a library and
-/// the global pool belongs to the process; the nmath element-wise maps use it
-/// and want every core, since those are equal-sized independent chunks with no
-/// join in the middle. Only this one caller has the problem, so only this one
-/// caller gets the smaller pool.
+/// A private pool, not a resize of the global one: `hea` is a library and the
+/// global pool belongs to the process. The nmath element-wise maps use it and
+/// want every core, since those are equal-sized independent chunks with no join
+/// in the middle. Only this caller has the problem, so only this caller gets the
+/// smaller pool.
 ///
 /// `RAYON_NUM_THREADS` still wins: when it is set, the count is left at
 /// `rayon`'s default so an explicit request is honoured. Anywhere the query

@@ -801,7 +801,10 @@ def _compute_aesthetics(mapping: Aes, data: pl.DataFrame, env: dict) -> pl.DataF
 
 
 def _eval_aes_value(expr, data: pl.DataFrame, env: dict):
-    """Resolve one aes value. See plan §13 Q3 for disambiguation rules."""
+    """Resolve one aes value.
+
+    See :mod:`hea.ggplot.aes` for the bare-name vs expression rules.
+    """
     # Polars expression — evaluate against the layer's data. Lets users
     # write ``aes(x=col("carat").log())`` and the like; without this the
     # Expr would fall through as a "constant" and ``to_series`` would

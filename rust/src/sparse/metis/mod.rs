@@ -5,10 +5,9 @@
 //! through `CHOLMOD/Partition/cholmod_metis_wrapper.c`. One module per upstream
 //! `.c` file, so a citation is a file name plus a line.
 //!
-//! This exists because `cholmod_analyze`'s ordering trial loop has a METIS slot,
-//! and until now that slot held NATURAL. On the SAC conformal system at
-//! `conformal_jump = 1` (n = 3,437,410) the difference is 523.0M `nnz(L)`
-//! against 380.5M, which is 3.0× on the numeric factorization.
+//! This fills the METIS slot in `cholmod_analyze`'s ordering trial loop. On a
+//! 3.4M-row system where AMD and NATURAL both do badly, METIS gives 380.5M
+//! `nnz(L)` against NATURAL's 523.0M — 3.0× on the numeric factorization.
 //!
 //! Only what `METIS_NodeND` can actually reach is ported. The k-way partitioner
 //! (`kwayfm.c`, `kwayrefine.c`, `minconn.c`, `contig.c`) links into upstream's

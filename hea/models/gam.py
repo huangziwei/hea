@@ -2236,8 +2236,8 @@ def _dlog_det_H_drho(
     dw_drho = dw_deta[:, None] * deta_drho  # (n, n_sp)
 
     # H⁻¹ (p×p) is ρ-fixed across the slot loop — compute once, not once
-    # per slot (the old in-loop cho_solve(eye) was O(n_sp) redundant
-    # full-inverse solves). Bit-identical: same factor, same RHS.
+    # per slot, since an in-loop cho_solve(eye) would be O(n_sp) redundant
+    # full-inverse solves. Bit-identical: same factor, same RHS.
     A_inv = cho_solve((fit.A_chol, fit.A_chol_lower), np.eye(p))
     out = np.empty(n_sp)
     for k, slot in enumerate(slots):
@@ -3463,8 +3463,8 @@ def _compute_Vc2(rho, fit, Vr, sigma_squared, *, L_pen, slots, p):
 def _dW_dtheta_total(fit, dd1=None, *, X, family, y, wt, family_mgcv_extended):
     """Total ∂W/∂θ for an extended family at the converged fit,
     shape (n, n_theta): the direct fixed-β̂ piece ½·Deta2th plus the
-    β̂(θ)-coupled piece (∂w/∂η)·(X·∂β̂/∂θ). The Dd-table version of
-    the old tw-only ``_dW_dp_tw_total`` (identical values for tw by
+    β̂(θ)-coupled piece (∂w/∂η)·(X·∂β̂/∂θ). The Dd-table form, general
+    over families (identical values for tw by
 
     mgcv anchor: the family-parameter (θ for nb/scat, p for tw)
     derivatives of W and log|H+S| come from ``gam.fit4``'s gdi block
@@ -3783,8 +3783,8 @@ def _reml_grad(
         # (∂(D+β'Sβ)/∂β = 0 kills the β-coupled chain); lsth1 comes
         # from the family's extended ls; the log|H+S| piece is the
         # Dd-based dW/dθ trace (direct ½·Deta2th + indirect via
-        # ∂β̂/∂θ). For tw this equals the old dD_dp/dls_dp/dp_dtheta
-        # chain exactly (tw.Dd's D*th already carry dp/dθ).
+        # ∂β̂/∂θ). For tw this equals the dD_dp/dls_dp/dp_dtheta chain
+        # exactly (tw.Dd's D*th already carry dp/dθ).
         nt = family.n_theta
         theta = family.get_theta()
         dd1 = _dDeta(fit, 1, family=family, y=y, wt=wt)
@@ -12307,9 +12307,9 @@ class gam:
 
         # Total-sum cap only. mgcv's gam.fit3.post.proc deliberately does
         # not cap element-wise — individual edf2[i] can exceed edf1[i] as
-        # long as the sum stays ≤ sum(edf1). Element-wise capping was a
-        # bug in an earlier version here that pushed sum(edf2) below
-        # sum(edf), the wrong direction for an sp-uncertainty correction.
+        # long as the sum stays ≤ sum(edf1). Element-wise capping pushes
+        # sum(edf2) below sum(edf), the wrong direction for an
+        # sp-uncertainty correction.
         if edf2.sum() > edf1.sum():
             edf2 = edf1.copy()
         return edf2, edf1, Vc_corr
@@ -12375,9 +12375,9 @@ class gam:
             return H_inv[np.ix_(sel, sel)]
         # GCV / no-H_aug fallback: ρρ block of the (ρ, log φ) joint Hessian
         # at log φ = 0, chained to working space (T'HT). For
-        # Gaussian-identity REML this used to call the Gaussian-profiled
-        # `_reml_hessian`; the joint Hessian's ρρ block equals 2× that
-        # profiled Hessian up to the rank-1 Schur term, which is fine for
+        # Gaussian-identity REML the joint Hessian's ρρ block equals 2× the
+        # Gaussian-profiled `_reml_hessian` up to the rank-1 Schur term,
+        # which is fine for
         # the GCV path (mgcv defines edf2 differently for GCV anyway —
         # this is a best-effort sp-uncertainty correction).
         H_full = 0.5 * self._reml_hessian(rho, 0.0, include_log_phi=False)

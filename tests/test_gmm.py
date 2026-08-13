@@ -957,9 +957,8 @@ def test_lmm_optctrl_unknown_key_raises(sleepstudy_data):
 
 
 # ---------------------------------------------------------------------------
-# Prior weights on the LMM path (gmm-lmer-parity #4). weights= used to raise
-# NotImplementedError; now lmer(y~x+(1|g), weights=w) is reproduced via √w
-# row-scaling of the profiled-deviance design. Reference: lme4 4.x,
+# Prior weights on the LMM path. lmer(y~x+(1|g), weights=w) is reproduced via
+# √w row-scaling of the profiled-deviance design. Reference: lme4 4.x,
 # lmer(Reaction~Days+(Days|Subject), sleepstudy, weights=rep(c(1,2,3),len=180)).
 # ---------------------------------------------------------------------------
 

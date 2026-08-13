@@ -932,8 +932,8 @@ class Translator:
             return P.BinOp(left=left, op=P.MatMult(), right=right)
 
         # Other ``%infix%`` operators — emit as a function call so the user
-        # sees something sensible. The registry can resolve specific names
-        # in a later phase. The function-name strips ``%`` and any other
+        # sees something sensible; the registry resolves no specific names
+        # for these. The function-name strips ``%`` and any other
         # operator-only character so we never produce ``*(...)``-style
         # invalid Python identifiers.
         if op.startswith("%") and op.endswith("%"):
