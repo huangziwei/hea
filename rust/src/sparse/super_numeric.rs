@@ -681,6 +681,41 @@ const BATCH_DOUBLES: usize = 4 << 20;
 /// The kernels run at tens of GF/s, so this is tens of microseconds of work
 /// against a join that costs a few — and it has to be a *batch* total rather
 /// than a per-update one, because the batch is what rayon splits.
+///
+/// This arm is two builds, and they want the same value for the same reason:
+/// the portable kernels are one thread per call, and so is OpenBLAS here, since
+/// [`super::blas::init`] pins it to one inside hea's pool. Either way this fork
+/// *is* the parallelism, which is why the number is four orders of magnitude
+/// below the `accelerate` one below.
+///
+/// Raising it was swept on both, paired against the shipped value with the
+/// reference build entered twice as its own control. Portable arm, wall / core
+/// ratios, above 1 meaning cheaper than 5.0e5:
+///
+/// | | control | 1.5e6 | 5.0e6 |
+/// |---|---|---|---|
+/// | gridfit 320² | 0.985 / 0.993 | 0.994 / 0.994 | 0.996 / 1.024 |
+/// | gridfit 220² | 1.005 / 1.015 | 1.001 / 1.019 | 1.004 / 1.038 |
+/// | pywarper AtA | 1.004 / 1.031 | 1.036 / 1.057 | 1.021 / 1.117 |
+/// | gmm M | 0.980 / 1.002 | 0.970 / 0.986 | 0.994 / 1.037 |
+/// | **SAC j1** | 0.970 / 0.995 | — | **0.929 / 0.966** |
+///
+/// The four small systems agree, weakly: 5.0e6 is a wash on wall and worth
+/// 2-8% of core net of the control, because a batch that no longer forks does
+/// not pay for the join. **At 3.4M rows it reverses** — 6% of the wall clock
+/// and 3% of the core, both outside the control — and the wall clock at scale
+/// outranks 3% of core on a 35 ms factorization. The OpenBLAS arm reads the
+/// same shape and smaller (320² core 1.039 against a 1.000 control, j1 not
+/// re-run), so nothing here separates the two backends.
+///
+/// One regime gaining what the other loses is what this constant has always
+/// done, so the sweep is recorded rather than acted on. What would settle it is
+/// a machine where OpenBLAS is the *right* backend, and this is not one:
+/// measured here it trails the portable kernels outright (320²: 49.6 ms against
+/// 34.9), because aarch64's baseline has NEON and an FMA while the coprocessor
+/// beyond it is Accelerate-only. On x86-64 the baseline is SSE2 with no FMA —
+/// deliberately, per [`crate::nmath::util::rfma`] — so the same two kernels
+/// stand in the opposite order and this sweep says nothing about them.
 #[cfg(not(accelerate))]
 const PAR_FLOPS: f64 = 5.0e5;
 

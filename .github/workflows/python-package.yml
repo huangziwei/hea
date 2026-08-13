@@ -178,8 +178,8 @@ jobs:
       run: |
         python -c "import hea, hea._rs; print('hea:', hea.__file__); print('hea._rs:', hea._rs.__file__)"
         python -c "
-        from hea import _rs
-        i = _rs.build_info(); print('build_info:', i)
+        from hea.sparse import build_info
+        i = build_info(); print('build_info:', i)
         assert i['backend'] == 'openblas', f'expected the OpenBLAS arm, got {i}'
         "
     - name: Test with pytest

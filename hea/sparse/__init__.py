@@ -18,13 +18,15 @@ every bit.
 are the platform's own — Accelerate on macOS, OpenBLAS on Linux and Windows, the
 same ``scipy-openblas32`` binary numpy and scipy already carry, vendored into
 the wheel so nothing is needed from the system. Calls too small to be worth the
-vendor's dispatch stay on hea's own portable NEON kernels, which is worth 8–22%
-of the CPU on a sparse factorization made of many small supernodes.
+vendor's dispatch stay on hea's own portable kernels, which is worth 8–22% of
+the CPU on a sparse factorization made of many small supernodes.
 :func:`build_info` reports which backend a given build has::
 
     >>> from hea.sparse import build_info
-    >>> build_info()
-    {'blas': True, 'backend': 'accelerate', 'min_flops': 100000.0}
+    >>> sorted(build_info())
+    ['backend', 'blas', 'min_flops']
+    >>> build_info()["backend"] in {"accelerate", "openblas", None}
+    True
 
 ``backend`` is ``'openblas'`` on a Linux or Windows wheel, and ``None`` on a
 build with no vendor BLAS: the Alpine (musllinux) wheel, which has no OpenBLAS
@@ -42,7 +44,16 @@ METIS is not free: on a 3.4M-row system it costs seconds, where AMD costs
 tenths. It earns that back in ``nnz(L)`` (−27% on that system), in solve time,
 and in memory, so it pays for a factor that is solved against repeatedly or
 refactorized through :meth:`Factor.factorize`; for a single factorize-and-solve
-at that size, ``order="amd"`` finishes sooner.
+at that size, ``order="amd"`` finishes sooner — 5.2 s against 12.4.
+
+**The break-even is somewhere between five and ten refactorizations**, and the
+range is honest rather than vague: METIS's ordering cost is stable but the
+saving per refactorize swings about 2× with how rested the machine's memory is,
+so the durable quantity is the flop ratio (2.15× fewer, matching a 2.23×
+measured refactorize) and not the seconds. Below that count pin ``order="amd"``;
+above it take the default. The strategy cannot make this call for you because it
+turns on how many numeric factorizations you will do, which is something you
+know and the library does not.
 
 **The numeric factorization is parallel, and it needs the cores.** It runs over
 the supernodal elimination tree and again inside a supernode's panel, on a
@@ -53,13 +64,22 @@ matrix made of many small supernodes it barely can, so it runs at a little over
 one core however many are free. hea is 2.7–3.0× faster on wall clock than
 CHOLMOD called from C, on everything from a 12k-row system to a 3.4M-row one.
 
+It is not only the threads. Pinned to ``RAYON_NUM_THREADS=1`` — genuinely one
+thread, hea's CPU there equals its wall clock — it is still 1.2–1.3× faster than
+CHOLMOD called from C, which is using 1.2 cores for that comparison, and
+1.3–1.6× faster than ``scikit-sparse``. So a one-core container or a pinned
+deterministic run is slower than this machine, not slower than the library this
+replaces.
+
 The trade is CPU for wall clock, and past a point it stops being free. On the
 small and medium systems hea also uses *less* total CPU (1.05–1.17×). On a
-3.4M-row system it is ahead on CPU through two threads and behind at eight —
-0.72× there — because the machine's memory bandwidth saturates and the same
-traffic then costs more CPU. Pinning ``RAYON_NUM_THREADS`` is how a caller picks
-its point on that curve; ``=1`` gives up most of the wall-clock difference and
-is the cheapest per core.
+3.4M-row system it is ahead on CPU through two threads and behind past four —
+0.7–0.9× at the thread counts a busy machine actually hands out — because the
+memory bandwidth saturates and the same traffic then costs more CPU. That is a
+band rather than a number on purpose: it is a point on a curve, and which point
+depends on how many cores are free. Pinning ``RAYON_NUM_THREADS`` is how a
+caller chooses; ``=1`` gives up most of the wall-clock difference and is the
+cheapest per core.
 
 **On macOS, set ``MallocSpaceEfficient=1`` in the environment for a large
 factorization.** A parallel factorization makes many large short-lived
@@ -81,10 +101,10 @@ additions CHOLMOD has and scikit-sparse 0.5.0 does not expose:
 solve against :attr:`Factor.L` needs, since ``L @ L.T == A[p][:, p]`` rather
 than ``A``.
 
-    >>> F = cho_factor(A)          # analyze + numeric factorization
-    >>> F.factorize(A2)            # new values, same pattern: reuses the analysis
-    >>> x = F.solve(b)             # A \\ b
-    >>> F.half_log_det()           # ½ log|det A|
+    >>> F = cho_factor(A)          # analyze + numeric factorization  # doctest: +SKIP
+    >>> F.factorize(A2)            # new values, same pattern: reuses the analysis  # doctest: +SKIP
+    >>> x = F.solve(b)             # A \\ b  # doctest: +SKIP
+    >>> F.half_log_det()           # ½ log|det A|  # doctest: +SKIP
 
 This module imports numpy, ``scipy.sparse`` and the compiled extension, and
 nothing else from hea.
@@ -108,7 +128,7 @@ def build_info() -> dict:
 
     ``backend``
         ``"accelerate"``, ``"openblas"``, or ``None`` for hea's own portable
-        NEON kernels. Which one a wheel has depends on the platform it was built
+        kernels. Which one a wheel has depends on the platform it was built
         for — see the module docstring.
     ``min_flops``
         The per-call flop count above which a dense kernel is handed to the

@@ -1,8 +1,13 @@
-//! The platform's BLAS, behind `--features blas`.
+//! The platform's BLAS, which `--features blas` asks for and `build.rs` finds.
+//!
+//! On by default, so a plain build already has it where one is reachable:
 //!
 //! ```text
-//! .venv/bin/maturin develop --release --features blas
+//! .venv/bin/maturin develop --release                      # the shipped build
+//! .venv/bin/maturin develop --release --no-default-features  # the portable one
 //! ```
+//!
+//! `hea.sparse.build_info()` reports which of the two you got.
 //!
 //! # Why this is the faithful path, not the unfaithful one
 //!
@@ -66,15 +71,25 @@
 //! cannot cover is the platform's own linker and loader, and the wheel-repair
 //! step that vendors the library — those need the real target, and belong in CI.
 //!
-//! # What it costs, and why it is off by default
+//! # What it costs the pins, which turned out to be nothing
 //!
-//! A digest taken against Accelerate is not the one OpenBLAS gives, so a pinned
-//! literal stops being one number across platforms. The shape of the answer is
-//! the one hea's other cross-platform pins already use — store every answer the
-//! reference itself has and assert membership, never branch on the platform —
-//! but changing what a pin *means* is a decision, not a side effect of a
-//! performance change, so the feature ships off and the default build stays the
-//! deterministic one the pins describe.
+//! A digest taken against Accelerate is not the one OpenBLAS gives, so in
+//! principle a pinned literal stops being one number across platforms — and
+//! that argument kept this feature off by default for several cycles without
+//! anyone measuring it. It is worth nothing: at [`MIN_FLOPS`] the largest
+//! matrix under `tests/` is `n = 1000`, far too sparse for any call in it to
+//! reach the vendor at all, and the suite reads **4572 passed on all three
+//! arms** — Accelerate, OpenBLAS, portable — with no pin edited. The shape of
+//! the answer had one been needed is the one hea's other cross-platform pins
+//! use: store every value the reference itself produces and assert membership,
+//! never branch on the platform.
+//!
+//! The real cost of turning it on was installability, and it is `build.rs`'s
+//! subject: a default feature that can fail to *link* would break `pip install`
+//! from the sdist wherever no OpenBLAS is present. Hence the split between the
+//! feature (an intent) and `cfg(vendor_blas)` (a backend was found), and
+//! `blas-required` for the wheel jobs, where falling back silently would be the
+//! defect.
 
 use std::os::raw::{c_char, c_double, c_int};
 
@@ -131,6 +146,30 @@ use std::os::raw::{c_char, c_double, c_int};
 /// ahead by **1.81x** at `nrhs = 32` on the large ones. A cutoff on flops
 /// separates those two without ever looking at `nrhs`, which is why one number
 /// covers all eight kernels.
+///
+/// # Every number above is aarch64, and the crossing is not a portable quantity
+///
+/// A cutoff is a ratio between two implementations, so it moves when either one
+/// does. Both move on x86-64, and in the same direction:
+///
+/// * hea's kernels get **worse**. They are portable Rust at the target's
+///   baseline, and that baseline is SSE2 with no FMA — not an oversight but
+///   [`crate::nmath::util::rfma`]'s R-parity contract, which forbids a blanket
+///   `target-feature=+fma`. On aarch64 the baseline already has NEON and a
+///   fused multiply-add, so the same source is several times the flops per
+///   cycle there than it is on a generic x86-64.
+/// * the vendor gets **better relatively**, since OpenBLAS dispatches to AVX2
+///   or AVX-512 FMA kernels and reaches them without Accelerate's
+///   coprocessor round trip — which is what makes small calls cost 10 GF/s here
+///   and is half of why this constant is not zero.
+///
+/// So `1.0e5` is the crossing on the machine it was swept on, and on x86-64 the
+/// crossing is somewhere lower — plausibly at zero, where the vendor takes every
+/// call. **This is not yet measured**, and it wants an x86-64 Linux box rather
+/// than an argument: the same sweep, `0` through `10000` kflop, against the same
+/// corpus. Until then Linux and Windows ship a cutoff tuned for a different ISA,
+/// which costs speed and nothing else — every arm is correct, and
+/// `blas-all` still gates bit-exactness at zero.
 #[cfg(not(feature = "blas-all"))]
 pub const MIN_FLOPS: f64 = 1.0e5;
 
@@ -270,8 +309,42 @@ pub fn init() {
     ONCE.call_once(|| unsafe { openblas_set_num_threads(1) });
 }
 
-/// Accelerate needs no such call: measured at 4.3-5.4 threads inside hea's pool,
-/// it already stands down.
+/// Accelerate gets no such call, and the asymmetry is the two libraries', not a
+/// pair of policies.
+///
+/// OpenBLAS nested under hea's pool is *strictly* worse — 47x the CPU for a 12x
+/// worse wall clock — so pinning it is a defect fix. Accelerate nested is
+/// something hea deliberately uses: it takes 4.3-5.4 threads inside the pool,
+/// and [`super::super_numeric`]'s `PAR_FLOPS` is four orders of magnitude
+/// higher on this arm precisely so the wide supernodes go to it whole rather
+/// than being cut up by a second scheduler on top of its own.
+///
+/// **Pinning it is possible and was measured, so this is a choice rather than a
+/// limitation.** `BLASSetThreading(BLAS_THREADING_SINGLE_THREADED)` is
+/// `thread_local` (`vecLib/thread_api.h`, macOS 15+), so hea can hold one
+/// thread on its own workers without touching the caller's numpy — an earlier
+/// note here said the opposite and was wrong. Resolved through
+/// `dlsym(RTLD_DEFAULT, …)` it needs no deployment-target bump. Set on every
+/// pool worker and paired against this build:
+///
+/// | | x wall | x core | control |
+/// |---|---|---|---|
+/// | gridfit 320² | 0.988 | 1.023 | 1.008 / 0.995 |
+/// | gridfit 220² | 0.993 | 0.998 | 0.999 / 0.995 |
+/// | pywarper AtA | 0.989 | 0.995 | 0.989 / 0.994 |
+/// | gmm M | 1.022 | 1.201 | 1.003 / 1.029 |
+/// | **SAC j1** | **0.905** | **1.224** | 1.008 / 1.004 |
+///
+/// Four systems cannot see it on either axis — gmm's 1.201 is 0.3 ms of a 2 ms
+/// core — and j1 trades **10% of the wall clock for 22% of the CPU**, at 9.4
+/// threads' worth of CPU per wall-second saved. It reproduces the process-wide
+/// `VECLIB_MAXIMUM_THREADS=1` result (0.877 / 1.213) closely enough to confirm
+/// the mechanism.
+///
+/// So: free and worthless on four, expensive on the fifth, and not shipped.
+/// What would change that is j1's ~22% idle — pinning only costs wall clock
+/// because hea's own schedule cannot fill the region Accelerate is filling, and
+/// a schedule that could would take the 22% of CPU for nothing.
 #[cfg(accelerate)]
 #[inline]
 pub fn init() {}

@@ -68,11 +68,23 @@ jobs:
           manylinux: auto          # manylinux2014 container → glibc 2.17
           sccache: "true"
           # Runs INSIDE the container, so the OpenBLAS has to be installed
-          # there rather than on the runner. `$HEA_BLAS_LIB_DIR` is read by
-          # rust/build.rs.
+          # there rather than on the runner — a path from the runner's own
+          # site-packages would not exist in the container. `HEA_BLAS_LIB_DIR`
+          # is read by rust/build.rs.
+          #
+          # Exported *and* appended to $GITHUB_ENV because the two mechanisms
+          # cover different things and only one of them can be right: `export`
+          # reaches maturin if this script shares its shell, and $GITHUB_ENV
+          # reaches it only if it does not (a variable written to $GITHUB_ENV
+          # applies to *subsequent* steps, and the build is part of this one).
+          # Getting it wrong is not silent — `blas-required` turns a missing
+          # backend into a build failure — but there is no reason to find out
+          # the hard way.
           before-script-linux: |
             python3 -m pip install scipy-openblas32
-            echo "HEA_BLAS_LIB_DIR=$(python3 -c 'import scipy_openblas32 as s; print(s.get_lib_dir())')" >> "$GITHUB_ENV"
+            HEA_BLAS_LIB_DIR=$(python3 -c 'import scipy_openblas32 as s; print(s.get_lib_dir())')
+            export HEA_BLAS_LIB_DIR
+            echo "HEA_BLAS_LIB_DIR=$HEA_BLAS_LIB_DIR" >> "$GITHUB_ENV"
       - name: Assert the wheel carries OpenBLAS
         # A wheel that took the fallback passes every test and is 2.4x more CPU
         # on a large factorization. This is the only place that shows.
@@ -86,8 +98,8 @@ jobs:
         run: |
           python -m pip install --no-index --find-links dist hea
           python -c "
-          from hea import _rs
-          i = _rs.build_info(); print(i)
+          from hea.sparse import build_info
+          i = build_info(); print(i)
           assert i['backend'] == 'openblas', i
           "
       - uses: actions/upload-artifact@v4
@@ -153,8 +165,8 @@ jobs:
         run: |
           python -m pip install --no-index --find-links dist hea
           python -c "
-          from hea import _rs
-          i = _rs.build_info(); print(i)
+          from hea.sparse import build_info
+          i = build_info(); print(i)
           assert i['backend'] == 'accelerate', i
           "
       - uses: actions/upload-artifact@v4
@@ -207,8 +219,8 @@ jobs:
           python -m pip uninstall -y scipy-openblas32
           python -m pip install --no-index --find-links dist hea
           python -c "
-          from hea import _rs
-          i = _rs.build_info(); print(i)
+          from hea.sparse import build_info
+          i = build_info(); print(i)
           assert i['backend'] == 'openblas', i
           "
       - uses: actions/upload-artifact@v4
