@@ -129,6 +129,16 @@ jobs:
           # requires `--target` alongside `--platform`, hence the explicit
           # directory rather than `get_lib_dir()`. Both tags are passed because
           # the wheel carries both and pip matches them literally.
+          #
+          # `LD_LIBRARY_PATH` is for maturin's *repair* step, not for the
+          # compiler, and the two arches need different amounts of help. The
+          # link succeeds either way, and then auditwheel has to find the
+          # library again to copy it into the wheel: on x86_64 it resolves all
+          # three (`libscipy_openblas`, `libgfortran`, `libquadmath`) out of the
+          # rpath `build.rs` emitted, but the aarch64 wheel is **cross-built**,
+          # so that resolution runs on an ELF the host loader cannot touch and
+          # it reported `libscipy_openblas.so => not found` with the rpath sat
+          # right there. An explicit search path is what it reads instead.
           before-script-linux: |
             python3 -m pip install --upgrade pip
             python3 -m pip install scipy-openblas32 \
@@ -137,6 +147,7 @@ jobs:
               --platform manylinux_2_17_${{ matrix.target }} \
               --target /opt/hea-openblas
             export HEA_BLAS_LIB_DIR=/opt/hea-openblas/scipy_openblas32/lib
+            export LD_LIBRARY_PATH="$HEA_BLAS_LIB_DIR:${LD_LIBRARY_PATH:-}"
       - name: Assert the wheel carries OpenBLAS
         # A wheel that took the fallback passes every test and is 2.4x more CPU
         # on a large factorization. This is the only place that shows.
