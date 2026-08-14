@@ -4,8 +4,14 @@ Both solve ``min ||Ax - b||`` for a rectangular sparse ``A``, and both do it
 **without forming ``AᵀA`` and without a factorization**. That is the whole
 reason they are here beside a direct solver: the working set is ``A`` plus a
 handful of vectors, where the direct route holds ``L``, and on a large system
-``nnz(L)`` dominates everything else. It is also better conditioned, since the
-normal equations square the condition number and these do not.
+``nnz(L)`` dominates everything else.
+
+They also work with ``cond(A)`` where the normal equations work with
+``cond(A)²``. Take that as a statement about the arithmetic, not as a promise
+of a better answer: it bounds how much accuracy the *formulation* can cost,
+and it says nothing about how close a run that stops on a tolerance actually
+gets. Whether the bound is ever reached is a property of the matrix, and the
+paragraph below on ``istop`` is the reason it usually is not.
 
 The two are different in kind from :func:`cho_factor`, and callers should treat
 them so:

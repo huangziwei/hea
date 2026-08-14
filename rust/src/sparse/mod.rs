@@ -2,9 +2,10 @@
 //! (CHOLMOD) dependency, so `hea` installs from a wheel on every platform with
 //! no system SuiteSparse.
 //!
-//! Every routine here is a mechanical port of SuiteSparse **7.6.0** — the
-//! version R's `Matrix` ships, hence the one `lme4` factorizes with, which is
-//! what makes "hea == lme4" a checkable claim.
+//! Every CHOLMOD routine here is a mechanical port of SuiteSparse **7.6.0** —
+//! the version R's `Matrix` ships, hence the one `lme4` factorizes with, which
+//! is what makes "hea == lme4" a checkable claim. [`pattern`] is the one
+//! module that is not a port; it backs an API of hea's own and says so.
 //!
 //! The oracle for these routines is upstream's own C at that tag, compiled and
 //! driven directly — *not* `scikit-sparse`. `sksparse`'s `F.perm` is the ordering
@@ -21,6 +22,7 @@ pub mod dense;
 pub mod metis;
 pub mod metis_order;
 pub mod numeric;
+pub mod pattern;
 pub mod py;
 pub mod solve;
 pub mod spinv;
@@ -862,8 +864,42 @@ fn build_info(py: Python<'_>) -> PyResult<Py<PyDict>> {
     Ok(d.unbind())
 }
 
+/// `B`'s values laid out on a wider CSC pattern — `PatternPlan.scatter`.
+///
+/// `(indptr, indices)` is the plan's pattern and `(bp, bi, bx)` is `B`, both
+/// CSC with row indices ascending within each column. Returns the filled value
+/// array together with the number of `B`'s entries that were **not** in the
+/// pattern; a nonzero count leaves the array meaningless and is the caller's
+/// to report, since the message worth printing names the plan.
+#[pyfunction]
+fn pattern_scatter(
+    py: Python<'_>,
+    ncol: usize,
+    indptr: PyReadonlyArray1<i64>,
+    indices: PyReadonlyArray1<i64>,
+    bp: PyReadonlyArray1<i64>,
+    bi: PyReadonlyArray1<i64>,
+    bx: PyReadonlyArray1<f64>,
+) -> PyResult<(Py<PyArray1<f64>>, usize)> {
+    let ap = indptr.as_slice()?;
+    let ai = indices.as_slice()?;
+    let (bp, bi, bx) = (bp.as_slice()?, bi.as_slice()?, bx.as_slice()?);
+    if ap.len() != ncol + 1 || bp.len() != ncol + 1 {
+        return Err(PyValueError::new_err(
+            "indptr and bp must both have ncol + 1 entries",
+        ));
+    }
+    if bx.len() != bi.len() {
+        return Err(PyValueError::new_err("bi and bx must be the same length"));
+    }
+    let mut out = vec![0.0f64; ai.len()];
+    let missing = py.allow_threads(|| pattern::scatter(ncol, ap, ai, bp, bi, bx, &mut out));
+    Ok((out.into_pyarray(py).unbind(), missing))
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_info, m)?)?;
+    m.add_function(wrap_pyfunction!(pattern_scatter, m)?)?;
     m.add_function(wrap_pyfunction!(aat_pattern, m)?)?;
     m.add_function(wrap_pyfunction!(analyze_rect, m)?)?;
     m.add_function(wrap_pyfunction!(factorize_rect, m)?)?;

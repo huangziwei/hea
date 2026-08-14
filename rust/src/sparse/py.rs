@@ -359,7 +359,16 @@ impl CholFactor {
     /// Upstream's recursion is stated for `LDL'`, so an `LL'` factor is
     /// converted through [`Factor::change_factor`] first — on a copy, since a
     /// caller's factor must still be the one they factorized.
-    fn selected(&mut self, _py: Python<'_>) -> PyResult<(spinv::Selected, Vec<i64>)> {
+    fn selected(&mut self, py: Python<'_>) -> PyResult<(spinv::Selected, Vec<i64>)> {
+        let (z, perm, _) = self.selected_with_phases(py)?;
+        Ok((z, perm))
+    }
+
+    /// [`CholFactor::selected`], also returning the sweep's phase breakdown.
+    fn selected_with_phases(
+        &mut self,
+        _py: Python<'_>,
+    ) -> PyResult<(spinv::Selected, Vec<i64>, spinv::Phases)> {
         let converted = self.build_simplicial()?;
         let params = match &self.kind {
             Kind::Simplicial(k) => k.params,
@@ -384,9 +393,9 @@ impl CholFactor {
             l
         };
 
-        let (z, _flops) =
+        let (z, _flops, ph) =
             spinv::selected_inverse(l).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok((z, l.perm.clone()))
+        Ok((z, l.perm.clone(), ph))
     }
 }
 
@@ -669,18 +678,14 @@ impl CholFactor {
         ))
     }
 
-    /// `½ log|det A|`.
-    ///
-    /// The diagonal of an `LDL'` factor holds `D`, not `L`, so this is
-    /// `½ Σ log D_kk` there and `Σ log L_kk` for `LL'` — the same number either
-    /// way. Raises rather than returning `-inf`/`nan` if the factorization
-    /// stopped early, because a caller reading a log-determinant off a factor
-    /// that does not exist is a bug, not a limit case.
     /// `diag(A⁻¹)`, in `A`'s own ordering.
     ///
-    /// Takahashi's recursion over the factor, so `A⁻¹` is never formed. Costs
-    /// about one numeric factorization — `Σ_j |L_j|²`, not `nnz(L)` — and holds
-    /// roughly two `L`s while it runs.
+    /// Takahashi's recursion over the factor, so `A⁻¹` is never formed. The
+    /// *work* is `Σ_j |L_j|²`, a factorization's flop count rather than its
+    /// nonzero count, and the sweep is scalar where the numeric factorization
+    /// is blocked and threaded — so budget orders of magnitude more than a
+    /// refactorize of the same matrix, not one. It holds roughly two `L`s
+    /// while it runs.
     fn inv_diagonal(&mut self, py: Python<'_>) -> PyResult<Py<PyArray1<f64>>> {
         let (z, perm) = self.selected(py)?;
         let d = z.diagonal();
@@ -690,6 +695,16 @@ impl CholFactor {
             out[perm[i] as usize] = d[i];
         }
         Ok(out.into_pyarray(py).unbind())
+    }
+
+    /// Nanoseconds in each of the sweep's three phases: scatter, the fused
+    /// recurrence, gather.
+    ///
+    /// All zero unless the extension was built with the `profiling` feature.
+    /// The unpermute is not timed and not included — this is the sweep alone.
+    fn selected_inverse_phases(&mut self, py: Python<'_>) -> PyResult<(u64, u64, u64)> {
+        let (_, _, ph) = self.selected_with_phases(py)?;
+        Ok((ph.scatter, ph.recurrence, ph.gather))
     }
 
     /// The selected inverse as CSC `(indptr, indices, data)`, in `A`'s ordering.
@@ -748,6 +763,13 @@ impl CholFactor {
         ))
     }
 
+    /// `½ log|det A|`.
+    ///
+    /// The diagonal of an `LDL'` factor holds `D`, not `L`, so this is
+    /// `½ Σ log D_kk` there and `Σ log L_kk` for `LL'` — the same number either
+    /// way. Raises rather than returning `-inf`/`nan` if the factorization
+    /// stopped early, because a caller reading a log-determinant off a factor
+    /// that does not exist is a bug, not a limit case.
     fn half_log_det(&self) -> PyResult<f64> {
         let n = self.n();
         if self.minor() < n {

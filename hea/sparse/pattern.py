@@ -56,6 +56,8 @@ from __future__ import annotations
 import numpy as np
 from scipy.sparse import csc_array, issparse
 
+from hea import _rs
+
 __all__ = ["PatternPlan"]
 
 
@@ -75,19 +77,6 @@ def _as_sorted_csc(M):
         M = M.copy()
         M.sort_indices()
     return M
-
-
-def _linear_index(M) -> np.ndarray:
-    """``col * nrow + row`` for every stored entry of a sorted CSC matrix.
-
-    CSC with sorted indices orders entries by ``(col, row)``, and so does this
-    scalar, so the result is ascending and ``searchsorted`` applies to it. It
-    is the pattern reduced to one sortable key per entry, which is what makes
-    the set operations below one-dimensional.
-    """
-    nrow = M.shape[0]
-    cols = np.repeat(np.arange(M.shape[1], dtype=np.int64), np.diff(M.indptr))
-    return M.indices.astype(np.int64) + nrow * cols
 
 
 def _ones_like_pattern(M):
@@ -110,13 +99,12 @@ class PatternPlan:
     :meth:`materialize`. The pattern is immutable; the values are not.
     """
 
-    __slots__ = ("_indices", "_indptr", "_lin", "_shape")
+    __slots__ = ("_indices", "_indptr", "_shape")
 
-    def __init__(self, shape, indptr, indices, lin):
+    def __init__(self, shape, indptr, indices):
         self._shape = shape
         self._indptr = indptr
         self._indices = indices
-        self._lin = lin
 
     @classmethod
     def _from_csc(cls, M) -> PatternPlan:
@@ -125,7 +113,6 @@ class PatternPlan:
             M.shape,
             np.ascontiguousarray(M.indptr, dtype=np.int64),
             np.ascontiguousarray(M.indices, dtype=np.int64),
-            _linear_index(M),
         )
 
     @classmethod
@@ -204,12 +191,15 @@ class PatternPlan:
         entry.
 
         ``B``'s pattern must be contained in this one. It is checked rather
-        than assumed: ``out[searchsorted(lin, lin_B)] = B.data`` writes into
-        the neighbouring slot for any entry that is *not* in the pattern, and
-        silently — the result is a plausible matrix with two values in the
-        wrong places. Containment holds by construction for the matrices a plan
-        was built from, and stops holding the moment a caller passes a fourth
-        one.
+        than assumed, because the failure is silent otherwise: an entry with
+        nowhere to go lands in a neighbouring slot and the result is a
+        plausible matrix with two values in the wrong places. Containment holds
+        by construction for the matrices a plan was built from, and stops
+        holding the moment a caller passes a fourth one.
+
+        Both patterns are CSC with sorted row indices, so this is a merge of
+        the two — linear in the entries, with no per-entry key to build or
+        hold.
 
             >>> import numpy as np, scipy.sparse as sp
             >>> A = sp.csc_array(np.array([[1.0, 0.0], [2.0, 3.0]]))
@@ -221,22 +211,19 @@ class PatternPlan:
         B = _as_sorted_csc(B)
         if B.shape != self._shape:
             raise ValueError(f"B is {B.shape}, expected {self._shape}")
-        out = np.zeros(self.nnz, dtype=np.float64)
-        if B.nnz == 0:
-            return out
-        lin_b = _linear_index(B)
-        if self.nnz == 0:
-            raise ValueError("B has entries outside the pattern: the pattern is empty")
-        where = np.searchsorted(self._lin, lin_b)
-        # searchsorted can return nnz for an entry past the last key; clamp so
-        # the comparison below is the only thing that has to reject it.
-        probe = np.minimum(where, self.nnz - 1)
-        if not np.array_equal(self._lin[probe], lin_b):
-            bad = int(np.count_nonzero(self._lin[probe] != lin_b))
+        out, missing = _rs.pattern_scatter(
+            self._shape[1],
+            self._indptr,
+            self._indices,
+            np.ascontiguousarray(B.indptr, dtype=np.int64),
+            np.ascontiguousarray(B.indices, dtype=np.int64),
+            np.ascontiguousarray(B.data, dtype=np.float64),
+        )
+        if missing:
             raise ValueError(
-                f"B has {bad} entr{'y' if bad == 1 else 'ies'} outside the pattern"
+                f"B has {missing} entr{'y' if missing == 1 else 'ies'} "
+                "outside the pattern"
             )
-        out[where] = B.data
         return out
 
     def materialize(self, values) -> csc_array:

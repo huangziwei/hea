@@ -63,12 +63,14 @@ pub fn random_bisection(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2],
             ctrl.rng.irand_array_permute(nvtxs, &mut perm, nvtxs / 2, 1);
             let mut pwgts = [0 as Idx, graph.tvwgt[0]];
 
+            let (perm, vwgt) = (Ws::new_ref(&perm), Ws::new_ref(&graph.vwgt));
+            let w = Ws::new(&mut graph.r#where);
             for ii in 0..nvtxs as usize {
-                let i = perm[ii] as usize;
-                if pwgts[0] + graph.vwgt[i] < zeromaxpwgt {
-                    graph.r#where[i] = 0;
-                    pwgts[0] += graph.vwgt[i];
-                    pwgts[1] -= graph.vwgt[i];
+                let i = perm[ii];
+                if pwgts[0] + vwgt[i] < zeromaxpwgt {
+                    w[i] = 0;
+                    pwgts[0] += vwgt[i];
+                    pwgts[1] -= vwgt[i];
                     if pwgts[0] > zeromaxpwgt {
                         break;
                     }
@@ -290,10 +292,13 @@ pub fn grow_bisection_node(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 
             }
 
             drain = false;
-            for j in graph.xadj[i] as usize..graph.xadj[i + 1] as usize {
-                let k = graph.adjncy[j] as usize;
+            let (xadj, adjncy) = (Ws::new_ref(&graph.xadj), Ws::new_ref(&graph.adjncy));
+            let touched = Ws::new(&mut touched);
+            let queue = Ws::new(&mut queue);
+            for j in xadj[i]..xadj[i + 1] {
+                let k = adjncy[j];
                 if touched[k] == 0 {
-                    queue[last] = k as Idx;
+                    queue[last] = k;
                     last += 1;
                     touched[k] = 1;
                     nleft -= 1;
@@ -306,10 +311,14 @@ pub fn grow_bisection_node(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 
         fm_2way_refine(ctrl, graph, ntpwgts, 4);
 
         // Construct and refine the vertex separator.
-        for i in 0..graph.nbnd as usize {
-            let j = graph.bndind[i] as usize;
-            if graph.xadj[j + 1] - graph.xadj[j] > 0 {
-                graph.r#where[j] = 2;
+        {
+            let (xadj, bndind) = (Ws::new_ref(&graph.xadj), Ws::new_ref(&graph.bndind));
+            let w = Ws::new(&mut graph.r#where);
+            for i in 0..graph.nbnd as usize {
+                let j = bndind[i];
+                if xadj[j + 1] - xadj[j] > 0 {
+                    w[j] = 2;
+                }
             }
         }
 

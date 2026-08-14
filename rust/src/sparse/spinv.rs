@@ -18,11 +18,22 @@
 //! symmetrization and its permutation handling are the caller's, not this
 //! module's.
 //!
-//! **Cost is a factorization, not a pass over `L`.** The sweep dot-products
-//! each column against itself, so the work is `Σ_j |L_j|²` — the
-//! factorization's flop count. It is *not* `O(nnz(L))`, and on a large system
-//! the two differ by more than two orders of magnitude. [`sweep`] returns
-//! upstream's own flop count so a caller can check what it paid.
+//! **Cost is a factorization's worth of work, run at a scalar rate.** The
+//! sweep dot-products each column against itself, so the work is
+//! `Σ_j |L_j|²` — the factorization's flop count, not `O(nnz(L))`, and on a
+//! large system those differ by more than two orders of magnitude. It then
+//! does that work in one thread with no blocking, where the supernodal
+//! factorization has both, so the wall clock is another two orders above the
+//! work ratio. [`sweep`] returns upstream's own flop count so a caller can
+//! check what it paid.
+//!
+//! The lever, if this is ever made faster: [`sweep`]'s two arithmetic loops
+//! visit exactly the same number of entries, and the back-substitution costs
+//! most of the time anyway, because each `z[k]` it writes feeds the next
+//! iteration's gather and the chain stalls on FMA latency. The updates are
+//! mutually independent. Fusing the loops — see [`sweep`] — buys what can be
+//! bought without reassociating a sum; past that, every option changes the
+//! arithmetic.
 //!
 //! **Memory is roughly two `L`s.** `Z` holds `pattern(L + L')`, i.e.
 //! `2·nnz(L) − n` entries with both an index and a value, where `L` holds
@@ -41,8 +52,8 @@
 //! The diagonal slot is never read as a value in either role. In `L`'s role
 //! `Lmunch[k]` walks column `k` from the bottom and only consumes an entry
 //! whose row is `j`, and every `k` the sweep reaches satisfies `k < j`, so the
-//! diagonal's row index `k` never matches. In `U`'s role the `i > k` test skips
-//! it outright.
+//! diagonal's row index `k` never matches. In `U`'s role it is the first entry
+//! of the column and [`sweep`] starts past it.
 //!
 //! `U` is `L'` **stored by row**, which for `U = L'` is the same three arrays
 //! as `L` stored by column: row `k` of `U` is column `k` of `L`. Upstream's mex
@@ -119,6 +130,41 @@ impl Selected {
         (0..self.n)
             .map(|j| self.x[self.diagp[j] as usize])
             .collect()
+    }
+}
+
+/// Nanoseconds spent in each of [`sweep`]'s three phases.
+///
+/// All zero unless the crate is built with the `profiling` feature. The clock
+/// is read once per phase per column rather than per entry, so a sweep that is
+/// being measured does the same work at the same rate as one that is not.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Phases {
+    /// Scattering column `j` of `Z` into the dense workspace.
+    pub scatter: u64,
+    /// The recurrence itself: the back-substitution for the strictly-upper
+    /// entries of column `j`, fused with the left-looking updates it feeds.
+    pub recurrence: u64,
+    /// Gathering column `j` back out and clearing the workspace.
+    pub gather: u64,
+}
+
+#[cfg(feature = "profiling")]
+#[inline]
+fn tick() -> Option<std::time::Instant> {
+    Some(std::time::Instant::now())
+}
+
+#[cfg(not(feature = "profiling"))]
+#[inline]
+fn tick() -> Option<std::time::Instant> {
+    None
+}
+
+#[inline]
+fn tock(t: Option<std::time::Instant>, acc: &mut u64) {
+    if let Some(t) = t {
+        *acc += t.elapsed().as_nanos() as u64;
     }
 }
 
@@ -203,6 +249,7 @@ fn sweep(
     z: &mut [f64],
     zdiagp: &mut [i64],
     lmunch: &mut [i64],
+    ph: &mut Phases,
 ) -> Result<i64, SpinvError> {
     let mut flops: i64 = n as i64;
 
@@ -237,57 +284,84 @@ fn sweep(
     for j in (0..n).rev() {
         /* scatter Z (:,j) into z workspace; only the lower triangular part is
          * needed, since the upper triangular part is all zero */
+        let t = tick();
         for p in zdiagp[j] as usize..zp[j + 1] as usize {
             z[zi[p] as usize] = zx[p];
         }
+        tock(t, &mut ph.scatter);
 
-        /* the strictly upper triangular part of Z (:,j):
-         * Z (k,j) = - U (k,k+1:n) * Z (k+1:n,j), for the entries Z(k,j) only */
+        /* Upstream runs two separate `p` loops over the strictly-upper pattern
+         * of column j — first every `Z(k,j)`, then every left-looking update —
+         * and they are fused here into one descending walk. The fusion is
+         * exact rather than approximate: the update for `k` reads `z` only at
+         * rows `≥ k` of column `k` of `L`, and the dot loop has written every
+         * `z[k']` for `k' ≥ k` by the time it reaches `k`, so both loops see
+         * the same values in the same order however they are interleaved. The
+         * two also walk the same row list — `zi[zdiagp[k]..]` is column `k` of
+         * `L` verbatim — so fusing loads `z[i]` once for both.
+         *
+         * The reason to do it: the dot is a back-substitution whose `z[k]`
+         * feeds the next iteration's gather, so consecutive dots are one long
+         * dependency chain and stall on FMA latency, while the updates are
+         * mutually independent. Interleaving gives the chain something to
+         * overlap with. Neither sum is reassociated, so the answer is
+         * unchanged bit for bit.
+         *
+         * The two are one timed phase because of the fusion, not despite it:
+         * splitting them would need a clock read per entry of `L` rather than
+         * per column, which costs a fifth of the sweep and would be measuring
+         * the measurement. */
+        let t = tick();
         let mut p = zdiagp[j] - 1;
         while p >= zp[j] {
             let k = zi[p as usize] as usize;
+
+            /* Z (k,j) = - U (k,k+1:n) * Z (k+1:n,j) */
             let mut zkj = 0.0;
             let (ub, ue) = (lp[k] as usize, (lp[k] + lnz[k]) as usize);
             flops += (ue - ub) as i64;
-            for up in ub..ue {
-                /* skip the diagonal of U, if present */
-                let i = li[up] as usize;
-                if i > k {
-                    zkj = mulsub(zkj, lx[up], z[i]);
+            /* Upstream tests `i > k` per entry to "skip the diagonal of U, if
+             * present", because its `U` comes from an LU where it may not be.
+             * Column k of an `LDL'` factor is always the D slot at row k
+             * followed by rows > k ascending, so the test is false exactly
+             * once and true for every other entry. Dropping the first entry
+             * visits the same entries in the same order. */
+            if ue > ub {
+                debug_assert_eq!(
+                    li[ub], k as i64,
+                    "column {k} of L must open on its diagonal"
+                );
+                for (&v, &i) in lx[ub + 1..ue].iter().zip(&li[ub + 1..ue]) {
+                    zkj = mulsub(zkj, v, z[i as usize]);
                 }
             }
             z[k] = zkj;
-            p -= 1;
-        }
 
-        /* left-looking update to the lower triangular part of Z */
-        let mut p = zdiagp[j] - 1;
-        while p >= zp[j] {
-            let k = zi[p as usize] as usize;
+            /* left-looking update to the lower triangular part of Z.
+             * ljk = L (j,k) */
+            if lmunch[k] >= lp[k] && li[lmunch[k] as usize] == j as i64 {
+                let ljk = lx[lmunch[k] as usize];
+                lmunch[k] -= 1;
 
-            /* ljk = L (j,k) */
-            if lmunch[k] < lp[k] || li[lmunch[k] as usize] != j as i64 {
-                /* L (j,k) is zero, so there is no work to do */
-                p -= 1;
-                continue;
-            }
-            let ljk = lx[lmunch[k] as usize];
-            lmunch[k] -= 1;
-
-            /* Z (k+1:n,k) = Z (k+1:n,k) - Z (k+1:n,j) * L (j,k) */
-            flops += zp[k + 1] - zdiagp[k];
-            for zq in zdiagp[k] as usize..zp[k + 1] as usize {
-                zx[zq] = mulsub(zx[zq], z[zi[zq] as usize], ljk);
+                /* Z (k+1:n,k) = Z (k+1:n,k) - Z (k+1:n,j) * L (j,k) */
+                flops += zp[k + 1] - zdiagp[k];
+                let (zb, ze) = (zdiagp[k] as usize, zp[k + 1] as usize);
+                for (v, &i) in zx[zb..ze].iter_mut().zip(&zi[zb..ze]) {
+                    *v = mulsub(*v, z[i as usize], ljk);
+                }
             }
             p -= 1;
         }
+        tock(t, &mut ph.recurrence);
 
         /* gather Z (:,j) back from z workspace */
+        let t = tick();
         for p in zp[j] as usize..zp[j + 1] as usize {
             let i = zi[p] as usize;
             zx[p] = z[i];
             z[i] = 0.0;
         }
+        tock(t, &mut ph.gather);
     }
 
     Ok(flops)
@@ -295,9 +369,10 @@ fn sweep(
 
 /// The selected inverse of the matrix `l` factors, in `l`'s own ordering.
 ///
-/// `l` must be a numeric simplicial `LDL'` factor. Returns `Z` and upstream's
-/// flop count.
-pub fn selected_inverse(l: &Factor) -> Result<(Selected, i64), SpinvError> {
+/// `l` must be a numeric simplicial `LDL'` factor. Returns `Z`, upstream's
+/// flop count, and where the time went — the last being all zero unless the
+/// crate is built with the `profiling` feature.
+pub fn selected_inverse(l: &Factor) -> Result<(Selected, i64, Phases), SpinvError> {
     if !l.numeric {
         return Err(SpinvError::NotNumeric);
     }
@@ -319,6 +394,7 @@ pub fn selected_inverse(l: &Factor) -> Result<(Selected, i64), SpinvError> {
     let mut z = vec![0.0f64; n];
     let mut zdiagp = vec![0i64; n];
     let mut lmunch = vec![0i64; n];
+    let mut ph = Phases::default();
 
     let flops = sweep(
         n,
@@ -333,6 +409,7 @@ pub fn selected_inverse(l: &Factor) -> Result<(Selected, i64), SpinvError> {
         &mut z,
         &mut zdiagp,
         &mut lmunch,
+        &mut ph,
     )?;
 
     Ok((
@@ -344,6 +421,7 @@ pub fn selected_inverse(l: &Factor) -> Result<(Selected, i64), SpinvError> {
             diagp: zdiagp,
         },
         flops,
+        ph,
     ))
 }
 
@@ -447,7 +525,7 @@ mod tests {
                 continue;
             }
             let (l, p, i, v) = factor(n, &edges);
-            let (z, _) = selected_inverse(&l).unwrap();
+            let (z, _, _) = selected_inverse(&l).unwrap();
             let inv = dense_inverse(n, &p, &i, &v, &l.perm);
             for j in 0..n {
                 for q in z.p[j] as usize..z.p[j + 1] as usize {
@@ -470,7 +548,7 @@ mod tests {
                 continue;
             }
             let (l, _, _, _) = factor(n, &edges);
-            let (z, _) = selected_inverse(&l).unwrap();
+            let (z, _, _) = selected_inverse(&l).unwrap();
             assert_eq!(z.diagonal().len(), n, "{name}");
             for j in 0..n {
                 assert_eq!(z.i[z.diagp[j] as usize], j as i64, "{name}: column {j}");
@@ -521,7 +599,7 @@ mod tests {
             .find(|(name, n, _)| *name == "banded" && *n == 400)
             .unwrap();
         let (l, _, _, _) = factor(n, &edges);
-        let (_, flops) = selected_inverse(&l).unwrap();
+        let (_, flops, _) = selected_inverse(&l).unwrap();
         let nnz_l: i64 = l.nz.iter().sum();
         assert!(flops > nnz_l, "flops {flops} vs nnz(L) {nnz_l}");
     }
@@ -565,7 +643,7 @@ mod tests {
                 continue;
             }
             let (l, _, _, _) = factor(n, &edges);
-            let (z, flops) = selected_inverse(&l).unwrap();
+            let (z, flops, _) = selected_inverse(&l).unwrap();
             assert!(flops >= n as i64, "{name}");
             assert_eq!(z.x.len(), z.i.len(), "{name}");
         }

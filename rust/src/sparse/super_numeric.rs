@@ -893,9 +893,15 @@ fn nthreads(work: f64, max: usize) -> usize {
 /// `sx` is `L->x` from `psx` on, so upstream's `psx + RelativeMap [j] * nsrow`
 /// loses its `psx`.
 ///
-/// **Both loops are `#pragma omp parallel for` upstream** (`:897` over `ndrow2`
-/// with `if (ndrow2 > 64)`, `:915` over `ndrow1` with `if (ndrow1 > 64)`), and
-/// the `j` loop is safe to split for a reason worth stating rather than
+/// **Both loops are `#pragma omp parallel for` upstream**, and only the second
+/// has a parallel arm here. `:897` over `ndrow2` gates on
+/// `cholmod_nthreads (ndrow2)`, which needs `ndrow2` at twice `Common->chunk`
+/// before a second thread appears — far above any `ndrow2` these
+/// factorizations reach — so it is serial for the same reason the `Map` build
+/// is. `:915` over `ndrow1` gates on `cholmod_nthreads (ndcol * ndrow2)`, a
+/// product, and that one does fire.
+///
+/// The `j` loop is safe to split for a reason worth stating rather than
 /// re-deriving: `px = RelativeMap [j] * nsrow`, so **iteration `j` writes column
 /// `RelativeMap [j]` and nothing else**. `RelativeMap` is injective — `Map` is a
 /// bijection from `s`'s rows onto `0 .. nsrow`, and `Ls [pdi1 ..]` are distinct
@@ -1175,7 +1181,15 @@ fn node_numeric(
     //--------------------------------------------------------------------------
 
     /* If row i is the kth row in s, then Map [i] = k.  Similarly, if
-     * column j is the kth column in s, then  Map [j] = k. */
+     * column j is the kth column in s, then  Map [j] = k.
+     *
+     * Upstream wraps this in `#pragma omp parallel for if (nsrow > 128)` with
+     * `cholmod_nthreads (nsrow)` (`:387-397`), which hands out a second thread
+     * only once `nsrow` reaches twice `Common->chunk`. Serial here because
+     * that is two orders of magnitude wider than the widest supernode these
+     * factorizations build, so a parallel arm would be unreachable — and an
+     * unreachable arm is one no gate can check. The same applies to the copy
+     * below and to `assemble`'s relative map. */
     {
         let map = Ws::new(&mut tw.map);
         for k in 0..nsrow {
@@ -1187,6 +1201,10 @@ fn node_numeric(
     // copy matrix into supernode s (lower triangular part only)
     //--------------------------------------------------------------------------
 
+    /* Upstream's `#pragma omp parallel for if (k2-k1 > 64)` (`:437-439`) takes
+     * its thread count from the nonzeros this column block reads, not from the
+     * column count, and needs twice `Common->chunk` of them. Serial here for
+     * the reason given at the `Map` build above. */
     {
         let map = Ws::new_ref(&tw.map);
         let sx = Ws::new(own);

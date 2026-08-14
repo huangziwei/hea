@@ -12,7 +12,19 @@ import pytest
 import scipy.sparse as sp
 
 from hea.sparse import CholmodError, PatternPlan, cho_factor
-from hea.sparse.pattern import _linear_index
+
+
+def _linear_index(M):
+    """``col * nrow + row`` for every stored entry of a sorted CSC matrix.
+
+    An oracle, not a copy of anything the module does: it reduces a pattern to
+    one ascending key per entry so a union can be checked against the general
+    set routine. ``PatternPlan`` merges the CSC structures directly and builds
+    no such key.
+    """
+    M = sp.csc_array(M)
+    cols = np.repeat(np.arange(M.shape[1], dtype=np.int64), np.diff(M.indptr))
+    return M.indices.astype(np.int64) + M.shape[0] * cols
 
 
 def _dense(M):
@@ -118,13 +130,21 @@ def test_scatter_rejects_an_entry_outside_the_pattern():
 
 
 def test_scatter_rejects_an_entry_past_the_last_slot():
-    # searchsorted returns nnz for this one rather than a wrong slot, so it is
-    # a separate arm of the guard from the case above.
+    # A separate arm of the merge's guard from the case above: this entry runs
+    # its column's cursor off the end, so it is rejected by the exhaustion test
+    # rather than by the row comparison.
     A = sp.csc_array(np.array([[1.0, 0.0], [0.0, 0.0]]))
     plan = PatternPlan.union(A)
     outside = sp.csc_array(np.array([[1.0, 0.0], [0.0, 5.0]]))
     with pytest.raises(ValueError, match="outside the pattern"):
         plan.scatter(outside)
+
+
+def test_scatter_onto_an_empty_pattern_rejects_every_entry():
+    plan = PatternPlan.union(sp.csc_array((2, 2)))
+    assert plan.nnz == 0
+    with pytest.raises(ValueError, match="2 entries outside the pattern"):
+        plan.scatter(sp.csc_array(np.array([[1.0, 0.0], [0.0, 3.0]])))
 
 
 def test_union_of_empty_matrices_is_empty():
@@ -157,9 +177,10 @@ def test_union_of_three_matrices():
 
 
 def test_union_matches_a_general_set_union():
-    # The fast path assumes each operand's linear index is already ascending,
-    # which `_linear_index` guarantees. If that assumption ever breaks the
-    # answer diverges from the general routine, so pin them together.
+    # `union` is a scipy add over ones-valued patterns, which is a linear-time
+    # merge and assumes both operands are already ascending. If that ever stops
+    # holding the answer diverges from the general set routine, so pin them
+    # together against one that sorts.
     rng = np.random.default_rng(5)
     A = sp.csc_array(sp.random_array((50, 50), density=0.1, rng=rng))
     B = sp.csc_array(sp.random_array((50, 50), density=0.1, rng=rng))
