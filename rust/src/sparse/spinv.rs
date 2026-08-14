@@ -359,6 +359,7 @@ mod tests {
     fn factor(n: usize, edges: &[(usize, usize)]) -> (Factor, Vec<i64>, Vec<i64>, Vec<f64>) {
         let (p, i, v) = spd_triangle(n, edges, false);
         let a = Sparse {
+            nrow: n,
             n,
             p: p.clone().into(),
             i: i.clone().into(),
@@ -529,6 +530,7 @@ mod tests {
     fn an_ll_factor_is_refused() {
         let (p, i, v) = spd_triangle(20, &[(0, 1), (1, 2), (2, 3)], false);
         let a = Sparse {
+            nrow: 20,
             n: 20,
             p: p.clone().into(),
             i: i.clone().into(),

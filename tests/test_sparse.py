@@ -1154,12 +1154,25 @@ def test_factorize_empty_and_singleton():
     assert factorize(sp.csc_array(np.array([[4.0]])), final_ll=True)["Lx"][0] == 2.0
 
 
+def test_a_square_stype_zero_input_factorizes_aat():
+    # `stype == 0` means "unsymmetric", and CHOLMOD factorizes ``L L' = A A'``
+    # for it. On a square input that is a legal request, not a malformed one:
+    # here ``A`` is the identity, so ``A A'`` is too and ``L`` comes back with
+    # one entry per column.
+    ip = np.array([0, 1, 2], dtype=np.int64)
+    ii = np.array([0, 1], dtype=np.int64)
+    ax = np.array([1.0, 1.0])
+    f = _rs.factorize(2, ip, ii, ax, 0)
+    assert f["Lnz"].tolist() == [1, 1]
+    assert f["Li"][: f["Lnz"].sum()].tolist() == [0, 1]
+    assert f["Lx"][: f["Lnz"].sum()].tolist() == [1.0, 1.0]
+    assert f["minor"] == 2
+
+
 def test_factorize_rejects_bad_input():
     ip = np.array([0, 1, 2], dtype=np.int64)
     ii = np.array([0, 1], dtype=np.int64)
     ax = np.array([1.0, 1.0])
-    with pytest.raises(ValueError, match="stype must be nonzero"):
-        _rs.factorize(2, ip, ii, ax, 0)
     with pytest.raises(ValueError, match="ordering must be"):
         _rs.factorize(2, ip, ii, ax, 1, ordering="nesdis")
     with pytest.raises(ValueError, match="indptr"):

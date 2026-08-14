@@ -82,6 +82,7 @@ use super::numeric::NumericError;
 use super::super_symbolic::SuperSymbolic;
 use super::symbolic::{permute_sym, Ordering, Sparse, Symbolic};
 use super::ws::{Work, Ws, EMPTY};
+use crate::nmath::util::rfma;
 
 /// A supernodal `cholmod_factor`: the symbolic pattern plus `L->x`.
 ///
@@ -1112,6 +1113,10 @@ struct Ctx<'a> {
     ap: &'a Ws,
     ai: &'a Ws,
     ax: &'a Ws<f64>,
+    /// `F` — `A'` in column form — present exactly when `A->stype == 0`, where
+    /// the supernode is assembled from `A*F` rather than from `A` itself
+    /// (`t_cholmod_super_numeric_worker.c:441-500`).
+    f: Option<(&'a Ws, &'a Ws, &'a Ws<f64>)>,
     ls: &'a Ws,
     lpi: &'a Ws,
     lpx: &'a Ws,
@@ -1186,18 +1191,41 @@ fn node_numeric(
         let map = Ws::new_ref(&tw.map);
         let sx = Ws::new(own);
         for k in k1..k2 {
-            /* copy the kth column of A into the supernode */
-            for p in ctx.ap[k]..ctx.ap[k + 1] {
-                /* row i of L is located in row Map [i] of s */
-                let i = ctx.ai[p];
-                if i >= k {
-                    /* If the test is false, the numeric factorization of A
-                     * is undefined.  The test does not detect all invalid
-                     * entries, only some of them. */
-                    let imap = map[i];
-                    if imap >= 0 && imap < nsrow {
-                        /* Lx [Map [i] + pk] = Ax [p] */
-                        sx[imap + (k - k1) * nsrow] = ctx.ax[p];
+            match ctx.f {
+                None => {
+                    /* copy the kth column of A into the supernode */
+                    for p in ctx.ap[k]..ctx.ap[k + 1] {
+                        /* row i of L is located in row Map [i] of s */
+                        let i = ctx.ai[p];
+                        if i >= k {
+                            /* If the test is false, the numeric factorization
+                             * of A is undefined.  The test does not detect all
+                             * invalid entries, only some of them. */
+                            let imap = map[i];
+                            if imap >= 0 && imap < nsrow {
+                                /* Lx [Map [i] + pk] = Ax [p] */
+                                sx[imap + (k - k1) * nsrow] = ctx.ax[p];
+                            }
+                        }
+                    }
+                }
+                Some((fp, fi, fx)) => {
+                    /* copy the kth column of A*F into the supernode */
+                    for pf in fp[k]..fp[k + 1] {
+                        let j = fi[pf];
+                        let fjk = fx[pf];
+                        for p in ctx.ap[j]..ctx.ap[j + 1] {
+                            let i = ctx.ai[p];
+                            if i >= k {
+                                /* see the discussion of imap above */
+                                let imap = map[i];
+                                if imap >= 0 && imap < nsrow {
+                                    /* Lx [Map [i] + pk] += Ax [p] * fjk */
+                                    let q = imap + (k - k1) * nsrow;
+                                    sx[q] = rfma(ctx.ax[p], fjk, sx[q]);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1675,6 +1703,7 @@ fn worker(
 /// clear.
 pub fn super_numeric(
     a: &Sparse,
+    f: Option<&Sparse>,
     beta: f64,
     l: &mut SuperFactor,
     work: &mut Work,
@@ -1683,13 +1712,12 @@ pub fn super_numeric(
     let n = l.n;
     let nsuper = l.sym.nsuper;
 
-    if a.stype == 0 {
+    if (a.stype == 0) != f.is_some() {
         return Err(NumericError::Invalid(
-            "stype must be nonzero: this port factorizes LL' = A for a \
-             symmetric A, not LL' = AA'",
+            "super_numeric needs F exactly when A->stype is zero",
         ));
     }
-    if a.n != n {
+    if a.nrow != n {
         return Err(NumericError::Invalid("dimensions of A and L do not match"));
     }
     if !a.numeric {
@@ -1767,6 +1795,7 @@ pub fn super_numeric(
             ap: Ws::new_ref(&a.p),
             ai: Ws::new_ref(&a.i),
             ax: Ws::new_ref(&a.x),
+            f: f.map(|f| (Ws::new_ref(&f.p), Ws::new_ref(&f.i), Ws::new_ref(&f.x))),
             ls: Ws::new_ref(&l.sym.s),
             lpi: Ws::new_ref(&l.sym.pi),
             lpx: Ws::new_ref(&l.sym.px),
@@ -1909,22 +1938,34 @@ pub fn super_factorize(
     work: &mut Work,
     cwork: &mut SuperWork,
 ) -> Result<(), NumericError> {
-    if a.stype == 0 {
-        return Err(NumericError::Invalid(
-            "stype must be nonzero: this port factorizes LL' = A for a \
-             symmetric A, not LL' = AA'",
-        ));
-    }
-    if a.n != l.n {
+    if a.nrow != l.n {
         return Err(NumericError::Invalid("dimensions of A and L do not match"));
     }
 
     /* S = tril (P A P').  `ptranspose (A, 2, ...)` is the conjugate transpose,
-     * which for CHOLMOD_REAL is the same array transpose mode 1 gives. */
+     * which for CHOLMOD_REAL is the same array transpose mode 1 gives.
+     *
+     * For `stype == 0` there is no triangle to take: `S` is `A` itself under a
+     * natural ordering and `F'` under a permuted one, with `F = A(p,:)'` in
+     * both cases the second operand the assembly multiplies through
+     * (`cholmod_factorize.c:201-250`). */
     const VALUES: bool = true;
     const LOWER: bool = true;
-    let s = permute_sym(a, l.ordering, &l.perm, VALUES, LOWER, &mut work.all());
-    super_numeric(s.as_ref().unwrap_or(a), beta, l, work, cwork)
+    if a.stype != 0 {
+        let s = permute_sym(a, l.ordering, &l.perm, VALUES, LOWER, &mut work.all());
+        return super_numeric(s.as_ref().unwrap_or(a), None, beta, l, work, cwork);
+    }
+    let f = super::symbolic::transpose_unsym(
+        a,
+        VALUES,
+        (!matches!(l.ordering, Ordering::Natural)).then_some(&l.perm[..]),
+    );
+    if matches!(l.ordering, Ordering::Natural) {
+        super_numeric(a, Some(&f), beta, l, work, cwork)
+    } else {
+        let s = super::symbolic::transpose_unsym(&f, VALUES, None);
+        super_numeric(&s, Some(&f), beta, l, work, cwork)
+    }
 }
 
 /* ========================================================================= */
@@ -2009,6 +2050,7 @@ mod tests {
     ) -> (Sparse<'static>, SuperFactor, Work) {
         let (p, i, v) = spd_triangle(n, edges, false);
         let a = Sparse {
+            nrow: n,
             n,
             p: p.clone().into(),
             i: i.clone().into(),
@@ -2022,6 +2064,7 @@ mod tests {
         let a2 = permute_sym(&a, s.ordering, &s.perm, false, false, &mut w.all());
         let sym = super_symbolic(
             a2.as_ref().unwrap_or(&a),
+            None,
             &s.parent,
             &s.colcount,
             &Relax::default(),

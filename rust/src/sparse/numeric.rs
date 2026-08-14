@@ -898,6 +898,7 @@ fn grow_l(lnz: i64, grow0: f64, n: i64) -> i64 {
 /// Returns `Common->rowfacfl`, the flop count.
 pub fn rowfac(
     a: &Sparse,
+    f: Option<&Sparse>,
     beta: f64,
     kstart: usize,
     kend: usize,
@@ -905,11 +906,20 @@ pub fn rowfac(
     params: &Params,
     work: &mut WorkRef<'_>,
 ) -> Result<f64, NumericError> {
-    let n = a.n;
-    if a.stype <= 0 {
+    /* `stype > 0` factorizes `A` and takes its columns directly; `stype == 0`
+     * factorizes `A F` — upstream's `F` is `A'`, supplied by the caller — and
+     * takes one column of `A` per nonzero of `F(:,k)`. The dimension is `A`'s
+     * row count in both cases. */
+    let n = a.nrow;
+    if a.stype < 0 {
         return Err(NumericError::Invalid(
             "rowfac needs the upper triangle of a symmetric A: \
-             stype <= 0 is not supported",
+             stype < 0 is not supported",
+        ));
+    }
+    if (a.stype == 0) != f.is_some() {
+        return Err(NumericError::Invalid(
+            "rowfac needs F exactly when A->stype is zero",
         ));
     }
     if !a.numeric {
@@ -968,22 +978,53 @@ pub fn rowfac(
         /* do not include diagonal entry in Stack */
         flag[k] = *mark;
 
-        /* Stack is empty; scatter kth col of triu (beta*I+A), get pattern
-         * L(k,:) */
-        let top = subtree(
-            k,
-            ap[k],
-            ap[k + 1],
-            sorted,
-            n_i,
-            *mark,
-            ai,
-            ax,
-            l,
-            stack,
-            flag,
-            wx,
-        );
+        /* Stack is empty; scatter kth col of triu (beta*I+A) or of
+         * triu (beta*I + A*F), and get pattern L(k,:) */
+        let mut multadds = 0.0f64;
+        let top = match f {
+            None => subtree::<false>(
+                k,
+                ap[k],
+                ap[k + 1],
+                sorted,
+                n_i,
+                *mark,
+                ai,
+                ax,
+                0.0,
+                &mut multadds,
+                l,
+                stack,
+                flag,
+                wx,
+            ),
+            Some(f) => {
+                /* one column of A per nonzero of F(:,k): W += A(:,t) * F(t,k) */
+                let mut top = n_i;
+                for pf in f.p[k as usize] as usize..f.p[k as usize + 1] as usize {
+                    let t = f.i[pf] as usize;
+                    let fx = f.x[pf];
+                    top = subtree::<true>(
+                        k,
+                        ap[t as i64],
+                        ap[t as i64 + 1],
+                        sorted,
+                        top,
+                        *mark,
+                        ai,
+                        ax,
+                        fx,
+                        &mut multadds,
+                        l,
+                        stack,
+                        flag,
+                        wx,
+                    );
+                }
+                top
+            }
+        };
+        fl += 2.0 * multadds;
 
         /* nonzero pattern of kth row of L is now in Stack [top..n-1].
          * Flag [Stack [top..n-1]] is equal to mark, but no longer needed.
@@ -1106,9 +1147,15 @@ pub fn rowfac(
 /// Returns the new `top`. `len` and `top` grow toward each other in the same
 /// `Iwork`; they cannot meet, because the two regions together hold only the
 /// nodes marked at this `k`, of which there are at most `n`.
+/// `UNSYM` picks which of the two `SCATTER` bodies the macro is expanded with:
+/// `W [i] = Ax [p]` for the symmetric case (`:209`) and
+/// `W [i] += Ax [p] * fk` for `stype == 0` (`:227`), where the caller is
+/// walking one column of `A` per nonzero of `F(:,k)` and `fk` is that entry.
+/// `multadds` counts the second form's operations, which is what upstream adds
+/// into `Common->rowfacfl`.
 #[inline]
 #[allow(clippy::too_many_arguments)]
-fn subtree(
+fn subtree<const UNSYM: bool>(
     k: i64,
     p: i64,
     pend: i64,
@@ -1117,6 +1164,8 @@ fn subtree(
     mark: i64,
     ai: &Ws,
     ax: &Ws<f64>,
+    fk: f64,
+    multadds: &mut f64,
     l: &Factor,
     stack: &mut Ws,
     flag: &mut Ws,
@@ -1128,7 +1177,12 @@ fn subtree(
         let i = ai[pa];
         if i <= k {
             /* scatter the column of A into Wx */
-            wx[i] = ax[pa];
+            if UNSYM {
+                wx[i] = rfma(ax[pa], fk, wx[i]);
+                *multadds += 1.0;
+            } else {
+                wx[i] = ax[pa];
+            }
             /* start at node i and traverse up the subtree, stop at node k */
             let mut len = 0i64;
             let mut i = i;
@@ -1221,23 +1275,31 @@ pub fn factorize(
     params: &Params,
     work: &mut Work,
 ) -> Result<f64, NumericError> {
-    let nrow = a.n;
-    if a.stype == 0 {
-        return Err(NumericError::Invalid(
-            "stype must be nonzero: this port factorizes LL' = A for a \
-             symmetric A, not LL' = AA'",
-        ));
-    }
+    let nrow = a.nrow;
     if nrow != l.n {
         return Err(NumericError::Invalid("dimensions of A and L do not match"));
     }
 
     /* Permute the input matrix A if necessary.  cholmod_rowfac requires
-     * triu(A) in column form for the symmetric case. */
+     * triu(A) in column form for the symmetric case, and for `stype == 0` both
+     * `A` in column form (`S`) and `A'` in column form (`F`), since it
+     * factorizes `beta*I + F*F'` (`cholmod_factorize.c:304-375`). */
     const VALUES: bool = true;
     const UPPER: bool = false;
-    let a2 = permute_sym(a, l.ordering, &l.perm, VALUES, UPPER, &mut work.all());
-    let s: &Sparse = a2.as_ref().unwrap_or(a);
+    let (a1, a2);
+    let (s, f): (&Sparse, Option<&Sparse>) = if a.stype != 0 {
+        a2 = permute_sym(a, l.ordering, &l.perm, VALUES, UPPER, &mut work.all());
+        (a2.as_ref().unwrap_or(a), None)
+    } else if matches!(l.ordering, Ordering::Natural) {
+        /* F = A', S = A */
+        a1 = super::symbolic::transpose_unsym(a, VALUES, None);
+        (a, Some(&a1))
+    } else {
+        /* F = A (p,:)', S = F' */
+        a1 = super::symbolic::transpose_unsym(a, VALUES, Some(&l.perm));
+        a2 = Some(super::symbolic::transpose_unsym(&a1, VALUES, None));
+        (a2.as_ref().unwrap(), Some(&a1))
+    };
 
     /* factorize beta*I+S */
     let mut facparams = *params;
@@ -1246,7 +1308,7 @@ pub fn factorize(
         /* allocate a factor with exactly the space required */
         facparams.grow2 = 0;
     }
-    let fl = rowfac(s, beta, 0, nrow, l, &facparams, &mut work.all())?;
+    let fl = rowfac(s, f, beta, 0, nrow, l, &facparams, &mut work.all())?;
     /* Common->grow2 = grow2 — restored before anything else reads it */
 
     /* convert to final form, if requested */
@@ -1275,25 +1337,28 @@ pub fn factorize(
 /// header at `:219-222` states the permutation requirement). That is exactly
 /// the `S` the supernodal factorization was handed.
 ///
-/// Upstream's `stype == 0` arm builds link lists over the columns of `A(:,f)`;
-/// it is `LL' = FF'`, out of scope here as everywhere else in this module, and
-/// the `Anext` half of the workspace goes with it.
+/// **`stype == 0` is `LL' = FF'`** and is the other arm: there `A` is `F` and
+/// each of its columns is queued on the link list of its smallest row index, so
+/// step `k` merges every column whose first row is `k` rather than column `k`
+/// itself (`:361-415` and `worker:91-111`). `Anext` is the second half of the
+/// workspace that arm needs.
 pub fn resymbol_noperm(
     a: &Sparse,
     pack: bool,
     l: &mut Factor,
     work: &mut WorkRef<'_>,
 ) -> Result<(), NumericError> {
-    if a.stype >= 0 {
+    if a.stype > 0 {
         return Err(NumericError::Invalid(
-            "resymbol_noperm needs tril (P A P'): symmetric upper is rejected \
-             upstream and LL' = FF' is not ported",
+            "resymbol_noperm needs tril (P A P') or an unsymmetric F: \
+             symmetric upper is rejected upstream",
         ));
     }
-    if a.n != l.n {
+    if a.nrow != l.n {
         return Err(NumericError::Invalid("dimensions of A and L do not match"));
     }
     let n = l.n;
+    let unsym = a.stype == 0;
 
     /* cannot pack a non-monotonic matrix (`:322-326`) */
     let pack = pack && l.is_monotonic;
@@ -1308,19 +1373,54 @@ pub fn resymbol_noperm(
      * clarity for nothing. */
     let flag = Ws::new(&mut work.flag[..n]);
     let mark = &mut *work.mark;
-    let link = &mut work.iwork[..n];
+    let ncol = a.n;
+    let (link, anext) = work.iwork[..n + if unsym { ncol } else { 0 }].split_at_mut(n);
     link.fill(EMPTY);
+
+    /* For the unsymmetric case, queue each column of A on the link list of its
+     * smallest row index (`:361-415`). `Head` is the list head per row. */
+    let head = &mut work.head[..n.max(1)];
+    if unsym {
+        anext.fill(EMPTY);
+        for j in 0..ncol {
+            let (pb, pe) = (a.p[j] as usize, a.p[j + 1] as usize);
+            if pe > pb {
+                let mut k = a.i[pb];
+                if !a.sorted {
+                    for q in pb..pe {
+                        k = k.min(a.i[q]);
+                    }
+                }
+                anext[j] = head[k as usize];
+                head[k as usize] = j as i64;
+            }
+        }
+    }
 
     let mut pdest: usize = 0;
     for k in 0..n {
-        /* compute column k of I+A: flag the diagonal, then the lower triangle
-         * of column k (`worker:69-88`) */
+        /* compute column k of I+A (symmetric) or of I+F*F' (unsymmetric):
+         * flag the diagonal, then either the lower triangle of column k, or
+         * every column whose first row index is k (`worker:69-111`) */
         clear_flag(flag, mark);
         flag[k as i64] = *mark;
-        for p in a.p[k]..a.p[k + 1] {
-            let i = a.i[p as usize];
-            if i > k as i64 {
-                flag[i] = *mark;
+        if unsym {
+            let mut j = head[k];
+            while j != EMPTY {
+                let ju = j as usize;
+                for p in a.p[ju] as usize..a.p[ju + 1] as usize {
+                    flag[a.i[p]] = *mark;
+                }
+                j = anext[ju];
+            }
+            /* clear the kth link list */
+            head[k] = EMPTY;
+        } else {
+            for p in a.p[k]..a.p[k + 1] {
+                let i = a.i[p as usize];
+                if i > k as i64 {
+                    flag[i] = *mark;
+                }
             }
         }
 
@@ -1398,6 +1498,7 @@ mod tests {
         .expect("the corpus is well-formed");
         (
             Sparse {
+                nrow: n,
                 n,
                 p: p.into(),
                 i: i.into(),
@@ -1597,6 +1698,7 @@ mod tests {
     fn an_indefinite_matrix_reports_where_it_failed() {
         /* [[1,2],[2,1]] is symmetric with eigenvalues 3 and -1 */
         let a = Sparse {
+            nrow: 2,
             n: 2,
             p: vec![0, 1, 3].into(),
             i: vec![0, 0, 1].into(),
@@ -1655,6 +1757,7 @@ mod tests {
     fn unsupported_inputs_are_rejected() {
         let mut work = Work::new(1);
         let pattern_only = Sparse {
+            nrow: 1,
             n: 1,
             p: vec![0, 1].into(),
             i: vec![0].into(),
@@ -1676,6 +1779,7 @@ mod tests {
         assert!(matches!(
             rowfac(
                 &pattern_only,
+                None,
                 0.0,
                 0,
                 1,
@@ -1694,6 +1798,7 @@ mod tests {
         assert!(matches!(
             rowfac(
                 &lower,
+                None,
                 0.0,
                 0,
                 1,

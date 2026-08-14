@@ -185,21 +185,44 @@ fn analyze_and_factorize(
     };
 
     if want_super {
-        let a2 = symbolic::permute_sym(a, s.ordering, &s.perm, false, false, &mut work.all());
+        /* `permute_matrices` for the supernodal symbolic: `S` alone when `A` is
+         * symmetric, and `S` with `F = A(p,:)'` when it is not
+         * (`cholmod_analyze.c:894-898`). */
+        let a2;
+        let fpat: Option<Sparse>;
+        let (ssym, fsym): (&Sparse, Option<&Sparse>) = if a.stype != 0 {
+            a2 = symbolic::permute_sym(a, s.ordering, &s.perm, false, false, &mut work.all());
+            fpat = None;
+            (a2.as_ref().unwrap_or(a), None)
+        } else if matches!(s.ordering, Ordering::Natural) {
+            fpat = Some(symbolic::transpose_unsym(a, false, None));
+            a2 = None;
+            (a, fpat.as_ref())
+        } else {
+            fpat = Some(symbolic::transpose_unsym(a, false, Some(&s.perm)));
+            a2 = Some(symbolic::transpose_unsym(
+                fpat.as_ref().unwrap(),
+                false,
+                None,
+            ));
+            (a2.as_ref().unwrap(), fpat.as_ref())
+        };
         let sym = super_symbolic::super_symbolic(
-            a2.as_ref().unwrap_or(a),
+            ssym,
+            fsym,
             &s.parent,
             &s.colcount,
             &super_symbolic::Relax::default(),
             work,
         )
         .map_err(|e| e.to_string())?;
-        /* `a2` is the pattern-only `P A P'` the supernodal *symbolic* needs and
-         * nothing after it does: `super_factorize` builds its own numeric
-         * `tril (P A P')`. Rust would keep it to the end of the block, so it
-         * would be live across the allocation of `L->x` — 0.4 GB against 4.7 on
-         * a 3.4M-row system. */
+        /* `a2` and `fpat` are the pattern-only `S` and `F` the supernodal
+         * *symbolic* needs and nothing after it does: `super_factorize` builds
+         * its own numeric pair. Rust would keep them to the end of the block,
+         * so they would be live across the allocation of `L->x` — 0.4 GB
+         * against 4.7 on a 3.4M-row system. */
         drop(a2);
+        drop(fpat);
         /* `SuperFactor::new` consumes the analysis, so `Perm` and `ColCount`
          * move into `L` the way `Lperm = L->Perm` puts them there upstream, and
          * `parent`/`post` — the analysis's own scratch, which nothing numeric
@@ -258,6 +281,9 @@ pub struct CholFactor {
     /// `A->stype`, kept with the pattern for the same reason: it is what says
     /// which triangle those indices are.
     stype: i32,
+    /// `A->nrow`. Equal to the column count for a symmetric `A`, and the
+    /// dimension of `L` in both cases: `stype == 0` factorizes `A A'`.
+    nrow: usize,
     /// `A->sorted` for that pattern, so a `refactorize` whose pattern is
     /// unchanged does not sweep `A->i` again to rediscover it.
     sorted: bool,
@@ -285,6 +311,7 @@ impl CholFactor {
             ap,
             ai,
             stype,
+            nrow,
             sorted,
             kind,
             work,
@@ -294,13 +321,15 @@ impl CholFactor {
             return Ok(None);
         };
         let mut f = Factor::from_supernodal(&k.l);
-        /* resymbol wants tril (P A P'), which is the S the supernodal
-         * factorization was handed (`cholmod_factorize.c:275`) — but only its
-         * pattern: `cholmod_resymbol_noperm` reads `A->p` and `A->i` and never
-         * `A->x`, which is why the values are not kept and this builds a
-         * `CHOLMOD_PATTERN` matrix. */
+        /* resymbol wants tril (P A P') for a symmetric `A` — the `S` the
+         * supernodal factorization was handed (`cholmod_factorize.c:275`) —
+         * and `F = A(p,:)'` for `stype == 0`, where it prunes `LL' = FF'`. In
+         * both cases only the pattern: `cholmod_resymbol_noperm` reads `A->p`
+         * and `A->i` and never `A->x`, which is why the values are not kept
+         * and this builds a `CHOLMOD_PATTERN` matrix. */
         let a = Sparse {
-            n: k.l.n,
+            nrow: *nrow,
+            n: ap.len() - 1,
             p: Cow::Borrowed(ap),
             i: Cow::Borrowed(ai),
             x: Cow::Borrowed(&[]),
@@ -309,9 +338,19 @@ impl CholFactor {
             sorted: *sorted,
         };
         const PATTERN: bool = false;
-        let s = symbolic::permute_sym(&a, f.ordering, &f.perm, PATTERN, true, &mut work.all());
-        numeric::resymbol_noperm(s.as_ref().unwrap_or(&a), true, &mut f, &mut work.all())
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if *stype == 0 {
+            /* `S = A(p,:)`, not `F`: resymbol queues the columns of its
+             * argument by their smallest *row* index, so the argument is the
+             * one whose rows index `L` — `nrow`-by-`ncol`, which is `F'`. */
+            let fpat = symbolic::transpose_unsym(&a, PATTERN, Some(&f.perm));
+            let spat = symbolic::transpose_unsym(&fpat, PATTERN, None);
+            numeric::resymbol_noperm(&spat, true, &mut f, &mut work.all())
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        } else {
+            let s = symbolic::permute_sym(&a, f.ordering, &f.perm, PATTERN, true, &mut work.all());
+            numeric::resymbol_noperm(s.as_ref().unwrap_or(&a), true, &mut f, &mut work.all())
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        }
         Ok(Some(f))
     }
 
@@ -367,12 +406,13 @@ impl CholFactor {
     /// and an `LDL'` only on a zero one), so that is a real choice and not a
     /// presentational one.
     #[new]
-    #[pyo3(signature = (n, indptr, indices, data, stype, beta=0.0, ordering="best",
+    #[pyo3(signature = (nrow, ncol, indptr, indices, data, stype, beta=0.0, ordering="best",
                         use_ll=false, supernodal="auto"))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
-        n: usize,
+        nrow: usize,
+        ncol: usize,
         indptr: PyReadonlyArray1<'_, i64>,
         indices: PyReadonlyArray1<'_, i64>,
         data: PyReadonlyArray1<'_, f64>,
@@ -393,29 +433,32 @@ impl CholFactor {
         };
 
         py.allow_threads(|| -> Result<CholFactor, String> {
-            let nz = ws::validate_csc(n, indptr, indices).map_err(|e| e.to_string())?;
+            let nz =
+                ws::validate_csc_rect(nrow, ncol, indptr, indices).map_err(|e| e.to_string())?;
             if nz > data.len() {
                 return Err(format!(
-                    "data has length {}, expected at least indptr[n] = {nz}",
+                    "data has length {}, expected at least indptr[ncol] = {nz}",
                     data.len()
                 ));
             }
             let a = Sparse {
-                n,
-                p: Cow::Borrowed(&indptr[..n + 1]),
+                nrow,
+                n: ncol,
+                p: Cow::Borrowed(&indptr[..ncol + 1]),
                 i: Cow::Borrowed(&indices[..nz]),
                 x: Cow::Borrowed(&data[..nz]),
                 numeric: true,
                 stype,
-                sorted: ws::columns_are_sorted(n, indptr, indices),
+                sorted: ws::columns_are_sorted(ncol, indptr, indices),
             };
-            let mut work = Work::new(n);
+            let mut work = Work::new(nrow);
             let sorted = a.sorted;
             let (kind, fl) = analyze_and_factorize(&a, beta, method, mode, params, &mut work)?;
             Ok(CholFactor {
-                ap: indptr[..n + 1].to_vec(),
+                ap: indptr[..ncol + 1].to_vec(),
                 ai: indices[..nz].to_vec(),
                 stype,
+                nrow,
                 sorted,
                 kind,
                 work,
@@ -458,17 +501,18 @@ impl CholFactor {
         let (indptr, indices, data) = (indptr.as_slice()?, indices.as_slice()?, data.as_slice()?);
         let (method, mode, params, stype) = (self.method, self.mode, self.params, self.stype);
         let n = self.n();
+        let ncol = self.ap.len() - 1;
         if indptr.len() != self.ap.len() {
             return Err(PyValueError::new_err(format!(
-                "indptr has length {}, expected n + 1 = {}",
+                "indptr has length {}, expected ncol + 1 = {}",
                 indptr.len(),
                 self.ap.len()
             )));
         }
-        let nz = indptr[n] as usize;
+        let nz = indptr[ncol] as usize;
         if nz > indices.len() || nz > data.len() {
             return Err(PyValueError::new_err(format!(
-                "indptr[n] = {nz} is out of range for {} row indices and {} values",
+                "indptr[ncol] = {nz} is out of range for {} row indices and {} values",
                 indices.len(),
                 data.len()
             )));
@@ -489,15 +533,17 @@ impl CholFactor {
              * skipped, which is the whole point of holding the pattern. */
             let same = indptr == &ap[..] && indices[..nz] == ai[..];
             if !same {
-                ws::validate_csc(n, indptr, &indices[..nz]).map_err(|e| e.to_string())?;
-                *sorted = ws::columns_are_sorted(n, indptr, indices);
+                ws::validate_csc_rect(n, ncol, indptr, &indices[..nz])
+                    .map_err(|e| e.to_string())?;
+                *sorted = ws::columns_are_sorted(ncol, indptr, indices);
             }
             /* the matrix `cholmod_factorize (A, L, Common)` is handed: a view
              * onto the caller's three arrays, built fresh on every call and
              * kept by nobody */
             let a = Sparse {
-                n,
-                p: Cow::Borrowed(&indptr[..n + 1]),
+                nrow: n,
+                n: ncol,
+                p: Cow::Borrowed(&indptr[..ncol + 1]),
                 i: Cow::Borrowed(&indices[..nz]),
                 x: Cow::Borrowed(&data[..nz]),
                 numeric: true,

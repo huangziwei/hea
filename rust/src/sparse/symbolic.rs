@@ -93,6 +93,14 @@ impl core::fmt::Display for SymbolicError {
 /// 3.4M-row system, and it read as faithful because the C's declaration does
 /// not say which it is.
 pub struct Sparse<'a> {
+    /// `A->nrow`. Equal to [`Sparse::n`] for every symmetric matrix, which is
+    /// every matrix reaching the factorization; they differ only on the
+    /// rectangular `A` that `stype == 0` takes, where `C = A A'` is
+    /// `nrow`-by-`nrow` and `A->p` is still indexed by column.
+    pub nrow: usize,
+    /// `A->ncol`. Named `n` because for a symmetric `A` it is *the* dimension
+    /// and upstream calls it `n` throughout; read it as the column count
+    /// wherever a matrix may be rectangular.
     pub n: usize,
     /// `A->p`, size `n + 1`.
     pub p: Cow<'a, [i64]>,
@@ -227,6 +235,7 @@ pub fn transpose_sym(
     }
 
     Sparse {
+        nrow: n,
         n,
         p: cp.into(),
         i: ci.into(),
@@ -340,9 +349,13 @@ fn transpose_permuted<const LO: bool, const NUMERIC: bool, const VALUES: bool>(
     }
 }
 
-/// `cholmod_ptranspose` restricted to a symmetric `A`
-/// (`t_cholmod_ptranspose.c:25-115`). For `A->stype != 0` it is exactly
-/// [`transpose_sym`]; the `fset` counting above it only runs when `stype == 0`.
+/// `cholmod_ptranspose` (`t_cholmod_ptranspose.c:25-115`) — the dispatch on
+/// `A->stype` that decides which of the two transposes runs.
+///
+/// The `fset` argument upstream carries is not here: it is meaningful only for
+/// `stype == 0`, and the one caller that could supply one
+/// (`cholmod_analyze`'s `permute_matrices`) passes its own `fset` through, which
+/// this port does not take.
 #[inline]
 pub fn ptranspose(
     a: &Sparse,
@@ -350,7 +363,11 @@ pub fn ptranspose(
     perm: Option<&[i64]>,
     work: &mut WorkRef<'_>,
 ) -> Sparse<'static> {
-    transpose_sym(a, values, perm, work)
+    if a.stype == 0 {
+        transpose_unsym(a, values, perm)
+    } else {
+        transpose_sym(a, values, perm, work)
+    }
 }
 
 /// `permute_matrices` (`cholmod_analyze.c:161-286`) for a symmetric `A`,
@@ -411,6 +428,102 @@ pub fn permute_sym(
 }
 
 /* ========================================================================= */
+/* === cholmod_transpose_unsym ============================================= */
+/* ========================================================================= */
+
+/// `C = A'` for an unsymmetric `A` — `cholmod_transpose_unsym`
+/// (`t_cholmod_transpose_unsym.c:96-397`).
+///
+/// The counterpart of [`transpose_sym`] for `stype == 0`, and the reason it
+/// exists here: `cholmod_aat` opens with a transpose of its rectangular input,
+/// and the symmetric transpose cannot take one.
+///
+/// **Scope: `fset == NULL`.** Upstream also supports `A(:,f)'`; that arm exists
+/// to serve `cholmod_aat`'s column-subset variant, which no consumer asks for
+/// and which is not ported. `Perm` *is* supported: `cholmod_analyze`'s
+/// `permute_matrices` builds `F = A(p,:)'` for a permuted `stype == 0` matrix,
+/// so it is on the only path that reaches here.
+///
+/// With `fset` absent upstream's `fsorted` stays true and so `C` is sorted,
+/// permuted or not: each column of `C` is filled by scanning `A`'s columns in
+/// increasing order, so its row indices ascend by construction.
+///
+/// `C` is `A->ncol`-by-`A->nrow`. Upstream allocates `C` in
+/// `cholmod_ptranspose` and fills it here; this returns it, since the caller
+/// never has a `C` to reuse.
+pub fn transpose_unsym(a: &Sparse, values: bool, perm: Option<&[i64]>) -> Sparse<'static> {
+    let nrow = a.nrow;
+    let ncol = a.n;
+    let numeric = values && a.numeric;
+    let anz = a.p[ncol] as usize;
+
+    /* count entries in each row of A */
+    let mut wi = vec![0i64; nrow];
+    for j in 0..ncol {
+        for p in a.p[j] as usize..a.p[j + 1] as usize {
+            wi[a.i[p] as usize] += 1;
+        }
+    }
+
+    let mut cp = vec![0i64; nrow + 1];
+    match perm {
+        None => {
+            /* Cp = cumsum (Wi), then Wi [0..nrow-1] = Cp [0..nrow-1] */
+            let mut s = 0i64;
+            for i in 0..nrow {
+                cp[i] = s;
+                s += wi[i];
+            }
+            cp[nrow] = s;
+            wi.copy_from_slice(&cp[..nrow]);
+        }
+        Some(p) => {
+            /* Cp = cumsum (Wi [Perm]), then Wi [Perm [i]] = Cp [i]: row
+             * `Perm[i]` of `A` becomes column `i` of `C`. */
+            let mut s = 0i64;
+            for i in 0..nrow {
+                cp[i] = s;
+                s += wi[p[i] as usize];
+            }
+            cp[nrow] = s;
+            for i in 0..nrow {
+                wi[p[i] as usize] = cp[i];
+            }
+        }
+    }
+
+    /* C(j,i) = A(i,j), placed at the running position for row i */
+    let mut ci = vec![0i64; anz];
+    let mut cx = if numeric {
+        vec![0.0f64; anz]
+    } else {
+        Vec::new()
+    };
+    for j in 0..ncol {
+        for p in a.p[j] as usize..a.p[j + 1] as usize {
+            let i = a.i[p] as usize;
+            let pc = wi[i] as usize;
+            wi[i] += 1;
+            ci[pc] = j as i64;
+            if numeric {
+                cx[pc] = a.x[p];
+            }
+        }
+    }
+
+    Sparse {
+        nrow: ncol,
+        n: nrow,
+        p: cp.into(),
+        i: ci.into(),
+        x: cx.into(),
+        numeric,
+        stype: 0,
+        sorted: true,
+    }
+}
+
+/* ========================================================================= */
 /* === cholmod_etree ======================================================= */
 /* ========================================================================= */
 
@@ -437,23 +550,34 @@ fn update_etree(mut k: i64, i: i64, parent: &mut Ws, ancestor: &mut Ws) {
     }
 }
 
-/// The elimination tree of a symmetric `A` — `cholmod_etree.c:81-221`.
+/// The elimination tree of `A` (symmetric upper) or of `A'A` (`stype == 0`) —
+/// `cholmod_etree.c:81-221`.
 ///
-/// Only the upper triangular part of `A` is used, so `A->stype` must be
-/// positive: upstream rejects the lower form outright (`:215`, "symmetric lower
-/// not supported"), because the algorithm needs the columns of `triu(A)` and
-/// the lower form stores its transpose.
+/// The **lower** symmetric form is rejected, as upstream rejects it (`:215`,
+/// "symmetric lower not supported"): the algorithm needs the columns of
+/// `triu(A)` and the lower form stores its transpose.
+///
+/// `stype == 0` computes `etree(A'A)`, which is how `cholmod_analyze` gets the
+/// tree it wants: it hands this `F = A'`, so `etree(F'F) = etree(A A')` is the
+/// tree of the matrix actually being factorized (`cholmod_analyze.c:333`).
+/// `Parent` is sized by `ncol` in both cases.
 pub fn etree(
     a: &Sparse,
     parent_buf: &mut [i64],
     work: &mut WorkRef<'_>,
 ) -> Result<(), SymbolicError> {
-    if a.stype <= 0 {
+    if a.stype < 0 {
         return Err(SymbolicError::Unsymmetric);
     }
     let ncol = a.n;
-    /* Ancestor = Iwork [0..n) */
-    let (ancestor_buf, _) = work.scratch2(ncol);
+    let nrow = a.nrow;
+    /* Ancestor = Iwork [0..ncol), and for stype == 0 also Prev = Iwork
+     * [ncol..ncol+nrow), which is upstream's `Iwork + ncol` (`:178`). Its
+     * total is `A->nrow + (stype ? 0 : A->ncol)` (`:112`) — taken as one slice
+     * rather than through `scratch2`, whose two equal halves are the wrong
+     * shape here. */
+    let want = if a.stype == 0 { ncol + nrow } else { ncol };
+    let (ancestor_buf, prev_buf) = work.iwork[..want].split_at_mut(ncol);
 
     let ap = Ws::new_ref(&a.p);
     let ai = Ws::new_ref(&a.i);
@@ -464,12 +588,34 @@ pub fn etree(
         ancestor[j] = EMPTY;
     }
 
-    /* symmetric (upper) case: compute etree (A) */
-    for j in 0..ncol as i64 {
-        /* for each row i in column j of triu(A), excluding the diagonal */
-        for &i in ai.range(ap[j], ap[j + 1]) {
-            if i < j {
-                update_etree(i, j, parent, ancestor);
+    if a.stype > 0 {
+        /* symmetric (upper) case: compute etree (A) */
+        for j in 0..ncol as i64 {
+            /* for each row i in column j of triu(A), excluding the diagonal */
+            for &i in ai.range(ap[j], ap[j + 1]) {
+                if i < j {
+                    update_etree(i, j, parent, ancestor);
+                }
+            }
+        }
+    } else {
+        /* unsymmetric case: compute etree (A'*A).
+         *
+         * A graph is built with one path per row of A: if row i holds column
+         * indices (j1,j2,j3) the path has edges (j1,j2) and (j2,j3). `Prev[i]`
+         * is the last column seen in row i, so every edge (jprev, j) with
+         * jprev < j is offered to the tree exactly once. */
+        let prev = Ws::new(prev_buf);
+        for i in 0..nrow {
+            prev[i] = EMPTY;
+        }
+        for j in 0..ncol as i64 {
+            for &i in ai.range(ap[j], ap[j + 1]) {
+                let jprev = prev[i];
+                if jprev != EMPTY {
+                    update_etree(jprev, j, parent, ancestor);
+                }
+                prev[i] = j;
             }
         }
     }
@@ -736,6 +882,53 @@ fn sym_pass<const ROWCOUNT: bool>(
     anz
 }
 
+/// The unsymmetric branch of `cholmod_rowcolcounts` (`:446-482`).
+///
+/// `LL' = AA'`, so the edges come from `A`'s columns rather than its triangle:
+/// column `j` contributes an edge from the current node to every row `i` it
+/// holds, once per step `k`. `Head[k]` is the list of columns whose *first
+/// postordered* row is `k`, which is what makes each column reachable at
+/// exactly the step where it first matters, and `PrevNbr[i] < k` is what stops
+/// a row being processed twice within one step.
+///
+/// Unlike [`sym_pass`] there is no `anz` to accumulate: upstream leaves
+/// `Common->anz` alone here.
+#[inline]
+fn unsym_pass<const ROWCOUNT: bool>(
+    nrow: usize,
+    ap: &Ws,
+    ai: &Ws,
+    post: &Ws,
+    parent: &Ws,
+    head: &mut Ws,
+    anext: &Ws,
+    w: &mut RowColWork<'_>,
+    rowcount: &mut [i64],
+) {
+    for k in 0..nrow as i64 {
+        /* inode is the kth node in the postordered etree */
+        let inode = initialize_node(k, post, parent, w.colcount, w.prevnbr);
+
+        /* for all cols j whose first postordered row is k */
+        let mut j = head[k];
+        while j != EMPTY {
+            /* for all rows i in column j */
+            for &i in ai.range(ap[j], ap[j + 1]) {
+                /* has i already been considered at this step k */
+                if w.prevnbr[i] < k {
+                    /* inode is a descendant of i in etree(AA') */
+                    process_edge::<ROWCOUNT>(inode, i, k, w, rowcount);
+                }
+            }
+            j = anext[j];
+        }
+        /* clear link list k */
+        head[k] = EMPTY;
+        /* update SetParent: UNION (inode, Parent [inode]) */
+        finalize_node(inode, parent, w.setparent);
+    }
+}
+
 /// `cholmod_rowcolcounts.c:163-176` — `UNION (p, Parent [p])`.
 #[inline]
 fn finalize_node(p: i64, parent: &Ws, setparent: &mut Ws) {
@@ -756,6 +949,11 @@ pub struct RowColCounts {
     pub lnz: f64,
     /// `Common->fl` — `Σ ColCount[j]²` (`:517-524`).
     pub fl: f64,
+    /// `Common->aatfl` (`:514`) — `Σ_j |A_j|² + |A_j|` over the columns of `A`,
+    /// accumulated only on the `stype == 0` path and left at zero otherwise.
+    /// It is the flop count of forming `AA'`, which is a different quantity
+    /// from [`RowColCounts::fl`], the count of factorizing it.
+    pub aatfl: f64,
 }
 
 /// Row and column counts of `L` where `LL' = A` — `cholmod_rowcolcounts.c`.
@@ -780,13 +978,19 @@ pub fn rowcolcounts(
     level: &mut [i64],
     work: &mut WorkRef<'_>,
 ) -> Result<RowColCounts, SymbolicError> {
-    if a.stype >= 0 {
+    if a.stype > 0 {
         return Err(SymbolicError::Unsymmetric);
     }
-    let nrow = a.n;
+    let unsym = a.stype == 0;
+    let nrow = a.nrow;
+    let ncol = a.n;
 
-    /* SetParent = Iwork [0..n), PrevNbr = Iwork [n..2n), PrevLeaf = Flag */
-    let (setparent_buf, prevnbr_buf) = work.iwork[..2 * nrow].split_at_mut(nrow);
+    /* SetParent = Iwork [0..nrow), PrevNbr = Iwork [nrow..2nrow),
+     * Anext = Iwork [2nrow..2nrow+ncol) (unsym only), PrevLeaf = Flag */
+    let iwant = 2 * nrow + if unsym { ncol } else { 0 };
+    let (head2, rest) = work.iwork[..iwant].split_at_mut(2 * nrow);
+    let (setparent_buf, prevnbr_buf) = head2.split_at_mut(nrow);
+    let anext_buf = rest;
     let prevleaf_buf = &mut work.flag;
 
     let ap = Ws::new_ref(&a.p);
@@ -847,6 +1051,35 @@ pub fn rowcolcounts(
         }
     }
 
+    /* AA' case: sort the columns of A by their first postordered row index.
+     * Runs before PrevNbr is reset below, because it borrows PrevNbr as Ipost
+     * exactly as upstream does (`:333`, "use PrevNbr as workspace for Ipost"). */
+    let mut aatfl = 0.0f64;
+    let head_w = Ws::new(&mut work.head[..nrow.max(1)]);
+    let anext_w = Ws::new(anext_buf);
+    if unsym {
+        let ipost = &mut w.prevnbr;
+        for k in 0..nrow as i64 {
+            /* Ipost [i] = k if i is the kth node in the postordered etree */
+            ipost[post_w[k]] = k;
+        }
+        for j in 0..ncol as i64 {
+            /* find the smallest postordered row in column j, if any */
+            let (pb, pe) = (ap[j], ap[j + 1]);
+            let ff = (pe - pb).max(0) as f64;
+            aatfl += ff * ff + ff;
+            if pe > pb {
+                let mut k = ipost[ai[pb]];
+                for &i in ai.range(pb, pe) {
+                    k = k.min(ipost[i]);
+                }
+                /* place column j in link list k */
+                anext_w[j] = head_w[k];
+                head_w[k] = j;
+            }
+        }
+    }
+
     /* compute the row counts and node weights */
     if has_rows {
         for x in rows.iter_mut() {
@@ -859,12 +1092,23 @@ pub fn rowcolcounts(
         w.setparent[i] = i; /* every node is in its own set, by itself */
     }
 
-    /* symmetric case: LL' = A.
-     * also determine the number of entries in triu(A) */
-    let anz = if has_rows {
-        sym_pass::<true>(nrow, ap, ai, post_w, parent_w, &mut w, rows)
-    } else {
-        sym_pass::<false>(nrow, ap, ai, post_w, parent_w, &mut w, rows)
+    /* symmetric case: LL' = A, which also counts the entries of triu(A);
+     * unsymmetric case: LL' = AA', where upstream leaves anz alone */
+    let anz = match (unsym, has_rows) {
+        (false, true) => sym_pass::<true>(nrow, ap, ai, post_w, parent_w, &mut w, rows),
+        (false, false) => sym_pass::<false>(nrow, ap, ai, post_w, parent_w, &mut w, rows),
+        (true, true) => {
+            unsym_pass::<true>(
+                nrow, ap, ai, post_w, parent_w, head_w, anext_w, &mut w, rows,
+            );
+            0
+        }
+        (true, false) => {
+            unsym_pass::<false>(
+                nrow, ap, ai, post_w, parent_w, head_w, anext_w, &mut w, rows,
+            );
+            0
+        }
     };
 
     /* finish computing the column counts */
@@ -893,6 +1137,7 @@ pub fn rowcolcounts(
         anz: anz as f64,
         lnz,
         fl,
+        aatfl,
     })
 }
 
@@ -1003,8 +1248,13 @@ fn permute_matrices(
             p.a2 = Some(ptranspose(a, PATTERN, None, work));
             p.f = Handle::A;
             p.s = Handle::A2;
-        } else {
+        } else if a.stype > 0 {
             /* symmetric upper case: F = pattern of triu (A)', S = A */
+            p.a1 = Some(ptranspose(a, PATTERN, None, work));
+            p.f = Handle::A1;
+            p.s = Handle::A;
+        } else {
+            /* unsymmetric case: F = pattern of A', S = A */
             p.a1 = Some(ptranspose(a, PATTERN, None, work));
             p.f = Handle::A1;
             p.s = Handle::A;
@@ -1017,8 +1267,14 @@ fn permute_matrices(
             p.s = Handle::A2;
             p.a1 = Some(ptranspose(p.a2.as_ref().unwrap(), PATTERN, None, work));
             p.f = Handle::A1;
-        } else {
+        } else if a.stype > 0 {
             /* symmetric upper case: F = triu (A (p,p))' and S = F' */
+            p.a1 = Some(ptranspose(a, PATTERN, Some(perm), work));
+            p.f = Handle::A1;
+            p.a2 = Some(ptranspose(p.a1.as_ref().unwrap(), PATTERN, None, work));
+            p.s = Handle::A2;
+        } else {
+            /* unsymmetric case: F = A (p,:)' and S = F' */
             p.a1 = Some(ptranspose(a, PATTERN, Some(perm), work));
             p.f = Handle::A1;
             p.a2 = Some(ptranspose(p.a1.as_ref().unwrap(), PATTERN, None, work));
@@ -1046,13 +1302,17 @@ pub fn analyze_ordering(
     level: &mut [i64],
     work: &mut WorkRef<'_>,
 ) -> Result<RowColCounts, SymbolicError> {
-    let n = a.n;
+    /* the dimension being factorized: `n` for a symmetric A, and A's row count
+     * for `stype == 0`, where LL' = AA' */
+    let n = a.nrow;
     /* permute A according to Perm */
     let p = permute_matrices(a, ordering, perm, work);
     let (s, f) = (p.get(a, p.s), p.get(a, p.f));
 
-    /* find etree of S (symmetric upper/lower case) */
-    etree(s, parent, work)?;
+    /* find etree of S (symmetric case) or F (unsymmetric) — the two swap,
+     * `cholmod_analyze.c:333,349` */
+    let (for_etree, for_counts) = if a.stype != 0 { (s, f) } else { (f, s) };
+    etree(for_etree, parent, work)?;
 
     /* postorder the etree (required by cholmod_rowcolcounts) */
     let k = postorder(parent, n, None, post, work);
@@ -1060,8 +1320,8 @@ pub fn analyze_ordering(
         return Err(SymbolicError::NotATree { got: k, want: n });
     }
 
-    /* analyze LL'=S */
-    rowcolcounts(f, parent, post, None, colcount, first, level, work)
+    /* analyze LL'=S, or LL'=AA' */
+    rowcolcounts(for_counts, parent, post, None, colcount, first, level, work)
 }
 
 /// What [`analyze`] computed. The three arrays are in the *final* ordering,
@@ -1087,6 +1347,11 @@ pub struct Symbolic {
     /// `Common->anz` — nnz of the stored triangle of the permuted `A`,
     /// diagonal included.
     pub anz: f64,
+    /// `Common->aatfl` — the flop count of forming `A A'`, which
+    /// `cholmod_rowcolcounts` reports on the `stype == 0` path and leaves at
+    /// zero otherwise. Nothing inside CHOLMOD reads it; it is a statistic for
+    /// the caller, and it is carried out here for the same reason.
+    pub aatfl: f64,
     /// The ordering the trial loop selected, after upstream's relabel of
     /// [`Ordering::Natural`] to [`Ordering::Postordered`] — `L->ordering`.
     pub ordering: Ordering,
@@ -1130,6 +1395,7 @@ pub fn analyze(
     }
     let nz = validate_csc(n, indptr, indices)?;
     let a = Sparse {
+        nrow: n,
         n,
         p: Cow::Borrowed(&indptr[..n + 1]),
         i: Cow::Borrowed(&indices[..nz]),
@@ -1154,15 +1420,15 @@ pub fn analyze_sparse(
     width: IntWidth,
     work: &mut Work,
 ) -> Result<Symbolic, SymbolicError> {
-    if a.stype == 0 {
-        return Err(SymbolicError::Unsymmetric);
-    }
-    let n = a.n;
+    /* the dimension of the factorization: `A->nrow`, which for a symmetric `A`
+     * is also its column count and for `stype == 0` is not */
+    let n = a.nrow;
 
     /* `cholmod_allocate_work (nrow, 6*nrow + uncol, 0, Common)` (`:487-496`):
-     * enough that the routines called below never reallocate.  `uncol` is 0
-     * for the symmetric case this port takes. */
-    work.allocate(n, 6 * n, 0);
+     * enough that the routines called below never reallocate.  `uncol` is
+     * `A->ncol` when `stype == 0` and zero otherwise (`:487`). */
+    let uncol = if a.stype == 0 { a.n } else { 0 };
+    work.allocate(n, 6 * n + uncol, 0);
 
     /* the candidate the loop is working on: upstream's Perm/ColCount
      * workspace, against the Lperm/Lparent/Lcolcount that hold the best so
@@ -1197,6 +1463,7 @@ pub fn analyze_sparse(
     let mut best_fl = 0.0;
     let mut amd_ran = None;
     let mut anz = 0.0;
+    let mut aatfl = 0.0;
     let mut metis_would_be_tried = false;
     let mut failure = None;
 
@@ -1220,6 +1487,7 @@ pub fn analyze_sparse(
             Ordering::Amd => {
                 match amd::cholmod_amd(
                     n,
+                    a.n,
                     &a.p,
                     &a.i,
                     a.stype,
@@ -1242,7 +1510,7 @@ pub fn analyze_sparse(
                 }
                 skip_analysis = true;
             }
-            Ordering::Metis => match metis_order::cholmod_metis(n, &a.p, &a.i, a.stype) {
+            Ordering::Metis => match metis_order::cholmod_metis(n, a.n, &a.p, &a.i, a.stype) {
                 Ok((p, _anz)) => perm.copy_from_slice(&p),
                 Err(e) => {
                     failure.get_or_insert(SymbolicError::from(e));
@@ -1254,7 +1522,7 @@ pub fn analyze_sparse(
         /* analyze the ordering.  AMD is exempt: cholmod_amd has already left
          * its own fl/lnz estimates in Common, and the exact counts are wanted
          * only for the ordering that wins (`:715-725`, `:814-822`). */
-        let mut w = work.split_analyze(n);
+        let mut w = work.split_analyze(n, uncol);
         let (fl, lnz) = if skip_analysis {
             let info = amd_ran.expect("cholmod_amd sets its Info before returning");
             (info.fl(n), info.lnz(n))
@@ -1322,7 +1590,7 @@ pub fn analyze_sparse(
      * Common->fl and Common->lnz with the exact counts, so the supernodal
      * switch downstream never sees AMD's estimate. */
     let mut ordering = best_ordering;
-    let mut w = work.split_analyze(n);
+    let mut w = work.split_analyze(n, uncol);
     if skip_best {
         let counts = analyze_ordering(
             a,
@@ -1336,6 +1604,7 @@ pub fn analyze_sparse(
             &mut w.work,
         )?;
         anz = counts.anz;
+        aatfl = counts.aatfl;
         best_fl = counts.fl;
         lnz_best = counts.lnz;
     }
@@ -1391,6 +1660,7 @@ pub fn analyze_sparse(
         fl: best_fl,
         lnz: lnz_best,
         anz,
+        aatfl,
         ordering,
         amd: amd_ran,
         metis_would_be_tried,
@@ -1552,6 +1822,7 @@ mod tests {
              * a mismatch rather than a coincidence */
             let x: Vec<f64> = (0..indices.len()).map(|p| p as f64 + 0.5).collect();
             let a = Sparse {
+                nrow: n,
                 n,
                 p: indptr.into(),
                 i: indices.into(),
@@ -1596,6 +1867,7 @@ mod tests {
         for (name, n, edges) in corpus() {
             let (indptr, indices) = triangle_csc(n, &edges, false);
             let a = Sparse {
+                nrow: n,
                 n,
                 p: indptr.into(),
                 i: indices.into(),
@@ -1655,6 +1927,7 @@ mod tests {
             Err(SymbolicError::Unsymmetric)
         ));
         let lower = Sparse {
+            nrow: 1,
             n: 1,
             p: vec![0, 1].into(),
             i: vec![0].into(),

@@ -651,6 +651,7 @@ mod tests {
     fn factor(n: usize, edges: &[(usize, usize)], ll: bool) -> Factor {
         let (p, i, v) = spd_triangle(n, edges, false);
         let a = Sparse {
+            nrow: n,
             n,
             p: p.clone().into(),
             i: i.clone().into(),
@@ -781,6 +782,7 @@ mod tests {
     fn a_symbolic_factor_is_rejected() {
         let (p, i, x) = spd_triangle(4, &[(0, 1), (1, 2), (2, 3)], false);
         let a = Sparse {
+            nrow: 4,
             n: 4,
             p: p.clone().into(),
             i: i.clone().into(),

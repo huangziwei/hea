@@ -260,8 +260,13 @@ impl Work {
     /// upstream permits precisely because none of the four is needed across
     /// such a call (`:511-514`). Re-split afterwards; every one of the four is
     /// written before it is read again.
-    pub(super) fn split_analyze(&mut self, n: usize) -> Analyze<'_> {
-        let (scratch, tail) = self.iwork.split_at_mut(2 * n);
+    ///
+    /// `uncol` is `A->ncol` for an `stype == 0` matrix and zero otherwise:
+    /// upstream puts the four at `Iwork + 2n + uncol` (`:515`), because the
+    /// unsymmetric arms of `cholmod_etree` and `cholmod_rowcolcounts` need that
+    /// much scratch rather than `2n`.
+    pub(super) fn split_analyze(&mut self, n: usize, uncol: usize) -> Analyze<'_> {
+        let (scratch, tail) = self.iwork.split_at_mut(2 * n + uncol);
         let (parent, tail) = tail.split_at_mut(n);
         let (first, tail) = tail.split_at_mut(n);
         let (level, post) = tail.split_at_mut(n);
@@ -384,6 +389,21 @@ impl core::fmt::Display for CscError {
 /// one branchless O(nnz) pass for the row indices — the reporting scan that
 /// locates a bad entry only runs after that pass has already failed.
 pub fn validate_csc(n: usize, indptr: &[i64], indices: &[i64]) -> Result<usize, CscError> {
+    validate_csc_rect(n, n, indptr, indices)
+}
+
+/// [`validate_csc`] for a matrix whose row count is not its column count.
+///
+/// `indptr` is sized by `ncol` and the row indices are bounded by `nrow`; the
+/// two coincide for every symmetric matrix, which is why the square form is
+/// the one everything else calls.
+pub fn validate_csc_rect(
+    nrow: usize,
+    ncol: usize,
+    indptr: &[i64],
+    indices: &[i64],
+) -> Result<usize, CscError> {
+    let n = ncol;
     if indptr.len() != n + 1 {
         return Err(CscError::IndptrLen {
             got: indptr.len(),
@@ -421,14 +441,14 @@ pub fn validate_csc(n: usize, indptr: &[i64], indices: &[i64]) -> Result<usize, 
         lo = lo.min(i);
         hi = hi.max(i);
     }
-    if lo < 0 || hi >= n as i64 {
+    if lo < 0 || hi >= nrow as i64 {
         let (at, got) = indices[..nz]
             .iter()
             .enumerate()
-            .find(|(_, &i)| i < 0 || i >= n as i64)
+            .find(|(_, &i)| i < 0 || i >= nrow as i64)
             .map(|(p, &i)| (p, i))
             .expect("the min/max fold only fails when some index is out of range");
-        return Err(CscError::RowOutOfRange { at, got, n });
+        return Err(CscError::RowOutOfRange { at, got, n: nrow });
     }
     Ok(nz)
 }

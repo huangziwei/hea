@@ -327,6 +327,7 @@ mod tests {
     ) -> (SuperFactor, Sparse<'static>) {
         let (p, i, v) = spd_triangle(n, edges, false);
         let a = Sparse {
+            nrow: n,
             n,
             p: p.clone().into(),
             i: i.clone().into(),
@@ -340,6 +341,7 @@ mod tests {
         let a2 = permute_sym(&a, s.ordering, &s.perm, false, false, &mut w.all());
         let sym = super_symbolic(
             a2.as_ref().unwrap_or(&a),
+            None,
             &s.parent,
             &s.colcount,
             &Relax::default(),

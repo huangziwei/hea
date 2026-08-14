@@ -13,6 +13,7 @@
 //! it is a different quantity from what `cholmod_amd` returns and only
 //! coincides when that postorder is the identity.
 
+pub mod aat;
 pub mod amd;
 #[cfg(vendor_blas)]
 pub mod blas;
@@ -39,6 +40,252 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use amd::IntWidth;
+
+/// `cholmod_aat` — the pattern of `A A'` for an unsymmetric `A`.
+///
+/// `indptr`/`indices` are a CSC pattern of an `nrow`-by-`ncol` matrix with
+/// `stype == 0`. `mode` is upstream's, restricted to the pattern half: `0`
+/// keeps the diagonal, `-1` removes it, `-2` removes it and allocates AMD's
+/// elbow room. Returns `(indptr, indices)` of an `nrow`-by-`nrow` pattern,
+/// **unsorted** within each column, which is what upstream returns.
+///
+/// This is what a `stype == 0` analysis orders: the product exists as a
+/// pattern so a fill-reducing ordering has something to work on, and the
+/// numeric factorization then consumes `A` and `A'` without forming it.
+#[pyfunction]
+#[pyo3(signature = (nrow, ncol, indptr, indices, mode=-2))]
+fn aat_pattern(
+    py: Python<'_>,
+    nrow: usize,
+    ncol: usize,
+    indptr: PyReadonlyArray1<'_, i64>,
+    indices: PyReadonlyArray1<'_, i64>,
+    mode: i32,
+) -> PyResult<(Py<PyArray1<i64>>, Py<PyArray1<i64>>)> {
+    let indptr = indptr.as_slice()?;
+    let indices = indices.as_slice()?;
+    let a = symbolic::Sparse {
+        nrow,
+        n: ncol,
+        p: Cow::Borrowed(indptr),
+        i: Cow::Borrowed(indices),
+        x: Cow::Borrowed(&[]),
+        numeric: false,
+        stype: 0,
+        sorted: true,
+    };
+    let c = py.allow_threads(|| aat::aat(&a, mode));
+    let (p, i) = (c.p.into_owned(), c.i.into_owned());
+    Ok((p.into_pyarray(py).unbind(), i.into_pyarray(py).unbind()))
+}
+
+/// `cholmod_transpose_unsym` — `C = A'` for an unsymmetric `A`.
+///
+/// `indptr`/`indices`/`data` are CSC for an `nrow`-by-`ncol` matrix with
+/// `stype == 0`; `data` may be empty for a pattern transpose. Returns
+/// `(indptr, indices, data)` of the `ncol`-by-`nrow` transpose, with row
+/// indices ascending.
+#[pyfunction]
+#[pyo3(signature = (nrow, ncol, indptr, indices, data, values=true, perm=None))]
+fn transpose_unsym(
+    py: Python<'_>,
+    nrow: usize,
+    ncol: usize,
+    indptr: PyReadonlyArray1<'_, i64>,
+    indices: PyReadonlyArray1<'_, i64>,
+    data: PyReadonlyArray1<'_, f64>,
+    values: bool,
+    perm: Option<PyReadonlyArray1<'_, i64>>,
+) -> PyResult<(Py<PyArray1<i64>>, Py<PyArray1<i64>>, Py<PyArray1<f64>>)> {
+    let indptr = indptr.as_slice()?;
+    let indices = indices.as_slice()?;
+    let data = data.as_slice()?;
+    let a = symbolic::Sparse {
+        nrow,
+        n: ncol,
+        p: Cow::Borrowed(indptr),
+        i: Cow::Borrowed(indices),
+        x: Cow::Borrowed(data),
+        numeric: !data.is_empty(),
+        stype: 0,
+        sorted: true,
+    };
+    let perm = perm.as_ref().map(|p| p.as_slice()).transpose()?;
+    let c = py.allow_threads(|| symbolic::transpose_unsym(&a, values, perm));
+    Ok((
+        c.p.into_owned().into_pyarray(py).unbind(),
+        c.i.into_owned().into_pyarray(py).unbind(),
+        c.x.into_owned().into_pyarray(py).unbind(),
+    ))
+}
+
+/// `cholmod_analyze` for a rectangular `stype == 0` matrix — `LL' = A A'`.
+///
+/// The counterpart of [`analyze`] for the unsymmetric case, which that entry
+/// point cannot express because it takes one dimension. Exists so the
+/// `stype == 0` path has something to pin against upstream.
+#[pyfunction]
+#[pyo3(signature = (nrow, ncol, indptr, indices, stype=0, ordering="best", use_long=false))]
+fn analyze_rect(
+    py: Python<'_>,
+    nrow: usize,
+    ncol: usize,
+    indptr: PyReadonlyArray1<'_, i64>,
+    indices: PyReadonlyArray1<'_, i64>,
+    stype: i32,
+    ordering: &str,
+    use_long: bool,
+) -> PyResult<Py<PyDict>> {
+    let indptr = indptr.as_slice()?;
+    let indices = indices.as_slice()?;
+    let method = py::parse_method(ordering)?;
+    let width = if use_long {
+        IntWidth::I64
+    } else {
+        IntWidth::I32
+    };
+    let nz = ws::validate_csc_rect(nrow, ncol, indptr, indices)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let a = symbolic::Sparse {
+        nrow,
+        n: ncol,
+        p: Cow::Borrowed(&indptr[..ncol + 1]),
+        i: Cow::Borrowed(&indices[..nz]),
+        x: Cow::Borrowed(&[]),
+        numeric: false,
+        stype,
+        sorted: ws::columns_are_sorted(ncol, indptr, indices),
+    };
+    let s = py
+        .allow_threads(|| symbolic::analyze_sparse(&a, method, width, &mut ws::Work::new(nrow)))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let d = PyDict::new(py);
+    d.set_item("perm", s.perm.into_pyarray(py))?;
+    d.set_item("colcount", s.colcount.into_pyarray(py))?;
+    d.set_item("parent", s.parent.into_pyarray(py))?;
+    d.set_item("post", s.post.into_pyarray(py))?;
+    d.set_item("fl", s.fl)?;
+    d.set_item("lnz", s.lnz)?;
+    d.set_item("anz", s.anz)?;
+    d.set_item("aatfl", s.aatfl)?;
+    d.set_item("ordering", py::ordering_name(s.ordering))?;
+    Ok(d.unbind())
+}
+
+/// `cholmod_analyze` + `cholmod_factorize` for a rectangular `stype == 0`
+/// matrix, simplicial `LL'` — `L L' = A A'`.
+///
+/// Returns `(indptr, indices, data, perm)` of the packed `L`. Exists so the
+/// `stype == 0` numeric path has something to pin against upstream; the
+/// shipping entry point is `CholFactor`.
+#[pyfunction]
+#[pyo3(signature = (nrow, ncol, indptr, indices, data, ordering="amd", supernodal=false))]
+fn factorize_rect(
+    py: Python<'_>,
+    nrow: usize,
+    ncol: usize,
+    indptr: PyReadonlyArray1<'_, i64>,
+    indices: PyReadonlyArray1<'_, i64>,
+    data: PyReadonlyArray1<'_, f64>,
+    ordering: &str,
+    supernodal: bool,
+) -> PyResult<(
+    Py<PyArray1<i64>>,
+    Py<PyArray1<i64>>,
+    Py<PyArray1<f64>>,
+    Py<PyArray1<i64>>,
+)> {
+    let indptr = indptr.as_slice()?;
+    let indices = indices.as_slice()?;
+    let data = data.as_slice()?;
+    let method = py::parse_method(ordering)?;
+    let nz = ws::validate_csc_rect(nrow, ncol, indptr, indices)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let a = symbolic::Sparse {
+        nrow,
+        n: ncol,
+        p: Cow::Borrowed(&indptr[..ncol + 1]),
+        i: Cow::Borrowed(&indices[..nz]),
+        x: Cow::Borrowed(&data[..nz]),
+        numeric: true,
+        stype: 0,
+        sorted: ws::columns_are_sorted(ncol, indptr, indices),
+    };
+    let (p, i, x, perm) = py
+        .allow_threads(|| -> Result<_, String> {
+            let mut work = ws::Work::new(nrow);
+            let s = symbolic::analyze_sparse(&a, method, IntWidth::I64, &mut work)
+                .map_err(|e| e.to_string())?;
+            let params = numeric::Params {
+                final_ll: true,
+                ..numeric::Params::default()
+            };
+            let l = if supernodal {
+                /* the supernodal arm, converted back to a packed simplicial
+                 * `LL'` the way `.L` does, so the two are comparable */
+                let (a2, fpat);
+                let (ssym, fsym): (&symbolic::Sparse, Option<&symbolic::Sparse>) =
+                    if matches!(s.ordering, symbolic::Ordering::Natural) {
+                        fpat = Some(symbolic::transpose_unsym(&a, false, None));
+                        a2 = None;
+                        (&a, fpat.as_ref())
+                    } else {
+                        fpat = Some(symbolic::transpose_unsym(&a, false, Some(&s.perm)));
+                        a2 = Some(symbolic::transpose_unsym(
+                            fpat.as_ref().unwrap(),
+                            false,
+                            None,
+                        ));
+                        (a2.as_ref().unwrap(), fpat.as_ref())
+                    };
+                let sym = super_symbolic::super_symbolic(
+                    ssym,
+                    fsym,
+                    &s.parent,
+                    &s.colcount,
+                    &super_symbolic::Relax::default(),
+                    &mut work,
+                )
+                .map_err(|e| e.to_string())?;
+                drop(a2);
+                drop(fpat);
+                let mut sl = super_numeric::SuperFactor::new(s, sym);
+                let mut cwork = super_numeric::SuperWork::new();
+                super_numeric::super_factorize(&a, 0.0, &mut sl, &mut work, &mut cwork)
+                    .map_err(|e| e.to_string())?;
+                let mut f = numeric::Factor::from_supernodal(&sl);
+                f.change_factor(true, true, true, &params)
+                    .map_err(|e| e.to_string())?;
+                f
+            } else {
+                let mut l = numeric::Factor::from_symbolic(s);
+                numeric::factorize(&a, 0.0, &mut l, &params, &mut work)
+                    .map_err(|e| e.to_string())?;
+                l
+            };
+            let nz: i64 = l.nz.iter().sum();
+            let mut p = Vec::with_capacity(nrow + 1);
+            let mut i = Vec::with_capacity(nz as usize);
+            let mut x = Vec::with_capacity(nz as usize);
+            p.push(0i64);
+            for j in 0..nrow {
+                let b = l.p[j] as usize;
+                let len = l.nz[j] as usize;
+                i.extend_from_slice(&l.i[b..b + len]);
+                x.extend_from_slice(&l.x[b..b + len]);
+                p.push(i.len() as i64);
+            }
+            Ok((p, i, x, l.perm))
+        })
+        .map_err(PyValueError::new_err)?;
+    Ok((
+        p.into_pyarray(py).unbind(),
+        i.into_pyarray(py).unbind(),
+        x.into_pyarray(py).unbind(),
+        perm.into_pyarray(py).unbind(),
+    ))
+}
 
 /// `cholmod_amd` — the fill-reducing permutation CHOLMOD computes for a
 /// symmetric matrix, before any symbolic analysis.
@@ -89,6 +336,7 @@ fn amd_order(
         .allow_threads(|| {
             let mut work = amd::Work::new(n);
             amd::cholmod_amd(
+                n,
                 n,
                 indptr,
                 indices,
@@ -144,7 +392,7 @@ fn metis_perm(
         ));
     }
     let (perm, _anz) = py
-        .allow_threads(|| metis_order::cholmod_metis(n, indptr, indices, stype))
+        .allow_threads(|| metis_order::cholmod_metis(n, n, indptr, indices, stype))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(perm.into_pyarray(py).unbind())
 }
@@ -265,6 +513,7 @@ fn factorize(
              * `cholmod_analyze` and `cholmod_factorize` take the same
              * `cholmod_sparse *A`, and it points at what the caller allocated */
             let a = symbolic::Sparse {
+                nrow: n,
                 n,
                 p: Cow::Borrowed(&indptr[..n + 1]),
                 i: Cow::Borrowed(&indices[..nz]),
@@ -323,6 +572,7 @@ fn super_analyze(
         .allow_threads(|| -> Result<_, String> {
             let nz = ws::validate_csc(n, indptr, indices).map_err(|e| e.to_string())?;
             let a = symbolic::Sparse {
+                nrow: n,
                 n,
                 p: Cow::Borrowed(&indptr[..n + 1]),
                 i: Cow::Borrowed(&indices[..nz]),
@@ -340,6 +590,7 @@ fn super_analyze(
             let sup = a2.as_ref().unwrap_or(&a);
             let ss = super_symbolic::super_symbolic(
                 sup,
+                None,
                 &s.parent,
                 &s.colcount,
                 &super_symbolic::Relax::default(),
@@ -411,6 +662,7 @@ fn super_factorize(
                 ));
             }
             let a = symbolic::Sparse {
+                nrow: n,
                 n,
                 p: Cow::Borrowed(&indptr[..n + 1]),
                 i: Cow::Borrowed(&indices[..nz]),
@@ -425,6 +677,7 @@ fn super_factorize(
             let a2 = symbolic::permute_sym(&a, s.ordering, &s.perm, false, false, &mut work.all());
             let sym = super_symbolic::super_symbolic(
                 a2.as_ref().unwrap_or(&a),
+                None,
                 &s.parent,
                 &s.colcount,
                 &super_symbolic::Relax::default(),
@@ -520,6 +773,7 @@ fn supernodal_solve(
                 return Err(format!("b has {} entries, need {}", b.len(), n * nrhs));
             }
             let a = symbolic::Sparse {
+                nrow: n,
                 n,
                 p: Cow::Borrowed(&indptr[..n + 1]),
                 i: Cow::Borrowed(&indices[..nz]),
@@ -534,6 +788,7 @@ fn supernodal_solve(
             let a2 = symbolic::permute_sym(&a, s.ordering, &s.perm, false, false, &mut work.all());
             let sym = super_symbolic::super_symbolic(
                 a2.as_ref().unwrap_or(&a),
+                None,
                 &s.parent,
                 &s.colcount,
                 &super_symbolic::Relax::default(),
@@ -609,6 +864,10 @@ fn build_info(py: Python<'_>) -> PyResult<Py<PyDict>> {
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_info, m)?)?;
+    m.add_function(wrap_pyfunction!(aat_pattern, m)?)?;
+    m.add_function(wrap_pyfunction!(analyze_rect, m)?)?;
+    m.add_function(wrap_pyfunction!(factorize_rect, m)?)?;
+    m.add_function(wrap_pyfunction!(transpose_unsym, m)?)?;
     m.add_function(wrap_pyfunction!(amd_order, m)?)?;
     m.add_function(wrap_pyfunction!(metis_perm, m)?)?;
     m.add_function(wrap_pyfunction!(analyze, m)?)?;

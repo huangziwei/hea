@@ -185,7 +185,24 @@ class CholmodError(Exception):
     """
 
 
-def _as_csc(A):
+#: What ``sym_kind`` may be, spelled as ``scikit-sparse`` 0.5.0 spells it.
+#: ``"sym"`` factorizes ``A`` itself and needs it square; the other two take a
+#: rectangular ``A`` and factorize a Gram matrix of it *without forming the
+#: product* — CHOLMOD's ``A->stype == 0``.
+SYM_KINDS = ("sym", "row", "col")
+
+
+def _parse_sym_kind(sym_kind):
+    """``None`` normalises to ``"sym"``, as in ``scikit-sparse``'s
+    ``cholmod.pyx``, so the two stay swappable."""
+    if sym_kind is None:
+        return "sym"
+    if sym_kind not in SYM_KINDS:
+        raise ValueError(f"sym_kind must be one of {SYM_KINDS}, not {sym_kind!r}")
+    return sym_kind
+
+
+def _as_csc(A, sym_kind="sym"):
     """The input as a sorted CSC matrix with the index and value types the
     extension takes.
 
@@ -200,15 +217,27 @@ def _as_csc(A):
     the way each CHOLMOD build has one, while scipy uses ``int32`` below 2³¹
     nonzeros. That upcast is a real copy of ``indices`` per call — 197 MB on a
     3.4M-row system — and it is the price of the single-itype scope.
+
+    The square check applies to ``sym_kind="sym"`` only, which is the same
+    guard ``scikit-sparse`` writes as ``if sym_kind == "sym" and A.shape[0] !=
+    A.shape[1]``. ``"col"`` transposes here rather than in the extension,
+    because CHOLMOD's ``stype == 0`` factorizes ``A A'`` and ``AᵀA`` is that
+    product of ``Aᵀ`` — which is also what ``scikit-sparse`` does, with a
+    C-side ``cholmod_transpose``.
     """
     if not issparse(A):
         A = csc_array(np.asarray(A, dtype=np.float64))
     A = csc_array(A)
-    if A.ndim != 2 or A.shape[0] != A.shape[1]:
+    if A.ndim != 2:
+        raise ValueError(f"expected a 2-D matrix, got {A.ndim}-D")
+    if sym_kind == "sym" and A.shape[0] != A.shape[1]:
         raise ValueError(f"expected a square matrix, got shape {A.shape}")
+    if sym_kind == "col":
+        A = csc_array(A.T)
     A.sort_indices()
     return (
         A.shape[0],
+        A.shape[1],
         np.ascontiguousarray(A.indptr, dtype=np.int64),
         np.ascontiguousarray(A.indices, dtype=np.int64),
         np.ascontiguousarray(A.data, dtype=np.float64),
@@ -230,13 +259,25 @@ class Factor:
     :attr:`L` needs to prune the supernodal factor.
     """
 
-    __slots__ = ("_F", "_lower", "_n")
+    __slots__ = ("_F", "_lower", "_n", "_sym_kind")
 
     def __init__(
-        self, A, beta=0.0, *, lower=False, order="best", use_ll=True, supernodal=None
+        self,
+        A,
+        beta=0.0,
+        *,
+        lower=False,
+        order="best",
+        use_ll=True,
+        supernodal=None,
+        sym_kind=None,
     ):
-        n, indptr, indices, data = _as_csc(A)
-        self._n = n
+        sym_kind = _parse_sym_kind(sym_kind)
+        nrow, ncol, indptr, indices, data = _as_csc(A, sym_kind)
+        # `stype == 0` factorizes `A A'`, whose dimension is A's row count;
+        # for a symmetric A the two are the same number.
+        self._n = nrow
+        self._sym_kind = sym_kind
         self._lower = bool(lower)
         if supernodal is None:
             # The supernodal factorization is ``LL'`` and only ``LL'``, so a
@@ -244,11 +285,12 @@ class Factor:
             # the two disagree about which matrices are factorizable at all.
             supernodal = "auto" if use_ll else "simplicial"
         self._F = _CholFactor(
-            n,
+            nrow,
+            ncol,
             indptr,
             indices,
             data,
-            -1 if lower else 1,
+            0 if sym_kind != "sym" else (-1 if lower else 1),
             float(beta),
             order,
             bool(use_ll),
@@ -278,9 +320,12 @@ class Factor:
         changes no arithmetic. A pattern that has *grown* raises instead of
         silently dropping the new entries.
         """
-        n, indptr, indices, data = _as_csc(A)
-        if n != self._n:
-            raise ValueError(f"A is {n}-by-{n}, expected n = {self._n}")
+        nrow, _ncol, indptr, indices, data = _as_csc(A, self._sym_kind)
+        if nrow != self._n:
+            raise ValueError(
+                f"A has {nrow} rows after sym_kind={self._sym_kind!r}, "
+                f"expected n = {self._n}"
+            )
         self._F.refactorize(indptr, indices, data, float(beta))
         self._check()
 
@@ -449,12 +494,40 @@ class Factor:
 
 
 def cho_factor(
-    A, beta=0.0, *, lower=False, order="best", use_ll=True, supernodal=None
+    A,
+    beta=0.0,
+    *,
+    lower=False,
+    order="best",
+    use_ll=True,
+    supernodal=None,
+    sym_kind=None,
 ) -> Factor:
     """Factorize ``beta*I + A`` and return a reusable :class:`Factor`.
 
     ``lower`` selects which triangle of ``A`` is the stored half, matching
     ``sksparse.cholmod.cho_factor``'s argument of the same name.
+
+    ``sym_kind`` selects **what** is factorized, and is the reason a
+    rectangular ``A`` is accepted at all:
+
+    ``"sym"`` (the default, and what ``None`` normalises to)
+        ``A`` itself, which must be square.
+    ``"row"``
+        ``A @ A.T``, for an ``A`` of shape ``(m, n)``; the factor is ``m``-by-``m``.
+    ``"col"``
+        ``A.T @ A``; the factor is ``n``-by-``n``.
+
+    **The product is never formed.** CHOLMOD factorizes ``A A'`` from ``A`` and
+    ``A'`` directly — the explicit product exists only as a pattern for the
+    fill-reducing ordering — so the normal equations cost no memory and the
+    caller writes no ``A.T @ A``. The values of that product are never
+    materialized in any array.
+
+    What it does *not* save is a transpose: ``"col"`` needs ``A'`` in column
+    form and takes it once per factorization, which trades a full-values
+    transpose of ``A`` for the product it removes. Reach for this because it is
+    the correct API and one fewer intermediate, not because it is faster.
 
     ``order`` is the fill-reducing ordering: ``"best"`` (the default) is
     CHOLMOD's ``Common->nmethods == 0`` strategy, AMD then METIS, keeping the
@@ -487,14 +560,26 @@ def cho_factor(
     "not positive definite" means. Pass ``use_ll=False`` for the ``LDL'``.
     """
     return Factor(
-        A, beta, lower=lower, order=order, use_ll=use_ll, supernodal=supernodal
+        A,
+        beta,
+        lower=lower,
+        order=order,
+        use_ll=use_ll,
+        supernodal=supernodal,
+        sym_kind=sym_kind,
     )
 
 
-def cho_solve(A, b, beta=0.0, *, lower=False, order="best"):
+def cho_solve(A, b, beta=0.0, *, lower=False, order="best", sym_kind=None):
     """One-shot ``A \\ b`` — analyze, factorize and solve.
 
     For repeated solves against one matrix, or repeated factorizations of one
     pattern, build a :class:`Factor` instead: this throws the analysis away.
+
+    ``sym_kind`` is :func:`cho_factor`'s; under ``"row"`` or ``"col"`` the
+    system solved is the Gram matrix's, so ``b`` has that many rows.
+    ``scikit-sparse`` 0.5.0 puts ``sym_kind`` on its factories but not on
+    ``cho_solve``; having it here is a deliberate superset, since a one-shot
+    normal-equations solve is exactly the case this argument exists for.
     """
-    return cho_factor(A, beta, lower=lower, order=order).solve(b)
+    return cho_factor(A, beta, lower=lower, order=order, sym_kind=sym_kind).solve(b)

@@ -31,6 +31,7 @@ const METIS_DSWITCH: f64 = 0.66;
 /// compares against.
 pub fn cholmod_metis(
     n: usize,
+    ncol: usize,
     indptr: &[i64],
     indices: &[i64],
     stype: i32,
@@ -39,13 +40,33 @@ pub fn cholmod_metis(
         return Ok((Vec::new(), 0.0));
     }
 
-    // B = A+A', upper and lower parts present, no diagonal. `cholmod_copy`'s
-    // `mode = -1` and `mode = -2` build the identical pattern — they differ
-    // only in how much slack `cnzmax` leaves (`t_cholmod_copy.c:248`) — so this
-    // is the same construction `cholmod_amd` uses.
+    // B = A+A' for a symmetric A, or A*A' for `stype == 0` (`:630-641`), in
+    // both cases with the diagonal removed. `cholmod_copy`'s `mode = -1` and
+    // `mode = -2` build the identical pattern — they differ only in how much
+    // slack `cnzmax` leaves (`t_cholmod_copy.c:248`) — so the symmetric arm is
+    // the same construction `cholmod_amd` uses. The unsymmetric arm asks `aat`
+    // for `mode = -1`, where `cholmod_amd` asks for `-2`; same reason, same
+    // pattern.
     // `copy_sym_to_unsym` returns the *allocated* length, which carries AMD's
     // elbow room; `Bp[n]` is the entry count METIS is given.
-    let (bp, bi, _nzmax) = copy_sym_to_unsym(n, indptr, indices, stype)?;
+    let (bp, bi) = if stype == 0 {
+        super::ws::validate_csc_rect(n, ncol, indptr, indices)?;
+        let a = super::symbolic::Sparse {
+            nrow: n,
+            n: ncol,
+            p: std::borrow::Cow::Borrowed(indptr),
+            i: std::borrow::Cow::Borrowed(indices),
+            x: std::borrow::Cow::Borrowed(&[]),
+            numeric: false,
+            stype: 0,
+            sorted: true,
+        };
+        let b = super::aat::aat(&a, -1);
+        (b.p.into_owned(), b.i.into_owned())
+    } else {
+        let (bp, bi, _nzmax) = copy_sym_to_unsym(n, indptr, indices, stype)?;
+        (bp, bi)
+    };
     let nz = bp[n] as usize;
 
     let anz = (nz / 2 + n) as f64;

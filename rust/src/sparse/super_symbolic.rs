@@ -152,7 +152,8 @@ pub struct SuperSymbolic {
 #[inline]
 fn subtree(
     /* inputs, not modified: */
-    k: i64, /* j = k for symmetric case */
+    j: i64, /* j = k for symmetric case */
+    k: i64,
     ap: &Ws,
     ai: &Ws,
     supermap: &Ws,
@@ -165,7 +166,6 @@ fn subtree(
     ls: &mut Ws,
     lpi2: &mut Ws,
 ) {
-    let j = k;
     /* `Anz == NULL`: a [`Sparse`] is always packed */
     for &i in ai.range(ap[j], ap[j + 1]) {
         if i < k1 {
@@ -207,6 +207,7 @@ fn subtree(
 /// conversion except `Perm` and `ColCount`, which the caller already holds.
 pub fn super_symbolic(
     a: &Sparse,
+    f: Option<&Sparse>,
     parent: &[i64],
     colcount: &[i64],
     relax: &Relax,
@@ -220,8 +221,9 @@ pub fn super_symbolic(
         /* invalid symmetry; symmetric lower form not supported */
         return Err(SuperError::Invalid("symmetric lower not supported"));
     }
-    if a.stype == 0 {
-        /* F must be present in the unsymmetric case */
+    if (a.stype == 0) != f.is_some() {
+        /* F must be present in the unsymmetric case, and is meaningless
+         * otherwise (`:195-199`) */
         return Err(SuperError::Unsymmetric);
     }
 
@@ -229,7 +231,7 @@ pub fn super_symbolic(
     // get inputs
     //--------------------------------------------------------------------------
 
-    let n = a.n;
+    let n = a.nrow;
     let ap = Ws::new_ref(&a.p);
     let ai = Ws::new_ref(&a.i);
     let parent = Ws::new_ref(parent);
@@ -573,10 +575,21 @@ pub fn super_symbolic(
                 flag[s] = *mark;
                 debug_assert_eq!(s as i64, supermap[k]);
 
-                /* traverse the row subtree for each nonzero in A */
-                subtree(
-                    k, ap, ai, supermap, sparent, *mark, asorted, k1, flag, ls, lpi2,
-                );
+                /* traverse the row subtree for each nonzero in A or AA' */
+                match f {
+                    None => subtree(
+                        k, k, ap, ai, supermap, sparent, *mark, asorted, k1, flag, ls, lpi2,
+                    ),
+                    /* for each j nonzero in F (:,k) */
+                    Some(f) => {
+                        for p in f.p[k as usize] as usize..f.p[k as usize + 1] as usize {
+                            subtree(
+                                f.i[p], k, ap, ai, supermap, sparent, *mark, asorted, k1, flag, ls,
+                                lpi2,
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -665,6 +678,7 @@ mod tests {
                 for order in [Ordering::Amd, Ordering::Natural] {
                     let (p, i) = triangle_csc(n, &edges, stype < 0);
                     let a = Sparse {
+                        nrow: n,
                         n,
                         p: p.into(),
                         i: i.into(),
@@ -679,6 +693,7 @@ mod tests {
                     let a2 = permute_sym(&a, s.ordering, &s.perm, false, false, &mut work.all());
                     let ss = super_symbolic(
                         a2.as_ref().unwrap_or(&a),
+                        None,
                         &s.parent,
                         &s.colcount,
                         &Relax::default(),
@@ -772,6 +787,7 @@ mod tests {
         let (name, n, edges) = corpus().into_iter().find(|c| c.0 == "arrow-300").unwrap();
         let (p, i) = triangle_csc(n, &edges, false);
         let a = Sparse {
+            nrow: n,
             n,
             p: p.into(),
             i: i.into(),
@@ -790,6 +806,7 @@ mod tests {
         );
         super_symbolic(
             a2.as_ref().unwrap_or(&a),
+            None,
             &s.parent,
             &s.colcount,
             &Relax::default(),
@@ -805,6 +822,7 @@ mod tests {
     fn the_wrong_stype_is_rejected() {
         for stype in [-1i32, 0] {
             let a = Sparse {
+                nrow: 1,
                 n: 1,
                 p: vec![0, 1].into(),
                 i: vec![0].into(),
@@ -814,7 +832,7 @@ mod tests {
                 sorted: true,
             };
             let mut work = Work::new(1);
-            let e = super_symbolic(&a, &[EMPTY], &[1], &Relax::default(), &mut work);
+            let e = super_symbolic(&a, None, &[EMPTY], &[1], &Relax::default(), &mut work);
             match (&e, stype) {
                 (Err(SuperError::Invalid(_)), -1) | (Err(SuperError::Unsymmetric), 0) => {}
                 _ => panic!("stype {stype} gave {e:?}"),
@@ -827,6 +845,7 @@ mod tests {
     #[test]
     fn an_empty_matrix_analyzes_to_no_supernodes() {
         let a = Sparse {
+            nrow: 0,
             n: 0,
             p: vec![0].into(),
             i: Vec::new().into(),
@@ -836,7 +855,7 @@ mod tests {
             sorted: true,
         };
         let mut work = Work::new(0);
-        let ss = super_symbolic(&a, &[], &[], &Relax::default(), &mut work).unwrap();
+        let ss = super_symbolic(&a, None, &[], &[], &Relax::default(), &mut work).unwrap();
         assert_eq!(ss.nsuper, 0);
         assert_eq!(ss.sup, vec![0]);
         assert_eq!((ss.ssize, ss.xsize), (1, 1));
