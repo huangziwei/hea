@@ -106,6 +106,13 @@ than ``A``.
     >>> x = F.solve(b)             # A \\ b  # doctest: +SKIP
     >>> F.half_log_det()           # ½ log|det A|  # doctest: +SKIP
 
+:class:`PatternPlan` is what makes that second line reachable from scipy. Every
+scipy sparse operation drops entries that come out exactly zero, so a matrix
+assembled from an expression has whatever pattern that arithmetic produced, and
+stepping a coefficient moves it. A plan computes the pattern once from operands
+that cannot cancel and lays each matrix's values out on it, which is what turns
+a sweep over a penalty weight into one analysis and many refactorizations.
+
 This module imports numpy, ``scipy.sparse`` and the compiled extension, and
 nothing else from hea.
 """
@@ -117,8 +124,19 @@ from scipy.sparse import csc_array, issparse
 
 from hea._rs import CholFactor as _CholFactor
 from hea._rs import build_info as _build_info
+from hea.sparse.lsq import lsmr, lsqr
+from hea.sparse.pattern import PatternPlan
 
-__all__ = ["CholmodError", "Factor", "build_info", "cho_factor", "cho_solve"]
+__all__ = [
+    "CholmodError",
+    "Factor",
+    "PatternPlan",
+    "build_info",
+    "cho_factor",
+    "cho_solve",
+    "lsmr",
+    "lsqr",
+]
 
 
 def build_info() -> dict:
@@ -287,6 +305,76 @@ class Factor:
     def half_log_det(self) -> float:
         """``½ log|det A|``."""
         return float(self._F.half_log_det())
+
+    def inv_diagonal(self) -> np.ndarray:
+        """``diag(inv(A))``, without forming ``inv(A)``.
+
+        Every standard error, hat-matrix diagonal and effective-degrees-of-
+        freedom count in a penalized linear model is this quantity. Takahashi's
+        recursion gets it from the factor alone, which is the difference
+        between one factorization's worth of work and ``n`` triangular solves.
+
+        **Budget two to three orders of magnitude more than a refactorize of
+        the same matrix.** Two things compound. The recursion dot-products each
+        column of ``L`` against itself, so the *work* is ``Σ_j |L_j|²`` — the
+        factorization's flop count, not its nonzero count, and on a large
+        system those differ by two orders of magnitude. And the sweep is
+        **scalar** where the numeric factorization is blocked and threaded, so
+        it does that work at a small fraction of the factorization's rate.
+
+        It also holds roughly two ``L``s while it runs, since the entries it
+        computes live on the pattern of ``L + L'``.
+
+        So this is worth reaching for when the alternative is ``n`` triangular
+        solves, or when an *exact* answer replaces a stochastic estimate whose
+        noise is changing a decision. It is not worth reaching for to make an
+        existing estimate cheaper.
+
+        Returned in ``A``'s own ordering, not the factor's.
+        """
+        return self._F.inv_diagonal()
+
+    def selected_inverse(self):
+        """The entries of ``inv(A)`` on the pattern of ``L + L'``, as CSC.
+
+        The off-diagonal companion to :meth:`inv_diagonal`, in ``A``'s
+        ordering. What it is *for*: ``tr(inv(A) @ B)`` touches ``inv(A)`` only
+        where ``B`` has entries, so any ``B`` whose pattern fits inside this one
+        gives an **exact** trace from one sweep. That covers the
+        ``tr(M⁻¹ AᵀA)`` an effective-degrees-of-freedom count needs, which is
+        otherwise estimated with stochastic probes.
+
+        **Where that exactness earns its cost**, given the price above: not
+        wherever a probe estimate is noisy, but wherever what you compute
+        *from* it is a difference of nearly equal numbers. A stochastic trace
+        carries a few percent of relative error; catastrophic cancellation
+        downstream turns that into unbounded relative error in the result,
+        while a well-conditioned expression absorbs it and never notices.
+
+        The case worth knowing, because it is easy to walk into: a GCV score
+        ``n·RSS / (n − γ·edf)²`` near the interpolating end, where ``edf``
+        approaches ``n``. At ``γ = 1`` the denominator is a cancellation of two
+        numbers that agree to seven digits, so its condition number with
+        respect to ``edf`` runs to ``10⁷`` and a few percent of trace error is
+        *five to six orders of magnitude* larger than the quantity itself — the
+        denominator is then not noisy, it is entirely noise, and even its sign
+        is arbitrary. At ``γ = 1.2`` the same denominator is ``−0.2n``, its
+        condition number is single digits, and the identical estimator with the
+        identical error is perfectly adequate.
+
+        So the test is not "is my trace noisy" but "how well conditioned is the
+        arithmetic I feed it to". Where the answer is "badly", an exact trace
+        is the difference between a determinate result and a coin flip; where
+        it is "fine", this buys nothing that probes do not already give.
+
+        Entries outside this pattern are not computed and are not zero; they
+        are simply absent. Same cost and memory as :meth:`inv_diagonal`, which
+        is the same sweep with only the diagonal kept.
+        """
+        indptr, indices, data = self._F.selected_inverse()
+        out = csc_array((data, indices, indptr), shape=(self._n, self._n))
+        out.sort_indices()
+        return out
 
     @property
     def L(self):

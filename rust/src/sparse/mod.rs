@@ -22,6 +22,7 @@ pub mod metis_order;
 pub mod numeric;
 pub mod py;
 pub mod solve;
+pub mod spinv;
 pub mod super_numeric;
 pub mod super_solve;
 pub mod super_symbolic;
