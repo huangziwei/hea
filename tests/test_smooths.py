@@ -24,8 +24,6 @@ import json
 import numpy as np
 import polars as pl
 import pytest
-from scipy.io import mmread
-
 from conftest import (
     FIXTURE_ROOT,
     _apply_schema,
@@ -33,6 +31,8 @@ from conftest import (
     fixtures_by_kind,
     load_dataset,
 )
+from scipy.io import mmread
+
 from hea.formula import (
     expand,
     materialize_smooths,
@@ -303,7 +303,7 @@ def test_mgcv_predict_mat_matches_R(fx_id: str):
             # new data, so the fit-time relative rotation carries over
             # exactly.
             if r_meta["class"] == "fs.smooth.spec":
-                p_lev, fs_rank, null_d, nf, _ = _fs_null_layout(r_meta, blk.X.shape[1])
+                p_lev, fs_rank, _null_d, nf, _ = _fs_null_layout(r_meta, blk.X.shape[1])
                 for j in range(nf):
                     cols = np.arange(j * p_lev + fs_rank, (j + 1) * p_lev)
                     G, *_ = np.linalg.lstsq(

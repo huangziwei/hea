@@ -24,7 +24,6 @@ from matplotlib.patches import Rectangle
 from ..aes import split_layer_kwargs
 from .geom import Geom
 
-
 _PT_PER_MM = 72.27 / 25.4
 
 
@@ -242,6 +241,7 @@ def _per_row_color(df, col, default, *, missing_value=None):
 
 def _color_to_rgba(c, default):
     import matplotlib.colors as mcolors
+
     from .._util import r_color
 
     if c is None:

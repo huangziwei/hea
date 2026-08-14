@@ -16,6 +16,7 @@ wrapped via the install hooks in :mod:`hea.tidy.series`.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
 import numpy as np
 import polars as pl
 
-from .basics import _Drop
 from ._shared import (
     _apply_groups,
     _check_groups,
@@ -39,12 +39,13 @@ from ._shared import (
     _split_arrange,
     _TidyRange,
 )
+from .basics import _Drop
 from .joins import (
     _CLOSEST_STRATEGY,
     _INEQ_BUILDERS,
-    _JoinBy,
     _align_equi_key_types,
     _emit_natural_join_message,
+    _JoinBy,
 )
 
 
@@ -65,7 +66,7 @@ class DataFrame(pl.DataFrame):
 
     # ---- internal -----------------------------------------------------
 
-    def _wrap(self, df: pl.DataFrame) -> "DataFrame":
+    def _wrap(self, df: pl.DataFrame) -> DataFrame:
         """Re-wrap a polars result as the same subclass as ``self``."""
         return type(self)._from_pydf(df._df)
 
@@ -103,11 +104,11 @@ class DataFrame(pl.DataFrame):
 
     # ---- row verbs ----------------------------------------------------
 
-    def filter(self, *predicates: Any, **constraints: Any) -> "DataFrame":
+    def filter(self, *predicates: Any, **constraints: Any) -> DataFrame:
         """Keep rows matching ``predicates``. Polars ``filter`` semantics."""
         return super().filter(*predicates, **constraints)
 
-    def arrange(self, *cols: Any) -> "DataFrame":
+    def arrange(self, *cols: Any) -> DataFrame:
         """Sort rows. Wrap a column in ``desc()`` for descending order.
 
         Nulls **and NaN** sort to the end regardless of direction (dplyr
@@ -129,7 +130,7 @@ class DataFrame(pl.DataFrame):
                 keys.append(n)
         return self._wrap(super().sort(keys, descending=desc_flags, nulls_last=True))
 
-    def distinct(self, *cols: str, keep_all: bool = False) -> "DataFrame":
+    def distinct(self, *cols: str, keep_all: bool = False) -> DataFrame:
         """Keep unique rows.
 
         With no args, dedupes on all columns. With ``cols``, returns the
@@ -156,7 +157,7 @@ class DataFrame(pl.DataFrame):
         _keep: str = "all",
         _by: str | list[str] | None = None,
         **kwargs: pl.Expr,
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Add or modify columns.
 
         Equivalent to ``df.with_columns(...)`` but with kwarg auto-alias:
@@ -208,7 +209,7 @@ class DataFrame(pl.DataFrame):
             try:
                 meta = e.meta
                 name = meta.output_name()
-            except Exception:
+            except Exception:  # noqa: BLE001, S112
                 continue
             if name and name not in new_names:
                 new_names.append(name)
@@ -220,14 +221,12 @@ class DataFrame(pl.DataFrame):
                 # Find originals referenced by any new expression.
                 referenced: set[str] = set()
                 for e in exprs:
-                    try:
+                    # Some expressions (e.g., literals) may not expose
+                    # root_names; treat as referencing nothing.
+                    with contextlib.suppress(Exception):
                         for r in e.meta.root_names():
                             if r in originals and r not in new_set:
                                 referenced.add(r)
-                    except Exception:
-                        # Some expressions (e.g., literals) may not expose
-                        # root_names; treat as referencing nothing.
-                        pass
                 if _keep == "used":
                     keep_originals = [c for c in originals if c in referenced]
                 else:  # unused
@@ -283,7 +282,7 @@ class DataFrame(pl.DataFrame):
             i, j = j, i
         return cols[i : j + 1]
 
-    def select(self, *cols: Any, **named: Any) -> "DataFrame":
+    def select(self, *cols: Any, **named: Any) -> DataFrame:
         """Subset columns. Accepts column names, polars selectors, exprs.
 
         A list/tuple positional arg is flattened one level so you can
@@ -336,7 +335,7 @@ class DataFrame(pl.DataFrame):
                 exprs.append(pl.lit(src).alias(new_name))
         return super().select(exprs)
 
-    def drop(self, *cols: Any, strict: bool = True) -> "DataFrame":
+    def drop(self, *cols: Any, strict: bool = True) -> DataFrame:
         """Drop columns. Symmetric with :meth:`select`: accepts column
         names, lists/tuples, polars selectors, a :class:`DataFrame` (uses
         ``.columns``), or a :class:`Series` (uses ``.name``). The slice
@@ -357,7 +356,7 @@ class DataFrame(pl.DataFrame):
                 flat.append(c)
         return self._wrap(super().drop(*flat, strict=strict))
 
-    def rename(self, mapping: dict | None = None, /, **kwargs: str) -> "DataFrame":
+    def rename(self, mapping: dict | None = None, /, **kwargs: str) -> DataFrame:
         """Rename columns. Accepts a dict (polars-style) or kwargs.
 
         Tidyverse uses ``new = old`` (kwargs); polars uses ``{old: new}``
@@ -374,7 +373,7 @@ class DataFrame(pl.DataFrame):
         # kwargs: new=old → {old: new}
         return super().rename({old: new for new, old in kwargs.items()})
 
-    def clean_names(self) -> "DataFrame":
+    def clean_names(self) -> DataFrame:
         """Snake_case all column names — janitor's ``clean_names()``.
 
         Lowercases, splits camelCase (``mealPlan`` → ``meal_plan``,
@@ -395,7 +394,7 @@ class DataFrame(pl.DataFrame):
         *cols: Any,
         _before: str | int | None = None,
         _after: str | int | None = None,
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Move columns to a new position.
 
         Without ``_before`` / ``_after``, moves ``cols`` to the front
@@ -459,7 +458,7 @@ class DataFrame(pl.DataFrame):
 
     # ---- groups -------------------------------------------------------
 
-    def group_by(self, *cols: Any, **kwargs: Any) -> "GroupBy":
+    def group_by(self, *cols: Any, **kwargs: Any) -> GroupBy:
         """Begin a grouped operation. Returns a :class:`GroupBy` wrapper.
 
         Positional ``cols`` are existing column names (or polars Exprs)
@@ -512,7 +511,7 @@ class DataFrame(pl.DataFrame):
         _by: str | list[str] | None = None,
         _groups: str = "drop",
         **kwargs: pl.Expr,
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Reduce the frame to one row per group (or one row total).
 
         Without ``_by`` and without prior ``group_by``, collapses the
@@ -545,7 +544,7 @@ class DataFrame(pl.DataFrame):
 
     summarise = summarize  # British spelling, like dplyr.
 
-    def ungroup(self) -> "DataFrame":
+    def ungroup(self) -> DataFrame:
         """No-op on a flat DataFrame. Provided for symmetry with :meth:`GroupBy.ungroup`."""
         return self
 
@@ -556,7 +555,7 @@ class DataFrame(pl.DataFrame):
         sort: bool = False,
         name: str = "n",
         **kwargs: Any,
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Count rows per combination of ``cols``.
 
         Equivalent to ``group_by(*cols).summarize(n=pl.len())``. Without
@@ -644,7 +643,7 @@ class DataFrame(pl.DataFrame):
             return self._slice_positions(offset)
         return self._wrap(super().slice(offset, length))
 
-    def _slice_positions(self, positions, *, drop: bool = False) -> "DataFrame":
+    def _slice_positions(self, positions, *, drop: bool = False) -> DataFrame:
         """dplyr positional ``slice`` — keep the given 0-based positions
         (via ``gather``) or, with ``drop=True``, remove them (via
         ``remove``). Out-of-range positions are skipped either way."""
@@ -660,10 +659,10 @@ class DataFrame(pl.DataFrame):
         # preserves duplicates / reordering — exactly dplyr's slice().
         return self._wrap(pl.DataFrame.gather(self, keep))
 
-    def slice_head(self, n: int = 1) -> "DataFrame":
+    def slice_head(self, n: int = 1) -> DataFrame:
         return super().head(n)
 
-    def slice_tail(self, n: int = 1) -> "DataFrame":
+    def slice_tail(self, n: int = 1) -> DataFrame:
         return super().tail(n)
 
     def slice_min(
@@ -671,7 +670,7 @@ class DataFrame(pl.DataFrame):
         col: str,
         n: int = 1,
         with_ties: bool = True,
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Rows with the smallest ``n`` values of ``col``.
 
         Matches dplyr semantics: nulls sort to the end, so they only
@@ -686,7 +685,7 @@ class DataFrame(pl.DataFrame):
         col: str,
         n: int = 1,
         with_ties: bool = True,
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Rows with the largest ``n`` values of ``col``."""
         return self._slice_extreme(col, n, with_ties, descending=True)
 
@@ -697,7 +696,7 @@ class DataFrame(pl.DataFrame):
         with_ties: bool,
         *,
         descending: bool,
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Shared implementation for slice_min / slice_max.
 
         Sort by ``col`` (NAs last regardless of direction), then take
@@ -724,7 +723,7 @@ class DataFrame(pl.DataFrame):
         prop: float | None = None,
         replace: bool = False,
         seed: int | None = None,
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Random rows. Pass ``n=`` for a count or ``prop=`` for a fraction.
 
         ``seed`` is a **polars** seed, not R's. dplyr's ``slice_sample`` draws
@@ -753,7 +752,7 @@ class DataFrame(pl.DataFrame):
         unmatched: str = "drop",
         relationship: Any = None,
         multiple: str | None = None,
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Keep rows that have a match in both tables.
 
         See :meth:`left_join` for shared parameter semantics. ``unmatched``
@@ -777,7 +776,7 @@ class DataFrame(pl.DataFrame):
         suffix: tuple[str, str] = (".x", ".y"),
         keep: bool = False,
         na_matches: str = "na",
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Keep every row in ``self``; right-side columns come from matching rows.
 
         Parameters
@@ -810,7 +809,7 @@ class DataFrame(pl.DataFrame):
         suffix: tuple[str, str] = (".x", ".y"),
         keep: bool = False,
         na_matches: str = "na",
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Keep every row in ``other``; left-side columns come from matching rows.
 
         See :meth:`left_join` for parameter semantics.
@@ -825,7 +824,7 @@ class DataFrame(pl.DataFrame):
         suffix: tuple[str, str] = (".x", ".y"),
         keep: bool = False,
         na_matches: str = "na",
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Keep every row from both tables; non-matching rows get nulls.
 
         See :meth:`left_join` for parameter semantics.
@@ -838,7 +837,7 @@ class DataFrame(pl.DataFrame):
         by: Any = None,
         *,
         na_matches: str = "na",
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Keep rows in ``self`` that have a match in ``other``; drop the rest.
 
         Filtering join — no right-side columns are added. See
@@ -854,7 +853,7 @@ class DataFrame(pl.DataFrame):
         by: Any = None,
         *,
         na_matches: str = "na",
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Keep rows in ``self`` that have *no* match in ``other``.
 
         Filtering join — no right-side columns are added. See
@@ -869,7 +868,7 @@ class DataFrame(pl.DataFrame):
         other: pl.DataFrame,
         *,
         suffix: tuple[str, str] = (".x", ".y"),
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Cartesian product — every row of ``self`` paired with every row of ``other``."""
         return self._do_join(
             other,
@@ -890,7 +889,7 @@ class DataFrame(pl.DataFrame):
         suffix: tuple[str, str],
         keep: bool,
         na_matches: str,
-    ) -> "DataFrame":
+    ) -> DataFrame:
         if na_matches not in ("na", "never"):
             raise ValueError(
                 f"na_matches: expected 'na' or 'never', got {na_matches!r}."
@@ -945,7 +944,7 @@ class DataFrame(pl.DataFrame):
         suffix: tuple[str, str],
         keep: bool,
         na_matches: str,
-    ) -> "DataFrame":
+    ) -> DataFrame:
         nulls_equal = na_matches == "na"
         # Use a placeholder suffix polars won't collide with, then rename
         # to dplyr's two-sided convention.
@@ -1007,7 +1006,7 @@ class DataFrame(pl.DataFrame):
         how: str,
         suffix: tuple[str, str],
         keep: bool,
-    ) -> "DataFrame":
+    ) -> DataFrame:
         if how != "inner":
             raise NotImplementedError(
                 f"{how}_join with non-equi conditions is not supported yet — "
@@ -1047,7 +1046,7 @@ class DataFrame(pl.DataFrame):
         suffix: tuple[str, str],
         keep: bool,
         na_matches: str,
-    ) -> "DataFrame":
+    ) -> DataFrame:
         if how not in ("left", "inner", "anti", "semi"):
             raise NotImplementedError(
                 f"{how}_join with closest() is not supported — only "
@@ -1075,13 +1074,13 @@ class DataFrame(pl.DataFrame):
         left_sorted = pl.DataFrame.with_row_index(left_aligned, idx_col)
         left_sorted = left_sorted.sort(asof_keys_left)
         right_sorted = right_aligned.sort(asof_keys_right)
-        kwargs: dict[str, Any] = dict(
-            left_on=spec.asof.left,
-            right_on=spec.asof.right,
-            strategy=strategy,
-            suffix=polars_suffix,
-            coalesce=not keep,
-        )
+        kwargs: dict[str, Any] = {
+            "left_on": spec.asof.left,
+            "right_on": spec.asof.right,
+            "strategy": strategy,
+            "suffix": polars_suffix,
+            "coalesce": not keep,
+        }
         if spec.equi_left:
             kwargs["by_left"] = spec.equi_left
             kwargs["by_right"] = spec.equi_right
@@ -1125,7 +1124,7 @@ class DataFrame(pl.DataFrame):
         out: pl.DataFrame,
         suffix: tuple[str, str],
         polars_suffix: str,
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Rewrite polars' single-sided ``suffix`` into dplyr's two-sided form.
 
         Polars adds ``polars_suffix`` only to right-side columns that
@@ -1199,7 +1198,7 @@ class DataFrame(pl.DataFrame):
         self,
         *cols: Any,
         direction: str = "down",
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """tidyr: ``fill(.data, ..., .direction)`` — replace NA in each
         column by carrying neighboring non-NA values forward / backward.
 
@@ -1244,7 +1243,7 @@ class DataFrame(pl.DataFrame):
         names_sep: str | None = None,
         names_pattern: str | None = None,
         values_drop_na: bool = False,
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Wide → long reshape — tidyr's ``pivot_longer``.
 
         Parameters
@@ -1380,7 +1379,7 @@ class DataFrame(pl.DataFrame):
         values_fill: Any = None,
         names_prefix: str = "",
         names_sep: str = "_",
-    ) -> "DataFrame":
+    ) -> DataFrame:
         """Long → wide reshape — tidyr's ``pivot_wider``.
 
         Parameters
@@ -1516,7 +1515,7 @@ class DataFrame(pl.DataFrame):
 
     # ---- lazy frame ---------------------------------------------------
 
-    def lazy(self) -> "LazyFrame":
+    def lazy(self) -> LazyFrame:
         """Start a lazy query; returns a hea.LazyFrame.
 
         Overrides ``pl.DataFrame.lazy`` (which would return ``pl.LazyFrame``
@@ -1533,19 +1532,19 @@ class DataFrame(pl.DataFrame):
     # routing through ``self._from_pydf``. We override each to re-wrap so the
     # subclass is preserved.
 
-    def describe(self, *args: Any, **kwargs: Any) -> "DataFrame":
+    def describe(self, *args: Any, **kwargs: Any) -> DataFrame:
         return self._wrap(super().describe(*args, **kwargs))
 
-    def corr(self, *args: Any, **kwargs: Any) -> "DataFrame":
+    def corr(self, *args: Any, **kwargs: Any) -> DataFrame:
         return self._wrap(super().corr(*args, **kwargs))
 
-    def unstack(self, *args: Any, **kwargs: Any) -> "DataFrame":
+    def unstack(self, *args: Any, **kwargs: Any) -> DataFrame:
         return self._wrap(super().unstack(*args, **kwargs))
 
-    def sql(self, *args: Any, **kwargs: Any) -> "DataFrame":
+    def sql(self, *args: Any, **kwargs: Any) -> DataFrame:
         return self._wrap(super().sql(*args, **kwargs))
 
-    def match_to_schema(self, *args: Any, **kwargs: Any) -> "DataFrame":
+    def match_to_schema(self, *args: Any, **kwargs: Any) -> DataFrame:
         return self._wrap(super().match_to_schema(*args, **kwargs))
 
     # ---- summary ------------------------------------------------------
@@ -1556,7 +1555,7 @@ class DataFrame(pl.DataFrame):
         maxsum: int = 7,
         digits: int = 4,
         width: int | None = None,
-    ) -> "Summary":
+    ) -> Summary:
         """R-style per-column summary, mirroring ``summary(data.frame)``.
 
         Complements :meth:`describe` (polars' wide-format numeric stats)
@@ -1616,9 +1615,7 @@ class DataFrame(pl.DataFrame):
 
     # ---- time series --------------------------------------------------
 
-    def as_ts(
-        self, *, start: float | None = None, frequency: float = 1.0
-    ) -> "DataFrame":
+    def as_ts(self, *, start: float | None = None, frequency: float = 1.0) -> DataFrame:
         """Mark this frame as a time series (R's ``as.ts()``).
 
         The frame must already be a 2-column ``(time, value)`` shape —
@@ -1643,7 +1640,7 @@ class DataFrame(pl.DataFrame):
         out._ts_meta = TsMeta(start=start, end=end, frequency=float(frequency))
         return out
 
-    def drop_ts(self) -> "DataFrame":
+    def drop_ts(self) -> DataFrame:
         """Strip the ts marker — inverse of :meth:`as_ts`. Mirrors R's
         ``unclass(Nile)`` / ``as.data.frame(Nile)``.
 
@@ -1662,7 +1659,7 @@ def _fmt_ts_num(v: float) -> str:
     return str(iv) if float(iv) == v else repr(v)
 
 
-def _format_ts_header(m: "TsMeta") -> str:
+def _format_ts_header(m: TsMeta) -> str:
     """R-style ``print.ts`` header — three lines above the data block."""
     return (
         "Time Series:\n"
@@ -1672,7 +1669,7 @@ def _format_ts_header(m: "TsMeta") -> str:
     )
 
 
-def _format_ts_header_html(m: "TsMeta") -> str:
+def _format_ts_header_html(m: TsMeta) -> str:
     return (
         "<p><b>Time Series</b><br/>"
         f"Start = {_fmt_ts_num(m.start)}<br/>"
@@ -1699,7 +1696,7 @@ class TsMeta:
     frequency: float
 
 
-def ts(data, start: float = 1.0, frequency: float = 1.0) -> "DataFrame":
+def ts(data, start: float = 1.0, frequency: float = 1.0) -> DataFrame:
     """R: ``ts(data, start, frequency)`` — construct a time series.
 
     Returns a hea ``DataFrame`` with columns ``("time", "value")``,

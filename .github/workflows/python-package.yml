@@ -15,9 +15,215 @@ on:
     branches: [ "main" ]
 
 jobs:
+  # Lint is its own job: it needs neither Rust nor R, so it reports in seconds
+  # instead of waiting on the 5-way build matrix. Replaces the old
+  # tests/test_flake8.py, which ran a `--select=E9,F63,F7,F82` subset inside
+  # pytest. Keep the pin in step with the `ruff` floor in the dev group.
+  lint:
+    runs-on: ubuntu-latest
+    needs: bench-gate
+    # The other side of `bench-gate`. `bench` runs the sweep and nothing else,
+    # `wheels` runs neither (that commit belongs to python-publish.yml), so a
+    # CI-plumbing commit never drags a 5-way matrix along with it. Anything
+    # else, and every push to `main`, runs the suite as before.
+    if: needs.bench-gate.outputs.suite == 'true'
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+    - run: python -m pip install 'ruff==0.16.1'
+    - run: ruff check .
+    - run: ruff format --check .
+
+  # The crate's own checks, which the Python job does not reach: `cargo test`
+  # runs a #[cfg(test)] corpus that is the *only* place `Ws`'s bounds
+  # `debug_assert`s are live (release elides them), and clippy/rustfmt are house
+  # rules here.
+  #
+  # **Both feature arms, and that is the point.** `blas` is on by default, and
+  # two of `dense.rs`'s tests are `#[cfg(not(vendor_blas))]` — they assert that
+  # hea's own cache blocking is a scheduling decision and never a numerical one,
+  # a property about code the vendor build does not compile in. A single
+  # default-features run silently stops covering them, which is exactly what
+  # happened when the default flipped.
+  rust:
+    runs-on: ubuntu-latest
+    needs: bench-gate
+    # The other side of `bench-gate`. `bench` runs the sweep and nothing else,
+    # `wheels` runs neither (that commit belongs to python-publish.yml), so a
+    # CI-plumbing commit never drags a 5-way matrix along with it. Anything
+    # else, and every push to `main`, runs the suite as before.
+    if: needs.bench-gate.outputs.suite == 'true'
+    env:
+      RUST_BACKTRACE: "1"
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy, rustfmt
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: rust
+    - name: Install OpenBLAS (the default feature links it on Linux)
+      run: |
+        python -m pip install --upgrade pip scipy-openblas32
+        echo "HEA_BLAS_LIB_DIR=$(python -c 'import scipy_openblas32 as s; print(s.get_lib_dir())')" >> "$GITHUB_ENV"
+    - run: cargo fmt --manifest-path rust/Cargo.toml --check
+    - name: Clippy, every feature arm
+      run: |
+        for f in "" "--no-default-features" "--features blas-all" \
+                 "--features blas-required" "--features blas-sweep" \
+                 "--features profiling" "--no-default-features --features profiling"; do
+          echo "::group::clippy $f"
+          cargo clippy --manifest-path rust/Cargo.toml --release --all-targets $f -- -D warnings
+          echo "::endgroup::"
+        done
+    - name: Test, both arms
+      # pyo3 is built with `extension-module`, so the library deliberately does
+      # not link libpython and a test binary has nothing to resolve
+      # `__Py_TrueStruct` against. The interpreter has to go on the link line —
+      # this is what maturin passes when it builds the wheel.
+      run: |
+        LIBDIR=$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')
+        export RUSTFLAGS="-L $LIBDIR -C link-arg=-Wl,-undefined,dynamic_lookup"
+        cargo test --manifest-path rust/Cargo.toml
+        cargo test --manifest-path rust/Cargo.toml --no-default-features
+
+  # `sparse::blas::MIN_FLOPS` — the per-call flop count above which a dense
+  # kernel goes to the vendor — is a ratio between hea's kernels and the
+  # vendor's, so it moves when either does, and both differ between aarch64 and
+  # x86-64. This runner is the only x86-64 hardware the project has, so the
+  # sweep lives here. It is worth re-running when a `dense.rs` kernel or the
+  # routing changes; scheduling constants are far below its resolution.
+  #
+  # Decides whether the sweep below runs, by reading the head commit's message.
+  # Five seconds, so it is affordable on every PR where the ten-minute job it
+  # guards is not.
+  #
+  # It needs its own job because a job-level `if:` can only see the event
+  # payload, and a `pull_request` payload has no commit message in it — that is
+  # `push`-only. Hence the API call. And `actions/checkout` would not help: on a
+  # PR it checks out the *merge* commit, whose message is "Merge A into B".
+  bench-gate:
+    # Named so the Actions list cannot be misread: this one is the five-second
+    # decision, the next one is the measurement.
+    name: "bench 1/2 — sweep, or suite?"
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+      suite: ${{ steps.check.outputs.suite }}
+    steps:
+    - id: check
+      env:
+        GH_TOKEN: ${{ github.token }}
+        SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        if [ "${{ github.event_name }}" != "pull_request" ]; then
+          echo "run=false" >> "$GITHUB_OUTPUT"
+          echo "suite=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::not a pull request — the sweep is PR-only. Running the suite."
+          exit 0
+        fi
+        msg=$(gh api "repos/${{ github.repository }}/commits/$SHA" --jq .commit.message)
+        echo "head commit ${SHA:0:7}:"
+        echo "$msg"
+        # `wheels` belongs to python-publish.yml and means a four-platform wheel
+        # dry run. It suppresses the suite here for the same reason `bench`
+        # does: a CI-plumbing commit should buy the one thing it asked for, not
+        # that plus a five-way matrix.
+        if printf '%s' "$msg" | grep -qi wheels; then
+          echo "run=false" >> "$GITHUB_OUTPUT"
+          echo "suite=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::'wheels' is in the commit message — this run belongs to python-publish.yml. Skipping both the suite and the sweep."
+        elif printf '%s' "$msg" | grep -qi bench; then
+          echo "run=true" >> "$GITHUB_OUTPUT"
+          echo "suite=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::'bench' is in the commit message — running the MIN_FLOPS sweep INSTEAD of the test suite. This commit gets no test coverage; do not read its green as a passing build."
+        else
+          echo "run=false" >> "$GITHUB_OUTPUT"
+          echo "suite=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::no 'bench' or 'wheels' in the commit message — running the test suite."
+        fi
+
+  # **A development tool: pull requests only, never `main`, and only when the
+  # head commit's message contains `bench`.** It is ten-odd minutes, dominated
+  # by a release build of the crate, which is too much to spend on every push —
+  # and it is a benchmark rather than a gate, asserting nothing about the
+  # numbers, so it cannot fail a merge on a timing. A shared runner is noisy
+  # enough that a per-commit trend line would be a lie anyway. Read the flat
+  # bottom of the curve, not the argmax.
+  #
+  # When it does not run it shows as skipped, which looks the same as broken —
+  # so `bench-gate` above always runs and always prints which it decided.
+  bench-min-flops:
+    name: "bench 2/2 — MIN_FLOPS sweep (x86-64)"
+    needs: bench-gate
+    if: needs.bench-gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: rust
+    - name: Which x86-64 this actually is
+      # OpenBLAS is DYNAMIC_ARCH and dispatches on the running CPU, so the
+      # answer depends on which vector ISA the runner gave us. A number without
+      # this line cannot be compared against a later one.
+      #
+      # The ISA flags are pulled out by name rather than by printing the flags
+      # line, which is thousands of characters. Truncating it instead — the
+      # first version did `cut -c1-400`, and the line was 401 — silently drops
+      # exactly the flags being looked for and reports their absence.
+      run: |
+        lscpu | grep -E "^(Model name|Architecture|CPU\(s\)|Thread|Core)"
+        echo -n "vector ISA:"
+        for f in sse4_2 avx avx2 fma avx512f avx512dq avx512vl; do
+          grep -qw "$f" /proc/cpuinfo && echo -n " $f"
+        done
+        echo
+    - name: Build the sweep arm
+      # `blas-sweep` moves the cutoff to the environment so seven columns cost
+      # one build. `blas-required` refuses to fall back to the portable kernels,
+      # which would otherwise make every column identical and green.
+      #
+      # `maturin develop` wants a virtualenv, and `HEA_BLAS_LIB_DIR` has to be
+      # exported in the same step that builds — writing it to $GITHUB_ENV alone
+      # does not apply within the step that wrote it.
+      run: |
+        python -m venv /tmp/sweepenv
+        . /tmp/sweepenv/bin/activate
+        pip install --upgrade pip maturin scipy-openblas32 numpy scipy
+        export HEA_BLAS_LIB_DIR=$(python -c 'import scipy_openblas32 as s; print(s.get_lib_dir())')
+        maturin develop --release \
+          --manifest-path rust/Cargo.toml \
+          --features blas-sweep,blas-required
+        python -c "
+        from hea.sparse import build_info
+        i = build_info(); print(i)
+        assert i['backend'] == 'openblas', f'expected OpenBLAS, got {i}'
+        "
+    - name: Sweep
+      run: |
+        . /tmp/sweepenv/bin/activate
+        python .github/bench/min_flops_sweep.py
+
   build:
 
     runs-on: ubuntu-latest
+    needs: bench-gate
+    # The other side of `bench-gate`. `bench` runs the sweep and nothing else,
+    # `wheels` runs neither (that commit belongs to python-publish.yml), so a
+    # CI-plumbing commit never drags a 5-way matrix along with it. Anything
+    # else, and every push to `main`, runs the suite as before.
+    if: needs.bench-gate.outputs.suite == 'true'
     env:
       RUST_BACKTRACE: "1"
     strategy:
@@ -67,27 +273,57 @@ jobs:
           sudo R CMD INSTALL /tmp/mgcv.tar.gz
         fi
         Rscript -e 'cat("mgcv", as.character(packageVersion("mgcv")), "\n"); stopifnot(packageVersion("mgcv") == "1.9.4")'
-    - name: Install dependencies
+    - name: Install OpenBLAS for the sparse vendor path
+      # hea's `blas` feature is on by default and links the platform's best
+      # BLAS: Accelerate on macOS, OpenBLAS everywhere else. On Linux that has
+      # to be findable at build time or `rust/build.rs` falls back to the
+      # portable NEON kernels — a legitimate fallback for a user's source build
+      # and the WRONG thing for CI, which would then never exercise the path
+      # that ships. `scipy-openblas32` is a plain DYNAMIC_ARCH OpenBLAS with
+      # `scipy_`-prefixed symbols, the same binary numpy and scipy carry.
       run: |
         python -m pip install --upgrade pip
-        python -m pip install '.[fast]' --group dev
-    - name: Build hea._rs (Rust extension) into the source tree
-      # build-backend is still hatchling, so `pip install .` ships no Rust.
-      # Build the crate with maturin and copy the compiled module into hea/,
-      # where pytest's `pythonpath = ["."]` import resolution finds it
-      # (mirrors rust/rebuild.sh). abi3-py310 means one build is portable
-      # across the whole 3.10–3.14 matrix.
+        python -m pip install scipy-openblas32
+        echo "HEA_BLAS_LIB_DIR=$(python -c 'import scipy_openblas32 as s; print(s.get_lib_dir())')" >> "$GITHUB_ENV"
+    - name: Install dependencies
+      # maturin is the build backend, so this single command already compiles
+      # the hea-rs crate into the installed wheel — there is no separate build
+      # step, and adding one would compile the crate twice.
+      #
+      # `.[data]`, not `.[fast]`: the `fast` extra is an empty stub kept only so
+      # old `hea[fast]` pins keep resolving (the sparse Cholesky is in the wheel
+      # now). Installing the `data` extra from the local tree is also what
+      # satisfies the dev group's `hea[data]` self-reference — otherwise pip has
+      # to resolve that name, and `hea` exists on PyPI.
       run: |
-        python -m pip install 'maturin==1.14.0'
-        maturin build --release --interpreter python -o dist
-        whl="$(ls -t dist/hea-*.whl | head -1)"
-        python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall('dist/extract')" "$whl"
-        cp dist/extract/hea/_rs*.so hea/
+        python -m pip install --upgrade pip
+        python -m pip install '.[data]' --group dev
+    - name: Put hea._rs next to the sources
+      # pytest's `pythonpath = ["."]` makes the repo-root `hea/` shadow the
+      # installed package, so the compiled module has to exist in-tree as well
+      # (mirrors rust/rebuild.sh). Copy the module pip just built rather than
+      # rebuilding it. abi3-py310 means one build covers the whole 3.10–3.14
+      # matrix.
+      run: |
+        python -c "import pathlib,shutil,sysconfig as s; d={s.get_paths()[k] for k in ('purelib','platlib')}; f=next(p for x in d for p in pathlib.Path(x).glob('hea/_rs*.so')); shutil.copy(f,'hea/'+f.name); print('copied',f)"
         ls -l hea/_rs*.so
     - name: Verify the Rust extension is active (no silent fallback)
       # Hard-fail if hea._rs is missing: otherwise the parity tests would
       # importorskip and the suite would quietly green on the numpy path.
-      run: python -c "import hea, hea._rs; print('hea:', hea.__file__); print('hea._rs:', hea._rs.__file__)"
+      #
+      # Same argument one layer down for the BLAS backend. `build.rs` degrades
+      # to the portable kernels when it cannot find OpenBLAS, and that build
+      # passes every test — so without this assertion a broken
+      # `HEA_BLAS_LIB_DIR` would show up as nothing at all, and Linux would
+      # silently stop covering the vendor path. `build_info()` is the only
+      # place the distinction is visible from Python.
+      run: |
+        python -c "import hea, hea._rs; print('hea:', hea.__file__); print('hea._rs:', hea._rs.__file__)"
+        python -c "
+        from hea.sparse import build_info
+        i = build_info(); print('build_info:', i)
+        assert i['backend'] == 'openblas', f'expected the OpenBLAS arm, got {i}'
+        "
     - name: Test with pytest
       # Parallelize across the runner's cores (pytest-xdist). Pin BLAS/OpenMP to
       # one thread per worker so N workers don't oversubscribe the cores — and so
@@ -102,5 +338,8 @@ jobs:
       # tests/translate/ exercises the R<->Python translator end-to-end against
       # tidyverse (library(dplyr)/…), which isn't installed here and takes far too
       # long to install in CI. Those run locally where tidyverse is present.
-      # tests/test_rs_parity.py skips here (macOS-only gate, run locally not in CI).
+      # tests/test_rs_parity.py DOES run here: it `importorskip`s hea._rs (present,
+      # and the step above hard-fails otherwise) and only its bit-exact assertions
+      # are darwin-gated (`_STRICT = sys.platform == "darwin"`), so on Linux it
+      # gates the x86-64 Rust path as a tolerance check.
       run: pytest -n auto --dist worksteal --ignore=tests/translate

@@ -26,9 +26,9 @@ import sys
 
 import numpy as np
 
+from .._dispatch import rs_fn
 from ._shared import _rfma, _rfma_vec
 from .rng import _QN_A, _QN_B, _QN_C, _QN_D, _QN_E, _QN_F, _qn_horner
-from .._dispatch import rs_fn
 
 # Rust kernels — None when the extension is absent/disabled, in which
 # case the pure-Python kernels below run unchanged (bit-identical, just slower).
@@ -110,7 +110,7 @@ def _disp(name, scalar_fn, num_args, flags=()):
         return kern(*flat, *flags).reshape(shape)
     # No native extension: use the numpy-vectorized pure-Python kernel if one is
     # registered (bit-identical, ~C-speed); else the scalar loop (the bratio /
-    # Newton-quantile kernels are not vectorizable cheaply — see plan §5).
+    # Newton-quantile kernels are not vectorizable cheaply).
     py_vec = _PY_VEC.get(name)
     if py_vec is not None:
         r = py_vec(*num_args, *flags)
@@ -1547,7 +1547,7 @@ def psigamma5(x, deriv):
     derivative of the digamma function; ``psigamma(x, 0) == digamma(x)``."""
     if math.isnan(x):
         return x
-    n = int(round(deriv))  # R_forceint (half-even)
+    n = round(deriv)  # R_forceint (half-even)
     if n > 100:
         return _NAN
     ans = _dpsifn_m1(x, n)
@@ -2368,8 +2368,7 @@ def _pd_lower_cf(y, d):
     f0 = y / d
     if abs(y - 1) < abs(d) * _DBL_EPSILON:
         return f0
-    if f0 > 1.0:
-        f0 = 1.0
+    f0 = min(f0, 1.0)
     c2 = y
     c4 = d
     a1 = 0.0
@@ -2681,10 +2680,7 @@ def qgamma(p, alpha, scale, lower_tail=True, log_p=False):
     if not math.isfinite(ch):
         max_it_Newton = 0
         at_end = True
-    elif ch < EPS2:
-        max_it_Newton = 20
-        at_end = True
-    elif p_ > pMAX or p_ < pMIN:
+    elif ch < EPS2 or p_ > pMAX or p_ < pMIN:
         max_it_Newton = 20
         at_end = True
     if not at_end:
@@ -3083,8 +3079,7 @@ def _psi(x):
     p1, q1, p2, q2 = _PSI_P1, _PSI_Q1, _PSI_P2, _PSI_Q2
     xmax1 = 2147483647.0  # INT_MAX
     d2 = 0.5 / (0.5 * _DBL_EPSILON)
-    if xmax1 > d2:
-        xmax1 = d2
+    xmax1 = min(xmax1, d2)
     xsmall = 1e-9
     aug = 0.0
     if x < 0.5:
@@ -3439,8 +3434,7 @@ def _bup(a, b, x, y, n, eps, give_log):
     if n > 1 and a >= 1.0 and apb >= ap1 * 1.1:
         mu = int(abs(_exparg(1)))
         k = int(_exparg(0))
-        if mu > k:
-            mu = k
+        mu = min(mu, k)
         d = math.exp(-float(mu))
     else:
         mu = 0
@@ -3462,7 +3456,7 @@ def _bup(a, b, x, y, n, eps, give_log):
                 k = int(r) if r < nm1 else nm1
         else:
             k = nm1
-        for i in range(0, k):
+        for i in range(k):
             ll = float(i)
             d *= (apb + ll) / (ap1 + ll) * x
             w += d
@@ -4025,9 +4019,7 @@ def _bratio(a, b, x, y, log_p):
                 w1 = 0.0
                 do_L131 = True
         else:
-            if a0 >= min(0.2, b0):
-                go_bpser_w = True
-            elif math.pow(x0, a0) <= 0.9:
+            if a0 >= min(0.2, b0) or math.pow(x0, a0) <= 0.9:
                 go_bpser_w = True
             elif x0 >= 0.3:
                 go_bpser_w1 = True
@@ -4078,9 +4070,7 @@ def _bratio(a, b, x, y, log_p):
         elif a0 > b0:
             if b0 <= 100.0 or lambda_ > b0 * 0.03:
                 go_bfrac = True
-        elif a0 <= 100.0:
-            go_bfrac = True
-        elif lambda_ > a0 * 0.03:
+        elif a0 <= 100.0 or lambda_ > a0 * 0.03:
             go_bfrac = True
         if go_bpser_w:
             w = _bpser(a0, b0, x0, eps, log_p)
@@ -4152,10 +4142,8 @@ def lbeta(a, b):
     if math.isnan(a) or math.isnan(b):
         return a + b
     p = q = a
-    if b < p:
-        p = b
-    if b > q:
-        q = b
+    p = min(p, b)
+    q = max(q, b)
     if p < 0:
         return _NAN
     if p == 0:
@@ -6189,7 +6177,7 @@ def gammafn_vec(x):
                 negn = -n
                 xsml = ng & (frac < _GAM_XSML)
                 minn = int(negn[ng].max()) if ng.any() else 0
-                for i in range(0, minn):
+                for i in range(minn):
                     r = np.where(ng & (negn > i), r / (xl + i), r)
                 r = np.where(xsml, _INF, r)
             res[le10] = r
@@ -6546,8 +6534,7 @@ def ptukey(
             break
         ans += otsum
 
-    if ans > 1.0:
-        ans = 1.0
+    ans = min(ans, 1.0)
     return _dt_val(ans, lower_tail, log_p)
 
 
@@ -6881,8 +6868,8 @@ _WILCOX_CACHE: dict = {}
 
 
 def _cwilcox_sigma(k: int, m: int, n: int) -> int:
-    iter1 = m if m < k else k
-    iter2 = (m + n) if (m + n) < k else k
+    iter1 = min(k, m)
+    iter2 = min(k, m + n)
     s = 0
     for d in range(1, iter1 + 1):
         if k % d == 0:
@@ -6905,7 +6892,7 @@ def _wilcox_fill_to_k(m: int, n: int, new_k: int, cache: dict) -> None:
             w[0] = 1.0
         else:
             s = 0.0
-            for i in range(0, k):
+            for i in range(k):
                 s += w[i] * sigma[k - i]
             w[k] = s / k
     cache["max_k"] = new_k

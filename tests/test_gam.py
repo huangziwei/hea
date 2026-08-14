@@ -44,14 +44,14 @@ import matplotlib
 import numpy as np
 import polars as pl
 import pytest
+from conftest import assert_fp_equiv as _assert_fp_equiv
+from conftest import load_dataset
 
-from conftest import assert_fp_equiv as _assert_fp_equiv, load_dataset
-from hea.models import gam, glm
 from hea.family import Gamma, Poisson, Tweedie, tw
+from hea.models import gam, glm
 
 matplotlib.use("Agg")  # headless — must be set before pyplot import below.
-import matplotlib.pyplot as plt  # noqa: E402
-
+import matplotlib.pyplot as plt
 
 # =============================================================================
 # 1. mgcv-oracle parity
@@ -281,6 +281,7 @@ def test_gam_side_repeated_and_partial_overlap_matches_mgcv():
     entries are asserted as >1e4 rather than pinned.
     """
     import warnings as _warnings
+
     from hea.R.rng import RGenerator
 
     g = RGenerator(21)
@@ -491,13 +492,13 @@ def test_factor_helper():
     """`hea.R.factor()` is the polars equivalent of R's factor() — the
     user-side fix for wild-data Int64-stored factor columns.
     """
-    from hea.R import factor
-    from hea.formula import _ORDERED_COLS_CV, set_ordered_cols
-
     # Bypass `hea.data` (which applies our schema sidecar) to simulate the
     # wild-data scenario where factor info has been stripped — exactly what
     # rdatasets gives us out of the box.
     import rdatasets
+
+    from hea.formula import _ORDERED_COLS_CV, set_ordered_cols
+    from hea.R import factor
 
     df = pl.from_pandas(rdatasets.data("nlme", "Machines")).drop("rownames")
     assert df.schema["Worker"] == pl.Int64  # the wild-data scenario
@@ -829,8 +830,8 @@ def test_reml_finite_for_trees_gamma_log():
     """Sanity: for the converged Gamma(log) fit, `_reml` returns a
     finite value at the hea-current sp. (Phase 2.2 makes φ̂ a joint outer
     variable; this just ensures the formula is wired up correctly.)"""
-    from hea.models import gam
     from hea.family import Gamma
+    from hea.models import gam
 
     d = load_dataset("R", "trees")
     m = gam("Volume ~ s(Height) + s(Girth)", d, family=Gamma(link="log"), method="REML")
@@ -1245,6 +1246,7 @@ def test_plot_smooth_scheme_persp_for_2d():
 
     matplotlib.use("Agg")
     from mpl_toolkits.mplot3d import Axes3D
+
     from hea.family import Gamma
 
     trees = load_dataset("mgcv", "trees")
@@ -1269,6 +1271,7 @@ def test_plot_smooth_scheme_per_panel_list():
 
     matplotlib.use("Agg")
     from mpl_toolkits.mplot3d import Axes3D
+
     from hea.family import Gamma
 
     trees = load_dataset("mgcv", "trees")
@@ -1295,6 +1298,7 @@ def test_plot_smooth_ax_3d_required_for_persp():
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+
     from hea.family import Gamma
 
     trees = load_dataset("mgcv", "trees")
@@ -1314,7 +1318,7 @@ def _plot_curve(m, **kw):
     """The (x, y) polyline ``plot_smooth`` actually draws for a 1D panel."""
     fig, ax = plt.subplots()
     m.plot_smooth(ax=ax, **kw)
-    curve = [ln for ln in ax.lines if len(ln.get_xdata()) > 2][0]
+    curve = next(ln for ln in ax.lines if len(ln.get_xdata()) > 2)
     xs = np.asarray(curve.get_xdata(), dtype=float)
     ys = np.asarray(curve.get_ydata(), dtype=float)
     plt.close(fig)
@@ -1420,7 +1424,7 @@ def test_plot_smooth_1d_by_panel_rug_and_resids():
 
     fig, ax = plt.subplots()
     m.plot_smooth(select=0, ax=ax, rug=True, partial_residuals=True)
-    rug = [ln for ln in ax.lines if ln.get_marker() == "|"][0]
+    rug = next(ln for ln in ax.lines if ln.get_marker() == "|")
     assert len(rug.get_xdata()) == n  # not just the 'a' rows
     assert not [c for c in ax.collections if c.get_offsets().shape[0] > 10]
     plt.close(fig)
@@ -1569,6 +1573,7 @@ def test_select_true_binomial_summary_matches_mgcv():
     not t/F. Pinned to mgcv on wesdr at mgcv's converged sp.
     """
     from scipy.stats import norm
+
     from hea.family import Binomial
 
     d = load_dataset("gamair", "wesdr")
@@ -2265,7 +2270,7 @@ def test_get_difference_matches_itsadug(itsadug_fitted_model, case_id: str):
         )
 
         # crit is the empirical type-8 0.95 quantile of the MASD over
-        # n_sim=10000 MVN draws. hea now draws via mgcv::rmvn on R's *bit-exact*
+        # n_sim=10000 MVN draws. hea draws via mgcv::rmvn on R's *bit-exact*
         # MT stream (RMersenneTwister.rmvn, seeded with the fixture's
         # set.seed) — given identical Vc/p the quantile reproduces R's to
         # ~1e-12 (see test_rmvn_matches_r). The residual ~4e-3 here is NOT
@@ -2275,7 +2280,7 @@ def test_get_difference_matches_itsadug(itsadug_fitted_model, case_id: str):
         # off the same stream. Basis-invariant quantities (difference / CI /
         # se_fit above) match to ~5e-6; bit-exact crit would need full
         # column-for-column basis parity. 8e-3 covers the measured gap with
-        # margin and is ~6× tighter than the old cross-RNG bound.
+        # margin and is ~6× tighter than a cross-RNG bound would need to be.
         ref_crit = float(pl.read_csv(case_dir / "crit.csv")["crit"][0])
         np.testing.assert_allclose(
             res.crit,
@@ -2322,8 +2327,8 @@ def test_cohort_y_matches_basic(itsadug_fitted_model):
 #
 # Reference values: R mgcv 1.9-4 run locally on the exact CSV each numpy
 # generator below reproduces (tests never call R). The testStat pins
-# discriminate against the old single-statistic F-only path, which is ~15%
-# off on the low-p Gaussian case below.
+# discriminate against a single-statistic F-only path, which is ~15% off on
+# the low-p Gaussian case below.
 # =============================================================================
 
 
@@ -2374,7 +2379,7 @@ def test_teststat_mixture_pvalue_poisson_matches_mgcv():
     y = np.asarray(g.poisson(np.exp(0.30 * np.sin(4 * np.pi * x))), dtype=float)
     d = pl.DataFrame({"x": x, "y": y})
     m = gam("y ~ s(x)", d, family=Poisson(), method="REML")
-    label, edf, ref_df, stat_col, p_val = m._smooth_significance_rows()[0]
+    _label, edf, ref_df, stat_col, p_val = m._smooth_significance_rows()[0]
     # mgcv: edf, Ref.df, Chi.sq, p-value
     np.testing.assert_allclose(
         [edf, ref_df, stat_col, p_val],
@@ -2622,10 +2627,10 @@ def test_id_singleton_is_noop():
 
 
 def test_bam_links_id_like_gam():
-    """bam grew gam's working-θ L-matrix layer (plan P9): id= now shares ONE
-    working λ across the linked smooths instead of being rejected. Full
-    mgcv-bam parity (sp/edf/criterion/fitted) lives in test_bam.py §7; here we
-    just confirm bam links the same structure gam does on the shared fixture."""
+    """bam has gam's working-θ L-matrix layer: id= shares ONE working λ across
+    the linked smooths. Full mgcv-bam parity (sp/edf/criterion/fitted) lives in
+    test_bam.py §7; this confirms bam links the same structure gam does on the
+    shared fixture."""
     from hea.models.bam import bam
 
     d = _id_linked_data()
@@ -2846,8 +2851,8 @@ def test_r_rng_port_is_bit_exact():
     assert s[-3:].tolist() == [2694, 2568, 1897]
     # The port's home is hea.R.rng (formula's _RUnif and
     # hea.models.bam's name are shims/re-exports of the same class).
-    from hea.R import RMersenneTwister
     from hea.models.bam import RMersenneTwister as _bam_alias
+    from hea.R import RMersenneTwister
 
     assert type(_RUnif(1)) is RMersenneTwister is _bam_alias
     # Vector unif_rand consumes the identical stream as scalar draws.
@@ -3450,7 +3455,7 @@ def test_sandwich_general_family():
     # gradient outer-product sum. The meat is pinned against an
     # independent oracle: Σ_i g_i g_iᵀ with g_i the lb of a single-row ll
     # call (the standard gradient assembly, no sandwich path involved).
-    from hea.family import gaulss, cox_ph
+    from hea.family import cox_ph, gaulss
     from hea.R.rng import RGenerator
 
     g = RGenerator(6)
@@ -3729,8 +3734,8 @@ def test_weights_gamma_log_reml_matches_mgcv():
     np.testing.assert_allclose(m.null_deviance, 193.5417200300, rtol=0, atol=1e-7)
     np.testing.assert_allclose(m.deviance, 69.7617899100, rtol=0, atol=1e-7)
     # storedaic (family aic + 2·edf) pins exactly; AIC adds 2·(edf2−edf).
-    # edf2 tightened post-B9 (Fisher-seed Vc2; Gamma-log is non-canonical
-    # so the old Newton-seed Vc2 was off here too — measured Δ 5.7e-12).
+    # edf2 uses the Fisher-seed Vc2; Gamma-log is non-canonical, so a
+    # Newton-seed Vc2 is off here by Δ 5.7e-12.
     np.testing.assert_allclose(m._mgcv_aic, 457.8559119000, rtol=0, atol=1e-5)
     np.testing.assert_allclose(m.AIC, 458.4093699300, rtol=0, atol=1e-6)
 
@@ -3958,7 +3963,7 @@ def test_quasipoisson_through_gam_matches_mgcv():
         atol=1e-8,
     )
     assert np.isnan(m.AIC) and np.isnan(m.loglike)
-    label, edf, ref_df, stat, p_val = m._smooth_significance_rows()[0]
+    _label, edf, ref_df, stat, p_val = m._smooth_significance_rows()[0]
     np.testing.assert_allclose(
         [edf, ref_df, stat], [5.1846454520, 6.2624900930, 12.6559374100], rtol=1e-6
     )
@@ -3997,7 +4002,7 @@ def test_quasibinomial_cbind_through_gam_matches_mgcv():
     )
     np.testing.assert_allclose(m.prior_weights, trials, rtol=0, atol=0)
     assert np.isnan(m.AIC)
-    label, edf, ref_df, stat, p_val = m._smooth_significance_rows()[0]
+    _label, edf, ref_df, stat, p_val = m._smooth_significance_rows()[0]
     np.testing.assert_allclose(
         [edf, ref_df, stat], [5.6904929960, 6.8217009380, 40.8698983000], rtol=1e-6
     )
@@ -4541,7 +4546,7 @@ def test_scale_fixed_gaussian_matches_mgcv():
     np.testing.assert_allclose(m.Vp[0, 0], 0.001875, rtol=1e-6)
     np.testing.assert_allclose(m.AIC, 285.9720683910, rtol=0, atol=1e-5)
     np.testing.assert_allclose(m.loglike, -131.7123409670, rtol=0, atol=1e-5)
-    label, edf, ref_df, stat, p_val = m._smooth_significance_rows()[0]
+    _label, edf, ref_df, stat, _p_val = m._smooth_significance_rows()[0]
     np.testing.assert_allclose(
         [edf, ref_df, stat], [5.5231503566, 6.6485522295, 223.9957913612], rtol=1e-6
     )
@@ -4568,7 +4573,7 @@ def test_scale_negative_forces_estimation_matches_mgcv():
     np.testing.assert_allclose(float(np.sum(m.edf)), 6.6204950639, rtol=0, atol=1e-4)
     np.testing.assert_allclose(m.sigma_squared, 0.9621181226, rtol=0, atol=1e-8)
     assert m.scale_estimated is True
-    label, edf, ref_df, stat, p_val = m._smooth_significance_rows()[0]
+    _label, edf, ref_df, stat, _p_val = m._smooth_significance_rows()[0]
     np.testing.assert_allclose(
         [edf, ref_df, stat], [4.6204526515, 5.6432868481, 25.8921163282], rtol=1e-6
     )
@@ -4675,8 +4680,8 @@ def test_plain_quasi_identity_link_full_newton_matches_mgcv():
 def _scat_fixture():
     # R-native (set.seed(2): runif bit-identical; rt within ~3e-15 from rgamma's
     # GD float-ordering gap, via rchisq — negligible vs the pins). Heavier-tailed seed
-    # ν≈4.24 (well-determined) replaces the old numpy seed-99 sample: R-native
-    # seed 99 lands ν≈26, a flat/ill-conditioned region. mgcv 1.9-4 pins below.
+    # ν≈4.24, well-determined. R-native seed 99 lands ν≈26, a flat and
+    # ill-conditioned region, so it is not used. mgcv 1.9-4 pins below.
     from hea.R.rng import RGenerator
 
     g = RGenerator(2)
@@ -4836,7 +4841,7 @@ def test_sl_setup_ldet_s_match_mgcv():
     # te-only (no gam.side, so the penalty basis is representation-
     # identical to mgcv's): every quantity pins exactly. Plus the t2
     # split-into-singletons path (disjoint penalty footprints).
-    from hea.models.gam import _sl_setup, _ldet_s
+    from hea.models.gam import _ldet_s, _sl_setup
 
     df = _sl_fixture()
     m = gam("y ~ te(x, z, k=5)", df, method="REML")
@@ -4871,7 +4876,7 @@ def test_sl_mixed_model_matches_mgcv_geometry():
     # log-dets shift by a transform constant that cancels in the REML
     # criterion (fast-REML.r:294-296's own design). Pin the basis-
     # invariant quantities: block geometry/ranks, ldet1, ldet2, E rows.
-    from hea.models.gam import _sl_setup, _ldet_s
+    from hea.models.gam import _ldet_s, _sl_setup
 
     df = _sl_fixture()
     m = gam('y ~ s(x) + te(x, z, k=5) + s(g, bs="re")', df, method="REML")
@@ -4898,11 +4903,11 @@ def test_sl_machinery_invariants():
     # differences; Sl.mult == Σ Sl.termMult == S_total @ A; Xβ is
     # invariant under both reparameterizations; β round-trips.
     from hea.models.gam import (
-        _sl_setup,
         _ldet_s,
         _sl_initial_repara,
-        _sl_repara,
         _sl_mult,
+        _sl_repara,
+        _sl_setup,
         _sl_term_mult,
     )
 
@@ -4939,7 +4944,7 @@ def test_sl_machinery_invariants():
 
     rng = np.random.default_rng(11)
     A = rng.normal(size=(m.p, 3))
-    SA, inds = _sl_term_mult(sl, A, full=True)
+    SA, _inds = _sl_term_mult(sl, A, full=True)
     np.testing.assert_allclose(_sl_mult(sl, A), sum(SA), atol=1e-12)
     np.testing.assert_allclose(_sl_mult(sl, A), ld["S"] @ A, atol=1e-10)
     for k in range(n_sp):
@@ -5018,7 +5023,7 @@ def test_multi_formula_design_matches_mgcv():
 
 
 def test_multi_formula_lpmatrix_and_offsets():
-    from hea.models.gam import _prepare_multi_design, _multi_lpmatrix
+    from hea.models.gam import _multi_lpmatrix, _prepare_multi_design
 
     df = _mf_fixture()
     md = _prepare_multi_design(["y ~ s(x) + w", "~ s(z)"], df)
@@ -5379,18 +5384,18 @@ def _fit5_fixture():
     mu = 0.4 + np.sin(2 * np.pi * x) + 0.5 * w
     sd = np.exp(-0.6 + 0.8 * np.cos(2 * np.pi * z))
     y = mu + gen.normal(0, 1, n) * sd
-    return pl.DataFrame(dict(x=x, z=z, w=w, y=y))
+    return pl.DataFrame({"x": x, "z": z, "w": w, "y": y})
 
 
 def _fit5_run(formulas, lsp, deriv=2):
+    from hea.family import gaulss
     from hea.models.gam import (
-        _prepare_multi_design,
-        _sl_setup,
-        _sl_initial_repara,
         _gam_fit5,
+        _prepare_multi_design,
+        _sl_initial_repara,
+        _sl_setup,
         _sym_rank,
     )
-    from hea.family import gaulss
 
     md = _prepare_multi_design(formulas, _fit5_fixture())
     sl = _sl_setup(md.slots, md.p)
@@ -5677,9 +5682,9 @@ def test_fit5_fully_penalized_summary_matches_mgcv():
     # reTest → recov (mgcv.r:3599), which consumes the model R factor
     # ``b$R`` verbatim — for general families that is
     # gam.fit5.post.proc's root with R'R = −lbb, not the PIRLS
-    # √W·X factor (which fit5 never stores; ``_recov`` used to read it
-    # unguarded and summary() crashed on any general fit with a cc/cp/re
-    # smooth). One fixture drives all three recov consumptions:
+    # √W·X factor, which fit5 never stores — reading it unguarded crashes
+    # summary() on any general fit with a cc/cp/re smooth. One fixture drives
+    # all three recov consumptions:
     #   m1 s(x,cc)        — reTest, no random siblings (LRB branch);
     #   m2 s(x,cc)        — reTest conditioning on s(g,re) as random
     #                       (the R1/R2 split + L-inflation branch);
@@ -5877,8 +5882,8 @@ def test_multilp_parametric_collinearity_matches_mgcv_olid():
     # level). Receipt vs mgcv 1.9-4 on gaulss with xdup = 2·x in LP1:
     # same coef count, xdup coefficient EXACTLY 0, REML to all printed
     # digits (311.964723261).
-    from hea.R.rng import RGenerator
     from hea.family import gaulss
+    from hea.R.rng import RGenerator
 
     g = RGenerator(3)
     n = 200
@@ -6581,7 +6586,9 @@ def test_general_family_authoring_contract():
     # also the first end-to-end validation of the K=3 etamu/gH l1/l2
     # branches (oracle pins exist only at K=2, via gaulss).
     from itertools import combinations_with_replacement
+
     from scipy.special import digamma, gammaln, polygamma
+
     from hea.family import (
         GeneralFamily,
         IdentityLink,
@@ -6967,7 +6974,7 @@ def test_general_family_authoring_contract():
         method="REML",
         knots={"x": [0.0, 1.0]},
     )
-    ((label, edf, ref_df, stat, p_cc),) = m_cc._smooth_significance_rows()
+    ((label, _edf, ref_df, stat, p_cc),) = m_cc._smooth_significance_rows()
     assert label == "s(x)" and ref_df > 0
     assert np.isfinite(stat) and 0.0 <= p_cc <= 1.0
     m_cc.summary()
@@ -6987,12 +6994,14 @@ def test_general_family_newton_reml_nlp4_robustness():
     # both against their closed form (index plumbing) and an
     # independent η-space mixed-difference stencil (numeric), and (c)
     # an end-to-end fit that itself reaches ll(deriv=4) at K==4.
-    from itertools import combinations_with_replacement, product as iproduct
+    from itertools import combinations_with_replacement
+    from itertools import product as iproduct
+
     from hea.family import (
         GeneralFamily,
         IdentityLink,
-        LogLink,
         Link,
+        LogLink,
         gamlss_etamu,
         gamlss_gH,
         trind_generator,
@@ -8180,8 +8189,7 @@ def test_shash_through_gam_matches_mgcv():
     # The s(z)-on-τ smoothing parameter is a flattish (near-saturating)
     # ridge direction (R 25838 vs hea 25632 with the criterion agreeing
     # to ~1e-7) — pinned at band width; everything else is tight.
-    from hea.family import shash, _r_tweedie  # noqa: F401
-
+    from hea.family import _r_tweedie, shash  # noqa: F401
     from hea.R.rng import RGenerator
 
     gen = RGenerator(21)
@@ -8607,8 +8615,8 @@ def test_predict_na_action_block_size_matches_mgcv():
     BLAS rounding, as in R); newdata.guaranteed skips the processing.
     mgcv 1.9-4 pins on the seed-8 recipe.
     """
-    from hea.R.rng import RGenerator
     from hea.models.bam import bam as _bam
+    from hea.R.rng import RGenerator
 
     g = RGenerator(8)
     n = 120
@@ -8925,8 +8933,8 @@ def test_gam_in_out_and_drop_intercept_match_mgcv():
     mgcv.r:1163-1171: the parametric matrix keeps its factor contrast
     coding but the assign==0 column is deleted. mgcv 1.9-4 pins.
     """
-    from hea.R.rng import RGenerator
     from hea.family import gaulss
+    from hea.R.rng import RGenerator
 
     g = RGenerator(8)
     n = 120
@@ -9077,8 +9085,7 @@ def test_qq_gam_plot_and_gaulss_simulation():
         ["y ~ s(x) + w", "~ s(z)"], _fit5_fixture(), family=gaulss(), method="REML"
     )
     # gaulss HAS rd in mgcv (gamlss.r:1089) — qq.gam takes the
-    # simulation path (no qf → rep=50 via rd), NOT a qqnorm fallback
-    # (family-review A3; the old B2 record claimed otherwise).
+    # simulation path (no qf → rep=50 via rd), NOT a qqnorm fallback.
     qq = mg._qq_gam_quantiles(seed=0)
     assert qq["Dq"] is not None
     # Monte-Carlo-level: deviance residuals are (y−μ̂)·τ̂ ≈ N(0,1) at the
@@ -9128,6 +9135,7 @@ def test_gaulss_check_and_k_check_match_mgcv(capsys):
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+
     from hea.family import gaulss
 
     m = gam(["y ~ s(x) + w", "~ s(z)"], _fit5_fixture(), family=gaulss(), method="REML")
@@ -9501,6 +9509,7 @@ def _betar_fixture():
     # qbeta (R) and scipy beta.ppf invert the same regularized incomplete
     # beta, so the response matches to ~1e-12.
     from scipy.stats import beta as _B
+
     from hea.R.rng import RGenerator
 
     gen = RGenerator(71)
@@ -9723,6 +9732,7 @@ def _ziP_fixture():
     # R's qpois and scipy poisson.ppf invert the same Poisson CDF (verified
     # bit-identical on this stream). 235 zeros / 165 positives, max 10.
     from scipy.stats import poisson
+
     from hea.R.rng import RGenerator
 
     gen = RGenerator(7)
@@ -11699,8 +11709,8 @@ def test_predict_checks_variable_types_against_fit():
     variable whose type changed between fit and predict is refused, with R's
     message. ``factor`` supplied where the fit saw ``character`` is allowed —
     that is what R's own model.frame coercion produces."""
-    from hea.models.glm import glm
     from hea.family import Poisson
+    from hea.models.glm import glm
 
     rng = np.random.default_rng(0)
     n = 200
@@ -11788,8 +11798,8 @@ def test_check_reports_mgcv_method_and_optimizer():
     for m, expected in cases:
         assert hdr(m) == expected
 
-    # The discrete rail reports bgam.fitd's prop grad/hess (bam.r:884), not
-    # the fabricated "fixed by user" line the old code emitted.
+    # The discrete rail reports bgam.fitd's prop grad/hess (bam.r:884), not a
+    # fabricated "fixed by user" line.
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         bam("y ~ s(x)", d, method="fREML", discrete=True).check(plots=False)

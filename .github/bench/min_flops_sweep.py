@@ -1,0 +1,182 @@
+"""Where does the vendor BLAS start beating hea's own kernels on this ISA?
+
+`sparse::blas::MIN_FLOPS` is the per-call flop count above which a dense kernel
+is handed to the vendor. A cutoff is a ratio between two implementations, so it
+moves when either one does, and both move between aarch64 and x86-64: hea's
+kernels get worse there (the target baseline is SSE2 with no FMA, which
+`nmath::util::rfma`'s R-parity contract forbids widening), while OpenBLAS gets
+better (AVX2/AVX-512, dispatched at run time by `DYNAMIC_ARCH`). This sweep
+locates the crossing on whichever machine it runs on.
+
+It needs no CHOLMOD. The question is not "is hea faster than the reference" but
+"for a call of F flops, which of hea's own two paths is faster", so the
+instrument is hea against hea with only the cutoff moving — nothing external to
+link, nothing to install, no corpus to fetch.
+
+Requires a `blas-sweep` build, which reads the cutoff from the environment
+instead of compiling it in, so the whole sweep costs one build:
+
+    maturin develop --release --features blas-sweep,blas-required,blas-openblas
+    python .github/bench/min_flops_sweep.py
+
+`SWEEP_N` overrides the grid sizes, `SWEEP_REPS` the best-of.
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+import numpy as np
+import scipy.sparse as sp
+
+# kflop, i.e. the value of `MIN_FLOPS` in thousands. `inf` routes nothing, which
+# is what the kernels did before the vendor was bound; `0` hands the vendor every
+# call. The shipped constant is 100.
+#
+# `ctl` is 100 again, entered a second time and last, so the gap between it and
+# the `100` column is this run's resolution, including whatever the runner
+# drifted over the whole sweep. Without it the table is a row of numbers with no
+# scale, and every difference in it reads as a finding.
+CUTOFFS = ("inf", "1000", "250", "100", "50", "25", "0", "ctl")
+KFLOP = {"inf": "1e300", "ctl": "100"}
+
+# 2D grid Laplacians, which need no data files. A cutoff is a property of the
+# call shapes a factorization issues, and a banded 2D grid issues the same
+# spread of small-to-middling supernodes real systems of this size do.
+SIZES = tuple(int(v) for v in os.environ.get("SWEEP_N", "110,220,320").split(","))
+REPS = int(os.environ.get("SWEEP_REPS", "5"))
+NRHS = (1, 4, 16, 32)
+
+
+def laplacian(k):
+    """The 5-point Laplacian on a `k x k` grid, SPD, upper triangle, CSC."""
+    d = sp.diags_array(
+        [np.ones(k - 1), np.full(k, -4.0), np.ones(k - 1)], offsets=[-1, 0, 1]
+    )
+    i = sp.eye_array(k)
+    a = sp.kron(i, d) + sp.kron(sp.diags_array([np.ones(k - 1)], offsets=[1]), i)
+    a = a + a.T
+    n = k * k
+    # Diagonally dominant, so it is SPD without a shift search.
+    a = (-a + sp.eye_array(n) * 9.0).tocsc()
+    return sp.csc_array(sp.triu(a).tocsc())
+
+
+def child():
+    """One cutoff, in its own process, because the cutoff is read once."""
+    from hea import _rs
+    from hea.sparse import build_info
+
+    info = build_info()
+    got = {"backend": info["backend"], "min_flops": info["min_flops"], "rows": []}
+    for k in SIZES:
+        a = laplacian(k)
+        a.sort_indices()
+        n = a.shape[0]
+        ip = a.indptr.astype(np.int64)
+        ii = a.indices.astype(np.int64)
+        ax = a.data.astype(np.float64)
+        arg = (n, ip, ii, ax, 1, 0.0, "amd")
+        _rs.super_factorize(*arg, numeric_reps=0)  # warm the pool and the loader
+        fac = _rs.super_factorize(*arg, numeric_reps=REPS)["numeric_ms"]
+        solves = []
+        for nrhs in NRHS:
+            # `b` is one flat column-major block of `n * nrhs`, not an (n, nrhs)
+            # array -- `super_solve` takes a `PyReadonlyArray1` and slices it.
+            #
+            # `solve_reps` is the whole reason to call it this way: the entry
+            # point re-analyzes and refactorizes on every call, so timing the
+            # call from Python would measure the analysis. `solve_ms` is the
+            # best of `solve_reps` solves against one factor, which is the
+            # quantity the eight solve kernels actually live in.
+            b = np.ones(n * nrhs)
+            sol = _rs.super_solve(n, ip, ii, ax, b, nrhs, 1, "A", 0.0, "amd", REPS)
+            solves.append(sol["solve_ms"])
+        got["rows"].append({"k": k, "n": n, "factorize": fac, "solve": solves})
+    print(json.dumps(got))
+
+
+def geomean(xs):
+    return float(np.exp(np.mean(np.log(xs))))
+
+
+def main():
+    print(f"grid Laplacians {SIZES}, best-of-{REPS}, nrhs {NRHS}")
+    print("one process per cutoff; ms, lower is better\n")
+    out = {}
+    for c in CUTOFFS:
+        env = dict(os.environ)
+        env["HEA_BLAS_MIN_FLOPS"] = KFLOP.get(c) or str(int(c) * 1000)
+        r = subprocess.run(
+            [sys.executable, __file__, "--child"],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        if r.returncode:
+            # Do not make a CI failure require a second run to diagnose.
+            sys.exit(f"cutoff {c} failed:\n{r.stdout}\n{r.stderr}")
+        out[c] = json.loads(r.stdout.strip().splitlines()[-1])
+        eff = out[c]["min_flops"]
+        want = float(env["HEA_BLAS_MIN_FLOPS"])
+        if eff != want:
+            # A build without `blas-sweep` compiles the cutoff in and ignores
+            # the environment, which would silently make all seven columns the
+            # same measurement.
+            sys.exit(
+                f"cutoff {c}: build reports min_flops={eff}, asked for {want}. "
+                "Rebuild with --features blas-sweep."
+            )
+    print(f"backend: {out[CUTOFFS[0]]['backend']}\n")
+
+    for i, k in enumerate(SIZES):
+        print(f"{k}² (n = {out[CUTOFFS[0]]['rows'][i]['n']})")
+        print(f"{'cutoff, kflop':<16}" + "".join(f"{c:>9}" for c in CUTOFFS))
+        cells = "".join(f"{out[c]['rows'][i]['factorize']:>9.2f}" for c in CUTOFFS)
+        print(f"{'factorize':<16}{cells}")
+        for j, nrhs in enumerate(NRHS):
+            cells = "".join(f"{out[c]['rows'][i]['solve'][j]:>9.3f}" for c in CUTOFFS)
+            print(f"{'solve nrhs=' + str(nrhs):<16}{cells}")
+        print()
+
+    # One number per column: the geometric mean over every measurement, against
+    # the no-routing control. Above 1 means routing at that cutoff is a win.
+    print("geometric mean over all sizes and nrhs, x the `inf` control")
+    print(f"{'':<16}" + "".join(f"{c:>9}" for c in CUTOFFS))
+    ratios = {}
+    for c in CUTOFFS:
+        rs = []
+        for i, _ in enumerate(SIZES):
+            ctl, cur = out["inf"]["rows"][i], out[c]["rows"][i]
+            rs.append(ctl["factorize"] / max(cur["factorize"], 1e-12))
+            rs += [a / max(b, 1e-12) for a, b in zip(ctl["solve"], cur["solve"])]
+        ratios[c] = geomean(rs)
+    print(f"{'x control':<16}" + "".join(f"{ratios[c]:>9.3f}" for c in CUTOFFS))
+    res = abs(ratios["ctl"] - ratios["100"])
+    scored = {k: v for k, v in ratios.items() if k != "ctl"}
+    best = max(scored, key=scored.get)
+    print(
+        f"\nresolution: the two 100-kflop columns differ by {100 * res:.1f}% "
+        f"({ratios['100']:.3f} against {ratios['ctl']:.3f}). Nothing narrower "
+        "than that is a finding."
+    )
+    print(f"best column: {best} kflop at {scored[best]:.3f}x")
+    print(f"shipped constant is 100 kflop, reading {ratios['100']:.3f}x")
+    gain = scored[best] - ratios["100"]
+    verdict = "inside the resolution" if abs(gain) <= res else "outside it"
+    print(f"moving 100 -> {best} would be {100 * gain:+.1f}%, {verdict}")
+    print(
+        "\nRead the flat bottom, not the argmax. Two regimes pull against each "
+        "other in every column: a factorization is thousands of tiny calls that "
+        "lose to the vendor's dispatch, and a wide solve is a few big ones that "
+        "win. That is why 0 is not the answer even where the crossing is low."
+    )
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--child":
+        child()
+    else:
+        main()

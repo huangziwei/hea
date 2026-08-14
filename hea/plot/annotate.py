@@ -16,8 +16,8 @@ import inspect
 import numpy as np
 import polars as pl
 
-from ..R import nmath as _nmath
 from ..formula import parse
+from ..R import nmath as _nmath
 from ._util import draw_points, r_lty, resolve_overlay_ax, to_float, to_value_series
 from .formula_eval import eval_side
 
@@ -191,8 +191,9 @@ def legend(*args, ax=None, legend=None, pch=None, lty=None, col=None, **kwargs):
     pchs = list(pch) if pch is not None else [None] * len(labels)
     ltys = list(lty) if lty is not None else [None] * len(labels)
     cols = list(col) if isinstance(col, (list, tuple)) else [col] * len(labels)
-    from ._util import _R_MARKERS
     from matplotlib.lines import Line2D
+
+    from ._util import _R_MARKERS
 
     for i, lab in enumerate(labels):
         marker = (

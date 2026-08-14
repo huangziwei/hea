@@ -1404,9 +1404,12 @@ fn build_cols<const UP: bool>(n: usize, a_indptr: &Ws, a_indices: &Ws, wj: &mut 
 /// (`cholmod_amd.c:105-113`) — see [`Work`] for why that is worth doing rather
 /// than allocating them here. `Head` is left all `EMPTY` on return, which is
 /// the invariant the next user of the workspace relies on (`:190-193`).
+/// `ncol` is `A->ncol`, which differs from `n` only when `stype == 0` — there
+/// `n` is `A->nrow` and AMD orders `A A'`.
 #[allow(clippy::too_many_arguments)]
 pub fn cholmod_amd(
     n: usize,
+    ncol: usize,
     a_indptr: &[i64],
     a_indices: &[i64],
     stype: i32,
@@ -1417,12 +1420,35 @@ pub fn cholmod_amd(
 ) -> Result<(Vec<i64>, AmdInfo), CscError> {
     let mut perm = vec![0i64; n];
     if n == 0 {
-        validate_csc(n, a_indptr, a_indices)?;
+        super::ws::validate_csc_rect(n, ncol, a_indptr, a_indices)?;
         return Ok((perm, AmdInfo::default()));
     }
 
-    /* construct the input matrix for AMD */
-    let (mut cp, mut ci, cnzmax) = copy_sym_to_unsym(n, a_indptr, a_indices, stype)?;
+    /* construct the input matrix for AMD (`cholmod_amd.c:116-136`): for a
+     * symmetric A that is a copy of the stored triangle into both halves, and
+     * for `stype == 0` it is the pattern of `A A'` with the diagonal removed
+     * and AMD's elbow room added — which is what `mode = -2` means. */
+    let (mut cp, mut ci, cnzmax) = if stype == 0 {
+        super::ws::validate_csc_rect(n, ncol, a_indptr, a_indices)?;
+        let a = super::symbolic::Sparse {
+            nrow: n,
+            n: ncol,
+            p: std::borrow::Cow::Borrowed(a_indptr),
+            i: std::borrow::Cow::Borrowed(a_indices),
+            x: std::borrow::Cow::Borrowed(&[]),
+            numeric: false,
+            stype: 0,
+            sorted: true,
+        };
+        let c = super::aat::aat(&a, -2);
+        let cnz = c.p[n] as usize;
+        let mut ci = c.i.into_owned();
+        let nzmax = cnz + cnz / 2 + n;
+        ci.resize(nzmax, 0);
+        (c.p.into_owned(), ci, nzmax)
+    } else {
+        copy_sym_to_unsym(n, a_indptr, a_indices, stype)?
+    };
 
     /* Degree, Wi, Len, Nv, Next, Elen = Iwork [0 .. 6n).  The ordering
      * routines are the one exception to the 2n rule: nothing else's contents
@@ -1523,6 +1549,7 @@ mod tests {
                 for width in widths() {
                     let (perm, _) = cholmod_amd(
                         n,
+                        n,
                         &indptr,
                         &indices,
                         stype,
@@ -1556,6 +1583,7 @@ mod tests {
         for (_, n, edges) in corpus() {
             let (indptr, indices) = triangle_csc(n, &edges, true);
             let (_, info) = cholmod_amd(
+                n,
                 n,
                 &indptr,
                 &indices,

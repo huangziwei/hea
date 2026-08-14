@@ -16,7 +16,6 @@ from matplotlib.patches import Polygon
 from ..aes import split_layer_kwargs
 from .geom import Geom
 
-
 _PT_PER_MM = 72.27 / 25.4
 
 

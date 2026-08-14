@@ -106,7 +106,7 @@ def extended_breaks(
     if best_lmin is None:
         return np.array([dmin, dmax])
 
-    n = int(round((best_lmax - best_lmin) / best_lstep)) + 1
+    n = round((best_lmax - best_lmin) / best_lstep) + 1
     return best_lmin + best_lstep * np.arange(n)
 
 

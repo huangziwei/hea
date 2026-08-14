@@ -1,6 +1,7 @@
 """Geoms — visual primitives that draw layer data onto matplotlib axes."""
 
 from .bar import geom_bar, geom_col
+from .bin2d import geom_bin2d, geom_hex
 from .blank import geom_blank
 from .boxplot import geom_boxplot
 from .contour import geom_contour, geom_contour_filled
@@ -14,7 +15,6 @@ from .errorbar import (
     geom_linerange,
     geom_pointrange,
 )
-from .bin2d import geom_bin2d, geom_hex
 from .histogram import geom_freqpoly, geom_histogram
 from .path import geom_line, geom_path, geom_step
 from .point import geom_jitter, geom_point
@@ -28,45 +28,45 @@ from .text import geom_label, geom_label_repel, geom_text, geom_text_repel
 from .violin import geom_violin
 
 __all__ = [
-    "geom_blank",
-    "geom_point",
-    "geom_jitter",
+    "geom_abline",
+    "geom_area",
     "geom_bar",
+    "geom_bin2d",
+    "geom_blank",
+    "geom_boxplot",
     "geom_col",
-    "geom_histogram",
-    "geom_freqpoly",
+    "geom_contour",
+    "geom_contour_filled",
+    "geom_crossbar",
+    "geom_curve",
     "geom_density",
     "geom_density_ridges",
     "geom_density_ridges2",
-    "geom_line",
-    "geom_path",
-    "geom_step",
-    "geom_ribbon",
-    "geom_area",
-    "geom_smooth",
-    "geom_boxplot",
-    "geom_violin",
-    "geom_text",
-    "geom_text_repel",
-    "geom_label",
-    "geom_label_repel",
-    "geom_hline",
-    "geom_vline",
-    "geom_abline",
-    "geom_rect",
-    "geom_tile",
-    "geom_raster",
-    "geom_polygon",
+    "geom_dotplot",
     "geom_errorbar",
     "geom_errorbarh",
-    "geom_linerange",
-    "geom_pointrange",
-    "geom_crossbar",
-    "geom_segment",
-    "geom_curve",
-    "geom_contour",
-    "geom_contour_filled",
-    "geom_bin2d",
+    "geom_freqpoly",
     "geom_hex",
-    "geom_dotplot",
+    "geom_histogram",
+    "geom_hline",
+    "geom_jitter",
+    "geom_label",
+    "geom_label_repel",
+    "geom_line",
+    "geom_linerange",
+    "geom_path",
+    "geom_point",
+    "geom_pointrange",
+    "geom_polygon",
+    "geom_raster",
+    "geom_rect",
+    "geom_ribbon",
+    "geom_segment",
+    "geom_smooth",
+    "geom_step",
+    "geom_text",
+    "geom_text_repel",
+    "geom_tile",
+    "geom_violin",
+    "geom_vline",
 ]

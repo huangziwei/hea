@@ -9,6 +9,7 @@ change rather than editing this file's ``__add__``.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import inspect
 from dataclasses import dataclass, field
@@ -242,12 +243,13 @@ class ggplot:
             # Standalone — block engine. Compute figsize up-front so the
             # gridspec margins (in inches) come out right; matplotlib
             # normalizes ratios against the actual figure size.
+            import matplotlib.pyplot as plt
+
             from ._block import (
                 default_figsize_for,
                 measure_block,
                 render_block,
             )
-            import matplotlib.pyplot as plt
 
             bo = build(self)
             block = measure_block(self, bo)
@@ -355,13 +357,11 @@ def _resize_figure(fig, *, width, height, units, figsize) -> None:
         units_in_inches = _UNIT_TO_INCHES[units]
 
     fig.set_size_inches(float(width) * units_in_inches, float(height) * units_in_inches)
-    try:
+    # Some figure layouts (e.g. with a colorbar) emit a UserWarning and may not
+    # converge — accept the new size without re-laying out rather than failing
+    # the whole draw.
+    with contextlib.suppress(Exception):
         fig.tight_layout()
-    except Exception:
-        # Some figure layouts (e.g. with a colorbar) emit a UserWarning and
-        # may not converge — accept the new size without re-laying out rather
-        # than failing the whole draw.
-        pass
 
 
 def _copy_plot(plot: ggplot) -> ggplot:
@@ -430,7 +430,7 @@ def _(thing: Labels, plot):
 # ``guides(...)`` overrides per-aesthetic guide settings; rendering reads
 # them via ``plot.guide_overrides``. Auto-build still covers the common
 # case so this is currently a forward-compatible passthrough.
-from .guides import Guides as _Guides  # noqa: E402
+from .guides import Guides as _Guides
 
 
 @ggplot_add.register

@@ -17,7 +17,6 @@ import sys
 
 import numpy as np
 import pytest
-
 from conftest import have_rscript
 
 from hea.R.clustering import (
@@ -459,7 +458,7 @@ _HAS_RS_HCLUST = hasattr(_rs_mod, "hclust")
 def _py_hclust_cols(n, data, iopt, members):
     """Pure-Python reference: ``_hclust_fortran`` + ``_hcass2`` -> the same
     ``(merge_a, merge_b, height, order)`` columns the Rust kernel returns."""
-    from hea.R.clustering import _hclust_fortran, _hcass2
+    from hea.R.clustering import _hcass2, _hclust_fortran
 
     ia, ib, crit = _hclust_fortran(n, data, iopt, members)
     iorder, iia, iib = _hcass2(n, ia, ib)

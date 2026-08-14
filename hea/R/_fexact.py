@@ -41,7 +41,7 @@ class FexactError(RuntimeError):
 def _f11act(arr, src, dst, i1, i2):
     """f11act — revise row totals: copy the ``src`` column to ``dst`` dropping
     the entry at 1-based position ``i1`` (``arr`` flat, columns pre-offset)."""
-    for m in range(0, i1 - 1):
+    for m in range(i1 - 1):
         arr[dst + m] = arr[src + m]
     for m in range(i1, i2 + 1):
         arr[dst + m - 1] = arr[src + m]
@@ -418,8 +418,8 @@ class _Fexact:
                                 break
                     if not found:
                         raise FexactError(
-                            "FEXACT error 6: LDKEY=%d too small; increase "
-                            "'workspace' (or use simulate_p_value=True)" % ldkey
+                            f"FEXACT error 6: LDKEY={ldkey} too small; increase "
+                            "'workspace' (or use simulate_p_value=True)"
                         )
                 state = "L240"
                 continue
@@ -445,8 +445,7 @@ class _Fexact:
                             fact,
                             self.n2_stack,
                         )
-                        if LP[itp] > 0.0:
-                            LP[itp] = 0.0
+                        LP[itp] = min(LP[itp], 0.0)
                         SP[itp] = self._f4xact(
                             nro2,
                             irn[nrb : nrb + nro2],
@@ -456,8 +455,7 @@ class _Fexact:
                             fact,
                             tol,
                         )
-                        if SP[itp] > 0.0:
-                            SP[itp] = 0.0
+                        SP[itp] = min(SP[itp], 0.0)
                         if maybe_chisq and (irn[nrb] * ico[kb + 1]) > ntot * emin:
                             ncell = 0
                             for i in range(nro2):
@@ -695,8 +693,7 @@ class _Fexact:
                     v += fact[ico[1] - lb[1]] + fact[ico[2] - lb[2]]
                     for i in range(3, nco + 1):
                         v += fact[ico[i] - lb[i]]
-                    if vmn > v:
-                        vmn = v
+                    vmn = min(vmn, v)
                     state = "LoopNode"
                     continue
                 elif nro == 3 and nco == 2:
@@ -706,8 +703,7 @@ class _Fexact:
                     n11 = (iro[irl + 1] + 1) * (ic1 + 1) // nn1
                     n12 = iro[irl + 1] - n11
                     v += fact[n11] + fact[n12] + fact[ic1 - n11] + fact[ic2 - n12]
-                    if vmn > v:
-                        vmn = v
+                    vmn = min(vmn, v)
                     state = "LoopNode"
                     continue
                 else:
@@ -736,8 +732,7 @@ class _Fexact:
                             pushed = True
                             break
                         elif ist[ii] == key:
-                            if v < stv[ii]:
-                                stv[ii] = v
+                            stv[ii] = min(stv[ii], v)
                             pushed = True
                             break
                     if not pushed:
@@ -751,8 +746,7 @@ class _Fexact:
                                 pushed = True
                                 break
                             elif ist[ii] == key:
-                                if v < stv[ii]:
-                                    stv[ii] = v
+                                stv[ii] = min(stv[ii], v)
                                 pushed = True
                                 break
                     if not pushed:
@@ -784,8 +778,7 @@ class _Fexact:
                     if (not xmin) and ico[nco] <= ico[1] + nro:
                         xmin, val = _f10act(nco, ico[1:], nro, iro[irl:], val, fact)
                     if xmin:
-                        if vmn > val:
-                            vmn = val
+                        vmn = min(vmn, val)
                         state = "L200"
                         continue
                     else:
@@ -960,10 +953,12 @@ class _Fexact:
                         if IR[ircol(istk) + lvar - 1] < IR[ircol(istk) + lvar - 2]:
                             go60 = True
                             break
-                    elif n == 2:
-                        if IC[iccol(istk) + lvar - 1] < IC[iccol(istk) + lvar - 2]:
-                            go60 = True
-                            break
+                    elif (
+                        n == 2
+                        and IC[iccol(istk) + lvar - 1] < IC[iccol(istk) + lvar - 2]
+                    ):
+                        go60 = True
+                        break
                     lvar += 1
                 if go60:
                     state = "L60"
@@ -991,7 +986,7 @@ class _Fexact:
                     target = "L30"
                     break
             if target is None:
-                for itp in range(0, ird):
+                for itp in range(ird):
                     if key[jkey + itp] == kval:
                         target = "L40"
                         break
@@ -1000,8 +995,8 @@ class _Fexact:
                         break
             if target is None:
                 raise FexactError(
-                    "FEXACT error 6 (f5xact): LDKEY=%d too small (kval=%d); "
-                    "increase 'workspace'" % (ldkey, kval)
+                    f"FEXACT error 6 (f5xact): LDKEY={ldkey} too small (kval={kval}); "
+                    "increase 'workspace'"
                 )
             if target == "L30":
                 key[jkey + itp] = kval
@@ -1009,8 +1004,8 @@ class _Fexact:
                 ipoin[jkey + itp] = itop
                 if itop > ldstp:
                     raise FexactError(
-                        "FEXACT error 7 (f5xact): LDSTP=%d too small; increase "
-                        "'workspace' (or use simulate_p_value=True)" % ldstp
+                        f"FEXACT error 7 (f5xact): LDSTP={ldstp} too small; increase "
+                        "'workspace' (or use simulate_p_value=True)"
                     )
                 ifrq[jstp2 + itop - 1] = -1
                 ifrq[jstp3 + itop - 1] = -1
@@ -1042,8 +1037,8 @@ class _Fexact:
         itop += 1
         if itop > ldstp:
             raise FexactError(
-                "FEXACT error 7 (f5xact): LDSTP=%d too small; increase "
-                "'workspace' (or use simulate_p_value=True)" % ldstp
+                f"FEXACT error 7 (f5xact): LDSTP={ldstp} too small; increase "
+                "'workspace' (or use simulate_p_value=True)"
             )
         ipn = ipoin[jkey + itp]
         itmp = ipn

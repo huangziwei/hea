@@ -9,7 +9,7 @@ showing both a coloured swatch and a shape marker).
 
 Continuous colour/fill scales render as a :func:`matplotlib.figure.Figure.colorbar`
 instead of a legend; the colormap is built from the scale's palette.
-Continuous size/alpha (sample-point legends) are deferred polish.
+Continuous size/alpha do not render a sample-point legend.
 
 The renderer reads ``theme(legend.position=...)`` (one of ``"right"``,
 ``"left"``, ``"top"``, ``"bottom"``, ``"none"``) and
@@ -18,6 +18,7 @@ The renderer reads ``theme(legend.position=...)`` (one of ``"right"``,
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -31,7 +32,6 @@ from ._util import r_color
 from .scales.color_continuous import ScaleContinuousColor
 from .scales.discrete import ScaleDiscreteColor, ScaleIdentity
 from .theme import element_blank, element_rect, element_text
-
 
 # ggplot2 sizes are in mm; matplotlib widths/lengths are in pt. R's TeX
 # convention: 72.27 pt/inch, 25.4 mm/inch → ≈ 2.8454 pt/mm.
@@ -240,8 +240,8 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
         if isinstance(scale, ScaleIdentity):
             continue
         if not isinstance(scale, ScaleDiscreteColor):
-            # Continuous scales for non-positional aes get a colourbar (3.2)
-            # or sample-point legend; both deferred.
+            # Continuous scales for non-positional aes would need a colourbar
+            # or a sample-point legend; neither is rendered here.
             continue
         if not getattr(scale, "levels", None):
             continue
@@ -444,8 +444,8 @@ class ColorbarSpec:
 def build_colorbar_specs(plot, build_output) -> list[ColorbarSpec]:
     """Walk continuous colour/fill scales, return one :class:`ColorbarSpec`
     per. Scales for size/alpha use the same ``ScaleContinuousColor`` class
-    but should render as sample-point legends, not colourbars — those are
-    skipped here (deferred polish)."""
+    but would render as sample-point legends, not colourbars, so they are
+    skipped here."""
     aes_source = build_output.aes_source or {}
     plot_labels = getattr(plot, "labels", {}) or {}
     scales = build_output.scales
@@ -742,9 +742,8 @@ def _apply_handle_override(handle, key, value, key_glyph):
                 if key_glyph == "point":
                     handle.set_markeredgecolor(c)
                     handle.set_markerfacecolor(c)
-        elif isinstance(handle, Patch):
-            if c is not None:
-                handle.set_edgecolor(c)
+        elif isinstance(handle, Patch) and c is not None:
+            handle.set_edgecolor(c)
         return
     if key == "fill":
         c = "none" if value is None else r_color(value)
@@ -833,7 +832,7 @@ def _is_na(v):
         return True
     if isinstance(v, float):
         try:
-            return v != v  # NaN check
+            return math.isnan(v)
         except TypeError:
             return False
     return False
@@ -1098,7 +1097,7 @@ def _apply_n_dodge(ax, axis_name: str, n: int) -> None:
     ticks = target_axis.get_major_ticks()
     if not ticks:
         return
-    label = ticks[0].label1 if axis_name == "x" else ticks[0].label1
+    label = ticks[0].label1
     font_size = float(label.get_fontsize())
     # 1.2× font size is matplotlib's default line spacing — gives the
     # alternate row enough clearance to sit fully below (or beside) the

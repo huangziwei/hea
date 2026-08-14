@@ -12,7 +12,7 @@ Each model is a port of its R counterpart:
 from .bam import bam
 from .gam import gam
 from .glm import glm
-from .lm import lm
 from .gmm import gmm
+from .lm import lm
 
-__all__ = ["bam", "gam", "glm", "lm", "gmm"]
+__all__ = ["bam", "gam", "glm", "gmm", "lm"]

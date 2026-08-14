@@ -8,6 +8,7 @@ modes mean each panel autoscales independently (matplotlib's
 
 from __future__ import annotations
 
+import contextlib
 import math
 
 import matplotlib.pyplot as plt
@@ -20,13 +21,12 @@ from ._measure import STRIP_TEXT_SIZE_PT, strip_cell_height_in
 from ._util import r_color
 from .theme import element_blank, element_line, element_rect, element_text
 
-
 # ggplot2 sizes are in mm; matplotlib widths/lengths are in pt. R's TeX
 # convention: 72.27 pt/inch, 25.4 mm/inch → ≈ 2.8454 pt/mm.
 _PT_PER_MM = 72.27 / 25.4
 
 
-def render(plot, build_output, ax=None, subplotspec=None) -> "plt.Figure":
+def render(plot, build_output, ax=None, subplotspec=None) -> plt.Figure:
     """Render into a user-supplied ``ax`` or ``subplotspec``.
 
     For standalone plotting and patchwork composition use
@@ -150,12 +150,10 @@ def _polar_apply_scales(ax, x_scale, y_scale, x_range):
     from .scales.ordinal import ScaleOrdinal
 
     if y_scale is not None:
-        try:
+        # Radial-axis polishes (set_rgrids quirks etc.) shouldn't take down the
+        # plot; fall back to matplotlib auto-ticks.
+        with contextlib.suppress(Exception):
             y_scale.apply_to_axis(ax, "y", view_limits=None)
-        except Exception:
-            # Radial-axis polishes (set_rgrids quirks etc.) shouldn't
-            # take down the plot; fall back to matplotlib auto-ticks.
-            pass
 
     # ggplot2's coord_polar anchors the radial axis at r=0 regardless of
     # the data's minimum (so a ribbon over r ∈ [0.4, 1.0] renders as a
@@ -980,7 +978,7 @@ def _default_labels(plot, build_output=None):
         if isinstance(m, pl.Expr):
             try:
                 return m.meta.output_name()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return None
         return None
 
@@ -1101,7 +1099,7 @@ def _apply_plot_titles(plot, fig, ax_list=None, *, skip_caption: bool = False) -
             # Subtitle sits a few points above the spine top (or strip top
             # for facets). va='bottom' anchors the baseline at axes y=1.0,
             # so the text grows upward into the title's pad.
-            sub_anchor_y = 1.0 if not is_faceted else 1.0
+            sub_anchor_y = 1.0
             sub_lift_pts = 2.0  # small breathing room above spine/strip
             sub_trans = offset_copy(
                 target_ax.transAxes,

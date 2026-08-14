@@ -31,7 +31,7 @@ import inspect
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .gaps import Gap
 from .py_to_r import translate as _py_to_r
@@ -118,7 +118,7 @@ def from_R(
     r_source: str | Result,
     *,
     execute: bool = False,
-    save_to: Optional[str | Path] = None,
+    save_to: str | Path | None = None,
 ) -> Result:
     """Translate an R snippet to Python. Returns a :class:`Result` whose
     ``.source`` holds the translated Python.
@@ -171,7 +171,7 @@ def from_R(
     _rewrite_trailing_expr(tree, sentinel)
 
     exec_ns = _build_exec_namespace(caller)
-    exec(compile(tree, "<from_R>", "exec"), exec_ns)
+    exec(compile(tree, "<from_R>", "exec"), exec_ns)  # noqa: S102 - running translated R is this module's job
     value = exec_ns.pop(sentinel, None)
     _propagate_to_caller(caller, exec_ns)
 
@@ -181,7 +181,7 @@ def from_R(
 def to_R(
     py_source: str | Result,
     *,
-    save_to: Optional[str | Path] = None,
+    save_to: str | Path | None = None,
     execute: bool = False,
 ) -> Result:
     """Translate Python source to R source.

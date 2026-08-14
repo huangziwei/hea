@@ -64,6 +64,52 @@ This package is the result of splitting the legacy ``hea/tidy.py`` (one
 
 from __future__ import annotations
 
+# ---- polars DataFrame constructors + multi-frame combinators ---------
+#
+# ``hea.tidy`` is the frame namespace, period — so ``concat``,
+# ``from_dict``, ``from_pandas``, etc. live here, not in ``hea.io``.
+# Each is wrapped so the result is the hea subclass.
+import functools as _functools
+
+import polars as _pl_tidy
+
+# ---- polars passthrough ----------------------------------------------
+#
+# Names a tidy pipeline reaches for. Expression builders (``col``, ``lit``,
+# ``when``), basic combinators, row-wise reducers, plus a couple of
+# typing/schema classes. Anything more esoteric stays in ``polars`` and
+# is NOT re-exported. Dtypes live in :mod:`hea.dtypes`; I/O factories
+# in :mod:`hea.io`.
+from polars import (
+    Expr,
+    Schema,
+    all_horizontal,
+    any_horizontal,
+    coalesce,
+    col,
+    concat_list,
+    concat_str,
+    lit,
+    max_horizontal,
+    mean_horizontal,
+    min_horizontal,
+    sum_horizontal,
+    when,
+)
+
+from ._shared import (
+    _apply_groups,
+    _check_groups,
+    _clean_one_name,
+    _disambiguate_clean_names,
+    _kwargs_to_exprs,
+    _resolve_anchor,
+    _resolve_lazy_factors,
+    _split_arrange,
+    _TidyRange,
+    cols_between,
+)
+
 # Order matters: _shared and basics are foundational; dataframe pulls them
 # in; series uses dataframe; groupby uses both. Verb files don't depend on
 # the class hierarchy so they slot in anywhere.
@@ -80,38 +126,13 @@ from .basics import (
     n_distinct,
     tbl,
 )
-from ._shared import (
-    _apply_groups,
-    _check_groups,
-    _clean_one_name,
-    _disambiguate_clean_names,
-    _kwargs_to_exprs,
-    _resolve_anchor,
-    _resolve_lazy_factors,
-    _split_arrange,
-    _TidyRange,
-    cols_between,
-)
+
+# Free-function tidyverse verbs (split by functional area).
+from .binning import cut_interval, cut_number, cut_width
 
 # Class hierarchy (these install module-level side effects: pl.Series and
 # pl.Expr get patched with hea-aware wrappers).
 from .dataframe import DataFrame
-from .series import (
-    LazyFrame,
-    Series,
-    _HeaLazyGroupBy,
-    _install_df_series_overrides,
-    _install_expr_is_na_alias,
-    _install_expr_r_aliases,
-    _install_is_in_mixed_list_support,
-    _install_lazy_groupby_overrides,
-    _install_series_subclass_overrides,
-)
-from .groupby import GroupBy
-from .summary import Summary
-
-# Free-function tidyverse verbs (split by functional area).
-from .binning import cut_interval, cut_number, cut_width
 from .dates import (
     dmy,
     dmy_hm,
@@ -136,7 +157,19 @@ from .factors import (
     fct_reorder2,
     fct_rev,
 )
+from .groupby import GroupBy
 from .joins import closest, join_by, overlaps, within
+from .series import (
+    LazyFrame,
+    Series,
+    _HeaLazyGroupBy,
+    _install_df_series_overrides,
+    _install_expr_is_na_alias,
+    _install_expr_r_aliases,
+    _install_is_in_mixed_list_support,
+    _install_lazy_groupby_overrides,
+    _install_series_subclass_overrides,
+)
 from .strings import (
     parse_double,
     parse_number,
@@ -156,6 +189,7 @@ from .strings import (
     str_view_all,
     str_wrap,
 )
+from .summary import Summary
 from .window import (
     between,
     consecutive_id,
@@ -176,42 +210,6 @@ from .window import (
     percent_rank,
     row_number,
 )
-
-
-# ---- polars passthrough ----------------------------------------------
-#
-# Names a tidy pipeline reaches for. Expression builders (``col``, ``lit``,
-# ``when``), basic combinators, row-wise reducers, plus a couple of
-# typing/schema classes. Anything more esoteric stays in ``polars`` and
-# is NOT re-exported. Dtypes live in :mod:`hea.dtypes`; I/O factories
-# in :mod:`hea.io`.
-
-from polars import (  # noqa: F401, E402
-    Expr,
-    Schema,
-    all_horizontal,
-    any_horizontal,
-    coalesce,
-    col,
-    concat_list,
-    concat_str,
-    lit,
-    max_horizontal,
-    mean_horizontal,
-    min_horizontal,
-    sum_horizontal,
-    when,
-)
-
-
-# ---- polars DataFrame constructors + multi-frame combinators ---------
-#
-# ``hea.tidy`` is the frame namespace, period — so ``concat``,
-# ``from_dict``, ``from_pandas``, etc. live here, not in ``hea.io``.
-# Each is wrapped so the result is the hea subclass.
-
-import functools as _functools  # noqa: E402
-import polars as _pl_tidy  # noqa: E402
 
 
 def _rewrap(obj):
@@ -274,44 +272,44 @@ __all__ = [
     "LazyFrame",
     "Series",
     "Summary",
+    "between",
     # dplyr verbs / mutate helpers
     "case_when",
-    "desc",
-    "drop",
-    "if_else",
-    "n",
-    "n_distinct",
-    "tbl",
-    # dplyr rank family
-    "row_number",
-    "min_rank",
-    "dense_rank",
-    "percent_rank",
-    "cume_dist",
-    "ntile",
-    # dplyr window / numeric helpers
-    "lag",
-    "lead",
-    "between",
-    "na_if",
-    "near",
-    # dplyr positional pickers (shadow polars pl.first / pl.last / pl.nth)
-    "first",
-    "last",
-    "nth",
-    # dplyr cumulative + run-length
-    "cummean",
+    "closest",
+    "consecutive_id",
     "cumall",
     "cumany",
-    "consecutive_id",
+    "cume_dist",
+    # dplyr cumulative + run-length
+    "cummean",
+    "dense_rank",
+    "desc",
+    "drop",
+    # dplyr positional pickers (shadow polars pl.first / pl.last / pl.nth)
+    "first",
+    "glimpse",
+    "if_else",
     # dplyr two-table verb helpers (chapter 19)
     "join_by",
-    "closest",
+    # dplyr window / numeric helpers
+    "lag",
+    "last",
+    "lead",
+    "min_rank",
+    "n",
+    "n_distinct",
+    "na_if",
+    "near",
+    "nth",
+    "ntile",
     "overlaps",
-    "within",
     # readr / stringr / tibble
     "parse_double",
     "parse_number",
+    "percent_rank",
+    # dplyr rank family
+    "row_number",
     "str_wrap",
-    "glimpse",
+    "tbl",
+    "within",
 ]

@@ -132,7 +132,7 @@ def cut_interval(x, n=None, length=None, *, closed="right"):
             # ``fullseq``: round endpoints out to multiples of ``length``.
             start = float(np.floor(x_min / length) * length)
             end = float(np.ceil(x_max / length) * length)
-            n_bins = max(int(round((end - start) / length)), 1)
+            n_bins = max(round((end - start) / length), 1)
             breaks = start + np.arange(n_bins + 1) * length
             if breaks[-1] < x_max:
                 breaks = np.concatenate([breaks, [breaks[-1] + length]])

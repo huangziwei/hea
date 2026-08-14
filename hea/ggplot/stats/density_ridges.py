@@ -21,7 +21,7 @@ import polars as pl
 from scipy.stats import gaussian_kde
 
 from .density import StatDensity
-from .stat import Stat, _GROUPING_AES
+from .stat import _GROUPING_AES, Stat
 
 
 @dataclass
@@ -118,9 +118,10 @@ class StatDensityRidges(Stat):
             keys.append("group")
         if "y" in data.columns:
             y = data["y"]
-            if y.dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean):
-                if "group" not in keys or y.n_unique() > data["group"].n_unique():
-                    keys.append("y")
+            if y.dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean) and (
+                "group" not in keys or y.n_unique() > data["group"].n_unique()
+            ):
+                keys.append("y")
         return keys
 
     def _compute_one(self, sub, grid, bw, preserve):

@@ -44,11 +44,11 @@ class FacetWrap(Facet):
                 return (2, (n_panels + 1) // 2)
             if n_panels <= 12:
                 return (3, (n_panels + 2) // 3)
-            side = int(ceil(sqrt(n_panels)))
+            side = ceil(sqrt(n_panels))
             return (side, side)
         if ncol is None:
-            return (nrow, int(ceil(n_panels / nrow)))
-        return (int(ceil(n_panels / ncol)), ncol)
+            return (nrow, ceil(n_panels / nrow))
+        return (ceil(n_panels / ncol), ncol)
 
     def compute_layout(self, data: pl.DataFrame) -> pl.DataFrame:
         if not self.facets:

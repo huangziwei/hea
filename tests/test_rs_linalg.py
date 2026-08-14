@@ -5,7 +5,7 @@ accumulation. This is NOT wired into any fit path: the T4 spike measured that a
 portable deterministic kernel matches R's `chol()` only at n=2 and diverges
 1e-16..1e-11 for n≥5 (R routes through OpenBLAS `ddot`/`dgemv`, whose SIMD
 reductions match neither this kernel nor Accelerate) — so it cannot make fits
-0-ulp to an OpenBLAS-linked R (plan §7.3, go/no-go = NO-GO for bit-exactness).
+0-ulp to an OpenBLAS-linked R.
 
 What the kernel *does* guarantee, and what these tests pin: it is a faithful
 Cholesky (L Lᵀ == A) and **bit-identical across runs** (the property optimized
@@ -54,5 +54,5 @@ def test_chol_lower_matches_numpy_within_tol():
 
 def test_chol_lower_rejects_non_pd():
     a = np.array([[1.0, 2.0], [2.0, 1.0]])  # indefinite
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="not positive definite"):
         rs.chol_lower(a)

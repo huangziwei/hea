@@ -1,6 +1,6 @@
 [package]
 name = "hea-rs"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 description = "Bit-exact, vectorized Rust ports of hea's R-parity numeric kernels"
 license = "GPL-3.0-or-later"
@@ -9,6 +9,49 @@ license = "GPL-3.0-or-later"
 name = "_rs"
 # cdylib → a Python-loadable shared object; rlib → usable from Rust unit tests.
 crate-type = ["cdylib", "rlib"]
+
+# `blas` routes the twelve kernels upstream calls the BLAS for to the platform's
+# own — Accelerate on macOS, OpenBLAS elsewhere. **On by default**: it is worth
+# 2.4x the CPU on a large factorization, and both libraries are the same ones
+# CHOLMOD itself links, so the port gets *closer* to the reference rather than
+# further from it. See `sparse::blas`.
+#
+# The feature is an *intent*, not a guarantee. `build.rs` decides whether a
+# backend is actually reachable and emits `cfg(vendor_blas)` only then, so a
+# source build on a machine with no OpenBLAS gets the portable NEON kernels
+# instead of a link error — and `build_info()["backend"]` is None so it is
+# visible rather than silent. Use `blas-required` where the fallback would be a
+# defect (CI wheels).
+[features]
+default = ["blas"]
+blas = []
+# Refuse to build rather than fall back. What the wheel jobs pass: a release
+# wheel that quietly shipped the portable kernels because the container was
+# missing OpenBLAS is the exact failure this guards, and it is invisible in a
+# green CI run otherwise.
+blas-required = ["blas"]
+# Force the OpenBLAS arm even on macOS. A preference in its own right, and the
+# way the arm that ships to Linux and Windows gets built and run on a machine
+# that is neither — see `sparse::blas`.
+blas-openblas = ["blas"]
+# Hand the vendor *every* call rather than only those above `blas::MIN_FLOPS`.
+# Slower on purpose — the tiny calls pay the vendor's dispatch for nothing — and
+# it exists so the `blas` path can be gated for bit-exactness at all: at any
+# cutoff above zero `L->x` is a mix of two libraries' rounding and there is
+# nothing to compare with `==`. See `blas::MIN_FLOPS`.
+blas-all = ["blas"]
+# Read the cutoff from `HEA_BLAS_MIN_FLOPS` at first use instead of compiling it
+# in. **Never ship this**: it exists so locating the crossing costs one build
+# rather than one per column, which is what makes the sweep affordable on a CI
+# runner — the only x86-64 hardware this project has. See `blas::MIN_FLOPS`.
+blas-sweep = ["blas"]
+# Keep the kernels that a rayon task calls out of line, so a sampler can name
+# them. **Never ship this either**, and never time with it: it forbids an
+# inlining the release build wants. Without it a stolen task's stack is
+# `<&F as FnMut>::call_mut` with the whole kernel inlined into it and no child
+# frame left, so `dprof.py` charged the arithmetic to the scheduler — see that
+# file's OPAQUE guard.
+profiling = []
 
 [dependencies]
 # abi3-py310: one wheel works on CPython 3.10+ (matches requires-python).
@@ -21,10 +64,19 @@ numpy = "0.23"
 # per-unit float ops are unchanged so 0-ulp parity holds (parallel == serial
 # bit-for-bit; no cross-unit reduction). hclust/kmns are serial — never rayon.
 rayon = "1"
+# macOS only, and for exactly one call: `sysctlbyname ("hw.perflevel0.
+# physicalcpu")`, so the sparse factorization can size its pool to the
+# performance cores. See `sparse::super_numeric::numeric_pool`.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 
 [profile.release]
 opt-level = 3
-# Do NOT add fast-math / `-C target-feature=+fma` / `target-cpu=native`: FMA
-# contraction reorders float ops and breaks 0-ulp parity with R (re-run
-# tests/test_rs_parity.py if you touch codegen flags). LTO is intentionally off —
-# measured to give no speedup here (intra-crate hot path; opt-level=3 inlines it).
+# Do NOT add fast-math / `-C target-feature=+fma` / `target-cpu=native`: a
+# *blanket* contraction flag fuses expressions the reference leaves un-fused and
+# breaks 0-ulp parity with R (re-run tests/test_rs_parity.py if you touch codegen
+# flags). This is a ban on the flag, not on fusion: where the reference itself
+# fuses, the kernel says so explicitly with `nmath::util::rfma`, per expression —
+# which is how it stays a port decision rather than a compiler's. LTO is
+# intentionally off — measured to give no speedup here (intra-crate hot path;
+# opt-level=3 inlines it).

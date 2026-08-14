@@ -31,16 +31,16 @@ from .linalg import Cdqrls, dqrsl
 from .model_generics import coef, deviance, nobs, residuals, weights
 
 __all__ = [
-    "sigma",
+    "Infl",
     "cov2cor",
-    "weighted_residuals",
     "covratio",
     "influence_measures",
-    "Infl",
-    "lsfit",
     "ls_diag",
     "ls_print",
+    "lsfit",
     "replications",
+    "sigma",
+    "weighted_residuals",
 ]
 
 
@@ -428,7 +428,7 @@ class _NamedVec(dict):
         self._values = np.asarray(values, dtype=float)
 
     @property
-    def values(self):  # noqa: A003 - mirrors R's unnamed access
+    def values(self):
         return self._values
 
     def to_numpy(self):

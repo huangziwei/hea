@@ -36,7 +36,7 @@ Wood (2017), *Generalized Additive Models* (2nd ed.), ch. 6.
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import ClassVar
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -45,24 +45,41 @@ from matplotlib.transforms import blended_transform_factory
 from scipy.linalg import cho_factor, cho_solve, qr, solve_triangular
 from scipy.linalg.lapack import dgeqrf, dormqr
 
-from ..R import distributions as _dist
-from ..R import nmath as _nmath
+from .._dispatch import rs_fn
 from ..family import (
     Binomial,
-    DiscreteX as _DiscreteX,
     Family,
     Gaussian,
     GeneralFamily,
     Quasi,
     QuasiBinomial,
     _coerce_response,
+)
+from ..family import (
+    DiscreteX as _DiscreteX,
+)
+from ..family import (
     bcg as _bcg_family,
+)
+from ..family import (
     clog as _clog_family,
+)
+from ..family import (
     cnorm as _cnorm_family,
+)
+from ..family import (
     cpois as _cpois_family,
+)
+from ..family import (
     deterministic_xwx as _deterministic_xwx,
+)
+from ..family import (
     gfam as _gfam_family,
+)
+from ..family import (
     negbin as _negbin_family,
+)
+from ..family import (
     tw as _tw_family,
 )
 from ..formula import (
@@ -76,7 +93,8 @@ from ..formula import (
     parse,
     prepare_design,
 )
-from .lm import _label_top_n, _lowess, _qq_plot
+from ..R import distributions as _dist
+from ..R import nmath as _nmath
 from ..utils import (
     _dig_tst,
     format_df,
@@ -85,7 +103,7 @@ from ..utils import (
     format_signif_jointly,
     significance_code,
 )
-from .._dispatch import rs_fn
+from .lm import _label_top_n, _lowess, _qq_plot
 
 # mgcv pls_fit1 (gdi.c) — the per-PIRLS-iteration penalized least-squares solve.
 # The rust kernel (rust/src/linalg/pls.rs) does it as one call with a row-blocked
@@ -219,10 +237,9 @@ def gam_control(
     ndigit = nl.pop("ndigit", None)
     if ndigit is None or ndigit < 2:
         ndigit = max(2, int(np.ceil(-np.log10(epsilon))))
-    ndigit = int(round(ndigit))
+    ndigit = round(ndigit)
     ndigit_max = int(np.floor(-np.log10(np.finfo(float).eps)))
-    if ndigit > ndigit_max:
-        ndigit = ndigit_max
+    ndigit = min(ndigit, ndigit_max)
     stepmax = abs(float(nl.pop("stepmax", 2.0)))
     if stepmax == 0.0:
         stepmax = 2.0
@@ -388,11 +405,10 @@ def _truncation(
     y = math.exp(-sum1 - 0.25 * prod3) / pi
     err1 = 1.0 if s == 0 else 2.0 * x / s
     err2 = 2.5 * y if prod3 > 1.0 else 1.0
-    if err2 < err1:
-        err1 = err2
+    err1 = min(err1, err2)
     x = 0.5 * sum2
     err2 = 1.0 if x <= y else y / x
-    return err1 if err1 < err2 else err2
+    return min(err2, err1)
 
 
 def _findu(
@@ -480,8 +496,7 @@ def _cfe(
             if axl1 > axl2:
                 axl = axl1
             else:
-                if axl > axl2:
-                    axl = axl2
+                axl = min(axl, axl2)
                 sum1 = (axl - axl1) / lj
                 for k in range(j - 1, -1, -1):
                     sum1 += n[int(th[k])] + nc[int(th[k])]
@@ -538,7 +553,7 @@ def _davies(
         return 0.0, 3
 
     sd = math.sqrt(sd)
-    almx = -lmin if lmax < -lmin else lmax
+    almx = max(lmax, -lmin)
 
     utx = 16.0 / sd
     up = 4.5 / sd
@@ -549,10 +564,9 @@ def _davies(
     if c != 0.0 and almx > 0.07 * sd:
         cf, fail = _cfe(c, th, ln28, n, lb, nc)
         tausq = 0.25 * acc1 / cf
-        if not fail:
-            if _truncation(utx, tausq, sigsq, n, lb, nc) < 0.2 * acc1:
-                sigsq = sigsq + tausq
-                utx = _findu(utx, 0.25 * acc1, sigsq, n, lb, nc)
+        if not fail and _truncation(utx, tausq, sigsq, n, lb, nc) < 0.2 * acc1:
+            sigsq = sigsq + tausq
+            utx = _findu(utx, 0.25 * acc1, sigsq, n, lb, nc)
 
     acc1 = 0.5 * acc1
 
@@ -566,13 +580,13 @@ def _davies(
         d2 = c - d2_val
         if d2 < 0.0:
             return 0.0, 0
-        intv = 2.0 * pi / (d1 if d1 > d2 else d2)
+        intv = 2.0 * pi / (max(d2, d1))
         x = utx / intv
-        nt = int(math.floor(x))
+        nt = math.floor(x)
         if x - nt > 0.5:
             nt += 1
         x = 3.0 / math.sqrt(acc1)
-        ntm = int(math.floor(x))
+        ntm = math.floor(x)
         if x - ntm > 0.5:
             ntm += 1
         if nt > ntm * 1.5:
@@ -1506,7 +1520,7 @@ def _ml_logdet_adj(fit, Mp):
     # exactly 0 by construction (structural null space), so taking the
     # bottom-Mp eigenvectors picks out a stable U_n regardless of ρ.
     Sλ_sym = 0.5 * (fit.S_full + fit.S_full.T)
-    w, V = np.linalg.eigh(Sλ_sym)
+    _w, V = np.linalg.eigh(Sλ_sym)
     U_n = V[:, :Mp]
     B = cho_solve((fit.A_chol, fit.A_chol_lower), U_n)
     M = U_n.T @ B
@@ -2222,8 +2236,8 @@ def _dlog_det_H_drho(
     dw_drho = dw_deta[:, None] * deta_drho  # (n, n_sp)
 
     # H⁻¹ (p×p) is ρ-fixed across the slot loop — compute once, not once
-    # per slot (the old in-loop cho_solve(eye) was O(n_sp) redundant
-    # full-inverse solves). Bit-identical: same factor, same RHS.
+    # per slot, since an in-loop cho_solve(eye) would be O(n_sp) redundant
+    # full-inverse solves. Bit-identical: same factor, same RHS.
     A_inv = cho_solve((fit.A_chol, fit.A_chol_lower), np.eye(p))
     out = np.empty(n_sp)
     for k, slot in enumerate(slots):
@@ -2364,7 +2378,6 @@ def _gcv_grad_pieces(
     if n_sp == 0:
         return float(fit.dev), 0.0, np.zeros(0), np.zeros(0)
     sp = np.exp(rho)
-    n, p = n, p
 
     # Fisher X'W_F X (= XtX when W_F ≡ 1, e.g. Gaussian-identity).
     w_F = fit_F.w if fit_F.w is not None else np.ones(n)
@@ -2783,7 +2796,7 @@ def _gacv_grad(
     n_sp = len(slots)
     if n_sp == 0:
         return np.zeros(0)
-    dev, trA, dD_drho, dtau_drho = _gcv_grad_pieces(
+    _dev, trA, dD_drho, dtau_drho = _gcv_grad_pieces(
         rho,
         fit,
         X=X,
@@ -2958,7 +2971,6 @@ def _gcv_hessian(
         return np.zeros((0, 0))
 
     sp = np.exp(rho)
-    n, p = n, p
 
     # Fisher X'W_F X for τ.
     w_F = fit_F.w if fit_F.w is not None else np.ones(n)
@@ -3451,8 +3463,8 @@ def _compute_Vc2(rho, fit, Vr, sigma_squared, *, L_pen, slots, p):
 def _dW_dtheta_total(fit, dd1=None, *, X, family, y, wt, family_mgcv_extended):
     """Total ∂W/∂θ for an extended family at the converged fit,
     shape (n, n_theta): the direct fixed-β̂ piece ½·Deta2th plus the
-    β̂(θ)-coupled piece (∂w/∂η)·(X·∂β̂/∂θ). The Dd-table version of
-    the old tw-only ``_dW_dp_tw_total`` (identical values for tw by
+    β̂(θ)-coupled piece (∂w/∂η)·(X·∂β̂/∂θ). The Dd-table form, general
+    over families (identical values for tw by
 
     mgcv anchor: the family-parameter (θ for nb/scat, p for tw)
     derivatives of W and log|H+S| come from ``gam.fit4``'s gdi block
@@ -3771,8 +3783,8 @@ def _reml_grad(
         # (∂(D+β'Sβ)/∂β = 0 kills the β-coupled chain); lsth1 comes
         # from the family's extended ls; the log|H+S| piece is the
         # Dd-based dW/dθ trace (direct ½·Deta2th + indirect via
-        # ∂β̂/∂θ). For tw this equals the old dD_dp/dls_dp/dp_dtheta
-        # chain exactly (tw.Dd's D*th already carry dp/dθ).
+        # ∂β̂/∂θ). For tw this equals the dD_dp/dls_dp/dp_dtheta chain
+        # exactly (tw.Dd's D*th already carry dp/dθ).
         nt = family.n_theta
         theta = family.get_theta()
         dd1 = _dDeta(fit, 1, family=family, y=y, wt=wt)
@@ -5393,7 +5405,7 @@ def newton(
             _apply_family_theta(t)
             try:
                 fit_t = fit_fn(rho_t)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return float("inf"), None
             return score_fn(
                 rho_t,
@@ -5451,7 +5463,6 @@ def newton(
         # refit when the accepted point came from a deriv=0 trial. Inner
         # epsilon: newton caps control$epsilon at conv.tol/100
         # (gam.fit3.r:1308) → 1e-8 at gam defaults.
-        g5 = g5
 
         def _fit5_at(rho_t, d):
             fit_t = _gam_fit5(
@@ -5476,7 +5487,7 @@ def newton(
             rho_t, _ = _split(t)
             try:
                 fit_t = _fit5_at(rho_t, deriv)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return float("inf"), None
             return float(fit_t["REML"]), fit_t
 
@@ -5638,7 +5649,7 @@ def newton(
         gmax = float(np.abs(grad).max()) if grad.size else 0.0
         Sstep = (-grad / gmax) if gmax > 0 else np.zeros_like(grad)
 
-        def _qerror(step, score_change):
+        def _qerror(step, score_change, *, grad=grad, H=H, score_scale=score_scale):
             if step.size == 0:
                 return 0.0
             pred = float(grad @ step + 0.5 * step @ (H @ step))
@@ -5900,7 +5911,6 @@ def bfgs(
     """
 
     fam = family
-    L = L  # working→full sp (None ⇔ I)
     n_sp = int(np.asarray(theta0).size)
     eps_mach = float(np.finfo(float).eps)
 
@@ -6561,8 +6571,7 @@ def efsudr(
                 theta1 = _get_theta()
                 log_phi1 = _refresh_log_phi(fit_se)
             rho, theta_state, log_phi = rho1, theta1, log_phi1
-            if mult < 1.0:
-                mult = 1.0
+            mult = max(mult, 1.0)
         score_hist[it - 1] = fit_reml
         # break if the EFS step is small and REML flat over 3 steps...
         if (
@@ -6698,8 +6707,7 @@ def _magic_fit_reduced(
     b_proj = U1 @ y1
     yAAy = float(b_proj @ b_proj)
     norm = yy - 2 * yAy + yAAy
-    if norm < 0.0:
-        norm = 0.0
+    norm = max(norm, 0.0)
     trA = float(np.sum(U1 * U1))
     delta = n_score - gamma * trA
     if gcv:
@@ -6711,24 +6719,24 @@ def _magic_fit_reduced(
         score = (norm + norm_const) / n_score - 2.0 * scale / n_score * delta + scale
         scale_out = scale
     beta = Vr @ (y1 / d[:rank])
-    return dict(
-        score=score,
-        scale=scale_out,
-        norm=norm,
-        trA=trA,
-        rank=rank,
-        beta=beta,
-        U1=U1,
-        V=Vr,
-        d=d[:rank],
-        y1=y1,
-        delta=delta,
-        n_score=n_score,
-        gamma=gamma,
-        gcv=gcv,
-        norm_const=norm_const,
-        ubre_scale=scale,
-    )
+    return {
+        "score": score,
+        "scale": scale_out,
+        "norm": norm,
+        "trA": trA,
+        "rank": rank,
+        "beta": beta,
+        "U1": U1,
+        "V": Vr,
+        "d": d[:rank],
+        "y1": y1,
+        "delta": delta,
+        "n_score": n_score,
+        "gamma": gamma,
+        "gcv": gcv,
+        "norm_const": norm_const,
+        "ubre_scale": scale,
+    }
 
 
 def _magic_gH(mg, rho, roots):
@@ -7798,7 +7806,7 @@ def _cbind_response_intake(formula, data, family):
         formula = "_hea_gfam_y ~" + formula.split("~", 1)[1]
         return formula, data, "gfam", lhs.args[1]
     if not isinstance(family, (Binomial, QuasiBinomial)):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004 - ValueError is the documented API contract
             "cbind(successes, failures) ~ ... requires "
             "family=Binomial() or QuasiBinomial(); got "
             f"{family.name!r}"
@@ -8075,10 +8083,10 @@ class gam:
     # re-solving (mgcv.r:1684, gam.fit3.r:1718). Cached by `_outer_newton` so
     # the constructor never refits at the optimum. None ⇔ optimizer never ran
     # (magic path) or its initial fit failed.
-    _outer_fit: "_FitState | None" = None
+    _outer_fit: _FitState | None = None
     # The n×q QR factor R of √w₀·X from the design-time structural rank drop,
     # reused by the magic path's getRpqr so √w·X is factored ONCE (magic.c:393).
-    _struct_R: "np.ndarray | None" = None
+    _struct_R: np.ndarray | None = None
 
     @property
     def _scale_known_fit(self) -> bool:
@@ -8121,7 +8129,7 @@ class gam:
     def _pearson_scale_criterion(self) -> bool:
         """Pearson-Laplace scale criteria (P-REML/P-ML): φ = Pearson/(n−Mp)
         is the analytic plug-in (ρ-only outer problem, γ≡1), not the
-        profiled/​outer-variable scale of plain REML/ML. (Distinct from the
+        profiled/outer-variable scale of plain REML/ML. (Distinct from the
         instance attribute ``_pearson_scale``, which is the Pearson scale
         *value* reported by every fit.)"""
         return self.method in ("P-REML", "P-ML")
@@ -8139,7 +8147,7 @@ class gam:
     _lsp1_ec: np.ndarray | None = None
     _n_theta_aug: int = 0
     _UrS: list[np.ndarray] | None = None
-    _reparam_cache: dict = {}
+    _reparam_cache: ClassVar[dict] = {}
     # min.sp/H= fixed additive penalty (mgcv.r:1465-1508). None ⇔ absent;
     # class default lets shared machinery (bam's rails, _setup_reparam)
     # read it without every __init__ setting it.
@@ -8213,7 +8221,7 @@ class gam:
         H: np.ndarray | None = None,
         paraPen: dict | None = None,
         fit: bool = True,
-        G: "gam | None" = None,
+        G: gam | None = None,
     ):
         # ``data`` may be a polars DataFrame OR a mapping of name → 1-D /
         # 2-D ndarray. 2-D entries become matrix columns
@@ -9310,7 +9318,7 @@ class gam:
         # β_partial)·1`` — so the in-sample η is unchanged and out-of-sample
         # ``predict_mat(new) @ G_P @ β_partial`` equals what the fit basis
         # would have produced.
-        intercept_idx: Optional[int] = (
+        intercept_idx: int | None = (
             column_names.index("(Intercept)") if has_intercept else None
         )
         if any(b.spec is not None and b.spec.coef_remap is not None for b in blocks):
@@ -9996,7 +10004,7 @@ class gam:
 
     def _fit_given_rho(
         self, rho: np.ndarray, efs_scale: float | None = None
-    ) -> "_FitState":
+    ) -> _FitState:
         """Penalized IRLS at log-smoothing-params ρ.
 
         Iterate Newton-form working weights/responses
@@ -10132,7 +10140,7 @@ class gam:
         return w
 
     def _setup_reparam(
-        self, slots: list["_PenaltySlot"] | None = None, p: int | None = None
+        self, slots: list[_PenaltySlot] | None = None, p: int | None = None
     ) -> None:
         """Build mgcv's UrS: an orthonormal basis Y for the range of the
         *balanced* total penalty (totalPenaltySpace, gam.fit3.r:2661 —
@@ -10514,6 +10522,8 @@ class gam:
         # formula path (gam.py:1104). Each LP carries its own map.
         from ..formula import (
             _apply_smooth_arg_exprs as _asae,
+        )
+        from ..formula import (
             _smooth_arg_expr_map as _saem,
         )
 
@@ -11853,7 +11863,7 @@ class gam:
             if res_df <= 0:
                 pval = 0.5 * (psum_chisq(d, val) + psum_chisq(d1, val))
             else:
-                k0 = max(1, int(round(res_df)))
+                k0 = max(1, round(res_df))
                 df = np.concatenate(
                     [np.ones(val.size, dtype=int), np.array([k0], dtype=int)]
                 )
@@ -12102,7 +12112,7 @@ class gam:
         if self._scale_known_fit:
             pval = psum_chisq(stat, ev) if ev.size else float("nan")
         else:
-            k_df = max(1, int(round(self.df_residuals)))
+            k_df = max(1, round(self.df_residuals))
             lb = np.concatenate([ev, np.array([-stat / k_df])])
             df = np.concatenate(
                 [np.ones(ev.size, dtype=int), np.array([k_df], dtype=int)]
@@ -12205,7 +12215,7 @@ class gam:
     def _compute_edf12(
         self,
         rho: np.ndarray,
-        fit: "_FitState",
+        fit: _FitState,
         sigma_squared: float,
         A_inv: np.ndarray,
         A_inv_XtWX: np.ndarray,
@@ -12297,9 +12307,9 @@ class gam:
 
         # Total-sum cap only. mgcv's gam.fit3.post.proc deliberately does
         # not cap element-wise — individual edf2[i] can exceed edf1[i] as
-        # long as the sum stays ≤ sum(edf1). Element-wise capping was a
-        # bug in an earlier version here that pushed sum(edf2) below
-        # sum(edf), the wrong direction for an sp-uncertainty correction.
+        # long as the sum stays ≤ sum(edf1). Element-wise capping pushes
+        # sum(edf2) below sum(edf), the wrong direction for an
+        # sp-uncertainty correction.
         if edf2.sum() > edf1.sum():
             edf2 = edf1.copy()
         return edf2, edf1, Vc_corr
@@ -12365,9 +12375,9 @@ class gam:
             return H_inv[np.ix_(sel, sel)]
         # GCV / no-H_aug fallback: ρρ block of the (ρ, log φ) joint Hessian
         # at log φ = 0, chained to working space (T'HT). For
-        # Gaussian-identity REML this used to call the Gaussian-profiled
-        # `_reml_hessian`; the joint Hessian's ρρ block equals 2× that
-        # profiled Hessian up to the rank-1 Schur term, which is fine for
+        # Gaussian-identity REML the joint Hessian's ρρ block equals 2× the
+        # Gaussian-profiled `_reml_hessian` up to the rank-1 Schur term,
+        # which is fine for
         # the GCV path (mgcv defines edf2 differently for GCV anyway —
         # this is a best-effort sp-uncertainty correction).
         H_full = 0.5 * self._reml_hessian(rho, 0.0, include_log_phi=False)
@@ -13022,7 +13032,7 @@ class gam:
                 .to_numpy()
                 .astype(float)
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     def _predict_V(self, unconditional: bool) -> np.ndarray:
@@ -13294,7 +13304,7 @@ class gam:
         )
 
     @staticmethod
-    def _general_response_frame(fit, se) -> "pl.DataFrame":
+    def _general_response_frame(fit, se) -> pl.DataFrame:
         """Pack a general-family prediction into hea's per-LP DataFrame
         (``fit``, ``fit.{j}`` + ``se.fit``/``se.fit.{j}``). Accepts a
         1-D or (n, c) ``fit`` — a ``family.predict`` hook may return a
@@ -13322,7 +13332,7 @@ class gam:
         type: str = "link",
         se: bool = False,
         too_far: float = 0.0,
-    ) -> "VisResult":
+    ) -> VisResult:
         """2D model-surface viewer — :func:`vis.gam` parity.
 
         Builds an ``n_grid × n_grid`` grid over two ``view`` covariates, holds
@@ -13466,7 +13476,7 @@ class gam:
         n_sim: int = 10_000,
         rng: np.random.Generator | int | None = None,
         print_summary: bool = False,
-    ) -> "DiffResult":
+    ) -> DiffResult:
         """Estimate the difference between two conditions of a fitted GAM —
         :func:`itsadug::get_difference` parity. The numerical engine behind
         :meth:`plot_diff`; call this directly if you want the difference table
@@ -13883,7 +13893,7 @@ class gam:
             else None
         )
         if regions:
-            ymin, ymax = ax.get_ylim()
+            _ymin, _ymax = ax.get_ylim()
             for start, end in regions:
                 ax.axvline(start, color=col_diff, linestyle=":", linewidth=1)
                 ax.axvline(end, color=col_diff, linestyle=":", linewidth=1)
@@ -14084,8 +14094,9 @@ class gam:
 
         Returns the matplotlib ``Axes``.
         """
-        from matplotlib.ticker import MaxNLocator
         import warnings as _w
+
+        from matplotlib.ticker import MaxNLocator
 
         view = list(view)
         if len(view) < 2:
@@ -15190,7 +15201,7 @@ class gam:
         self,
         sandwich: bool = False,
         freq: bool = False,
-        dispersion: "float | None" = None,
+        dispersion: float | None = None,
         unconditional: bool = False,
     ) -> np.ndarray:
         """mgcv's ``vcov.gam`` (mgcv.r:4396): the fitted-coefficient
@@ -16621,8 +16632,7 @@ def _apply_gam_side(
             if lev is not None:
                 by_suffix += str(lev)
         vns.append([t + by_suffix for t in b.term])
-        if len(b.term) > max_dim:
-            max_dim = len(b.term)
+        max_dim = max(max_dim, len(b.term))
     all_names = [nm for vn in vns for nm in vn]
     if len(all_names) == len(set(all_names)):
         return blocks  # no repeats => no nesting
@@ -16799,7 +16809,7 @@ def _fix_dependence(
     residual = QtX2[r:, :]
     if residual.shape[0] == 0:
         return []
-    Q2, R2, piv = scipy_qr(residual, mode="economic", pivoting=True)
+    _Q2, R2, piv = scipy_qr(residual, mode="economic", pivoting=True)
     nrows = R2.shape[0]
     r_full = nrows
     r0 = r_full
@@ -16853,8 +16863,7 @@ def _r_cond(R: np.ndarray) -> float:
                 y[k] = ym
                 p_acc[:k] = pm
             kappa = abs(y[k])
-            if kappa > y_inf:
-                y_inf = kappa
+            y_inf = max(y_inf, kappa)
         R_inf = float(np.abs(np.triu(R[:c, :c])).sum(axis=1).max())
     return R_inf * y_inf
 
@@ -16880,7 +16889,7 @@ def _R_rank(R: np.ndarray, tol: float = float(np.finfo(float).eps) ** 0.5) -> in
 
 
 def _pls_rank_drop(
-    Xw: np.ndarray, slots: list["_PenaltySlot"], p: int
+    Xw: np.ndarray, slots: list[_PenaltySlot], p: int
 ) -> tuple[int, np.ndarray]:
     """mgcv's fitting-rank determination from ``gdiPK``
     (gdi.c:1740-1775): stack the R factor of QR(√W·X) on the *balanced*
@@ -17069,8 +17078,7 @@ def _get_stable_S(
         for i in range(Mf):
             if gamma[i]:
                 frob[i] = float(np.linalg.norm(Si[i], "fro"))
-                if frob[i] * spf[i] > max_frob:
-                    max_frob = frob[i] * spf[i]
+                max_frob = max(max_frob, frob[i] * spf[i])
         alpha = np.zeros(Mf, dtype=bool)
         gamma1 = np.zeros(Mf, dtype=bool)
         for i in range(Mf):
@@ -17212,19 +17220,19 @@ class _SlBlock:
     """One block of the block-diagonal total penalty (mgcv Sl[[b]])."""
 
     __slots__ = (
-        "start",
-        "stop",
-        "S",
-        "rank",
-        "repara",
-        "lam",
         "D",
         "Di",
-        "ind",
-        "ldet",
-        "rS",
+        "S",
         "Srp",
         "St",
+        "ind",
+        "lam",
+        "ldet",
+        "rS",
+        "rank",
+        "repara",
+        "start",
+        "stop",
     )
 
     def __init__(
@@ -17269,7 +17277,7 @@ class _SlBlock:
 class _Sl:
     """Container for the Sl block list + Sl.setup attributes."""
 
-    __slots__ = ("blocks", "E", "S", "lam0", "p")
+    __slots__ = ("E", "S", "blocks", "lam0", "p")
 
     def __init__(
         self,
@@ -17289,7 +17297,7 @@ class _Sl:
         return len(self.blocks)
 
 
-def _sl_setup(slots: list["_PenaltySlot"], p: int) -> _Sl:
+def _sl_setup(slots: list[_PenaltySlot], p: int) -> _Sl:
     """mgcv ``Sl.setup`` (fast-REML.r:68-429), default dense
     non-Cholesky path.
 
@@ -17759,7 +17767,7 @@ def _sl_repa(rp: list[dict], X: np.ndarray, lt: int = 0, r: int = 0):
         ind = rec["ind"]
         Qs = rec["Qs"]
 
-        def _T(code):
+        def _T(code, *, Qs=Qs):
             # D = t(Qs), Di = Qs (fast-REML.r:1067).
             if code == 1:
                 return Qs.T
@@ -17804,7 +17812,7 @@ def _sl_inirep(sl: _Sl, X: np.ndarray, lt: int = 0, r: int = 0):
         ind = slice(blk.start, blk.stop)
         D = blk.D
 
-        def _mat(code):
+        def _mat(code, *, D=D, blk=blk):
             if D.ndim == 1:
                 Dm = np.diag(D)
                 Dim = np.diag(1.0 / D)
@@ -17904,7 +17912,7 @@ def _sl_term_mult(sl: _Sl, A: np.ndarray, full: bool = False):
     return SA, inds
 
 
-def _append_extra_params(md: "_MultiDesign", n_extra: int) -> "_MultiDesign":
+def _append_extra_params(md: _MultiDesign, n_extra: int) -> _MultiDesign:
     """Append ``n_extra`` unpenalized "dummy" columns to a multi-formula
     design — mgcv's ``preinitialize`` for ``mvn`` (mvam.r:103-107): the
     Choleski-factor parameters of the precision matrix get zero design
@@ -17949,20 +17957,20 @@ class _LpDesign:
     """One linear predictor's design bundle (one formula's gam.setup)."""
 
     __slots__ = (
-        "formula",
-        "expanded",
-        "data",
-        "X",
-        "blocks",
-        "block_col_ranges",
-        "slots",
-        "column_names",
-        "offset",
-        "nsdf",
         "L",
-        "n_work",
-        "param_assign",
+        "X",
         "basis_state",
+        "block_col_ranges",
+        "blocks",
+        "column_names",
+        "data",
+        "expanded",
+        "formula",
+        "n_work",
+        "nsdf",
+        "offset",
+        "param_assign",
+        "slots",
     )
 
     def __init__(self, **kw):
@@ -17974,22 +17982,22 @@ class _MultiDesign:
     """gam.setup.list analog: the stacked multi-LP design."""
 
     __slots__ = (
-        "lps",
-        "X",
-        "lpi",
-        "y",
-        "blocks",
-        "block_col_ranges",
-        "slots",
-        "column_names",
-        "nsdf",
-        "pstart",
-        "offsets",
-        "n_lp",
         "L",
-        "n_work",
-        "p",
+        "X",
+        "block_col_ranges",
+        "blocks",
+        "column_names",
+        "lpi",
+        "lps",
         "n",
+        "n_lp",
+        "n_work",
+        "nsdf",
+        "offsets",
+        "p",
+        "pstart",
+        "slots",
+        "y",
     )
 
     def __init__(self, **kw):
@@ -19272,8 +19280,7 @@ def _efsud(
                 lsp1 = np.minimum(lsp + np.log(r) * mult, efs_lspmax)
                 fit = fit_at(lsp1, start)
             lsp = lsp1
-            if mult < 1.0:
-                mult = 1.0
+            mult = max(mult, 1.0)
         score_hist[it - 1] = fit["REML"]
         # break if EFS step small and REML flat over the last 3 steps
         if (
@@ -19349,7 +19356,7 @@ def _initial_sp_general(
     X,
     y,
     family,
-    slots: list["_PenaltySlot"],
+    slots: list[_PenaltySlot],
     lpi,
     *,
     weights=None,
@@ -19444,7 +19451,7 @@ class _ParaPenBlock:
     and treats an unknown (paraPen) block as fixed (never a random effect).
     """
 
-    __slots__ = ("label", "cls", "S_scale")
+    __slots__ = ("S_scale", "cls", "label")
 
     def __init__(self, label: str):
         self.label = label
@@ -19563,7 +19570,14 @@ def _parametric_penalty(terms, assign, paraPen, sp0):
         L[r0 : r0 + b.shape[0], c0 : c0 + b.shape[1]] = b
         r0 += b.shape[0]
         c0 += b.shape[1]
-    return dict(S=S, off=off, sp=sp_arr, L=L, rank=rank, full_sp_names=full_sp_names)
+    return {
+        "S": S,
+        "off": off,
+        "sp": sp_arr,
+        "L": L,
+        "rank": rank,
+        "full_sp_names": full_sp_names,
+    }
 
 
 class _PenaltySlot:
@@ -19575,7 +19589,7 @@ class _PenaltySlot:
     applied, incl. select's appended null-space penalty, smooth.r:4241).
     ``vcomp``'s default ``rescale=True`` divides the slot's sp by it."""
 
-    __slots__ = ("block", "col_start", "col_end", "S", "S_scale")
+    __slots__ = ("S", "S_scale", "block", "col_end", "col_start")
 
     def __init__(
         self,
@@ -19613,8 +19627,7 @@ def _wald_pinv(V: np.ndarray, M: int, rank_tol: float) -> tuple[np.ndarray, int]
     vals = vals[::-1]  # R eigen: descending
     vecs = vecs[:, ::-1]
     M1 = int(np.sum(vals > rank_tol * vals[0])) if vals.size else 0
-    if M > M1:
-        M = M1
+    M = min(M, M1)
     ivals = np.zeros_like(vals)
     if M > 0:
         ivals[:M] = 1.0 / vals[:M]
@@ -19628,32 +19641,32 @@ class _FitState:
     families ``rss`` is the deviance (``rss == dev``)."""
 
     __slots__ = (
-        "beta",
-        "eta",
-        "mu",
-        "w",
-        "z",
-        "alpha",
-        "dev",
-        "pen",
-        "rss",
         "A_chol",
         "A_chol_lower",
         "A_inv",
-        "S_full",
-        "log_det_A",
         "E_aug",
-        "is_fisher_fallback",
-        "is_working_gaussian",
-        "converged",
-        "boundary",
-        "warn",
-        "scale_est",
-        "_lderivs",
-        "_dwdeta",
+        "S_full",
         "_d2wdeta2",
         "_ddeta",
         "_ddraw",
+        "_dwdeta",
+        "_lderivs",
+        "alpha",
+        "beta",
+        "boundary",
+        "converged",
+        "dev",
+        "eta",
+        "is_fisher_fallback",
+        "is_working_gaussian",
+        "log_det_A",
+        "mu",
+        "pen",
+        "rss",
+        "scale_est",
+        "w",
+        "warn",
+        "z",
     )
 
     def __init__(
@@ -19841,7 +19854,7 @@ class VisResult:
         Scale of fit and se.
     """
 
-    __slots__ = ("view", "m1", "m2", "fit", "se", "type")
+    __slots__ = ("fit", "m1", "m2", "se", "type", "view")
 
     def __init__(self, *, view, m1, m2, fit, se, type):
         self.view = view
@@ -19951,7 +19964,7 @@ class VisResult:
                 alpha=line_alpha,
             )
             if clabel:
-                kw = dict(inline=True, fontsize=8, fmt="%.2f")
+                kw = {"inline": True, "fontsize": 8, "fmt": "%.2f"}
                 if clabel_kwargs:
                     kw.update(clabel_kwargs)
                 ax.clabel(cs, **kw)
@@ -20192,16 +20205,16 @@ class DiffResult:
     """
 
     __slots__ = (
-        "xvar",
-        "grid",
+        "ci",
+        "comp_label",
+        "crit",
         "difference",
         "f",
-        "ci",
-        "sim_ci",
-        "crit",
-        "comp_label",
+        "grid",
         "levels",
         "rm_ranef_cancelled",
+        "sim_ci",
+        "xvar",
     )
 
     def __init__(

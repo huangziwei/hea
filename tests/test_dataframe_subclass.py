@@ -384,7 +384,7 @@ def test_curated_df_methods_preserve_subclass(df: DataFrame):
     for name, fn in sorted(DF_METHODS.items()):
         try:
             result = fn(df)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             failures.append(f"  {name}: call failed ({type(e).__name__}: {e})")
             continue
         if not isinstance(result, DataFrame):
@@ -399,7 +399,7 @@ def test_curated_lf_methods_preserve_subclass(lf: LazyFrame):
     for name, fn in sorted(LF_METHODS.items()):
         try:
             result = fn(lf)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             failures.append(f"  {name}: call failed ({type(e).__name__}: {e})")
             continue
         if not isinstance(result, LazyFrame):
@@ -669,7 +669,7 @@ def test_curated_series_methods_preserve_subclass(s: Series):
     for name, fn in sorted(SERIES_METHODS.items()):
         try:
             result = fn(s)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             failures.append(f"  {name}: call failed ({type(e).__name__}: {e})")
             continue
         if not isinstance(result, Series):
@@ -686,7 +686,7 @@ def test_series_methods_returning_dataframe(s: Series):
     for name, fn in sorted(SERIES_DF_METHODS.items()):
         try:
             result = fn(s)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             failures.append(f"  {name}: call failed ({type(e).__name__}: {e})")
             continue
         if not isinstance(result, DataFrame):
@@ -720,7 +720,7 @@ def test_df_series_returning_methods_return_hea_series(df: DataFrame):
     for name, fn in cases:
         try:
             result = fn()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             failures.append(f"  {name}: call failed ({type(e).__name__}: {e})")
             continue
         if not isinstance(result, Series):

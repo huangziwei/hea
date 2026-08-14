@@ -44,25 +44,32 @@ from __future__ import annotations
 
 import copy as _copy
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Optional, Sequence
 
 import numpy as np
 import polars as pl
-from scipy.linalg import cho_factor, cho_solve, qr as scipy_qr, solve_triangular
+from scipy.linalg import cho_factor, cho_solve, solve_triangular
+from scipy.linalg import qr as scipy_qr
 from scipy.linalg.lapack import dgeqp3, dormqr, dpstrf
-from ..R import distributions as _dist
-from .._rfma import _rfma_vec
 
+from .._dispatch import rs_fn
+from .._rfma import _rfma_vec
 from ..family import (
     DiscreteX,
     Family,
     Gaussian,
     GeneralFamily,
     _coerce_response,
+)
+from ..family import (
     gfam as _gfam_family,
+)
+from ..family import (
     negbin as _negbin_family,
+)
+from ..family import (
     tw as _tw_family,
 )
 from ..formula import (
@@ -92,42 +99,42 @@ from ..formula import (
     normalize_data,
     prepare_design,
 )
+from ..R import distributions as _dist
+
+# Safe at module level: nothing on the hea.R.__init__ chain
+# (model_selection → models.gam → formula) imports this module.
+from ..R.rng import RMersenneTwister
 from .gam import (
-    _FitState,
-    _MultiDesign,
-    _PenaltySlot,
-    _R_rank,
-    _Sl,
     _add_null_space_penalties,
     _apply_gam_side,
     _block_s_scale,
     _cbind_family_stash,
     _cbind_response_intake,
+    _FitState,
     _gam_fit3_score,
     _initial_sp,
     _ldet_s,
     _magic_optimize,
+    _MultiDesign,
     _na_pass_expand,
-    _ParaPenBlock,
     _parametric_penalty,
+    _ParaPenBlock,
+    _PenaltySlot,
     _preml_hessian,
-    _SlBlock,
+    _R_rank,
     _row_frame,
+    _Sl,
     _sl_initial_repara,
     _sl_mult,
     _sl_repara,
     _sl_setup,
     _sl_term_mult,
+    _SlBlock,
     _suffix_smooth_label,
     _sym_rank,
     gam,
     gam_control,
 )
-
-# Safe at module level: nothing on the hea.R.__init__ chain
-# (model_selection → models.gam → formula) imports this module.
-from ..R.rng import RMersenneTwister
-from .._dispatch import rs_fn
 
 __all__ = ["bam"]
 
@@ -349,7 +356,7 @@ def _estimate_theta(
     mu: np.ndarray,
     *,
     scale: float = 1.0,
-    wt: Optional[np.ndarray] = None,
+    wt: np.ndarray | None = None,
     tol: float = 1e-7,
 ) -> np.ndarray:
     """Inner Newton on the family's extra parameters θ at fixed (y, μ).
@@ -1207,7 +1214,7 @@ def _sl_drop(sl: _Sl, drop: np.ndarray, np_total: int) -> _Sl:
     keep_full = np.ones(np_total, dtype=bool)
     keep_full[drop] = False
     ncum = np.cumsum(keep_full)  # new.loc (1-based count)
-    drop_set = set(int(i) for i in drop)
+    drop_set = {int(i) for i in drop}
     new_blocks: list[_SlBlock] = []
     for blk in sl.blocks:
         cols = np.arange(blk.start, blk.stop)
@@ -1356,7 +1363,7 @@ def _chol2qr(XX: np.ndarray, Xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     XX_sym = 0.5 * (XX + XX.T)
     # ``dpstrf`` overwrites the input — pass a contiguous Fortran copy.
     A = np.asfortranarray(XX_sym.copy())
-    c, piv_1based, rank, info = dpstrf(A, lower=0)
+    c, piv_1based, rank, _info = dpstrf(A, lower=0)
     R_piv = np.triu(c)
     # ``R_piv' R_piv = XX[piv, :][:, piv]`` (DPSTRF spec). For rank<p,
     # the trailing block has ~zero diag and DPSTRF leaves garbage in its
@@ -1389,8 +1396,8 @@ def _chol2qr(XX: np.ndarray, Xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 def _qr_update(
     Xn: np.ndarray,
     yn: np.ndarray,
-    R: Optional[np.ndarray] = None,
-    f: Optional[np.ndarray] = None,
+    R: np.ndarray | None = None,
+    f: np.ndarray | None = None,
     y_norm2: float = 0.0,
     use_chol: bool = False,
 ) -> dict:
@@ -1471,8 +1478,7 @@ def _mini_mf(data: pl.DataFrame, chunk_size: int, *, seed: int = 66) -> pl.DataF
             mn += int(s.unique().len())
         else:
             mn += 2
-    if chunk_size < mn:
-        chunk_size = mn
+    chunk_size = max(chunk_size, mn)
     if n <= chunk_size:
         return data
     # mgcv: rngs <- temp.seed(66), then sample(1:n, chunk.size) and
@@ -1605,10 +1611,10 @@ def _smooth_specs_from_expanded(expanded, data: pl.DataFrame) -> list[dict]:
     matrix-arg long form.
     """
     from ..formula import (
-        _smooth_term_vars,
-        _smooth_by_expr,
-        _te_parse_margins,
         _apply_tero,
+        _smooth_by_expr,
+        _smooth_term_vars,
+        _te_parse_margins,
     )
 
     out: list[dict] = []
@@ -1638,7 +1644,7 @@ def _smooth_specs_from_expanded(expanded, data: pl.DataFrame) -> list[dict]:
 
 
 def _ar_resid(
-    rsd: np.ndarray, rho: float = 0.0, ar_start: Optional[np.ndarray] = None
+    rsd: np.ndarray, rho: float = 0.0, ar_start: np.ndarray | None = None
 ) -> np.ndarray:
     """Apply AR1 transform to raw residuals.
 
@@ -1689,7 +1695,7 @@ class _BamQR:
     f: np.ndarray
     y_norm2: float
     rss_extra: float
-    yX_last: Optional[np.ndarray] = None  # last (y, X) row, for bam.update
+    yX_last: np.ndarray | None = None  # last (y, X) row, for bam.update
 
 
 # ---------------------------------------------------------------------------
@@ -1742,7 +1748,7 @@ def _ar1_rwmatrix_indices(
     N: int,
     ld: float,
     sd: float,
-    ar_start_block: Optional[np.ndarray] = None,
+    ar_start_block: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Build the ``(stop, row, weight)`` arrays for the AR1 row-recombine.
 
@@ -1881,8 +1887,8 @@ def _build_qr_chunked_gaussian(
     chunk_size: int,
     use_chol: bool = False,
     rho: float = 0.0,
-    ar_start: Optional[np.ndarray] = None,
-    prior_w: Optional[np.ndarray] = None,
+    ar_start: np.ndarray | None = None,
+    prior_w: np.ndarray | None = None,
 ) -> _BamQR:
     """Chunked QR build for the Gaussian-identity (am=TRUE) path.
 
@@ -1920,8 +1926,8 @@ def _build_qr_chunked_gaussian(
         ld = 1.0 / np.sqrt(1.0 - rho**2)
         sd = -rho * ld
     chunks = _chunk_indices(n, chunk_size, ar1=ar1)
-    R: Optional[np.ndarray] = None
-    f: Optional[np.ndarray] = None
+    R: np.ndarray | None = None
+    f: np.ndarray | None = None
     y_norm2 = 0.0
     for chunk_idx, (start, end) in enumerate(chunks):
         chunk_data = data[start:end]
@@ -1988,8 +1994,8 @@ class _PirlsQR:
     # ``Sl.initial.repara``/``Sl.fitChol`` (bam.r:657-665); recovering them as
     # ``R'R``/``R'f`` from a Cholesky factor is a lossy detour. ``None`` on the
     # chunked rails, where (R, f) IS what mgcv accumulates.
-    XX: Optional[np.ndarray] = None
-    Xy: Optional[np.ndarray] = None
+    XX: np.ndarray | None = None
+    Xy: np.ndarray | None = None
 
 
 def _build_qr_chunked_pirls(
@@ -2000,11 +2006,11 @@ def _build_qr_chunked_pirls(
     offset: np.ndarray,
     family: Family,
     *,
-    coef: Optional[np.ndarray],
-    eta_init: Optional[np.ndarray],
+    coef: np.ndarray | None,
+    eta_init: np.ndarray | None,
     chunk_size: int,
     use_chol: bool = False,
-    prior_w: Optional[np.ndarray] = None,
+    prior_w: np.ndarray | None = None,
 ) -> _PirlsQR:
     """One PIRLS-step chunked QR build for non-Gaussian families.
 
@@ -2044,8 +2050,8 @@ def _build_qr_chunked_pirls(
         prior_w = np.ones(n, dtype=float)
 
     link = family.link
-    R: Optional[np.ndarray] = None
-    f: Optional[np.ndarray] = None
+    R: np.ndarray | None = None
+    f: np.ndarray | None = None
     y_norm2 = 0.0
     eta_full = np.empty(n, dtype=float)
     mu_full = np.empty(n, dtype=float)
@@ -2181,12 +2187,12 @@ def _build_qr_discrete_pirls(
     offset: np.ndarray,
     family: Family,
     *,
-    coef: Optional[np.ndarray],
-    eta_init: Optional[np.ndarray],
+    coef: np.ndarray | None,
+    eta_init: np.ndarray | None,
     use_chol: bool = False,
-    prior_w: Optional[np.ndarray] = None,
+    prior_w: np.ndarray | None = None,
     rho: float = 0.0,
-    ar_start: Optional[np.ndarray] = None,
+    ar_start: np.ndarray | None = None,
 ) -> _PirlsQR:
     """One PIRLS-step build for ``bam(..., discrete=True)``.
 
@@ -2941,14 +2947,14 @@ class bam(gam):
         self._use_chol = bool(use_chol)
         self._discrete = bool(discrete)
         self._discrete_m = discrete_m
-        self._discrete_design: Optional[DiscreteDesign] = None
+        self._discrete_design: DiscreteDesign | None = None
         # mgcv ``terms2tensor`` split of the parametric part, replayed at
         # predict time so the new design's term/coef layout matches the fit's.
-        self._param_tensor: Optional[list[_ParamBlock]] = None
+        self._param_tensor: list[_ParamBlock] | None = None
         # mgcv ``dinfo$pmf.names`` (bam.r:2568) — the parametric variables
         # ``discrete.mf`` compresses, replayed on newdata at predict.
         self._pmf_names: list[str] = []
-        self._discrete_frame: Optional[DiscretizedFrame] = None
+        self._discrete_frame: DiscretizedFrame | None = None
         # PIRLS augmented-QR LAPACK workspace (mirror gam.__init__): bam's own
         # discrete/QR fit path never uses it, but the inherited gam derivative
         # helpers (``_fisher_view`` via ``_compute_edf12``) thread it through
@@ -3816,7 +3822,7 @@ class bam(gam):
         """
         family = Gaussian() if family is None else family
         if not isinstance(family, GeneralFamily):
-            raise ValueError(
+            raise ValueError(  # noqa: TRY004 - ValueError is the documented API contract
                 f"a formula list requires a general (multi-LP) family; got {family!r}"
             )
         if not discrete:
@@ -4360,7 +4366,7 @@ class bam(gam):
                 block_size=block_size,
             )
 
-        extra: Optional[np.ndarray] = None
+        extra: np.ndarray | None = None
         if offset is not None:
             extra = np.asarray(offset, dtype=float).flatten()
             if extra.shape != (self.n,):
@@ -4700,7 +4706,7 @@ class bam(gam):
     # _fit_given_rho override — uses (R, f, y_norm2, rss_extra)
     # -----------------------------------------------------------------------
 
-    def _fit_given_rho(self, rho: np.ndarray) -> "_FitState":
+    def _fit_given_rho(self, rho: np.ndarray) -> _FitState:
         """Closed-form Gaussian-on-(R, f) solve at fixed ρ.
 
         For Gaussian-identity (``am=TRUE``) the chunked QR build stores
@@ -4893,7 +4899,7 @@ class bam(gam):
     # PIRLS-weight derivatives — length-p zeros for Gaussian-identity
     # -----------------------------------------------------------------------
 
-    def _dw_deta(self, fit: "_FitState") -> np.ndarray:
+    def _dw_deta(self, fit: _FitState) -> np.ndarray:
         """∂w/∂η for Gaussian-identity: identically zero.
 
         For the canonical Gaussian-identity family, ``V(μ)=1`` (so
@@ -4913,7 +4919,7 @@ class bam(gam):
         """
         return np.zeros(self.p)
 
-    def _d2w_deta2(self, fit: "_FitState") -> np.ndarray:
+    def _d2w_deta2(self, fit: _FitState) -> np.ndarray:
         """∂²w/∂η² for Gaussian-identity: identically zero. Length-p so
         ``np.any(d2w_deta2)`` evaluates against the right-shape array
         and ``_reml_hessian``'s ``needs_w`` gate stays correct."""
@@ -5455,7 +5461,7 @@ class bam(gam):
 
         # Coefficient basis change for t2 (rare). Use the same code path as
         # gam — uses block.spec.coef_remap, no full X.
-        intercept_idx: Optional[int] = (
+        intercept_idx: int | None = (
             self.column_names.index("(Intercept)") if self._has_intercept else None
         )
         if any(
@@ -5946,7 +5952,7 @@ class bam(gam):
 
     def _bgam_fit_loop(
         self, *, sp_user, coef_start=None, eps: float = 1e-7
-    ) -> tuple["_FitState", np.ndarray]:
+    ) -> tuple[_FitState, np.ndarray]:
         """Outer PIRLS loop with chunked QR rebuild per iter.
 
         ``coef_start`` is mgcv's ``coef=`` warm start (bgam.fitd:548-560
@@ -6033,14 +6039,14 @@ class bam(gam):
             raise FloatingPointError(
                 "PIRLS init: cannot find valid starting μ̂ from family.initialize"
             )
-        coef: Optional[np.ndarray] = None
-        coef0: Optional[np.ndarray] = None
-        eta0: Optional[np.ndarray] = None
-        dev0: Optional[float] = None
+        coef: np.ndarray | None = None
+        coef0: np.ndarray | None = None
+        eta0: np.ndarray | None = None
+        dev0: float | None = None
         # NON-DISCRETE only (bgam.fit): the θ that built the PREVIOUS working
         # model (mgcv ``theta0``, snapshotted at iter-end before estimate.theta,
         # bam.r:1198) — the step-halving evaluates dev0/dev1 at this θ0.
-        theta0_snap: Optional[np.ndarray] = None
+        theta0_snap: np.ndarray | None = None
         # mgcv:969 — dev = sum(dev_resids) * 2 to avoid spurious convergence at iter 1.
         dev = 2.0 * float(np.sum(family.dev_resids(y, mu, prior_w)))
 
@@ -6068,20 +6074,20 @@ class bam(gam):
         maxit = 200  # mgcv default control$maxit
         conv = False
 
-        rho_hat: Optional[np.ndarray] = None  # full per-penalty log-sp
-        log_phi_hat: Optional[float] = None
-        fit: Optional[_FitState] = None
+        rho_hat: np.ndarray | None = None  # full per-penalty log-sp
+        log_phi_hat: float | None = None
+        fit: _FitState | None = None
         # Last accepted discrete-POI step (β, PP). For additive the per-iter
         # ``_fit_given_rho`` is deferred (Item 2b) and the converged fit is built
         # from this once, after the loop — skipping 6 of 7 O(n) η recomputes.
-        last_out: Optional[dict] = None
+        last_out: dict | None = None
         # Persistent *working* (id-linked) sp warm-start across PIRLS iters.
         # ``None`` until the first sp step; equals ``rho_hat`` slot-for-slot
         # when no smooths share an id (``_work_dim == len(slots)``).
-        theta_sp_warm: Optional[np.ndarray] = None
+        theta_sp_warm: np.ndarray | None = None
         # Discrete-POI Newton step, carried across PIRLS iters (its last
         # element is the log-φ step the bgam.fitd:678 convergence test reads).
-        Nstep: Optional[np.ndarray] = None
+        Nstep: np.ndarray | None = None
         n_work = self._work_dim
 
         for it in range(maxit):
@@ -6484,22 +6490,19 @@ class bam(gam):
                 #     loop (fast-REML.r:1740-1875), driving the SAME
                 #     ``_pi_fit_chol`` evaluator. The ``elif`` after this.
                 #
-                # Both reach the SAME optimum (verified: mgcv bgam.fit and
-                # bgam.fitd BOTH give Tweedie sp 0.258993) — cadence does not
-                # change the result. The FIX for plan item P19 (scale-UNKNOWN
-                # Gamma / inverse-Gaussian / fixed-p Tweedie / extended φ) is
-                # using *these* (Gaussian-working-REML) optimisers instead of
-                # the old ``_outer_newton``, which minimised ``_reml`` — the
-                # FULL non-Gaussian REML carrying the family's ``ls0(φ)``
+                # Both reach the SAME optimum (mgcv bgam.fit and bgam.fitd both
+                # give Tweedie sp 0.258993) — cadence does not change the
+                # result. Scale-UNKNOWN families (Gamma, inverse-Gaussian,
+                # fixed-p Tweedie, extended φ) must use *these*
+                # Gaussian-working-REML optimisers rather than
+                # ``_outer_newton``, which minimises ``_reml`` — the FULL
+                # non-Gaussian REML carrying the family's ``ls0(φ)``
                 # saturated-likelihood term (what mgcv-**gam** uses). On the
                 # reduced (R, f) that is a DIFFERENT objective with a different
-                # φ̂ optimum (Tweedie sp 0.207, not 0.259) — the divergence was
-                # the WRONG OBJECTIVE, not loose convergence (the tight
-                # ``√eps`` ``_fast_reml_fit`` reproduces 0.207 too when fed
-                # ``_reml``; only ``_pi_fit_chol``'s Gaussian working REML
-                # hits 0.259). ``_outer_newton`` now serves only
-                # ``method == "GCV.Cp"`` (no REML/φ formulas) — the final
-                # ``else``.
+                # φ̂ optimum (Tweedie sp 0.207, not 0.259); only
+                # ``_pi_fit_chol``'s Gaussian working REML hits 0.259.
+                # ``_outer_newton`` serves only ``method == "GCV.Cp"`` (no
+                # REML/φ formulas) — the final ``else``.
                 if method in ("REML", "ML") and self._discrete_design is not None:
                     # Lazily build the shared ``Sl`` (gam's ``Sl.setup``) on
                     # first PIRLS iter — depends only on the slot S matrices,
@@ -6572,7 +6575,7 @@ class bam(gam):
                             # bgam.fitd:696 `if (scale>0) log.phi <-
                             # log(scale)` — a FIXED φ ≠ 1 (bam(scale=))
                             # enters Sl.fitChol's criterion; φ=1 paths
-                            # give the old 0.
+                            # give 0.
                             log_phi_try = float(np.log(self._scale_fixed_value))
                         # ``Sl.initial.repara`` (fast-REML.r:517-588,
                         # bam.r:664-665) — reparameterize XX, Xy into mgcv's
@@ -6997,7 +7000,7 @@ class bam(gam):
         Ve = sigma_squared * A_inv_XtWX @ A_inv
 
         # Coefficient basis change for t2 smooths (rare).
-        intercept_idx: Optional[int] = (
+        intercept_idx: int | None = (
             self.column_names.index("(Intercept)") if self._has_intercept else None
         )
         if any(
@@ -7404,9 +7407,9 @@ class _CompressResult:
 
 def compress_df(
     dat: dict[str, np.ndarray],
-    m: Optional[int] = None,
+    m: int | None = None,
     *,
-    rng: Optional[RMersenneTwister] = None,
+    rng: RMersenneTwister | None = None,
 ) -> _CompressResult:
     """Discretise a small dataframe by rounding (numeric) / dedup (factor).
 
@@ -7445,7 +7448,7 @@ def compress_df(
         m = 1000 if d == 1 else (100 if d == 2 else 25)
     elif d > 1:
         # mgcv: m <- round(m^{1/d}) + 1
-        m = int(round(m ** (1.0 / d))) + 1
+        m = round(m ** (1.0 / d)) + 1
 
     # Detect factor / matrix columns. mgcv treats string / object arrays
     # as factors; numeric (any float / int dtype) gets the rounding path.
@@ -7560,7 +7563,7 @@ def _distinct_exceeds_1d(a: np.ndarray, threshold: int) -> bool:
     if n <= threshold:
         return False
     step = max(int(threshold) + 1, 1 << 16)
-    seen: Optional[np.ndarray] = None
+    seen: np.ndarray | None = None
     for s in range(0, n, step):
         u = np.unique(a[s : s + step])
         seen = u if seen is None else np.union1d(seen, u)
@@ -7569,7 +7572,7 @@ def _distinct_exceeds_1d(a: np.ndarray, threshold: int) -> bool:
     return False
 
 
-def _unique_inverse(col: np.ndarray, max_unique: Optional[int] = None):
+def _unique_inverse(col: np.ndarray, max_unique: int | None = None):
     """``np.unique(col, return_inverse=True)`` with an O(n) fast path for
     low-cardinality integer-valued columns — **byte-identical** output.
 
@@ -7606,7 +7609,7 @@ def _unique_inverse(col: np.ndarray, max_unique: Optional[int] = None):
         mn = a.min()
         mx = a.max()
         if np.isfinite(mn) and np.isfinite(mx):
-            span = int(round(float(mx - mn))) + 1
+            span = round(float(mx - mn)) + 1
             if 1 <= span <= _UNIQUE_FAST_SPAN_CAP:
                 # a ∈ [mn, mx] ⇒ codes ∈ [0, span-1] (no out-of-range gather).
                 codes = np.rint(a - mn).astype(np.intp)
@@ -7628,7 +7631,7 @@ def _unique_inverse(col: np.ndarray, max_unique: Optional[int] = None):
 
 
 def _uniquecombs(
-    work: dict[str, np.ndarray], names: list[str], max_unique: Optional[int] = None
+    work: dict[str, np.ndarray], names: list[str], max_unique: int | None = None
 ):
     """Numpy port of R's ``uniquecombs`` (single-thread).
 
@@ -7750,7 +7753,7 @@ def check_term(term: Sequence[str], rec: dict) -> int:
     return 0
 
 
-def _pmf_names(expanded, response: Optional[str], data_columns) -> list[str]:
+def _pmf_names(expanded, response: str | None, data_columns) -> list[str]:
     """mgcv's ``pmf.names``: ``names(model.frame(parametric_formula, data))``
     (bam.r:2314-2318), the list :func:`discrete_mf` compresses one variable at
     a time.
@@ -7781,9 +7784,9 @@ def discrete_mf(
     smooth_specs: list[dict],
     mf: pl.DataFrame,
     names_pmf: Sequence[str],
-    m: Optional[int] = None,
+    m: int | None = None,
     *,
-    rng: Optional[RMersenneTwister] = None,
+    rng: RMersenneTwister | None = None,
     full: bool = True,
 ) -> DiscretizedFrame:
     """Discretise the model frame ``mf`` per marginal of every smooth.
@@ -7827,8 +7830,8 @@ def discrete_mf(
     # contributes one slot per marginal VARIABLE plus ``(by != None)``; each
     # parametric variable contributes 1. A multi-D margin (e.g. a 2-D ad/tp
     # space margin, ``d=c(1,2)``) has >1 variable and is jointly discretised one
-    # ``ik`` per variable, so counting per-margin (the old behaviour) undersizes
-    # ``nr``/``ks`` and crashes; count per-variable to match.
+    # ``ik`` per variable, so counting per-margin undersizes ``nr``/``ks`` and
+    # crashes; count per-variable to match.
     nk = 0
     for spec in smooth_specs:
         margins = spec.get("margins", [{"term": spec["term"]}])
@@ -7854,7 +7857,7 @@ def discrete_mf(
     ik = -1  # 0-based marginal index counter (mgcv ``ik`` is 1-based)
 
     # Walk smooths, discretising each marginal once.
-    def _discretise_marginal(termi: list[str], mi: Optional[int]):
+    def _discretise_marginal(termi: list[str], mi: int | None):
         nonlocal ik
         prev = check_term(termi, rec)
         if prev != 0:
@@ -8077,22 +8080,22 @@ class _DiscreteTerm:
     k_cols: list[tuple[int, int]]  # (start, stop) into global k for each marginal
     coef_slice: slice  # where this term lives in the full coef
     qc: int = 0  # tensor-constraint indicator (1 if Householder)
-    v: Optional[np.ndarray] = None  # Householder vec, length = Π p_j (qc=1 case)
+    v: np.ndarray | None = None  # Householder vec, length = Π p_j (qc=1 case)
     # absorb / by / keep_cols for the term. The constraint ``T`` (absorb /
     # keep_cols) is applied by the kernels via ``_design_constraint_Ts``; None
     # for params and unconstrained smooths. ``by`` records the by-spec for
     # reference only — the by= weighting is carried by the by-marginal that
     # :func:`build_discrete_design` prepends to ``Xd_list`` (mgcv
     # discrete.mf:261-294 / bam.r:2469-2483), not by any post-hoc column mask.
-    absorb: Optional[object] = None
-    by: Optional[object] = None
-    keep_cols: Optional[np.ndarray] = None
+    absorb: object | None = None
+    by: object | None = None
+    keep_cols: np.ndarray | None = None
     # Predict-time replay (used for predict.bamd, not the fitter).
-    spec: Optional[BasisSpec] = None
+    spec: BasisSpec | None = None
     label: str = ""
     # Cache for :func:`_term_k_rows_bounds` — ``(key, rows, lo, hi)``, rebuilt
     # when the design's ``k`` changes. Not part of the design's identity.
-    _k_rows_cache: Optional[tuple] = None
+    _k_rows_cache: tuple | None = None
 
 
 @dataclass(slots=True)
@@ -8134,14 +8137,14 @@ class _ParamBlock:
     label: str
     col_start: int
     col_stop: int
-    Xd_list: Optional[list[np.ndarray]] = None
-    k_cols: Optional[list[tuple[int, int]]] = None
+    Xd_list: list[np.ndarray] | None = None
+    k_cols: list[tuple[int, int]] | None = None
 
 
 def param_tensor_blocks(
     expanded,
     param_assign: Sequence[int],
-    X_param_full: Optional[np.ndarray],
+    X_param_full: np.ndarray | None,
     dframe: DiscretizedFrame,
     var_index: dict[str, int],
 ) -> list[_ParamBlock]:
@@ -8243,8 +8246,8 @@ def build_discrete_design(
     dframe: DiscretizedFrame,
     *,
     param_terms: Sequence[str] = ("(Intercept)",),
-    data: Optional[pl.DataFrame] = None,
-    param_tensor: Optional[list[_ParamBlock]] = None,
+    data: pl.DataFrame | None = None,
+    param_tensor: list[_ParamBlock] | None = None,
 ) -> DiscreteDesign:
     """Build :class:`DiscreteDesign` from a fitted set of
     :class:`SmoothBlock` plus a discretised model frame.
@@ -8278,9 +8281,9 @@ def build_discrete_design(
 
 
 def build_discrete_design_lps(
-    lp_parts: list[tuple[Optional[np.ndarray], list[SmoothBlock]]],
+    lp_parts: list[tuple[np.ndarray | None, list[SmoothBlock]]],
     dframe: DiscretizedFrame,
-    param_tensors: Optional[list[Optional[list[_ParamBlock]]]] = None,
+    param_tensors: list[list[_ParamBlock] | None] | None = None,
 ) -> tuple[DiscreteDesign, list[list[int]]]:
     """Multi-linear-predictor :class:`DiscreteDesign` + mgcv's ``lpid``.
 
@@ -8303,9 +8306,9 @@ def build_discrete_design_lps(
 
 
 def _build_discrete_design_parts(
-    lp_parts: list[tuple[Optional[np.ndarray], list[SmoothBlock]]],
+    lp_parts: list[tuple[np.ndarray | None, list[SmoothBlock]]],
     dframe: DiscretizedFrame,
-    param_tensors: Optional[list[Optional[list[_ParamBlock]]]] = None,
+    param_tensors: list[list[_ParamBlock] | None] | None = None,
 ) -> tuple[DiscreteDesign, list[list[int]]]:
     var_index = {nm: j for j, nm in enumerate(dframe.names)}
     terms: list[_DiscreteTerm] = []
@@ -8384,7 +8387,7 @@ def _build_discrete_design_parts(
 
 
 def _append_smooth_discrete_term(
-    terms: list["_DiscreteTerm"],
+    terms: list[_DiscreteTerm],
     block: SmoothBlock,
     dframe: DiscretizedFrame,
     var_index: dict[str, int],
@@ -8408,10 +8411,7 @@ def _append_smooth_discrete_term(
     # declaration order (``block.term``) no longer matches the post-
     # tero margin order.
     raw = spec.predict_raw if spec.predict_raw is not None else spec.raw
-    if isinstance(raw, _TensorRawBasis):
-        margin_raws = list(raw.margins)
-        margin_vars = [_raw_basis_vars(m) or term_vars for m in margin_raws]
-    elif isinstance(raw, (_T2RawBasis, _T2PredictRawBasis)):
+    if isinstance(raw, (_TensorRawBasis, _T2RawBasis, _T2PredictRawBasis)):
         margin_raws = list(raw.margins)
         margin_vars = [_raw_basis_vars(m) or term_vars for m in margin_raws]
     else:
@@ -8452,10 +8452,10 @@ def _append_smooth_discrete_term(
     # smooth folds too: its by-marginal has `p=1`, so it neither reorders nor
     # widens the term, and `by·(X_raw @ T) == absorb.apply(by·X_raw)`.
     #
-    # (Applying this used to take the n=438k factor-`by` fit from 36 to 121
-    # PIRLS builds. The cause was not the fold — it reassociates rounding, and
-    # a chol2qr round trip on the discrete rail was amplifying that; see
-    # `_bgam_fit_loop`, where X'WX now reaches Sl.fitChol as accumulated.)
+    # The fold reassociates rounding, which a chol2qr round trip on the
+    # discrete rail amplifies enough to triple the PIRLS build count on a
+    # large factor-`by` fit. `_bgam_fit_loop` avoids that by handing X'WX to
+    # Sl.fitChol as accumulated.
     fold_T = None
     if len(margin_raws) == 1 and (
         spec.absorb is not None or spec.keep_cols is not None
@@ -8579,7 +8579,7 @@ def _split_term_vars_by_margins(
 # ---------------------------------------------------------------------------
 
 
-def _term_constraint_T(term: _DiscreteTerm) -> Optional[np.ndarray]:
+def _term_constraint_T(term: _DiscreteTerm) -> np.ndarray | None:
     """Materialise the constraint matrix ``T`` (p_raw × p_post) such that
     ``X_term_post = X_term_raw @ T``.
 
@@ -8605,7 +8605,7 @@ def _term_constraint_T(term: _DiscreteTerm) -> Optional[np.ndarray]:
     return np.ascontiguousarray(T)
 
 
-def _design_constraint_Ts(design: DiscreteDesign) -> list[Optional[np.ndarray]]:
+def _design_constraint_Ts(design: DiscreteDesign) -> list[np.ndarray | None]:
     """Per-term constraint matrices, cached on the design object.
 
     The ``T`` matrices depend only on the design (not on weights or
@@ -8809,7 +8809,7 @@ _XWX_EMPTY_F64 = np.empty(0, dtype=float)
 
 
 def _bin_accum(
-    kcol: np.ndarray, v: np.ndarray, m: int, u: Optional[np.ndarray] = None
+    kcol: np.ndarray, v: np.ndarray, m: int, u: np.ndarray | None = None
 ) -> np.ndarray:
     """``wb[K[row]] += v[row]`` (times ``u[row]`` when given), the weighted bin
     accumulation mgcv writes as a plain loop (``wb[K[kk]] += w[kk]``,
@@ -8942,7 +8942,7 @@ def _param_smooth_block(
     w: np.ndarray,
     k: np.ndarray,
     n: int,
-    w_off: Optional[np.ndarray] = None,
+    w_off: np.ndarray | None = None,
 ) -> np.ndarray:
     """Raw block ``X_param' W X_smooth`` (shape ``p_par × pt_smooth``).
 
@@ -8966,7 +8966,7 @@ def _smooth_smooth_block(
     w: np.ndarray,
     k: np.ndarray,
     n: int,
-    w_off: Optional[np.ndarray] = None,
+    w_off: np.ndarray | None = None,
 ) -> np.ndarray:
     """Raw block ``X_i' W X_j`` for two smooth terms (shape ``pt_i × pt_j``).
 
@@ -9194,7 +9194,7 @@ def _term_pair_XWX_raw(
     w: np.ndarray,
     k: np.ndarray,
     n: int,
-    w_off: Optional[np.ndarray] = None,
+    w_off: np.ndarray | None = None,
 ) -> np.ndarray:
     """Raw (pre-constraint) cross-product block ``X_i' W X_j`` for one term
     pair, dispatching on parametric (``m==n``) vs smooth (compressed) terms —
@@ -9230,7 +9230,7 @@ def _term_ncol(term: _DiscreteTerm) -> int:
 
 
 def Xbd(
-    design: DiscreteDesign, beta: np.ndarray, lt: Optional[Sequence[int]] = None
+    design: DiscreteDesign, beta: np.ndarray, lt: Sequence[int] | None = None
 ) -> np.ndarray:
     """Compute ``X β`` on the compressed design — per-term scatter-add only.
 
@@ -9270,9 +9270,9 @@ def Xbd(
 def XWXd(
     design: DiscreteDesign,
     w: np.ndarray,
-    ar_weights: Optional[np.ndarray] = None,
-    lt: Optional[Sequence[int]] = None,
-    rt: Optional[Sequence[int]] = None,
+    ar_weights: np.ndarray | None = None,
+    lt: Sequence[int] | None = None,
+    rt: Sequence[int] | None = None,
 ) -> np.ndarray:
     """Compute ``X' W X`` (``p × p``, post-constraint) on the compressed design.
 
@@ -9364,8 +9364,8 @@ def XWyd(
     design: DiscreteDesign,
     w: np.ndarray,
     y: np.ndarray,
-    ar: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None,
-    lt: Optional[Sequence[int]] = None,
+    ar: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+    lt: Sequence[int] | None = None,
 ) -> np.ndarray:
     """Compute ``X' (W · y)`` on the compressed design — scatter-add only.
 
@@ -9440,7 +9440,7 @@ def design_full_X(design: DiscreteDesign) -> np.ndarray:
 
 
 def diagXVXd(
-    design: DiscreteDesign, V: np.ndarray, lt: Optional[Sequence[int]] = None
+    design: DiscreteDesign, V: np.ndarray, lt: Sequence[int] | None = None
 ) -> np.ndarray:
     """Compute ``diag(X V X')`` (length ``n``) on the compressed design.
 

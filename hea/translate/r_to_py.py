@@ -19,15 +19,16 @@ import ast as P
 import functools
 import importlib
 import re
-from typing import Optional
+from typing import ClassVar
 
-from . import _datasets, gaps as _gaps, r_ast as R
+from . import _datasets
+from . import gaps as _gaps
+from . import r_ast as R
 from .nse import NSEContext, Slot
 from .r_parser import parse as parse_r
 from .registry.functions import FUNCTION_TABLE, Func, resolve_kwarg
 from .registry.ggplot import is_chain_extension
 from .registry.verbs import VERB_TABLE, Verb
-
 
 # ---------------------------------------------------------------------------
 # Standalone runnable preamble — discover what's importable from hea, hea.R,
@@ -49,7 +50,7 @@ def _callable_exports(module_name: str) -> frozenset[str]:
 
     try:
         mod = importlib.import_module(module_name)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return frozenset()
     out: set[str] = set()
     for n in dir(mod):
@@ -116,7 +117,7 @@ def _module_exports(module_name: str) -> frozenset[str]:
 
     try:
         mod = importlib.import_module(module_name)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return frozenset()
     out: set[str] = set()
     for n in dir(mod):
@@ -408,7 +409,7 @@ class Translator:
 
     # -- unportable-construct detection ------------------------------------
 
-    def _maybe_unported(self, stmt: R.Node) -> Optional[P.stmt]:
+    def _maybe_unported(self, stmt: R.Node) -> P.stmt | None:
         """Return a sentinel statement for top-level constructs the
         translator cannot emit as valid Python; otherwise ``None``."""
         # ``f(x) <- v`` replacement-function assignment. R has dozens of
@@ -469,12 +470,14 @@ class Translator:
                         defined.add(a.arg)
                 elif isinstance(node, P.Name) and isinstance(node.ctx, P.Load):
                     referenced.add(node.id)
-                elif isinstance(node, P.Attribute) and isinstance(node.value, P.Name):
-                    # ``hea.data(...)`` / ``selectors.starts_with(...)``
-                    # — the root name (``hea`` / ``selectors``) is what
-                    # must be importable.
-                    if isinstance(node.value.ctx, P.Load):
-                        referenced.add(node.value.id)
+                # ``hea.data(...)`` / ``selectors.starts_with(...)`` — the root
+                # name (``hea`` / ``selectors``) is what must be importable.
+                elif (
+                    isinstance(node, P.Attribute)
+                    and isinstance(node.value, P.Name)
+                    and isinstance(node.value.ctx, P.Load)
+                ):
+                    referenced.add(node.value.id)
 
         candidates = referenced - defined - _PY_BUILTINS
 
@@ -588,7 +591,7 @@ class Translator:
             )
         return out
 
-    def _maybe_smart_data_call(self, stmt: R.Node) -> Optional[P.AST]:
+    def _maybe_smart_data_call(self, stmt: R.Node) -> P.AST | None:
         """If ``stmt`` is a standalone ``data("X", package="Y")`` call,
         emit it as ``X = data("X", package="Y")`` (bare call — import
         preamble will pull in ``from hea import data``).
@@ -611,7 +614,7 @@ class Translator:
             name = first.name
         else:
             return None
-        pkg: Optional[str] = None
+        pkg: str | None = None
         for arg in stmt.args[1:]:
             if isinstance(arg, R.NamedArg) and arg.name == "package":
                 if isinstance(arg.value, R.StrLit):
@@ -929,8 +932,8 @@ class Translator:
             return P.BinOp(left=left, op=P.MatMult(), right=right)
 
         # Other ``%infix%`` operators — emit as a function call so the user
-        # sees something sensible. The registry can resolve specific names
-        # in a later phase. The function-name strips ``%`` and any other
+        # sees something sensible; the registry resolves no specific names
+        # for these. The function-name strips ``%`` and any other
         # operator-only character so we never produce ``*(...)``-style
         # invalid Python identifiers.
         if op.startswith("%") and op.endswith("%"):
@@ -1119,7 +1122,7 @@ class Translator:
                 py_kwargs.append(P.keyword(arg=name, value=P.Constant(value=value)))
         return _call(_attr(receiver, verb.hea_method), py_args, py_kwargs)
 
-    def _maybe_emit_slice(self, args: tuple[R.Node, ...]) -> Optional[P.AST]:
+    def _maybe_emit_slice(self, args: tuple[R.Node, ...]) -> P.AST | None:
         """dplyr ``slice(df, <positions>)`` → ``df.slice([...])`` / ``df.slice(drop([...]))``.
 
         Positive positions keep, a leading ``-`` drops (R's
@@ -1142,7 +1145,7 @@ class Translator:
         arg = _call(_name("drop"), [positions]) if negated else positions
         return _call(_attr(receiver, "slice"), [arg])
 
-    def _shift_slice_positions(self, node: R.Node) -> Optional[P.AST]:
+    def _shift_slice_positions(self, node: R.Node) -> P.AST | None:
         """Shift an R 1-based ``slice`` index to a 0-based Python positions
         expression, or ``None`` if it isn't a statically shiftable literal."""
         # ``c(1, 3, 5)`` of positive int literals → ``[0, 2, 4]``.
@@ -1492,10 +1495,10 @@ class Translator:
     # lme4 exposes two entry points (lmer / glmer); hea folds both into one
     # ``gmm`` class that dispatches lmer-vs-glmer on ``family`` internally.
     # Reverse direction in ``py_to_r._emit_gmm_call``.
-    _R_MODEL_ALIASES: dict[str, str] = {"lmer": "gmm", "glmer": "gmm"}
+    _R_MODEL_ALIASES: ClassVar[dict[str, str]] = {"lmer": "gmm", "glmer": "gmm"}
     _FORMULA_OPS: frozenset[str] = frozenset({"+", "-", "*", "/", ":", "^", "|"})
 
-    def _maybe_lm_no_data(self, name: str, args: tuple[R.Node, ...]) -> Optional[P.AST]:
+    def _maybe_lm_no_data(self, name: str, args: tuple[R.Node, ...]) -> P.AST | None:
         """Catch ``lm(y ~ x)`` / ``glm(...)`` / etc. with no ``data`` arg.
 
         R resolves the formula's variables in the caller's environment;
@@ -1627,7 +1630,7 @@ class Translator:
     # R's tidyselect predicates → equivalent ``polars.selectors`` calls.
     # All return a Selector (no extra args needed); the translator emits
     # ``selectors.<name>()``.
-    _WHERE_PREDICATE_MAP: dict[str, str] = {
+    _WHERE_PREDICATE_MAP: ClassVar[dict[str, str]] = {
         "is.character": "string",
         "is.string": "string",
         "is.numeric": "numeric",
@@ -1908,11 +1911,7 @@ class Translator:
         with self.nse.enter(Slot.NONE):
             target = self._visit(n.target)
         # Ensure target is a Name (or Attribute / Subscript) in Store context.
-        if isinstance(target, P.Name):
-            target.ctx = P.Store()
-        elif isinstance(target, P.Attribute):
-            target.ctx = P.Store()
-        elif isinstance(target, P.Subscript):
+        if isinstance(target, (P.Name, P.Attribute, P.Subscript)):
             target.ctx = P.Store()
         value = self._visit(n.value)
         return P.Assign(targets=[target], value=value)
@@ -2241,7 +2240,7 @@ def _is_pos_int_lit(x: R.Node) -> bool:
     )
 
 
-def _name(name: str, *, ctx: Optional[P.expr_context] = None) -> P.Name:
+def _name(name: str, *, ctx: P.expr_context | None = None) -> P.Name:
     return P.Name(id=name, ctx=ctx or P.Load())
 
 
@@ -2346,7 +2345,7 @@ def _contains_call_to(node: R.Node, fn_name: str) -> bool:
     return _first_matching_call(node, lambda n: n == fn_name) == fn_name
 
 
-def _first_python_keyword_call(node: R.Node) -> Optional[str]:
+def _first_python_keyword_call(node: R.Node) -> str | None:
     """Return the first hard-Python-keyword function name called anywhere
     inside ``node``'s subtree, or ``None`` if there is none.
 
@@ -2370,7 +2369,7 @@ def _first_python_keyword_call(node: R.Node) -> Optional[str]:
     )
 
 
-def _first_matching_call(node: R.Node, predicate) -> Optional[str]:
+def _first_matching_call(node: R.Node, predicate) -> str | None:
     """Walk ``node``'s subtree; return the name of the first ``R.Call``
     whose function-identifier name matches ``predicate``, else ``None``.
     """
@@ -2465,7 +2464,8 @@ def _substitute_identifier(
     nested dataclasses. Non-dataclass values (strings, ints, tuples of
     primitives like ``Span``) pass through untouched.
     """
-    from dataclasses import fields, replace as _dc_replace, is_dataclass
+    from dataclasses import fields, is_dataclass
+    from dataclasses import replace as _dc_replace
 
     if isinstance(node, R.Identifier) and node.name == param_name:
         return replacement

@@ -18,12 +18,11 @@ column for grouping and only accept a column name.
 
 from __future__ import annotations
 
-from typing import Callable, Union
+from collections.abc import Callable
 
 import polars as pl
 
-
-ColInput = Union[str, Callable[[pl.DataFrame], pl.Series]]
+ColInput = str | Callable[[pl.DataFrame], pl.Series]
 
 
 def _label_callable(fn: Callable, label: str) -> Callable:

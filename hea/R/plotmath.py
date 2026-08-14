@@ -35,7 +35,7 @@ def quote(r_source: str) -> str:
 
     try:
         ast = _parse(r_source)
-    except Exception:
+    except Exception:  # noqa: BLE001
         # Couldn't parse — return the raw text inside math delimiters so
         # the user sees something rather than a crash.
         return r"$" + r_source + r"$"

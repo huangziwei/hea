@@ -132,8 +132,8 @@ fn tweedie_series<'py>(
         // wp1/wp2/wpp are the p-parameterisation working derivatives of log W_j
         // (mgcv misc.c:289-293,333-334), before the θ-chain. `wp1²+wp2` is fused
         // (`rfma`) — it is the per-term curvature whose pieces nearly cancel, so
-        // summing them separately and subtracting (the old moment split) lost
-        // ~1e-11; combining per term keeps full precision (mgcv misc.c:392).
+        // summing them separately and subtracting loses ~1e-11; combining per
+        // term keeps full precision (mgcv misc.c:392).
         macro_rules! accumulate {
             ($j:expr, $lwj:expr) => {{
                 let k = ($j - 1) as usize;

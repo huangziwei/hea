@@ -16,7 +16,6 @@ from typing import Any
 
 from .cartesian import CoordCartesian
 
-
 _NAMED_TRANS = {
     "identity": "IdentityTrans",
     "log10": "Log10Trans",

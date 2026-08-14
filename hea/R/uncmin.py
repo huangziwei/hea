@@ -53,11 +53,11 @@ _DBL_MAX = float(np.finfo(np.float64).max)
 
 
 def _fmax2(a, b):
-    return a if a > b else b
+    return max(b, a)
 
 
 def _fmin2(a, b):
-    return a if a < b else b
+    return min(b, a)
 
 
 def fdhess(n, x, fval, fun, h, nfd, ndigit, typx):
@@ -157,14 +157,11 @@ def _choldc(n, a, diagmx, tol):
             offmax = 0.0
             for j in range(i):
                 tmp2 = abs(float(a[i, j]))
-                if offmax < tmp2:
-                    offmax = tmp2
-            if offmax <= amnlsq:
-                offmax = amnlsq
+                offmax = max(offmax, tmp2)
+            offmax = max(amnlsq, offmax)
             a[i, i] = math.sqrt(offmax)
             tmp2 = offmax - tmp1
-            if addmax < tmp2:
-                addmax = tmp2
+            addmax = max(addmax, tmp2)
     return addmax
 
 
@@ -263,8 +260,7 @@ def _tregup(
                 temp1 = abs(float(sc[i])) / _fmax2(
                     abs(float(xpls[i])), 1.0 / float(sx[i])
                 )
-                if rln < temp1:
-                    rln = temp1
+                rln = max(rln, temp1)
             if rln < steptl:
                 # cannot find satisfactory xpls distinct from x
                 iretcd = 1
@@ -336,8 +332,7 @@ def _lnsrch(n, x, f, g, p, xpls, fcn, stepmx, steptl, sx):
     rln = 0.0
     for i in range(n):
         temp1 = abs(float(p[i])) / _fmax2(abs(float(x[i])), 1.0 / float(sx[i]))
-        if rln < temp1:
-            rln = temp1
+        rln = max(rln, temp1)
     rmnlmb = steptl / rln
     lam = 1.0
     mxtake = False
@@ -383,8 +378,7 @@ def _lnsrch(n, x, f, g, p, xpls, fcn, stepmx, steptl, sx):
                     tlmbda = (
                         -b + (math.sqrt(disc) if a3 < 0 else -math.sqrt(disc))
                     ) / a3
-                if tlmbda > lam * 0.5:
-                    tlmbda = lam * 0.5
+                tlmbda = min(tlmbda, lam * 0.5)
             plmbda = lam
             pfpls = fpls
             if tlmbda < lam * 0.1:
@@ -544,7 +538,7 @@ def _hook_1step(
         _dtrsl(a, n, wrk0, 0)
         temp1 = _dnrm2(n, wrk0)
         phip = -(temp1 * temp1) / stepln
-        if (alo * dlt <= stepln and stepln <= hi * dlt) or (amuup - amulo > 0.0):
+        if (alo * dlt <= stepln <= hi * dlt) or (amuup - amulo > 0.0):
             # sc is acceptable hookstep
             break
         # select new amu
@@ -601,8 +595,7 @@ def _hookdrv(
                     tmp += float(a[j, i]) * float(g[j]) / (float(sx[j]) * float(sx[j]))
                 bet += tmp * tmp
             dlt = alpha * math.sqrt(alpha) / bet
-            if dlt > stepmx:
-                dlt = stepmx
+            dlt = min(dlt, stepmx)
     iretcd = 4
     fstime = True
     fpls = 0.0
@@ -777,10 +770,8 @@ def _chlhsn(n, a, epsm, sx, udiag):
     if n > 1:
         for i in range(1, n):
             tmp = float(a[i, i])
-            if diagmn > tmp:
-                diagmn = tmp
-            if diagmx < tmp:
-                diagmx = tmp
+            diagmn = min(diagmn, tmp)
+            diagmx = max(diagmx, tmp)
     posmax = _fmax2(diagmx, 0.0)
     if diagmn <= posmax * tol:
         amu = _rfma(tol, posmax - diagmn, -diagmn)
@@ -790,8 +781,7 @@ def _chlhsn(n, a, epsm, sx, udiag):
             for i in range(1, n):
                 for j in range(i):
                     tmp = abs(float(a[i, j]))
-                    if offmax < tmp:
-                        offmax = tmp
+                    offmax = max(offmax, tmp)
             amu = 1.0 if offmax == 0.0 else offmax * (tol + 1.0)
         # a = a + mu*i
         for i in range(n):
@@ -819,11 +809,9 @@ def _chlhsn(n, a, epsm, sx, udiag):
             for j in range(i + 1, n):
                 offrow += abs(float(a[j, i]))
             tmp = float(a[i, i]) - offrow
-            if evmin > tmp:
-                evmin = tmp
+            evmin = min(evmin, tmp)
             tmp = float(a[i, i]) + offrow
-            if evmax < tmp:
-                evmax = tmp
+            evmax = max(evmax, tmp)
         sdd = _rfma(tol, evmax - evmin, -evmin)
         # perturb a and decompose again
         amu = _fmin2(sdd, addmax)
@@ -995,8 +983,7 @@ def _opt_stop(
         relgrd = (
             abs(float(gpls[i])) * _fmax2(abs(float(xpls[i])), 1.0 / float(sx[i])) / d
         )
-        if rgx < relgrd:
-            rgx = relgrd
+        rgx = max(rgx, relgrd)
     jtrmcd = 1
     if rgx > gradtl:
         if itncnt == 0:
@@ -1006,8 +993,7 @@ def _opt_stop(
             relstp = abs(float(xpls[i]) - float(x[i])) / _fmax2(
                 abs(float(xpls[i])), 1.0 / float(sx[i])
             )
-            if rsx < relstp:
-                rsx = relstp
+            rsx = max(rsx, relstp)
         jtrmcd = 2
         if rsx > steptl:
             jtrmcd = 4

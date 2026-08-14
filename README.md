@@ -31,8 +31,8 @@ pip install "hea[data]"
 from hea import data
 from hea.models import lm
 
-gala = data('gala', package='faraway')
-m = lm('Species ~ Area + Adjacent + Elevation + Nearest + Scruz', gala)
+gala = data("gala", package="faraway")
+m = lm("Species ~ Area + Adjacent + Elevation + Nearest + Scruz", gala)
 m.summary()
 ```
 

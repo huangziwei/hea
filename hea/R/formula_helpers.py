@@ -54,26 +54,26 @@ from ..formula import (
 from .linalg import dqrdc2, dqrsl
 
 __all__ = [
-    "reformulate",
+    "DF2formula",
+    "MFclass",
+    "NAAction",
+    "Poly",
     "as_formula",
-    "update_formula",
     "delete_response",
     "drop_terms",
-    "DF2formula",
     "get_all_vars",
-    "na_pass",
-    "na_fail",
-    "na_exclude",
     "na_action",
-    "naresid",
+    "na_exclude",
+    "na_fail",
+    "na_pass",
     "napredict",
     "naprint",
-    "NAAction",
-    "MFclass",
+    "naresid",
     "poly",
     "polym",
     "predict_poly",
-    "Poly",
+    "reformulate",
+    "update_formula",
 ]
 
 
@@ -192,9 +192,7 @@ def DF2formula(x) -> str:
     """R: ``DF2formula(x)`` — first column ``~`` the rest, from a data frame's
     column names. A single-column frame gives the one-sided ``~col``. ``x`` is a
     polars DataFrame (or any object with a ``.columns`` list of names)."""
-    if isinstance(x, pl.DataFrame):
-        names = list(x.columns)
-    elif hasattr(x, "columns"):
+    if isinstance(x, pl.DataFrame) or hasattr(x, "columns"):
         names = list(x.columns)
     else:
         names = list(x)
@@ -368,9 +366,7 @@ def na_exclude(object, **kwargs):
     is dropped, ``na_action`` is ``None``.
     """
     omit, names = _na_positions(object)
-    if isinstance(object, pl.DataFrame):
-        cleaned = object.drop_nulls()
-    elif isinstance(object, pl.Series):
+    if isinstance(object, (pl.DataFrame, pl.Series)):
         cleaned = object.drop_nulls()
     else:
         arr = np.asarray(object)
@@ -549,7 +545,7 @@ def _poly_fit(x: np.ndarray, degree: int):
     n = x.size
     p = degree + 1
     X = np.column_stack([xc**d for d in range(p)])  # outer(x, 0:degree, ^)
-    qr, qraux, jpvt, rank = dqrdc2(X, 1e-7)
+    qr, qraux, _jpvt, rank = dqrdc2(X, 1e-7)
     if rank < degree:
         raise ValueError("'degree' must be less than number of unique points")
     Z = np.empty((n, p))

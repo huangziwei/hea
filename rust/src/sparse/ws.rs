@@ -88,8 +88,10 @@ impl<T> Ws<T> {
     }
 }
 
-/// `i64` is how the C spells a subscript; `usize` is how the loop counters
-/// arrive. Both land on the same unchecked access.
+/// `i64` is how the C spells a subscript, `usize` is how the loop counters
+/// arrive, and `i32` is what an unannotated literal infers to — `pwgts[0]` is
+/// written just that way in `metis`, following the C. All three land on the
+/// same unchecked access.
 macro_rules! ws_index {
     ($t:ty) => {
         impl<T> core::ops::Index<$t> for Ws<T> {
@@ -123,6 +125,7 @@ macro_rules! ws_index {
 
 ws_index!(i64);
 ws_index!(usize);
+ws_index!(i32);
 
 /// `cholmod_internal.h` / `amd_internal.h` — `EMPTY` is `(-1)`.
 pub const EMPTY: i64 = -1;
@@ -186,26 +189,25 @@ pub struct Work {
 }
 
 impl Work {
-    /// `cholmod_allocate_work (n, 6*n, 0, Common)`, the call
-    /// `cholmod_analyze` opens with, followed by the `cholmod_alloc_work (n, n,
-    /// n, ...)` that `cholmod_rowfac` adds on top of it — `alloc_work` only
-    /// ever grows (`t_cholmod_alloc_work.c:59,81,99`), so one factor's
-    /// workspace is the union.
+    /// `cholmod_start` followed by the `cholmod_allocate_work (n, 6*n, n, …)`
+    /// that one factor's routines add up to — see [`Work::allocate`], which is
+    /// what every entry point calls with its own requirement.
     pub fn new(n: usize) -> Work {
-        Work {
-            iwork: vec![0; 6 * n],
-            flag: vec![EMPTY; n],
-            head: vec![EMPTY; n + 1],
-            /* `alloc_work` zeroes Xwork once, at allocation (`:106-108`) */
-            xwork: vec![0.0; n],
+        let mut w = Work {
+            iwork: Vec::new(),
+            flag: Vec::new(),
+            head: Vec::new(),
+            xwork: Vec::new(),
             /* `Common->mark = 0` accompanies a fresh `Flag` (`:71`) */
             mark: 0,
-        }
+        };
+        w.allocate(n, 6 * n, n);
+        w
     }
 
     /// The whole workspace. Only the ordering routines may take this
-    /// (`cholmod_analyze.c:511-514`); everything else goes through
-    /// [`Work::split_analyze`].
+    /// (`cholmod_analyze.c:511-514`); everything else uses `Iwork [0..2n)` and
+    /// leaves the last `4n` to `Parent`/`First`/`Level`/`Post`.
     pub(super) fn all(&mut self) -> WorkRef<'_> {
         WorkRef {
             iwork: &mut self.iwork,
@@ -216,19 +218,70 @@ impl Work {
         }
     }
 
-    /// `cholmod_allocate_work (n, len, 0, Common)` where `n` is unchanged —
-    /// grow `Iwork` if it is short, and leave it alone otherwise
-    /// (`t_cholmod_alloc_work.c:81`). The supernodal numeric factorization
-    /// needs `2n + 5*nsuper`, which exceeds the `6n` [`Work::new`] starts with
-    /// once `nsuper > 4n/5`.
+    /// `cholmod_allocate_work (nrow, iworksize, xworksize, Common)` —
+    /// `t_cholmod_alloc_work.c:50-109`. Each of the four arrays grows if it is
+    /// short and is left alone otherwise; **none of them ever shrinks**, which
+    /// is why one workspace serves a whole session and why its size is the
+    /// union of what every routine asked for.
     ///
-    /// Growing *discards* the contents, as `alloc_work`'s free-then-malloc
-    /// does — which is why `cholmod_super_numeric` fills `SuperMap` only after
-    /// calling it (`:266-287`) and says so at
+    /// Growing *discards* the contents, as the C's free-then-malloc does —
+    /// which is why `cholmod_super_numeric` fills `SuperMap` only after calling
+    /// it (`:266-287`) and says so at
     /// `t_cholmod_super_numeric_worker.c:204-208`.
-    pub(super) fn ensure_iwork(&mut self, len: usize) {
-        if self.iwork.len() < len {
-            self.iwork = vec![0; len];
+    pub(super) fn allocate(&mut self, nrow: usize, iworksize: usize, xworksize: usize) {
+        /* the C's `MAX (1, nrow)`, `MAX (1, iworksize)` and `MAX (2,
+         * xworksize)` (`:54,80,95`) */
+        let nrow = nrow.max(1);
+        if nrow > self.flag.len() {
+            self.flag = vec![EMPTY; nrow];
+            self.head = vec![EMPTY; nrow + 1];
+            self.mark = 0;
+        }
+        if iworksize.max(1) > self.iwork.len() {
+            self.iwork = vec![0; iworksize.max(1)];
+        }
+        if xworksize.max(2) > self.xwork.len() {
+            /* `alloc_work` zeroes Xwork once, at allocation (`:106-108`) */
+            self.xwork = vec![0.0; xworksize.max(2)];
+        }
+    }
+
+    /// `Iwork` split the way `cholmod_analyze_p2` splits it
+    /// (`cholmod_analyze.c:509-526`): `Parent`, `First`, `Level` and `Post` are
+    /// the **last `4n`**, and everything the analysis calls between them gets a
+    /// [`WorkRef`] over the first `2n`.
+    ///
+    /// The split is what makes the four survive calls that are meanwhile
+    /// scratching in `Iwork [0..2n)` — the C gets that for free from raw
+    /// pointers into one block, and Rust needs to be shown the disjointness.
+    ///
+    /// **The ordering routines are the exception and must not take this.** AMD
+    /// uses all `6n` (`amd.rs`'s `Degree`/`Wi`/`Len`/`Nv`/`Next`/`Elen`), which
+    /// upstream permits precisely because none of the four is needed across
+    /// such a call (`:511-514`). Re-split afterwards; every one of the four is
+    /// written before it is read again.
+    ///
+    /// `uncol` is `A->ncol` for an `stype == 0` matrix and zero otherwise:
+    /// upstream puts the four at `Iwork + 2n + uncol` (`:515`), because the
+    /// unsymmetric arms of `cholmod_etree` and `cholmod_rowcolcounts` need that
+    /// much scratch rather than `2n`.
+    pub(super) fn split_analyze(&mut self, n: usize, uncol: usize) -> Analyze<'_> {
+        let (scratch, tail) = self.iwork.split_at_mut(2 * n + uncol);
+        let (parent, tail) = tail.split_at_mut(n);
+        let (first, tail) = tail.split_at_mut(n);
+        let (level, post) = tail.split_at_mut(n);
+        Analyze {
+            work: WorkRef {
+                iwork: scratch,
+                flag: &mut self.flag,
+                head: &mut self.head,
+                xwork: &mut self.xwork,
+                mark: &mut self.mark,
+            },
+            parent,
+            first,
+            level,
+            post: &mut post[..n],
         }
     }
 
@@ -242,6 +295,16 @@ impl Work {
             && self.head.iter().all(|&h| h == EMPTY)
             && self.xwork.iter().all(|&x| x == 0.0)
     }
+}
+
+/// [`Work::split_analyze`]'s four `n`-vectors and the scratch that goes with
+/// them — `Work4n` in `cholmod_analyze.c:516-521`.
+pub(super) struct Analyze<'a> {
+    pub(super) work: WorkRef<'a>,
+    pub(super) parent: &'a mut [i64],
+    pub(super) first: &'a mut [i64],
+    pub(super) level: &'a mut [i64],
+    pub(super) post: &'a mut [i64],
 }
 
 /// A borrowed [`Work`] — what the kernels take, so that a caller holding a
@@ -326,6 +389,21 @@ impl core::fmt::Display for CscError {
 /// one branchless O(nnz) pass for the row indices — the reporting scan that
 /// locates a bad entry only runs after that pass has already failed.
 pub fn validate_csc(n: usize, indptr: &[i64], indices: &[i64]) -> Result<usize, CscError> {
+    validate_csc_rect(n, n, indptr, indices)
+}
+
+/// [`validate_csc`] for a matrix whose row count is not its column count.
+///
+/// `indptr` is sized by `ncol` and the row indices are bounded by `nrow`; the
+/// two coincide for every symmetric matrix, which is why the square form is
+/// the one everything else calls.
+pub fn validate_csc_rect(
+    nrow: usize,
+    ncol: usize,
+    indptr: &[i64],
+    indices: &[i64],
+) -> Result<usize, CscError> {
+    let n = ncol;
     if indptr.len() != n + 1 {
         return Err(CscError::IndptrLen {
             got: indptr.len(),
@@ -363,14 +441,14 @@ pub fn validate_csc(n: usize, indptr: &[i64], indices: &[i64]) -> Result<usize, 
         lo = lo.min(i);
         hi = hi.max(i);
     }
-    if lo < 0 || hi >= n as i64 {
+    if lo < 0 || hi >= nrow as i64 {
         let (at, got) = indices[..nz]
             .iter()
             .enumerate()
-            .find(|(_, &i)| i < 0 || i >= n as i64)
+            .find(|(_, &i)| i < 0 || i >= nrow as i64)
             .map(|(p, &i)| (p, i))
             .expect("the min/max fold only fails when some index is out of range");
-        return Err(CscError::RowOutOfRange { at, got, n });
+        return Err(CscError::RowOutOfRange { at, got, n: nrow });
     }
     Ok(nz)
 }
@@ -396,8 +474,17 @@ mod tests {
     /// The corpora these kernels run are only evidence if the check they rely
     /// on is live in this profile, so prove that separately rather than
     /// assuming it.
+    ///
+    /// `cargo test --release` is a profile where it is *not* live —
+    /// `debug_assertions` is off, so the index below reaches
+    /// `get_unchecked` and the process traps instead of unwinding, taking the
+    /// whole binary down with it rather than failing one test. Skipped there,
+    /// which is also the honest reading: this test asserts something about the
+    /// debug profile, and in a release run neither it nor the corpora beside it
+    /// are evidence of bounds safety.
     #[test]
     #[should_panic(expected = "out of range")]
+    #[cfg_attr(not(debug_assertions), ignore = "the bound is compiled out")]
     fn ws_still_checks_its_bound_under_cfg_test() {
         let mut buf = [0i64; 4];
         let ws = Ws::new(&mut buf);

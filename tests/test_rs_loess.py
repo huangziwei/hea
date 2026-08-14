@@ -16,7 +16,7 @@ import pytest
 
 rs = pytest.importorskip("hea._rs")
 
-from hea.ggplot.stats.smooth import _loess_local_fit  # noqa: E402
+from hea.ggplot.stats.smooth import _loess_local_fit
 
 
 def _pyref(xq, x, y, span, degree, w, want_var=True):

@@ -7,11 +7,12 @@ labels. User-supplied ``limits=`` overrides autoscale.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
 
-from .scale import Scale, _NAME_MISSING, format_breaks
+from .scale import _NAME_MISSING, Scale, format_breaks
 from .transformed import IdentityTrans, Trans
 
 
@@ -33,7 +34,7 @@ class ScaleContinuous(Scale):
             hi = float(data.max())
         except (TypeError, ValueError):
             return
-        if not (lo == lo and hi == hi):  # NaN check
+        if math.isnan(lo) or math.isnan(hi):
             return
         if self.range_ is None:
             self.range_ = [lo, hi]
@@ -154,7 +155,7 @@ class ScaleContinuous(Scale):
         if self.transform.name != "identity":
             try:
                 tick_positions = np.asarray(self.transform.transform(breaks))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 tick_positions = np.asarray(breaks)
             mask = (tick_positions >= break_range[0]) & (
                 tick_positions <= break_range[1]

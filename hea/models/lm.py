@@ -1,15 +1,12 @@
 from functools import cached_property
-from typing import Union
+from typing import ClassVar
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from scipy.linalg import qr, solve_triangular
 from scipy.linalg.lapack import dgeqrf, dormqr
-from ..R import distributions as _dist
-from ..R import linalg as _linalg
 
-from ..R import nmath as _nmath
 from ..formula import (
     Name,
     _eval_atom,
@@ -21,6 +18,9 @@ from ..formula import (
     prepare_design,
     referenced_columns,
 )
+from ..R import distributions as _dist
+from ..R import linalg as _linalg
+from ..R import nmath as _nmath
 from ..utils import (
     _dig_tst,
     format_df,
@@ -149,7 +149,7 @@ def _resolve_subset(subset, data: pl.DataFrame):
 
         py_src = translate_r(subset)
         ns = {c: data[c] for c in data.columns}
-        result = eval(py_src, {"__builtins__": {}}, ns)  # noqa: S307 — R-style NSE
+        result = eval(py_src, {"__builtins__": {}}, ns)
         return np.asarray(result).astype(bool)
     if isinstance(subset, pl.Expr):
         return (
@@ -396,7 +396,7 @@ class SummaryLm:
 
     # ---- R-style ``$`` access (partial name matching) ---------------
 
-    _ALIASES = {
+    _ALIASES: ClassVar[dict[str, str]] = {
         "sig": "sigma",
         "sigma": "sigma",
         "r.squared": "r_squared",
@@ -560,7 +560,7 @@ def _format_summary_lm(model, digits: int, cor: bool) -> str:
 class lm:
     def __new__(
         cls,
-        formula: str = None,
+        formula: str | None = None,
         data: pl.DataFrame = None,
         weights=None,
         method: str = "qr",
@@ -609,19 +609,20 @@ class lm:
         self,
         formula: str,
         data: pl.DataFrame,
-        weights: Union[None, np.array] = None,
+        weights: np.ndarray | None = None,
         method: str = "qr",
         subset=None,
         na_action: str = "omit",
         contrasts=None,
         singular_ok: bool = True,
-        offset: Union[None, np.array] = None,
+        offset: np.ndarray | None = None,
     ):
 
         # R's `cbind(y1, y2, ...) ~ rhs` fits a multivariate linear model
         # (class "mlm") — m independent fits sharing one X/QR. Detect it from
         # the LHS and route to the mlm builder (which wraps m per-column `lm`s).
-        from hea.formula import parse as _parse, _multivariate_lhs_specs
+        from hea.formula import _multivariate_lhs_specs
+        from hea.formula import parse as _parse
 
         _lhs = _parse(formula).lhs
         _mv = _multivariate_lhs_specs(_lhs) if _lhs is not None else None
@@ -850,7 +851,7 @@ class lm:
 
         self.n, self.p = (
             n,
-            p,
+            _p,
         ) = X.shape  # n_samples x n_features (intercept included if available)
         # Prior weights as a length-n vector (all-ones when unweighted);
         # ``self.weights`` was already aligned to X's rows above. The
@@ -1033,7 +1034,9 @@ class lm:
         sharing a single jointly-na-omitted model frame (so every column has the
         identical X/QR — R's mlm). Combined accessors (coef p×m, fitted/residuals
         n×m, sigma per-column) delegate to the per-column sub-models."""
-        from hea.formula import parse as _parse, deparse as _deparse, _eval_lhs_expr
+        from hea.formula import _eval_lhs_expr
+        from hea.formula import deparse as _deparse
+        from hea.formula import parse as _parse
 
         self._is_mlm = True
         self.formula = formula
@@ -1994,7 +1997,7 @@ class lm:
     ):
 
         if ax is None:
-            fig, ax = plt.subplots(figsize=figsize)
+            _fig, ax = plt.subplots(figsize=figsize)
         y = self.y.to_numpy().astype(float)
         yhat = self.yhat["fit"].to_numpy().astype(float)
         ax.scatter(yhat, y, facecolor=facecolor, edgecolor=edgecolor)
@@ -2018,7 +2021,7 @@ class lm:
     ):
 
         if ax is None:
-            fig, ax = plt.subplots(figsize=figsize)
+            _fig, ax = plt.subplots(figsize=figsize)
         yhat = self.yhat["fit"].to_numpy().astype(float)
         r = self._residuals_arr
         ax.scatter(yhat, r, facecolor=facecolor, edgecolor=edgecolor)
@@ -2042,7 +2045,7 @@ class lm:
     ):
 
         if ax is None:
-            fig, ax = plt.subplots(figsize=figsize)
+            _fig, ax = plt.subplots(figsize=figsize)
         _qq_plot(ax, self.std_residuals, label_n=label_n)
         return ax
 
@@ -2057,7 +2060,7 @@ class lm:
     ):
 
         if ax is None:
-            fig, ax = plt.subplots(figsize=figsize)
+            _fig, ax = plt.subplots(figsize=figsize)
         yhat = self.yhat["fit"].to_numpy().astype(float)
         s = np.sqrt(np.abs(self.std_residuals))
         ax.scatter(yhat, s, facecolor=facecolor, edgecolor=edgecolor)
@@ -2082,7 +2085,7 @@ class lm:
     ):
 
         if ax is None:
-            fig, ax = plt.subplots(figsize=figsize)
+            _fig, ax = plt.subplots(figsize=figsize)
         h = self.leverage
         r = self.std_residuals
 

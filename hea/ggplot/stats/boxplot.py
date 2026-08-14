@@ -23,7 +23,6 @@ import polars as pl
 
 from .stat import Stat
 
-
 _DISCRETE_DTYPES = (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean)
 
 

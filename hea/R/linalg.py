@@ -13,9 +13,9 @@ calls from ``lm.fit`` / ``lm.wfit`` via ``Cdqrls`` (``stats/src/lm.c``):
 
 This is the **pure-Python spec + oracle** for the Rust port (``hea/_rs`` →
 ``dqrls``); it mirrors the Fortran line-for-line (pivot order, rank rule, the
-1e-6 norm-recompute branch) so Rust ≡ Python ≡ live R is checkable per
-[[rng-rust-port-t2]]. Per [[mechanical-port-never-guess]]: ported against the
-real sources, not reverse-engineered. ``pivot`` is returned 1-based (R parity).
+1e-6 norm-recompute branch) so Rust ≡ Python ≡ live R is checkable. Ported
+against the real sources, not reverse-engineered. ``pivot`` is returned 1-based
+(R parity).
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import numpy as np
 
 from .._dispatch import rs_fn
 
-__all__ = ["dqrdc2", "dqrsl", "dqrls", "Cdqrls", "dqrls_rank"]
+__all__ = ["Cdqrls", "dqrdc2", "dqrls", "dqrls_rank", "dqrsl"]
 
 _rs_dqrls = rs_fn("dqrls")
 _rs_dqrls_rank = rs_fn("dqrls_rank")
@@ -71,7 +71,7 @@ def dqrdc2(x: np.ndarray, tol: float = 1e-7):
     # Householder reduction of x
     lup = min(n, p)
     k = p + 1  # Fortran 'k' (1-based rank boundary)
-    for l in range(1, lup + 1):  # noqa: E741 — Fortran 'l' (1-based), kept for port fidelity
+    for l in range(1, lup + 1):
         l0 = l - 1
         # cycle columns l..p left-to-right until one has non-negligible norm;
         # a column is negligible if its norm fell below tol·(original norm).

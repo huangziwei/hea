@@ -661,10 +661,18 @@ def test_analyze_best_selects_but_does_not_invent(name, M):
     than pinning AMD; and when AMD's break check fires it never *looks* past
     AMD, which is what keeps the default as cheap as the pinned path on the
     matrices — every one here — where AMD already wins.
+
+    The second method is METIS, which is upstream's own; it used to be the
+    natural ordering, because this port had no METIS. Selecting METIS is
+    therefore not free the way selecting natural was — it runs
+    ``METIS_NodeND`` — so "never looks past AMD when the break check fires"
+    now guards real work.
     """
     best = analyze(M, ordering="best")
     amd = analyze(M, ordering="amd")
-    same_as = amd if best["ordering"] == "amd" else analyze(M, ordering="natural")
+    same_as = (
+        amd if best["ordering"] == "amd" else analyze(M, ordering=best["ordering"])
+    )
 
     np.testing.assert_array_equal(best["perm"], same_as["perm"])
     np.testing.assert_array_equal(best["colcount"], same_as["colcount"])
@@ -694,7 +702,7 @@ def test_analyze_rejects_bad_input():
     with pytest.raises(ValueError, match="stype must be nonzero"):
         _rs.analyze(5, indptr, indices, 0)
     with pytest.raises(ValueError, match="ordering must be"):
-        _rs.analyze(5, indptr, indices, 1, "metis")
+        _rs.analyze(5, indptr, indices, 1, "nesdis")
     with pytest.raises(ValueError, match="indptr has length"):
         _rs.analyze(6, indptr, indices, 1)
 
@@ -1146,14 +1154,27 @@ def test_factorize_empty_and_singleton():
     assert factorize(sp.csc_array(np.array([[4.0]])), final_ll=True)["Lx"][0] == 2.0
 
 
+def test_a_square_stype_zero_input_factorizes_aat():
+    # `stype == 0` means "unsymmetric", and CHOLMOD factorizes ``L L' = A A'``
+    # for it. On a square input that is a legal request, not a malformed one:
+    # here ``A`` is the identity, so ``A A'`` is too and ``L`` comes back with
+    # one entry per column.
+    ip = np.array([0, 1, 2], dtype=np.int64)
+    ii = np.array([0, 1], dtype=np.int64)
+    ax = np.array([1.0, 1.0])
+    f = _rs.factorize(2, ip, ii, ax, 0)
+    assert f["Lnz"].tolist() == [1, 1]
+    assert f["Li"][: f["Lnz"].sum()].tolist() == [0, 1]
+    assert f["Lx"][: f["Lnz"].sum()].tolist() == [1.0, 1.0]
+    assert f["minor"] == 2
+
+
 def test_factorize_rejects_bad_input():
     ip = np.array([0, 1, 2], dtype=np.int64)
     ii = np.array([0, 1], dtype=np.int64)
     ax = np.array([1.0, 1.0])
-    with pytest.raises(ValueError, match="stype must be nonzero"):
-        _rs.factorize(2, ip, ii, ax, 0)
     with pytest.raises(ValueError, match="ordering must be"):
-        _rs.factorize(2, ip, ii, ax, 1, ordering="metis")
+        _rs.factorize(2, ip, ii, ax, 1, ordering="nesdis")
     with pytest.raises(ValueError, match="indptr"):
         _rs.factorize(2, np.array([0, 2, 1], dtype=np.int64), ii, ax, 1)
     with pytest.raises(ValueError, match="row index"):

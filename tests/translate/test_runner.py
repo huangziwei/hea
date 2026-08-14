@@ -24,7 +24,6 @@ from hea.translate.runner import (
     run_r,
 )
 
-
 # Skip everything if R isn't on PATH — the runner is fundamentally
 # coupled to it, no point trying to mock around that.
 _HAS_R = shutil.which("R") is not None

@@ -1,11 +1,11 @@
 //! Deterministic dense Cholesky — a mechanical port of reference LAPACK
 //! `dpotf2` (the unblocked, "Level-2" factorization), lower variant.
 //!
-//! T4 spike (plan §7.3). The point is *determinism + portability*: a naive
+//! The point is *determinism + portability*: a naive
 //! in-order accumulation that gives the SAME bits on every platform/run, unlike
 //! optimized BLAS (Accelerate/OpenBLAS) whose reduction order is
-//! address/SIMD/thread dependent (the source of hea's BLAS-bistable test flakes,
-//! [[ill-cond-gam-coef-blas-bistable]] / [[cross-fit-deviance-residual-blas-flake]]).
+//! address/SIMD/thread dependent — the source of hea's BLAS-bistable test
+//! flakes on ill-conditioned fits.
 //!
 //! Op order is matched to `dpotf2` EXACTLY so it can be bit-exact to R's
 //! `chol()` in the regime where R also runs unblocked (small n, where OpenBLAS's

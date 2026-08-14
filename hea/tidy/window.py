@@ -21,7 +21,6 @@ import numpy as np
 import polars as pl
 from scipy import stats as _sps
 
-
 # ---- shared helpers (rank + sort dispatch) -------------------------
 
 
@@ -373,7 +372,7 @@ def cumall(x):
     """
     if isinstance(x, pl.Expr):
         # has_false = any FALSE so far; has_na = any NA so far
-        has_false = (x == False).fill_null(False).cum_max()  # noqa: E712
+        has_false = (x == False).fill_null(False).cum_max()
         has_na = x.is_null().cum_max()
         return pl.when(has_false).then(False).when(has_na).then(None).otherwise(True)
     return _cumall_cumany_eager(x, all_=True)

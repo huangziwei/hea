@@ -19,6 +19,17 @@
 //! parallelize loops whose results do not depend on the order, so dropping them
 //! changes nothing but speed.
 //!
+//! **Memory contract.** `A` is borrowed and nothing here keeps it; `L->x` is
+//! allocated once per factor and reused by every refactorization. The one
+//! deviation is the per-supernode scratch: upstream has exactly one `Map`
+//! (aliased onto `Common->Flag`), one `RelativeMap` (a slice of `Common->Iwork`)
+//! and one `C` (`cholmod_super_numeric.c:245`), which is correct **only because
+//! its supernode loop is serial**. Here they come from a [`WorkPool`], one set
+//! per concurrently-running task, and the pool retains one set per worker plus
+//! nothing over [`C_KEEP_DOUBLES`]. On a 3.4M-row system that is 210 MB of
+//! `Map` held and up to `nthreads × maxcsize` of `C` in flight against
+//! upstream's one. That is the memory cost of the parallelism.
+//!
 //! **`S` is the *lower* triangle here**, not the upper one the simplicial
 //! `rowfac` takes. `cholmod_factorize_p`'s supernodal branch builds
 //! `S = tril (P A P')` (`:216-238`) where its simplicial branch builds
@@ -71,6 +82,7 @@ use super::numeric::NumericError;
 use super::super_symbolic::SuperSymbolic;
 use super::symbolic::{permute_sym, Ordering, Sparse, Symbolic};
 use super::ws::{Work, Ws, EMPTY};
+use crate::nmath::util::rfma;
 
 /// A supernodal `cholmod_factor`: the symbolic pattern plus `L->x`.
 ///
@@ -104,15 +116,22 @@ pub struct SuperFactor {
 impl SuperFactor {
     /// The supernodal symbolic factor, as `cholmod_analyze` returns it: the
     /// pattern, with no numeric part yet.
-    pub fn new(s: &Symbolic, sym: SuperSymbolic) -> SuperFactor {
+    ///
+    /// Takes the [`Symbolic`] **by value**, because upstream's analysis has no
+    /// separate object to take it from: `Lperm = L->Perm` at
+    /// `cholmod_analyze.c:542`, so the trial loop's winner *is* the factor's
+    /// ordering and no copy exists. A caller that needs the analysis afterwards
+    /// clones it and can see what that costs — `2n` int64s, 52 MiB on a
+    /// 3.4M-row system.
+    pub fn new(s: Symbolic, sym: SuperSymbolic) -> SuperFactor {
         SuperFactor {
             n: sym.n,
-            perm: s.perm.clone(),
-            colcount: s.colcount.clone(),
+            minor: s.perm.len(),
+            perm: s.perm,
+            colcount: s.colcount,
             ordering: s.ordering,
             sym,
             x: Vec::new(),
-            minor: s.perm.len(),
             numeric: false,
             schedule: Schedule::default(),
         }
@@ -177,22 +196,27 @@ impl Schedule {
 struct TaskWork {
     /// `Map`, size `n`.
     map: Vec<i64>,
-    /// `RelativeMap`, size `n`.
+    /// `RelativeMap`. Upstream's is a size-`n` slice of the shared `Iwork`;
+    /// here there is one per task, and it is indexed `0 .. ndrow2`, so it is
+    /// sized `L->maxesize` instead — `ndrow2` counts a descendant's rows
+    /// outside its own columns, which is what `maxesize` bounds. At `n` it was
+    /// 27 MB per task on a 3.4M-row system, for 33 KB of use.
     relative_map: Vec<i64>,
     /// `C`, grown to whatever this task's largest update needs rather than to
     /// `L->maxcsize`: the big `C`s belong to the supernodes near the root, and
     /// sizing every task's buffer for those would cost `nthreads` times the
-    /// largest one.
+    /// largest one. Anything over [`C_KEEP_DOUBLES`] is released when the
+    /// workspace goes back to the pool — see [`WorkPool::give`].
     c: Vec<f64>,
     /// One `C` per concurrently-computed descendant; see [`apply_updates`].
     bufs: Vec<Vec<f64>>,
 }
 
 impl TaskWork {
-    fn new(n: usize) -> TaskWork {
+    fn new(n: usize, esize: usize) -> TaskWork {
         TaskWork {
             map: vec![EMPTY; n],
-            relative_map: vec![0; n],
+            relative_map: vec![0; esize],
             c: Vec::new(),
             bufs: Vec::new(),
         }
@@ -210,14 +234,21 @@ impl TaskWork {
 #[derive(Debug, Default)]
 struct WorkPool {
     n: usize,
+    esize: usize,
+    /// How many workspaces the free list keeps between calls — the pool may
+    /// still hand out more than this at once, it just does not hoard them.
+    keep: usize,
     free: Mutex<Vec<TaskWork>>,
 }
 
 impl WorkPool {
-    /// Size the pool for an `n`-by-`n` factor, discarding it if `n` changed.
-    fn ensure(&mut self, n: usize) {
-        if self.n != n {
+    /// Size the pool for an `n`-by-`n` factor, discarding it if the shape
+    /// changed.
+    fn ensure(&mut self, n: usize, esize: usize, keep: usize) {
+        self.keep = keep;
+        if self.n != n || self.esize != esize {
             self.n = n;
+            self.esize = esize;
             self.free
                 .get_mut()
                 .unwrap_or_else(|e| e.into_inner())
@@ -230,13 +261,43 @@ impl WorkPool {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .pop()
-            .unwrap_or_else(|| TaskWork::new(self.n))
+            .unwrap_or_else(|| TaskWork::new(self.n, self.esize))
     }
 
-    fn give(&self, w: TaskWork) {
-        self.free.lock().unwrap_or_else(|e| e.into_inner()).push(w);
+    /// Return a workspace, keeping only what is worth keeping.
+    ///
+    /// Two separate hoards, and both were real on a 3.4M-row system. The big
+    /// `C`s belong to the supernodes near the root and only a couple of tasks
+    /// are inside one at a time, but every task that had *ever* held one kept
+    /// it — ~13 × 139 MB. And the pool itself grows to whatever concurrency the
+    /// joins reached, so `Map` alone (size `n`, 27 MB here) was held that many
+    /// times over for the rest of the process. Re-allocating either is
+    /// `alloc_zeroed`, so the pages come from the kernel already zero and cost
+    /// the same first-touch faults the writes would take anyway.
+    ///
+    /// The cap is on what is *retained*, never on what is handed out: `take`
+    /// still allocates on demand, so a burst of concurrency cannot deadlock
+    /// against it.
+    fn give(&self, mut w: TaskWork) {
+        if w.c.len() > C_KEEP_DOUBLES {
+            w.c = Vec::new();
+        }
+        for b in w.bufs.iter_mut() {
+            if b.len() > C_KEEP_DOUBLES {
+                *b = Vec::new();
+            }
+        }
+        let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        if free.len() < self.keep {
+            free.push(w);
+        }
     }
 }
+
+/// The largest `C` a returned [`TaskWork`] keeps, in doubles. Big enough that
+/// the overwhelming majority of supernodes — whose updates are a few rows by a
+/// few columns — never re-allocate.
+const C_KEEP_DOUBLES: usize = 1 << 16;
 
 /// What the last factorization did, so that "the parallel path ran" is a number
 /// rather than an assumption.
@@ -264,14 +325,14 @@ pub struct SuperWork {
     descs: Vec<Desc>,
     counters: Counters,
     /// The batch size, in flops, at which the updates of one supernode go
-    /// wide — [`PAR_FLOPS`], except in [`SuperWork::pinned`].
+    /// wide — [`PAR_FLOPS`], except under `SuperWork::pinned`.
     par_flops: f64,
     /// The subtree size, in flops, at which a supernode's children are forked
-    /// rather than run in index order — [`TREE_FLOPS`], except in
-    /// [`SuperWork::pinned`].
+    /// rather than run in index order — [`TREE_FLOPS`], except under
+    /// `SuperWork::pinned`.
     tree_flops: f64,
     /// Take [`worker`]'s fused link-list walk rather than [`par_numeric`]. Set
-    /// only by [`SuperWork::pinned`]; the fallback itself does not need it,
+    /// only by `SuperWork::pinned`; the fallback itself does not need it,
     /// since it is reached by [`par_numeric`] returning `false`.
     force_serial: bool,
 }
@@ -298,7 +359,7 @@ impl SuperWork {
     /// how the corpus tests drive every arm rather than whichever one the
     /// defaults happen to select on a small matrix. All four combinations have
     /// to produce the same `L->x`, bit for bit.
-    #[cfg(test)]
+    #[cfg(all(test, not(vendor_blas)))]
     pub(super) fn pinned(par_flops: f64, tree_flops: f64, force_serial: bool) -> SuperWork {
         SuperWork {
             par_flops,
@@ -309,7 +370,7 @@ impl SuperWork {
     }
 
     /// Updates computed on the batched arm, and supernodes that forked.
-    #[cfg(test)]
+    #[cfg(all(test, not(vendor_blas)))]
     pub(super) fn counts(&self) -> (usize, usize) {
         (
             self.counters.wide.load(Atomic::Relaxed),
@@ -371,7 +432,7 @@ impl Desc {
 ///
 /// [`worker`] keeps its own fused walk rather than reading this, because on a
 /// non-positive-definite matrix upstream *replays* the walk for the failing
-/// supernode (`repeat_supernode`, `:301-318`) and the plan assumes success.
+/// supernode (`repeat_supernode`, `:301-318`) and [`Plan`] assumes success.
 #[derive(Debug, Clone, Default)]
 struct Plan {
     /// `descs [dptr [s] .. dptr [s+1])` are supernode `s`'s updates.
@@ -620,7 +681,33 @@ const BATCH_DOUBLES: usize = 4 << 20;
 /// The kernels run at tens of GF/s, so this is tens of microseconds of work
 /// against a join that costs a few — and it has to be a *batch* total rather
 /// than a per-update one, because the batch is what rayon splits.
+///
+/// This arm is two builds, and they want the same value for the same reason:
+/// the portable kernels are one thread per call, and so is OpenBLAS here, since
+/// [`super::blas::init`] pins it to one inside hea's pool. Either way this fork
+/// *is* the parallelism, which is why the number is four orders of magnitude
+/// below the `accelerate` one below.
+///
+/// Raising it trades the two regimes against each other, which is why it stays
+/// where it is. Small systems gain a few percent of core from batches that no
+/// longer fork and so no longer pay for the join; multi-million-row systems lose
+/// several percent of the wall clock, and the wall clock at scale outranks core
+/// on a 35 ms factorization. Both backends on this arm read the same shape.
+#[cfg(not(accelerate))]
 const PAR_FLOPS: f64 = 5.0e5;
+
+/// Four orders of magnitude higher when the BLAS threads the call itself, which
+/// is the same predicate [`strip_width`] splits on and for the same reason: with
+/// Accelerate underneath, forking the descendants of one supernode puts a second
+/// scheduler on top of the vendor's own, and it is pure loss on both axes.
+/// Raising it to here costs nothing on the wall clock — it improves — and drops
+/// the CPU by 1.4-2.2x. Multi-million-row systems neither gain nor object: their
+/// own updates are far above any threshold in this range and fork regardless.
+///
+/// Without a threaded BLAS this fork *is* the parallelism and raising it is a
+/// 1.75x wall regression, which is why the two arms differ.
+#[cfg(accelerate)]
+const PAR_FLOPS: f64 = 1.0e9;
 
 /// Below this much work under a supernode, its children are walked in index
 /// order rather than forked.
@@ -628,7 +715,7 @@ const TREE_FLOPS: f64 = 1.0e6;
 
 /// A valve, not a tuning knob: past this nesting the children are walked in
 /// index order whatever their weight, so a pathological tree cannot recurse the
-/// stack away. Measured nesting on the benchmark corpus is 9-23.
+/// stack away. Real elimination trees nest an order of magnitude below it.
 const MAX_FORK_DEPTH: u32 = 48;
 
 /// Roughly what one strip of one update should be worth. Small enough that the
@@ -636,12 +723,96 @@ const MAX_FORK_DEPTH: u32 = 48;
 /// strip is worth being a task.
 const STRIP_FLOPS: f64 = 1.0e5;
 
-/// How many columns of one update's `C` go in a strip — [`STRIP_FLOPS`] worth,
-/// rounded up to [`SYRK_NB`] so the strip's block columns are the ones the
-/// unsplit call would use.
-fn strip_width(g: &Desc) -> usize {
+/// The narrowest strip worth cutting once the descendant's `L1` no longer fits
+/// a cache.
+///
+/// A strip `w` columns wide re-reads the whole of the descendant's `L1` and uses
+/// each element `w` times, so `w` *is* the update's arithmetic intensity. On one
+/// core the kernel climbs steeply from 8 columns to 128 and is flat past it, so
+/// 128 is where the width stops paying for itself.
+///
+/// [`STRIP_FLOPS`] alone puts the flop-heavy descendants of a large system at the
+/// left end of that curve — millions of flops per column, so a single column
+/// already meets the budget — and cuts a 1300-column update into 163 strips.
+const STRIP_MIN_COLS: usize = 128;
+
+/// How big the operand a strip re-reads has to be before [`STRIP_MIN_COLS`]
+/// applies at all. Below this the re-read comes out of cache and costs nothing,
+/// so the strip may be as narrow as [`STRIP_FLOPS`] wants and the extra tasks
+/// are free.
+///
+/// The gate is on the mechanism rather than on a size threshold for the matrix,
+/// because the mechanism is what differs: applying [`STRIP_MIN_COLS`]
+/// unconditionally costs 10-16% on systems whose descendants stream a few
+/// hundred kilobytes and want every task the flop budget will give them.
+const STRIP_RESIDENT_BYTES: usize = 2 << 20;
+
+/// The most strips a *non-resident* descendant is cut into, per thread — a
+/// bound on the count, where [`STRIP_MIN_COLS`] is a bound on the width. It is
+/// an interior optimum: halving it costs the small regime ~12% and doubling it
+/// costs the large one ~15%.
+const STRIP_OVER: usize = 4;
+
+/// Roughly how many strips per thread one batch of updates is cut into, and so
+/// where the relative budget in [`strip_width`] crosses [`STRIP_FLOPS`] and
+/// starts to bind at all.
+///
+/// A strip exists for load balance, and load balance wants a few tasks per
+/// thread — not a count proportional to the work. [`STRIP_FLOPS`] alone is an
+/// absolute budget, so a batch with a hundred times the flops in it gets a
+/// hundred times the tasks, all of which the pool has to hand out and collect.
+/// That is right where there is not enough work to go round and pure overhead
+/// where there is.
+///
+/// 16 is an interior optimum, and unusually for the width constants in this file
+/// it is not a trade between the two regimes: it is the best value on small and
+/// large systems alike, worth 2-6% of the wall clock over the plain absolute
+/// budget. At 64 a trade does reappear, costing the small regime ~9% of its core
+/// for the same wall clock, the strips having grown wide enough to unbalance the
+/// tail.
+///
+/// Only the `not(accelerate)` arm reaches this: [`strip_width`] hands the whole
+/// update to a threading BLAS before any of it runs.
+const STRIP_TASKS: usize = 16;
+
+/// How many columns of one update's `C` go in a strip.
+///
+/// [`STRIP_FLOPS`] worth, rounded up to [`SYRK_NB`] so the strip's block columns
+/// are the ones the unsplit call would use. A descendant whose `L1`/`L2` no
+/// longer fits a cache — see [`STRIP_RESIDENT_BYTES`] — additionally gets at
+/// least [`STRIP_MIN_COLS`] columns and at most [`STRIP_OVER`] strips per
+/// thread, because for those the re-read is the cost and the flop budget alone
+/// cuts far too fine. Below that size nothing changes: the extra tasks are free
+/// and the systems made of them want every one.
+///
+/// On one thread there is nothing to balance, so the strip is the whole update
+/// and the kernel gets its widest call.
+fn strip_width(g: &Desc, nt: usize, batch_flops: f64) -> usize {
+    let ndrow1 = g.ndrow1 as usize;
+    /* A threaded BLAS wants upstream's whole call, and the split exists only to
+     * give a one-thread-per-call kernel a shape. That is a statement about the
+     * *library*, not about the feature: Accelerate threads, so it gets the whole
+     * call, but OpenBLAS is pinned to one thread here — see `blas::init` — and
+     * the pool needs the tasks. What Accelerate does *not* do is stand down
+     * inside a pool: measured, it takes 1.06-1.30 threads' worth of CPU at
+     * `RAYON_NUM_THREADS=1`, and pinning it with `VECLIB_MAXIMUM_THREADS=1`
+     * costs the 3.4M-row system 12% of its wall clock for 21% of its CPU. That
+     * trade is the caller's to make, so it stays an environment variable. */
+    if nt <= 1 || cfg!(accelerate) {
+        return ndrow1.max(1);
+    }
     let per_col = 2.0 * g.ndrow2 as f64 * g.ndcol as f64;
-    let cols = (STRIP_FLOPS / per_col).ceil().max(1.0) as usize;
+    /* Relative to the batch and floored at the absolute budget, so a
+     * flop-heavy batch gets *wider* strips rather than more of them, and a
+     * batch below the crossing falls back to the absolute budget entry for
+     * entry. See `STRIP_TASKS`. */
+    let budget = (batch_flops / (STRIP_TASKS * nt) as f64).max(STRIP_FLOPS);
+    let mut cols = (budget / per_col).ceil().max(1.0) as usize;
+    if 8 * g.ndrow2 as usize * g.ndcol as usize > STRIP_RESIDENT_BYTES {
+        cols = cols
+            .max(STRIP_MIN_COLS)
+            .max(ndrow1.div_ceil(nt * STRIP_OVER));
+    }
     cols.div_ceil(SYRK_NB) * SYRK_NB
 }
 
@@ -659,6 +830,7 @@ fn strip_width(g: &Desc) -> usize {
 /// A strip changes which thread computes an entry and nothing else: the `gemm`
 /// calls are the same calls on the same block columns, so every entry is still
 /// accumulated over `l` ascending in one place.
+#[cfg_attr(feature = "profiling", inline(never))]
 fn update_strip(lx: &[f64], base: i64, g: &Desc, j0: usize, jn: usize, c: &mut [f64]) {
     let (ndrow, ndcol) = (g.ndrow as usize, g.ndcol as usize);
     let (ndrow1, ndrow2) = (g.ndrow1 as usize, g.ndrow2 as usize);
@@ -693,14 +865,59 @@ fn update_strip(lx: &[f64], base: i64, g: &Desc, j0: usize, jn: usize, c: &mut [
 }
 
 /// The whole of one descendant's `C`, i.e. [`update_strip`] over every column.
+#[cfg_attr(feature = "profiling", inline(never))]
 fn update_c(lx: &[f64], base: i64, g: &Desc, c: &mut [f64]) {
     update_strip(lx, base, g, 0, g.ndrow1 as usize, c);
+}
+
+/// `Common->chunk` (`Utility/t_cholmod_start.c:44`) — the work one thread must
+/// be given before a second is worth adding.
+const CHUNK: f64 = 128000.0;
+
+/// `cholmod_nthreads (work, Common)` (`Include/cholmod_internal.h:566-587`).
+///
+/// `floor (work / chunk)`, clamped to `[1, nthreads_max]`. Deliberately
+/// conservative — most of the loops upstream guards with it never reach two
+/// threads at these shapes, and that is upstream's answer, not an oversight to
+/// correct. Porting the *rule* rather than a threshold of our own is the point:
+/// hea's own `PAR_FLOPS`/`TREE_FLOPS`/`STRIP_FLOPS` gate the tree and strip
+/// splits, which upstream does not have at all, but a loop upstream *does*
+/// thread is gated the way upstream gates it.
+#[inline]
+fn nthreads(work: f64, max: usize) -> usize {
+    (work.max(1.0) / CHUNK).floor().clamp(1.0, max as f64) as usize
 }
 
 /// The relative map and the scatter of one `C` into the supernode — `:1037-1050`.
 ///
 /// `sx` is `L->x` from `psx` on, so upstream's `psx + RelativeMap [j] * nsrow`
 /// loses its `psx`.
+///
+/// **Both loops are `#pragma omp parallel for` upstream**, and only the second
+/// has a parallel arm here. `:897` over `ndrow2` gates on
+/// `cholmod_nthreads (ndrow2)`, which needs `ndrow2` at twice `Common->chunk`
+/// before a second thread appears — far above any `ndrow2` these
+/// factorizations reach — so it is serial for the same reason the `Map` build
+/// is. `:915` over `ndrow1` gates on `cholmod_nthreads (ndcol * ndrow2)`, a
+/// product, and that one does fire.
+///
+/// The `j` loop is safe to split for a reason worth stating rather than
+/// re-deriving: `px = RelativeMap [j] * nsrow`, so **iteration `j` writes column
+/// `RelativeMap [j]` and nothing else**. `RelativeMap` is injective — `Map` is a
+/// bijection from `s`'s rows onto `0 .. nsrow`, and `Ls [pdi1 ..]` are distinct
+/// — so distinct `j` touch distinct columns and no entry is written twice.
+/// Nothing accumulates across `j`, so there is no summation order to preserve
+/// and the split is bit-exact by construction, not by argument.
+///
+/// It is in fact strictly *increasing*, since `Ls` is ascending within a
+/// supernode and `Map` is order-preserving on it. That is what lets the columns
+/// be carved out of `sx` in one forward pass with `chunks_mut`, with no `unsafe`
+/// and no second lookup.
+///
+/// This is only about the `j` loop of *one* descendant. Two descendants can hit
+/// the same entry of `s`, so [`apply_updates`] still assembles them one at a
+/// time in link-list order — see its docstring. The two were conflated once, and
+/// the outer constraint was wrongly inherited by the inner loop.
 fn assemble(
     g: &Desc,
     c: &[f64],
@@ -709,11 +926,19 @@ fn assemble(
     ls: &Ws,
     map: &Ws,
     relative_map: &mut Ws,
+    nt: usize,
 ) {
     /* construct relative map to supernode s */
     for i in 0..g.ndrow2 {
         relative_map[i] = map[ls[g.pdi1 + i]];
         debug_assert!(relative_map[i] >= 0 && relative_map[i] < nsrow);
+    }
+
+    /* work = ndcol * ndrow2 (`:911`), and `if (ndrow1 > 64)` */
+    let work = g.ndcol as f64 * g.ndrow2 as f64;
+    if g.ndrow1 > 64 && nthreads(work, nt) > 1 {
+        assemble_par(g, c, sx, nsrow, relative_map);
+        return;
     }
 
     let sx = Ws::new(sx);
@@ -729,18 +954,79 @@ fn assemble(
     }
 }
 
+/// [`assemble`]'s `j` loop with the columns split across threads.
+///
+/// Same entries, same values, same single `-=` per entry — only the thread that
+/// performs it changes. The `i` loop starts at `j`, so the columns are unequal
+/// (the first does `ndrow2` rows, the last does one); `par_iter_mut` steals, so
+/// they do not need to be equal.
+fn assemble_par(g: &Desc, c: &[f64], sx: &mut [f64], nsrow: i64, relative_map: &Ws) {
+    /* `RelativeMap` is strictly increasing, so one forward pass over the
+     * supernode's columns picks out the ones this descendant writes. */
+    let mut cols: Vec<&mut [f64]> = Vec::with_capacity(g.ndrow1 as usize);
+    let mut rest = sx;
+    let mut at = 0i64;
+    for j in 0..g.ndrow1 {
+        let want = relative_map[j];
+        debug_assert!(want >= at, "RelativeMap must ascend");
+        let skip = ((want - at) * nsrow) as usize;
+        let (_, tail) = rest.split_at_mut(skip);
+        let (col, tail) = tail.split_at_mut(nsrow as usize);
+        cols.push(col);
+        rest = tail;
+        at = want + 1;
+    }
+
+    let cw = Ws::new_ref(c);
+    cols.par_iter_mut().enumerate().for_each(|(j, col)| {
+        let col = Ws::new(col);
+        let j = j as i64;
+        for i in j..g.ndrow2 {
+            col[relative_map[i]] -= cw[i + g.ndrow2 * j];
+        }
+    });
+}
+
+/// Make `buf` at least `need` long, discarding what is in it.
+///
+/// A fresh allocation and not `Vec::resize`, because nothing in the old
+/// contents is wanted: `update_c` writes every entry `assemble` reads, and
+/// `resize` would `realloc` — copying the stale bytes — and then `memset` the
+/// tail. `vec![0.0; n]` goes through `alloc_zeroed`, so for a `C` in the tens of
+/// megabytes the pages arrive already zero and are faulted in by the writes that
+/// were going to happen anyway. Growing a 139 MB `C` a supernode at a time was
+/// 12% of the factorization's busy samples in `__bzero`/`memmove`/`memset`.
+#[inline]
+fn grow_c(buf: &mut Vec<f64>, need: usize) {
+    if buf.len() < need {
+        *buf = vec![0.0; need];
+    }
+}
+
 /// Apply every pending update of one supernode, in the link list's order.
 ///
 /// The updates are independent — each reads a different descendant's block of
 /// `L` and writes its own `C` — but their assemblies are not, because two
 /// descendants can hit the same entry of the supernode. So `C` is what goes
-/// wide and the assembly stays serial and in order, which is what keeps `L->x`
+/// wide and *this* loop stays serial and in order, which is what keeps `L->x`
 /// bit-for-bit what the one-at-a-time loop produces. It is also why the batch
 /// is a batch: the buffers are live simultaneously, so their total size is
 /// capped.
 ///
+/// That constraint stops here: inside one [`assemble`] the column loop is
+/// disjoint, and upstream threads it.
+///
 /// The parallel and serial arms differ only in *which* `C` buffer each update
-/// gets. Both call [`update_c`] and [`assemble`] with the same arguments.
+/// gets, and in whether its columns are cut into strips. Both compute the same
+/// `C` entries the same way and hand them to [`assemble`] in the same order.
+///
+/// The arm is chosen on the work, not on the batch size. Requiring
+/// `batch.len() > 1` would read like a concurrency test but is really a
+/// statement about buffer count: the batch loop stops once the live `C`s reach
+/// [`BATCH_DOUBLES`], so a descendant whose own `C` exceeds that is always alone
+/// in its batch — and that is precisely the descendant with the most flops in
+/// it. On a multi-million-row system the largest `C` runs to hundreds of
+/// megabytes, so every one of the heaviest updates would take the serial arm.
 fn apply_updates(
     ctx: &Ctx,
     descs: &[Desc],
@@ -769,23 +1055,31 @@ fn apply_updates(
         }
         let batch = &descs[i0..i1];
 
-        if batch.len() > 1 && flops >= ctx.par_flops {
-            if bufs.len() < batch.len() {
-                bufs.resize_with(batch.len(), Vec::new);
-            }
-            for (buf, g) in bufs.iter_mut().zip(batch) {
-                if buf.len() < g.csize() {
-                    buf.resize(g.csize(), 0.0);
+        if ctx.threads && flops >= ctx.par_flops {
+            /* One `C` per descendant, and for a lone one the serial path's own
+             * buffer — a descendant whose `C` is already over `BATCH_DOUBLES`
+             * is a batch of one, and it is exactly the descendant with the most
+             * flops in it. Giving that case the serial arm left the largest
+             * updates in the factorization single-threaded. */
+            let bufs: &mut [Vec<f64>] = if batch.len() == 1 {
+                core::slice::from_mut(c)
+            } else {
+                if bufs.len() < batch.len() {
+                    bufs.resize_with(batch.len(), Vec::new);
                 }
+                &mut bufs[..batch.len()]
+            };
+            for (buf, g) in bufs.iter_mut().zip(batch) {
+                grow_c(buf, g.csize());
             }
             {
                 /* One task per strip rather than per descendant: a supernode's
                  * descendants differ in size by orders of magnitude, and a
                  * batch cannot finish before its largest member does. */
                 let mut tasks: Vec<(Desc, usize, usize, &mut [f64])> = Vec::new();
-                for (buf, g) in bufs[..batch.len()].iter_mut().zip(batch) {
+                for (buf, g) in bufs.iter_mut().zip(batch) {
                     let (ndrow1, ndrow2) = (g.ndrow1 as usize, g.ndrow2 as usize);
-                    let width = strip_width(g);
+                    let width = strip_width(g, ctx.nthreads, flops);
                     let mut rest = &mut buf[..ndrow1 * ndrow2];
                     let mut j0 = 0;
                     while j0 < ndrow1 {
@@ -802,15 +1096,13 @@ fn apply_updates(
             }
             ctx.counters.wide.fetch_add(batch.len(), Atomic::Relaxed);
             for (buf, g) in bufs.iter().zip(batch) {
-                assemble(g, buf, sx, nsrow, ctx.ls, map, relative_map);
+                assemble(g, buf, sx, nsrow, ctx.ls, map, relative_map, ctx.nthreads);
             }
         } else {
             for g in batch {
-                if c.len() < g.csize() {
-                    c.resize(g.csize(), 0.0);
-                }
+                grow_c(c, g.csize());
                 update_c(lower, base, g, c);
-                assemble(g, c, sx, nsrow, ctx.ls, map, relative_map);
+                assemble(g, c, sx, nsrow, ctx.ls, map, relative_map, ctx.nthreads);
             }
         }
         i0 = i1;
@@ -827,6 +1119,10 @@ struct Ctx<'a> {
     ap: &'a Ws,
     ai: &'a Ws,
     ax: &'a Ws<f64>,
+    /// `F` — `A'` in column form — present exactly when `A->stype == 0`, where
+    /// the supernode is assembled from `A*F` rather than from `A` itself
+    /// (`t_cholmod_super_numeric_worker.c:441-500`).
+    f: Option<(&'a Ws, &'a Ws, &'a Ws<f64>)>,
     ls: &'a Ws,
     lpi: &'a Ws,
     lpx: &'a Ws,
@@ -885,7 +1181,15 @@ fn node_numeric(
     //--------------------------------------------------------------------------
 
     /* If row i is the kth row in s, then Map [i] = k.  Similarly, if
-     * column j is the kth column in s, then  Map [j] = k. */
+     * column j is the kth column in s, then  Map [j] = k.
+     *
+     * Upstream wraps this in `#pragma omp parallel for if (nsrow > 128)` with
+     * `cholmod_nthreads (nsrow)` (`:387-397`), which hands out a second thread
+     * only once `nsrow` reaches twice `Common->chunk`. Serial here because
+     * that is two orders of magnitude wider than the widest supernode these
+     * factorizations build, so a parallel arm would be unreachable — and an
+     * unreachable arm is one no gate can check. The same applies to the copy
+     * below and to `assemble`'s relative map. */
     {
         let map = Ws::new(&mut tw.map);
         for k in 0..nsrow {
@@ -897,22 +1201,49 @@ fn node_numeric(
     // copy matrix into supernode s (lower triangular part only)
     //--------------------------------------------------------------------------
 
+    /* Upstream's `#pragma omp parallel for if (k2-k1 > 64)` (`:437-439`) takes
+     * its thread count from the nonzeros this column block reads, not from the
+     * column count, and needs twice `Common->chunk` of them. Serial here for
+     * the reason given at the `Map` build above. */
     {
         let map = Ws::new_ref(&tw.map);
         let sx = Ws::new(own);
         for k in k1..k2 {
-            /* copy the kth column of A into the supernode */
-            for p in ctx.ap[k]..ctx.ap[k + 1] {
-                /* row i of L is located in row Map [i] of s */
-                let i = ctx.ai[p];
-                if i >= k {
-                    /* If the test is false, the numeric factorization of A
-                     * is undefined.  The test does not detect all invalid
-                     * entries, only some of them. */
-                    let imap = map[i];
-                    if imap >= 0 && imap < nsrow {
-                        /* Lx [Map [i] + pk] = Ax [p] */
-                        sx[imap + (k - k1) * nsrow] = ctx.ax[p];
+            match ctx.f {
+                None => {
+                    /* copy the kth column of A into the supernode */
+                    for p in ctx.ap[k]..ctx.ap[k + 1] {
+                        /* row i of L is located in row Map [i] of s */
+                        let i = ctx.ai[p];
+                        if i >= k {
+                            /* If the test is false, the numeric factorization
+                             * of A is undefined.  The test does not detect all
+                             * invalid entries, only some of them. */
+                            let imap = map[i];
+                            if imap >= 0 && imap < nsrow {
+                                /* Lx [Map [i] + pk] = Ax [p] */
+                                sx[imap + (k - k1) * nsrow] = ctx.ax[p];
+                            }
+                        }
+                    }
+                }
+                Some((fp, fi, fx)) => {
+                    /* copy the kth column of A*F into the supernode */
+                    for pf in fp[k]..fp[k + 1] {
+                        let j = fi[pf];
+                        let fjk = fx[pf];
+                        for p in ctx.ap[j]..ctx.ap[j + 1] {
+                            let i = ctx.ai[p];
+                            if i >= k {
+                                /* see the discussion of imap above */
+                                let imap = map[i];
+                                if imap >= 0 && imap < nsrow {
+                                    /* Lx [Map [i] + pk] += Ax [p] * fjk */
+                                    let q = imap + (k - k1) * nsrow;
+                                    sx[q] = rfma(ctx.ax[p], fjk, sx[q]);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1015,6 +1346,16 @@ fn node(
 /// subtree the interval `first [s] ..= s`, so ascending index order is a
 /// topological order, and running it iteratively is what keeps a long chain of
 /// supernodes off the stack.
+///
+/// **A single-child node is walked through, not given up on.** `s` with one
+/// child has nothing to fork *at `s`*, but the branching may be one link down,
+/// and taking the serial arm there hands the whole subtree — every branch under
+/// it — to one thread. Near the root of an AMD tree those chains are common and
+/// they carry most of the flops. So the chain is followed to the first node that
+/// does branch, that node forks, and the chain itself runs afterwards in
+/// ascending index order: a node whose only child is `c` is `c + 1` under
+/// postorder, so "the chain" is a contiguous run of indices and running it
+/// after `c`'s subtree is the same topological order the serial arm uses.
 #[allow(clippy::too_many_arguments)]
 fn subtree(
     ctx: &Ctx,
@@ -1027,13 +1368,25 @@ fn subtree(
     lx: &mut [f64],
     depth: u32,
 ) {
-    let kids = tree.kids(s);
-    let fork = ctx.threads
-        && depth < MAX_FORK_DEPTH
-        && kids.len() > 1
-        && tree.subwork[s] - tree.work[s] >= ctx.tree_flops;
+    let worth =
+        ctx.threads && depth < MAX_FORK_DEPTH && tree.subwork[s] - tree.work[s] >= ctx.tree_flops;
 
-    if !fork {
+    /* follow single-child links down to the first branch */
+    let mut top = s;
+    if worth {
+        while tree.kids(top).len() == 1 {
+            let c = tree.kids(top)[0] as usize;
+            debug_assert_eq!(
+                c + 1,
+                top,
+                "postorder makes a single child the previous index"
+            );
+            top = c;
+        }
+    }
+    let kids = tree.kids(top);
+
+    if !worth || kids.len() < 2 {
         let mut tw = pool.take();
         for t in tree.first[s]..=s {
             node(ctx, plan, failed, t, base, lx, &mut tw);
@@ -1043,8 +1396,11 @@ fn subtree(
     }
 
     {
+        /* the fork only reaches `px [top+1]`; the reborrow ends with this
+         * block, so the chain below gets `lx` whole again */
+        let head = &mut lx[..(ctx.lpx[top + 1] - base) as usize];
         let mut jobs: Vec<(usize, i64, &mut [f64])> = Vec::with_capacity(kids.len());
-        let mut rest = &mut lx[..];
+        let mut rest = &mut head[..];
         let mut cur = base;
         for &c in kids {
             let c = c as usize;
@@ -1054,14 +1410,18 @@ fn subtree(
             rest = tail;
             cur = end;
         }
-        debug_assert_eq!(cur, ctx.lpx[s]);
+        debug_assert_eq!(cur, ctx.lpx[top]);
         jobs.par_iter_mut()
             .for_each(|(c, b, sl)| subtree(ctx, tree, plan, pool, failed, *c, *b, sl, depth + 1));
     }
     ctx.counters.forked.fetch_add(1, Atomic::Relaxed);
 
+    /* `top`, then the chain that led down to it — ascending index order, which
+     * postorder makes a topological one */
     let mut tw = pool.take();
-    node(ctx, plan, failed, s, base, lx, &mut tw);
+    for t in top..=s {
+        node(ctx, plan, failed, t, base, lx, &mut tw);
+    }
     pool.give(tw);
 }
 
@@ -1361,6 +1721,7 @@ fn worker(
 /// clear.
 pub fn super_numeric(
     a: &Sparse,
+    f: Option<&Sparse>,
     beta: f64,
     l: &mut SuperFactor,
     work: &mut Work,
@@ -1369,25 +1730,32 @@ pub fn super_numeric(
     let n = l.n;
     let nsuper = l.sym.nsuper;
 
-    if a.stype == 0 {
+    if (a.stype == 0) != f.is_some() {
         return Err(NumericError::Invalid(
-            "stype must be nonzero: this port factorizes LL' = A for a \
-             symmetric A, not LL' = AA'",
+            "super_numeric needs F exactly when A->stype is zero",
         ));
     }
-    if a.n != n {
+    if a.nrow != n {
         return Err(NumericError::Invalid("dimensions of A and L do not match"));
     }
     if !a.numeric {
         return Err(NumericError::Invalid("A has no numeric values"));
     }
 
+    #[cfg(vendor_blas)]
+    super::blas::init();
+
     /* allocate workspace in Common: w = 2*nrow + 5*nsuper.  Map and
      * RelativeMap are per-task here (see TaskWork), so the two n-sized slots
      * upstream carves for them go unused; the request is left at upstream's
      * size because Work is shared and only ever grows. */
-    work.ensure_iwork(2 * n + 5 * nsuper);
-    cwork.pool.ensure(n);
+    work.allocate(n, 2 * n + 5 * nsuper, 0);
+    /* One workspace per worker is what a refactorization can reuse without
+     * hoarding: more than that only ever exist because a worker blocked on a
+     * join stole another task, and those are transient. */
+    cwork
+        .pool
+        .ensure(n, l.sym.maxesize.max(1), rayon::current_num_threads());
 
     /* get the current factor L and allocate numerical part, if needed */
     if !l.numeric {
@@ -1436,59 +1804,141 @@ pub fn super_numeric(
 
     l.schedule.ensure(&l.sym, supermap);
 
-    let ctx = Ctx {
-        ap: Ws::new_ref(&a.p),
-        ai: Ws::new_ref(&a.i),
-        ax: Ws::new_ref(&a.x),
-        ls: Ws::new_ref(&l.sym.s),
-        lpi: Ws::new_ref(&l.sym.pi),
-        lpx: Ws::new_ref(&l.sym.px),
-        sup: Ws::new_ref(&l.sym.sup),
-        beta,
-        n,
-        nsuper,
-        xsize: l.sym.xsize,
-        par_flops: *par_flops,
-        tree_flops: *tree_flops,
-        threads: rayon::current_num_threads() > 1,
-        nthreads: rayon::current_num_threads(),
-        counters,
+    /* Inside [`numeric_pool`], so `current_num_threads` is the pool that will
+     * actually run this and not the process-wide one — `ctx.nthreads` is what
+     * the panel kernels split against, so reading it outside would size every
+     * fork for a width the workers do not have. */
+    let mut run = || {
+        let ctx = Ctx {
+            ap: Ws::new_ref(&a.p),
+            ai: Ws::new_ref(&a.i),
+            ax: Ws::new_ref(&a.x),
+            f: f.map(|f| (Ws::new_ref(&f.p), Ws::new_ref(&f.i), Ws::new_ref(&f.x))),
+            ls: Ws::new_ref(&l.sym.s),
+            lpi: Ws::new_ref(&l.sym.pi),
+            lpx: Ws::new_ref(&l.sym.px),
+            sup: Ws::new_ref(&l.sym.sup),
+            beta,
+            n,
+            nsuper,
+            xsize: l.sym.xsize,
+            par_flops: *par_flops,
+            tree_flops: *tree_flops,
+            threads: rayon::current_num_threads() > 1,
+            nthreads: rayon::current_num_threads(),
+            counters,
+        };
+
+        let sched = &l.schedule;
+        if sched.postordered
+            && !*force_serial
+            && par_numeric(&ctx, &sched.tree, &sched.plan, pool, &mut l.x)
+        {
+            l.minor = n;
+            return;
+        }
+
+        /* Either the tree could not be used, or a supernode was not positive
+         * definite and L->x is garbage.  Upstream's loop rewrites every entry of
+         * L->x before reading it, so re-running it from the top is a clean slate
+         * and not a repair. */
+        let mut tw = pool.take();
+        worker(
+            &ctx,
+            &mut l.x,
+            &mut l.minor,
+            &mut tw,
+            supermap,
+            Ws::new(next),
+            Ws::new(lpos),
+            Ws::new(next_save),
+            Ws::new(lpos_save),
+            head,
+            descs,
+            QUICK_RETURN_IF_NOT_POSDEF,
+        );
+        pool.give(tw);
     };
-
-    let sched = &l.schedule;
-    if sched.postordered
-        && !*force_serial
-        && par_numeric(&ctx, &sched.tree, &sched.plan, pool, &mut l.x)
-    {
-        l.minor = n;
-        return Ok(());
+    match numeric_pool() {
+        Some(p) => p.install(run),
+        None => run(),
     }
-
-    /* Either the tree could not be used, or a supernode was not positive
-     * definite and L->x is garbage.  Upstream's loop rewrites every entry of
-     * L->x before reading it, so re-running it from the top is a clean slate
-     * and not a repair. */
-    let mut tw = pool.take();
-    worker(
-        &ctx,
-        &mut l.x,
-        &mut l.minor,
-        &mut tw,
-        supermap,
-        Ws::new(next),
-        Ws::new(lpos),
-        Ws::new(next_save),
-        Ws::new(lpos_save),
-        head,
-        descs,
-        QUICK_RETURN_IF_NOT_POSDEF,
-    );
-    pool.give(tw);
     Ok(())
 }
 
 /// `Common->quick_return_if_not_posdef` (`t_cholmod_defaults.c:48`).
 const QUICK_RETURN_IF_NOT_POSDEF: bool = false;
+
+/// The pool the numeric factorization runs in — the *performance* cores, not
+/// every logical CPU.
+///
+/// `rayon`'s default pool is one worker per logical CPU, which on a
+/// heterogeneous machine means workers on cores several times slower than the
+/// rest. This factorization forks over the elimination tree and again inside a
+/// supernode's panel, and both joins wait on their slowest task, so a worker on
+/// a slow core does not add its share — it sets the pace. Swept against thread
+/// count on an 8 performance + 4 efficiency core machine, speedup peaks at or
+/// below the performance-core count on every system in the corpus and is 6-23%
+/// *worse* with all twelve workers than with eight. The extra workers are not
+/// merely low-yield, they cost.
+///
+/// A private pool, not a resize of the global one: `hea` is a library and the
+/// global pool belongs to the process. The nmath element-wise maps use it and
+/// want every core, since those are equal-sized independent chunks with no join
+/// in the middle. Only this caller has the problem, so only this caller gets the
+/// smaller pool.
+///
+/// `RAYON_NUM_THREADS` still wins: when it is set, the count is left at
+/// `rayon`'s default so an explicit request is honoured. Anywhere the query
+/// does not apply — a homogeneous machine, or any target but macOS — this
+/// returns `None` and the global pool is used unchanged. x86-64 is *not* capped
+/// to physical cores here: that would be a guess about hyperthreading, and
+/// there is no measurement behind it.
+fn numeric_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        if std::env::var_os("RAYON_NUM_THREADS").is_some() {
+            return None;
+        }
+        let nt = perf_cores()?;
+        if nt >= rayon::current_num_threads() || nt < 2 {
+            return None;
+        }
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(nt)
+            .thread_name(|i| format!("hea-sparse-{i}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
+/// `sysctl hw.perflevel0.physicalcpu` — the number of performance cores.
+///
+/// Level 0 is the fastest cluster on Apple Silicon; the key is absent on Intel
+/// Macs, which is the "homogeneous, leave it alone" answer.
+#[cfg(target_os = "macos")]
+fn perf_cores() -> Option<usize> {
+    let mut v: i32 = 0;
+    let mut len = std::mem::size_of::<i32>();
+    // SAFETY: `sysctlbyname` writes at most `len` bytes into `v`, and `len` is
+    // `size_of::<i32>()`; the name is a NUL-terminated literal.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"hw.perflevel0.physicalcpu".as_ptr(),
+            (&raw mut v).cast(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (rc == 0 && v > 0).then_some(v as usize)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn perf_cores() -> Option<usize> {
+    None
+}
 
 /// `cholmod_factorize_p`'s supernodal branch (`cholmod_factorize.c:172-266`),
 /// for a symmetric `A`.
@@ -1506,22 +1956,34 @@ pub fn super_factorize(
     work: &mut Work,
     cwork: &mut SuperWork,
 ) -> Result<(), NumericError> {
-    if a.stype == 0 {
-        return Err(NumericError::Invalid(
-            "stype must be nonzero: this port factorizes LL' = A for a \
-             symmetric A, not LL' = AA'",
-        ));
-    }
-    if a.n != l.n {
+    if a.nrow != l.n {
         return Err(NumericError::Invalid("dimensions of A and L do not match"));
     }
 
     /* S = tril (P A P').  `ptranspose (A, 2, ...)` is the conjugate transpose,
-     * which for CHOLMOD_REAL is the same array transpose mode 1 gives. */
+     * which for CHOLMOD_REAL is the same array transpose mode 1 gives.
+     *
+     * For `stype == 0` there is no triangle to take: `S` is `A` itself under a
+     * natural ordering and `F'` under a permuted one, with `F = A(p,:)'` in
+     * both cases the second operand the assembly multiplies through
+     * (`cholmod_factorize.c:201-250`). */
     const VALUES: bool = true;
     const LOWER: bool = true;
-    let s = permute_sym(a, l.ordering, &l.perm, VALUES, LOWER, &mut work.all());
-    super_numeric(s.as_ref().unwrap_or(a), beta, l, work, cwork)
+    if a.stype != 0 {
+        let s = permute_sym(a, l.ordering, &l.perm, VALUES, LOWER, &mut work.all());
+        return super_numeric(s.as_ref().unwrap_or(a), None, beta, l, work, cwork);
+    }
+    let f = super::symbolic::transpose_unsym(
+        a,
+        VALUES,
+        (!matches!(l.ordering, Ordering::Natural)).then_some(&l.perm[..]),
+    );
+    if matches!(l.ordering, Ordering::Natural) {
+        super_numeric(a, Some(&f), beta, l, work, cwork)
+    } else {
+        let s = super::symbolic::transpose_unsym(&f, VALUES, None);
+        super_numeric(&s, Some(&f), beta, l, work, cwork)
+    }
 }
 
 /* ========================================================================= */
@@ -1535,6 +1997,67 @@ mod tests {
     use super::super::ws::{columns_are_sorted, Work};
     use super::*;
 
+    /// [`assemble_par`] writes exactly what [`assemble`]'s serial `j` loop
+    /// writes, bit for bit.
+    ///
+    /// Worth a direct test rather than corpus coverage: upstream's gate
+    /// (`ndrow1 > 64` and `cholmod_nthreads (ndcol * ndrow2) > 1`, i.e.
+    /// `ndcol * ndrow2 >= 256000`) fires on **2 of 11446** descendant updates
+    /// across the largest matrix measured, and on none at all in the smaller
+    /// ones — so the factorization gates cannot be relied on to reach this arm.
+    #[test]
+    fn the_parallel_assembly_writes_what_the_serial_one_writes() {
+        for &(ndrow1, ndrow2, ndcol) in &[(1i64, 1i64, 1i64), (5, 9, 3), (70, 300, 900)] {
+            /* `RelativeMap` is derived from `Map ∘ Ls`; feed it a strictly
+             * increasing map with gaps, which is the shape it really has. */
+            let nsrow = 2 * ndrow2 + 3;
+            let ls: Vec<i64> = (0..ndrow2).map(|i| 2 * i + 1).collect();
+            let mut map = vec![EMPTY; (2 * ndrow2 + 3) as usize];
+            for (i, &r) in ls.iter().enumerate() {
+                map[r as usize] = 2 * i as i64 + 1;
+            }
+            let g = Desc {
+                pdx1: 0,
+                pdi1: 0,
+                ndrow: ndrow2,
+                ndcol,
+                ndrow1,
+                ndrow2,
+            };
+            let c: Vec<f64> = (0..g.csize())
+                .map(|i| ((i % 97) as f64 - 48.0) / 7.0)
+                .collect();
+            let base: Vec<f64> = (0..(nsrow * (2 * ndrow2 + 3)) as usize)
+                .map(|i| ((i % 31) as f64) / 3.0)
+                .collect();
+
+            let mut ser = base.clone();
+            let mut rm = vec![0i64; ndrow2 as usize];
+            assemble(
+                &g,
+                &c,
+                &mut ser,
+                nsrow,
+                Ws::new_ref(&ls),
+                Ws::new_ref(&map),
+                Ws::new(&mut rm),
+                1, /* nt = 1 keeps the serial arm regardless of the gate */
+            );
+
+            let mut par = base.clone();
+            let mut rm2 = vec![0i64; ndrow2 as usize];
+            {
+                let rmw = Ws::new(&mut rm2);
+                for i in 0..ndrow2 {
+                    rmw[i] = map[ls[i as usize] as usize];
+                }
+                assemble_par(&g, &c, &mut par, nsrow, rmw);
+            }
+
+            assert_eq!(ser, par, "shape {ndrow1}x{ndrow2}x{ndcol}");
+        }
+    }
+
     /// One corpus matrix, scaled by `scale`, and the symbolic factor and
     /// workspace `mod.rs` would hand the numeric path.
     fn setup(
@@ -1542,35 +2065,38 @@ mod tests {
         edges: &[(usize, usize)],
         ordering: Ordering,
         scale: f64,
-    ) -> (Sparse, SuperFactor, Work) {
+    ) -> (Sparse<'static>, SuperFactor, Work) {
         let (p, i, v) = spd_triangle(n, edges, false);
         let a = Sparse {
+            nrow: n,
             n,
-            p: p.clone(),
-            i: i.clone(),
+            p: p.clone().into(),
+            i: i.clone().into(),
             x: v.iter().map(|x| x * scale).collect(),
             numeric: true,
             stype: 1,
             sorted: columns_are_sorted(n, &p, &i),
         };
-        let s = analyze_sparse(&a, Method::Pinned(ordering), IntWidth::I64).unwrap();
         let mut w = Work::new(n);
+        let s = analyze_sparse(&a, Method::Pinned(ordering), IntWidth::I64, &mut w).unwrap();
         let a2 = permute_sym(&a, s.ordering, &s.perm, false, false, &mut w.all());
         let sym = super_symbolic(
             a2.as_ref().unwrap_or(&a),
+            None,
             &s.parent,
             &s.colcount,
             &Relax::default(),
             &mut w,
         )
         .unwrap();
-        let l = SuperFactor::new(&s, sym);
+        let l = SuperFactor::new(s, sym);
         (a, l, w)
     }
 
     /// One corpus matrix, factorized supernodally with both thresholds and the
     /// driver pinned. Returns the factor, how many updates took the batched arm
     /// and how many supernodes forked.
+    #[cfg(not(vendor_blas))]
     fn factor(
         n: usize,
         edges: &[(usize, usize)],
@@ -1598,6 +2124,12 @@ mod tests {
     /// pinned rather than left at their defaults so every arm is exercised on
     /// every corpus matrix, and the counters are asserted so no arm can pass
     /// vacuously.
+    /// Portable arm only, for the reason `dense.rs`'s blocking-contract
+    /// group gives: under a vendor build the wide arm's strips and the
+    /// serial arm's full-width call land on different sides of
+    /// `blas::MIN_FLOPS`, so the two are not the same arithmetic and are
+    /// not required to agree bit for bit.
+    #[cfg(not(vendor_blas))]
     #[test]
     fn going_wide_does_not_move_a_rounding() {
         let (mut batched, mut forks) = (0, 0);

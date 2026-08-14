@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from ..aes import split_layer_kwargs
 from .geom import Geom
 
-
 # ggplot2 sizes (incl. ``outlier.size``) are in mm; matplotlib's Line2D
 # ``markersize`` is the marker DIAMETER in points. R/TeX convention:
 # 72.27 pt/inch, 25.4 mm/inch.

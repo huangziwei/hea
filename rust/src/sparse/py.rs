@@ -12,6 +12,8 @@
 //! CSC pattern; `merPredD.update_xwts_and_decomp` rebuilds `M` on every
 //! deviance evaluation with the same pattern and new numbers.
 
+use std::borrow::Cow;
+
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::{PyValueError, PyZeroDivisionError};
 use pyo3::prelude::*;
@@ -19,6 +21,7 @@ use pyo3::prelude::*;
 use super::amd::IntWidth;
 use super::numeric::{self, Factor, Params};
 use super::solve::{self, SolveWork, Sys};
+use super::spinv;
 use super::super_numeric::{self, SuperFactor, SuperWork};
 use super::super_solve::{self, SuperSolveWork};
 use super::super_symbolic;
@@ -61,9 +64,10 @@ pub(super) fn parse_method(s: &str) -> PyResult<Method> {
         "best" => Method::Default,
         "amd" => Method::Pinned(Ordering::Amd),
         "natural" => Method::Pinned(Ordering::Natural),
+        "metis" => Method::Pinned(Ordering::Metis),
         other => {
             return Err(PyValueError::new_err(format!(
-                "ordering must be 'best', 'amd' or 'natural', not {other:?}"
+                "ordering must be 'best', 'amd', 'metis' or 'natural', not {other:?}"
             )));
         }
     })
@@ -74,6 +78,7 @@ pub(super) fn parse_method(s: &str) -> PyResult<Method> {
 pub(super) fn ordering_name(o: Ordering) -> &'static str {
     match o {
         Ordering::Amd => "amd",
+        Ordering::Metis => "metis",
         Ordering::Natural => "natural",
         Ordering::Postordered => "postordered",
     }
@@ -131,7 +136,8 @@ struct Super {
     ywork: SuperSolveWork,
 }
 
-/// Whether `A`'s pattern is inside the one `L`'s supernodes were built on.
+/// Whether the pattern `(bp, bi)` is inside `(ap, ai)` — the new `A` inside the
+/// one `L`'s supernodes were built on.
 ///
 /// Both patterns have their row indices ascending, so this is a merge, not a
 /// search.
@@ -142,14 +148,14 @@ struct Super {
 /// to be redone. The simplicial path never asks: `rowfac` derives each row's
 /// pattern from `A` and the etree as it goes and grows `L` when it has to, so a
 /// wider `A` is simply factorized.
-fn pattern_is_contained(a: &Sparse, p: &[i64], i: &[i64]) -> bool {
-    for j in 0..a.n {
-        let (mut q, qend) = (a.p[j] as usize, a.p[j + 1] as usize);
-        for &row in &i[p[j] as usize..p[j + 1] as usize] {
-            while q < qend && a.i[q] < row {
+fn pattern_is_contained(n: usize, ap: &[i64], ai: &[i64], bp: &[i64], bi: &[i64]) -> bool {
+    for j in 0..n {
+        let (mut q, qend) = (ap[j] as usize, ap[j + 1] as usize);
+        for &row in &bi[bp[j] as usize..bp[j + 1] as usize] {
+            while q < qend && ai[q] < row {
                 q += 1;
             }
-            if q == qend || a.i[q] != row {
+            if q == qend || ai[q] != row {
                 return false;
             }
             q += 1;
@@ -168,7 +174,7 @@ fn analyze_and_factorize(
     params: Params,
     work: &mut Work,
 ) -> Result<(Kind, f64), String> {
-    let s = symbolic::analyze_sparse(a, method, IntWidth::I64).map_err(|e| e.to_string())?;
+    let s = symbolic::analyze_sparse(a, method, IntWidth::I64, work).map_err(|e| e.to_string())?;
 
     /* supernodal analysis, if requested or if selected automatically
      * (`cholmod_analyze.c:882-902`) */
@@ -179,16 +185,49 @@ fn analyze_and_factorize(
     };
 
     if want_super {
-        let a2 = symbolic::permute_sym(a, s.ordering, &s.perm, false, false, &mut work.all());
+        /* `permute_matrices` for the supernodal symbolic: `S` alone when `A` is
+         * symmetric, and `S` with `F = A(p,:)'` when it is not
+         * (`cholmod_analyze.c:894-898`). */
+        let a2;
+        let fpat: Option<Sparse>;
+        let (ssym, fsym): (&Sparse, Option<&Sparse>) = if a.stype != 0 {
+            a2 = symbolic::permute_sym(a, s.ordering, &s.perm, false, false, &mut work.all());
+            fpat = None;
+            (a2.as_ref().unwrap_or(a), None)
+        } else if matches!(s.ordering, Ordering::Natural) {
+            fpat = Some(symbolic::transpose_unsym(a, false, None));
+            a2 = None;
+            (a, fpat.as_ref())
+        } else {
+            fpat = Some(symbolic::transpose_unsym(a, false, Some(&s.perm)));
+            a2 = Some(symbolic::transpose_unsym(
+                fpat.as_ref().unwrap(),
+                false,
+                None,
+            ));
+            (a2.as_ref().unwrap(), fpat.as_ref())
+        };
         let sym = super_symbolic::super_symbolic(
-            a2.as_ref().unwrap_or(a),
+            ssym,
+            fsym,
             &s.parent,
             &s.colcount,
             &super_symbolic::Relax::default(),
             work,
         )
         .map_err(|e| e.to_string())?;
-        let mut l = SuperFactor::new(&s, sym);
+        /* `a2` and `fpat` are the pattern-only `S` and `F` the supernodal
+         * *symbolic* needs and nothing after it does: `super_factorize` builds
+         * its own numeric pair. Rust would keep them to the end of the block,
+         * so they would be live across the allocation of `L->x` — 0.4 GB
+         * against 4.7 on a 3.4M-row system. */
+        drop(a2);
+        drop(fpat);
+        /* `SuperFactor::new` consumes the analysis, so `Perm` and `ColCount`
+         * move into `L` the way `Lperm = L->Perm` puts them there upstream, and
+         * `parent`/`post` — the analysis's own scratch, which nothing numeric
+         * reads — are freed here rather than at the end of the block. */
+        let mut l = SuperFactor::new(s, sym);
         let mut cwork = SuperWork::new();
         super_numeric::super_factorize(a, beta, &mut l, work, &mut cwork)
             .map_err(|e| e.to_string())?;
@@ -202,7 +241,7 @@ fn analyze_and_factorize(
         ));
     }
 
-    let mut l = Factor::from_symbolic(&s);
+    let mut l = Factor::from_symbolic(s);
     let fl = numeric::factorize(a, beta, &mut l, &params, work).map_err(|e| e.to_string())?;
     Ok((
         Kind::Simplicial(Box::new(Simp {
@@ -218,9 +257,36 @@ fn analyze_and_factorize(
 /// solves.
 #[pyclass(module = "hea._rs")]
 pub struct CholFactor {
-    /// The input triangle. Kept so `refactorize` can replace `x` alone, which
-    /// is what `cholmod_factorize (A, L, Common)` is handed each time.
-    a: Sparse,
+    /// `A->p` and `A->i` of the last matrix factorized — the **pattern**, and
+    /// not the values.
+    ///
+    /// `cholmod_factorize (A, L, Common)` is handed the whole matrix on every
+    /// call and keeps none of it, so [`CholFactor::refactorize`] takes the
+    /// caller's arrays as they arrive and builds a borrowing [`Sparse`] over
+    /// them. Two things still need the pattern after the call returns, and
+    /// nothing needs the values:
+    ///
+    /// * [`pattern_is_contained`], to decide whether the analysis still holds;
+    /// * [`CholFactor::factor_csc`], whose `resymbol_noperm` re-derives `L`'s
+    ///   simplicial pattern from `A`'s and reads no `A->x` at all.
+    ///
+    /// So `A->x` is not stored, which is 367 MiB of the 760 that the whole
+    /// matrix was on a 3.4M-row system. The remaining 393 is the price of
+    /// pruning `factor_csc`'s output, and it is a price rather than an
+    /// oversight: `scikit-sparse` skips `resymbol` — `L()` is
+    /// `cholmod_factor_to_sparse` alone — and so returns the entries relaxed
+    /// amalgamation added.
+    ap: Vec<i64>,
+    ai: Vec<i64>,
+    /// `A->stype`, kept with the pattern for the same reason: it is what says
+    /// which triangle those indices are.
+    stype: i32,
+    /// `A->nrow`. Equal to the column count for a symmetric `A`, and the
+    /// dimension of `L` in both cases: `stype == 0` factorizes `A A'`.
+    nrow: usize,
+    /// `A->sorted` for that pattern, so a `refactorize` whose pattern is
+    /// unchanged does not sweep `A->i` again to rediscover it.
+    sorted: bool,
     kind: Kind,
     work: Work,
     /// `Common->rowfacfl` from the last factorization. Simplicial only —
@@ -231,6 +297,106 @@ pub struct CholFactor {
     method: Method,
     mode: SuperMode,
     params: Params,
+}
+
+impl CholFactor {
+    /// The supernodal factor converted to a simplicial one, or `None` when it
+    /// is simplicial already and the caller should read `Kind::Simplicial`.
+    ///
+    /// `from_supernodal` followed by `resymbol_noperm`, which is the one
+    /// conversion in this file: `.L` and the selected inverse both come through
+    /// here so they cannot drift apart.
+    fn build_simplicial(&mut self) -> PyResult<Option<Factor>> {
+        let CholFactor {
+            ap,
+            ai,
+            stype,
+            nrow,
+            sorted,
+            kind,
+            work,
+            ..
+        } = self;
+        let Kind::Supernodal(k) = kind else {
+            return Ok(None);
+        };
+        let mut f = Factor::from_supernodal(&k.l);
+        /* resymbol wants tril (P A P') for a symmetric `A` — the `S` the
+         * supernodal factorization was handed (`cholmod_factorize.c:275`) —
+         * and `F = A(p,:)'` for `stype == 0`, where it prunes `LL' = FF'`. In
+         * both cases only the pattern: `cholmod_resymbol_noperm` reads `A->p`
+         * and `A->i` and never `A->x`, which is why the values are not kept
+         * and this builds a `CHOLMOD_PATTERN` matrix. */
+        let a = Sparse {
+            nrow: *nrow,
+            n: ap.len() - 1,
+            p: Cow::Borrowed(ap),
+            i: Cow::Borrowed(ai),
+            x: Cow::Borrowed(&[]),
+            numeric: false,
+            stype: *stype,
+            sorted: *sorted,
+        };
+        const PATTERN: bool = false;
+        if *stype == 0 {
+            /* `S = A(p,:)`, not `F`: resymbol queues the columns of its
+             * argument by their smallest *row* index, so the argument is the
+             * one whose rows index `L` — `nrow`-by-`ncol`, which is `F'`. */
+            let fpat = symbolic::transpose_unsym(&a, PATTERN, Some(&f.perm));
+            let spat = symbolic::transpose_unsym(&fpat, PATTERN, None);
+            numeric::resymbol_noperm(&spat, true, &mut f, &mut work.all())
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        } else {
+            let s = symbolic::permute_sym(&a, f.ordering, &f.perm, PATTERN, true, &mut work.all());
+            numeric::resymbol_noperm(s.as_ref().unwrap_or(&a), true, &mut f, &mut work.all())
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        }
+        Ok(Some(f))
+    }
+
+    /// The selected inverse of `P A P'`, with the permutation to undo it.
+    ///
+    /// Upstream's recursion is stated for `LDL'`, so an `LL'` factor is
+    /// converted through [`Factor::change_factor`] first — on a copy, since a
+    /// caller's factor must still be the one they factorized.
+    fn selected(&mut self, py: Python<'_>) -> PyResult<(spinv::Selected, Vec<i64>)> {
+        let (z, perm, _) = self.selected_with_phases(py)?;
+        Ok((z, perm))
+    }
+
+    /// [`CholFactor::selected`], also returning the sweep's phase breakdown.
+    fn selected_with_phases(
+        &mut self,
+        _py: Python<'_>,
+    ) -> PyResult<(spinv::Selected, Vec<i64>, spinv::Phases)> {
+        let converted = self.build_simplicial()?;
+        let params = match &self.kind {
+            Kind::Simplicial(k) => k.params,
+            /* `from_supernodal` produces a packed monotonic `LL'`, and the
+             * defaults are what `change_factor` needs to take it to `LDL'`. */
+            Kind::Supernodal(_) => Params::default(),
+        };
+
+        let mut owned;
+        let l: &Factor = match (&converted, &self.kind) {
+            (Some(f), _) => f,
+            (None, Kind::Simplicial(k)) => &k.l,
+            (None, Kind::Supernodal(_)) => unreachable!("build_simplicial converts the supernodal"),
+        };
+        let l = if l.is_ll {
+            owned = l.clone();
+            owned
+                .change_factor(false, true, true, &params)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            &owned
+        } else {
+            l
+        };
+
+        let (z, _flops, ph) =
+            spinv::selected_inverse(l).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((z, l.perm.clone(), ph))
+    }
 }
 
 #[pymethods]
@@ -249,12 +415,13 @@ impl CholFactor {
     /// and an `LDL'` only on a zero one), so that is a real choice and not a
     /// presentational one.
     #[new]
-    #[pyo3(signature = (n, indptr, indices, data, stype, beta=0.0, ordering="best",
+    #[pyo3(signature = (nrow, ncol, indptr, indices, data, stype, beta=0.0, ordering="best",
                         use_ll=false, supernodal="auto"))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
-        n: usize,
+        nrow: usize,
+        ncol: usize,
         indptr: PyReadonlyArray1<'_, i64>,
         indices: PyReadonlyArray1<'_, i64>,
         data: PyReadonlyArray1<'_, f64>,
@@ -275,26 +442,33 @@ impl CholFactor {
         };
 
         py.allow_threads(|| -> Result<CholFactor, String> {
-            let nz = ws::validate_csc(n, indptr, indices).map_err(|e| e.to_string())?;
+            let nz =
+                ws::validate_csc_rect(nrow, ncol, indptr, indices).map_err(|e| e.to_string())?;
             if nz > data.len() {
                 return Err(format!(
-                    "data has length {}, expected at least indptr[n] = {nz}",
+                    "data has length {}, expected at least indptr[ncol] = {nz}",
                     data.len()
                 ));
             }
             let a = Sparse {
-                n,
-                p: indptr[..n + 1].to_vec(),
-                i: indices[..nz].to_vec(),
-                x: data[..nz].to_vec(),
+                nrow,
+                n: ncol,
+                p: Cow::Borrowed(&indptr[..ncol + 1]),
+                i: Cow::Borrowed(&indices[..nz]),
+                x: Cow::Borrowed(&data[..nz]),
                 numeric: true,
                 stype,
-                sorted: ws::columns_are_sorted(n, indptr, indices),
+                sorted: ws::columns_are_sorted(ncol, indptr, indices),
             };
-            let mut work = Work::new(n);
+            let mut work = Work::new(nrow);
+            let sorted = a.sorted;
             let (kind, fl) = analyze_and_factorize(&a, beta, method, mode, params, &mut work)?;
             Ok(CholFactor {
-                a,
+                ap: indptr[..ncol + 1].to_vec(),
+                ai: indices[..nz].to_vec(),
+                stype,
+                nrow,
+                sorted,
                 kind,
                 work,
                 fl,
@@ -334,57 +508,85 @@ impl CholFactor {
         beta: f64,
     ) -> PyResult<()> {
         let (indptr, indices, data) = (indptr.as_slice()?, indices.as_slice()?, data.as_slice()?);
-        let (method, mode, params) = (self.method, self.mode, self.params);
-        let (a, kind, work, fl) = (&mut self.a, &mut self.kind, &mut self.work, &mut self.fl);
-        if indptr.len() != a.p.len() {
+        let (method, mode, params, stype) = (self.method, self.mode, self.params, self.stype);
+        let n = self.n();
+        let ncol = self.ap.len() - 1;
+        if indptr.len() != self.ap.len() {
             return Err(PyValueError::new_err(format!(
-                "indptr has length {}, expected n + 1 = {}",
+                "indptr has length {}, expected ncol + 1 = {}",
                 indptr.len(),
-                a.p.len()
+                self.ap.len()
             )));
         }
-        let nz = indptr[a.n] as usize;
+        let nz = indptr[ncol] as usize;
         if nz > indices.len() || nz > data.len() {
             return Err(PyValueError::new_err(format!(
-                "indptr[n] = {nz} is out of range for {} row indices and {} values",
+                "indptr[ncol] = {nz} is out of range for {} row indices and {} values",
                 indices.len(),
                 data.len()
             )));
         }
+        let CholFactor {
+            ap,
+            ai,
+            sorted,
+            kind,
+            work,
+            fl,
+            ..
+        } = self;
         py.allow_threads(|| -> Result<(), String> {
-            if indptr == &a.p[..] && indices[..nz] == a.i[..] {
-                a.x.copy_from_slice(&data[..nz]);
-            } else {
-                ws::validate_csc(a.n, indptr, &indices[..nz]).map_err(|e| e.to_string())?;
-                /* Only the supernodal analysis can fail to hold a wider `A`;
-                 * see `pattern_is_contained`. When it cannot, redo it — that is
-                 * `cholmod_analyze` + `cholmod_factorize` together, which is
-                 * what a caller would otherwise have to do by hand, and it is
-                 * bounded: a pattern can only grow up to the structural product
-                 * that produced it, so this fires a handful of times per fit at
-                 * worst and never in the steady state. */
-                let reanalyze = matches!(kind, Kind::Supernodal(_))
-                    && !pattern_is_contained(a, indptr, &indices[..nz]);
-                a.p.copy_from_slice(indptr);
-                a.i.clear();
-                a.i.extend_from_slice(&indices[..nz]);
-                a.x.clear();
-                a.x.extend_from_slice(&data[..nz]);
-                a.sorted = ws::columns_are_sorted(a.n, indptr, indices);
-                if reanalyze {
-                    let (k, f) = analyze_and_factorize(a, beta, method, mode, params, work)?;
-                    *kind = k;
-                    *fl = f;
-                    return Ok(());
-                }
+            /* The pattern is usually the one already analyzed, and then this is
+             * the value copy it looks like: the comparison is what lets both
+             * `validate_csc` and `columns_are_sorted` — two O(nnz) sweeps — be
+             * skipped, which is the whole point of holding the pattern. */
+            let same = indptr == &ap[..] && indices[..nz] == ai[..];
+            if !same {
+                ws::validate_csc_rect(n, ncol, indptr, &indices[..nz])
+                    .map_err(|e| e.to_string())?;
+                *sorted = ws::columns_are_sorted(ncol, indptr, indices);
+            }
+            /* the matrix `cholmod_factorize (A, L, Common)` is handed: a view
+             * onto the caller's three arrays, built fresh on every call and
+             * kept by nobody */
+            let a = Sparse {
+                nrow: n,
+                n: ncol,
+                p: Cow::Borrowed(&indptr[..ncol + 1]),
+                i: Cow::Borrowed(&indices[..nz]),
+                x: Cow::Borrowed(&data[..nz]),
+                numeric: true,
+                stype,
+                sorted: *sorted,
+            };
+            /* Only the supernodal analysis can fail to hold a wider `A`;
+             * see `pattern_is_contained`. When it cannot, redo it — that is
+             * `cholmod_analyze` + `cholmod_factorize` together, which is
+             * what a caller would otherwise have to do by hand, and it is
+             * bounded: a pattern can only grow up to the structural product
+             * that produced it, so this fires a handful of times per fit at
+             * worst and never in the steady state. */
+            let reanalyze = !same
+                && matches!(kind, Kind::Supernodal(_))
+                && !pattern_is_contained(n, ap, ai, indptr, &indices[..nz]);
+            if !same {
+                ap.copy_from_slice(indptr);
+                ai.clear();
+                ai.extend_from_slice(&indices[..nz]);
+            }
+            if reanalyze {
+                let (k, f) = analyze_and_factorize(&a, beta, method, mode, params, work)?;
+                *kind = k;
+                *fl = f;
+                return Ok(());
             }
             match kind {
                 Kind::Simplicial(k) => {
-                    *fl = numeric::factorize(a, beta, &mut k.l, &k.params, work)
+                    *fl = numeric::factorize(&a, beta, &mut k.l, &k.params, work)
                         .map_err(|e| e.to_string())?;
                 }
                 Kind::Supernodal(k) => {
-                    super_numeric::super_factorize(a, beta, &mut k.l, work, &mut k.cwork)
+                    super_numeric::super_factorize(&a, beta, &mut k.l, work, &mut k.cwork)
                         .map_err(|e| e.to_string())?;
                 }
             }
@@ -435,28 +637,25 @@ impl CholFactor {
     ///
     /// A supernodal factor is converted first, and **pruned**: relaxed
     /// supernode amalgamation leaves entries that are not in `L`, and dropping
-    /// them is what makes this return the same matrix whichever path ran. That
-    /// is upstream's `Common->final_resymbol`, which CHOLMOD leaves off by
-    /// default and `scikit-sparse` turns on — and `scikit-sparse` is what this
-    /// is a replacement for.
+    /// them is what makes this return the same matrix whichever path ran.
+    ///
+    /// That is upstream's `Common->final_resymbol`, and it is a **deviation**,
+    /// deliberately: CHOLMOD leaves the flag off by default, and applies it
+    /// only when `cholmod_factorize_p` has just converted `L` to simplicial
+    /// (`:275`). `scikit-sparse` never sets it and never resymbols — its `L()`
+    /// is `change_factor` plus `cholmod_factor_to_sparse` — so it hands back the
+    /// amalgamation's structural zeros and its `L` differs between the two
+    /// paths. This is what that choice costs: [`CholFactor::ap`]/`ai`, because
+    /// `resymbol_noperm` re-derives the pattern from `A`'s.
     fn factor_csc(
         &mut self,
         py: Python<'_>,
     ) -> PyResult<(Py<PyArray1<i64>>, Py<PyArray1<i64>>, Py<PyArray1<f64>>)> {
-        let (a, kind, work) = (&self.a, &mut self.kind, &mut self.work);
-        let simplicial;
-        let l: &Factor = match kind {
-            Kind::Simplicial(k) => &k.l,
-            Kind::Supernodal(k) => {
-                let mut f = Factor::from_supernodal(&k.l);
-                /* resymbol wants tril (P A P'), which is the S the supernodal
-                 * factorization was handed (`cholmod_factorize.c:275`) */
-                let s = symbolic::permute_sym(a, f.ordering, &f.perm, true, true, &mut work.all());
-                numeric::resymbol_noperm(s.as_ref().unwrap_or(a), true, &mut f, &mut work.all())
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-                simplicial = f;
-                &simplicial
-            }
+        let simplicial = self.build_simplicial()?;
+        let l: &Factor = match (&simplicial, &self.kind) {
+            (Some(f), _) => f,
+            (None, Kind::Simplicial(k)) => &k.l,
+            (None, Kind::Supernodal(_)) => unreachable!("build_simplicial converts the supernodal"),
         };
 
         let n = l.n;
@@ -476,6 +675,91 @@ impl CholFactor {
             indptr.into_pyarray(py).unbind(),
             indices.into_pyarray(py).unbind(),
             data.into_pyarray(py).unbind(),
+        ))
+    }
+
+    /// `diag(A⁻¹)`, in `A`'s own ordering.
+    ///
+    /// Takahashi's recursion over the factor, so `A⁻¹` is never formed. The
+    /// *work* is `Σ_j |L_j|²`, a factorization's flop count rather than its
+    /// nonzero count, and the sweep is scalar where the numeric factorization
+    /// is blocked and threaded — so budget orders of magnitude more than a
+    /// refactorize of the same matrix, not one. It holds roughly two `L`s
+    /// while it runs.
+    fn inv_diagonal(&mut self, py: Python<'_>) -> PyResult<Py<PyArray1<f64>>> {
+        let (z, perm) = self.selected(py)?;
+        let d = z.diagonal();
+        /* L factors P A P', so entry i of the sweep is A's row perm[i]. */
+        let mut out = vec![0.0f64; z.n];
+        for i in 0..z.n {
+            out[perm[i] as usize] = d[i];
+        }
+        Ok(out.into_pyarray(py).unbind())
+    }
+
+    /// Nanoseconds in each of the sweep's three phases: scatter, the fused
+    /// recurrence, gather.
+    ///
+    /// All zero unless the extension was built with the `profiling` feature.
+    /// The unpermute is not timed and not included — this is the sweep alone.
+    fn selected_inverse_phases(&mut self, py: Python<'_>) -> PyResult<(u64, u64, u64)> {
+        let (_, _, ph) = self.selected_with_phases(py)?;
+        Ok((ph.scatter, ph.recurrence, ph.gather))
+    }
+
+    /// The selected inverse as CSC `(indptr, indices, data)`, in `A`'s ordering.
+    ///
+    /// The pattern is `L + L'` pulled back through the permutation, so the
+    /// columns are re-sorted on the way out.
+    fn selected_inverse(
+        &mut self,
+        py: Python<'_>,
+    ) -> PyResult<(Py<PyArray1<i64>>, Py<PyArray1<i64>>, Py<PyArray1<f64>>)> {
+        let (z, perm) = self.selected(py)?;
+        let n = z.n;
+        let nnz = z.i.len();
+
+        /* Count each unpermuted column, then fill and sort. `perm[i]` is the
+         * row of A that the factor's row i came from, so an entry at (i, j)
+         * lands at (perm[i], perm[j]). */
+        let mut count = vec![0i64; n + 1];
+        for j in 0..n {
+            let pj = perm[j] as usize;
+            count[pj + 1] += z.p[j + 1] - z.p[j];
+        }
+        for j in 0..n {
+            count[j + 1] += count[j];
+        }
+        let mut next: Vec<i64> = count[..n].to_vec();
+        let mut oi = vec![0i64; nnz];
+        let mut ox = vec![0.0f64; nnz];
+        for j in 0..n {
+            let pj = perm[j] as usize;
+            for q in z.p[j] as usize..z.p[j + 1] as usize {
+                let slot = next[pj] as usize;
+                oi[slot] = perm[z.i[q] as usize];
+                ox[slot] = z.x[q];
+                next[pj] += 1;
+            }
+        }
+        /* Each column is a permuted set of rows and so is unsorted; scipy's
+         * containers and every downstream `searchsorted` want it ascending. */
+        let mut order: Vec<usize> = Vec::new();
+        for j in 0..n {
+            let (b, e) = (count[j] as usize, count[j + 1] as usize);
+            order.clear();
+            order.extend(b..e);
+            order.sort_unstable_by_key(|&q| oi[q]);
+            let rows: Vec<i64> = order.iter().map(|&q| oi[q]).collect();
+            let vals: Vec<f64> = order.iter().map(|&q| ox[q]).collect();
+            oi[b..e].copy_from_slice(&rows);
+            ox[b..e].copy_from_slice(&vals);
+        }
+
+        Ok((
+            count.into_pyarray(py).unbind(),
+            oi.into_pyarray(py).unbind(),
+            ox.into_pyarray(py).unbind(),
         ))
     }
 

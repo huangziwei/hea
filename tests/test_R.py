@@ -15,12 +15,10 @@ import sys
 import numpy as np
 import polars as pl
 import pytest
-
 from conftest import have_rscript, r_scalar_values
 
 import hea
 from hea import R as R_mod
-from hea.R import nmath as _nm
 from hea.R import (
     as_character,
     as_integer,
@@ -30,13 +28,29 @@ from hea.R import (
     complete_cases,
     cor,
     cov,
-    cumsum,
     cummax,
     cummin,
     cumprod,
-    dim,
+    cumsum,
+    dbinom,
+    dcauchy,
+    dchisq,
+    dgeom,
+    dhyper,
     diff,
+    dim,
+    dlnorm,
+    dlogis,
+    dmultinom,
+    dnbinom,
+    # distributions (a representative subset; full grid checked elsewhere)
+    dnorm,
+    dpois,
+    dsignrank,
+    dt,
     duplicated,
+    dweibull,
+    dwilcox,
     factor,
     head,
     is_factor,
@@ -54,92 +68,78 @@ from hea.R import (
     nlevels,
     nrow,
     order,
+    pbeta,
+    pbinom,
+    pbirthday,
+    pcauchy,
+    pchisq,
+    pf,
+    pgamma,
+    pgeom,
+    phyper,
+    plnorm,
+    plogis,
+    pnbinom,
+    pnorm,
+    ppois,
+    psignrank,
+    psmirnov,
+    pt,
+    ptukey,
+    punif,
+    pweibull,
+    pwilcox,
+    qbirthday,
+    qcauchy,
+    qchisq,
+    qexp,
+    qf,
+    qgeom,
+    qhyper,
+    qlnorm,
+    qlogis,
+    qnbinom,
+    qnorm,
+    qsignrank,
+    qsmirnov,
+    qt,
+    qtukey,
     quantile,
-    rank as R_rank,
+    qweibull,
+    qwilcox,
+    r2dtable,
+    rcauchy,
     rev,
+    rgeom,
+    rhyper,
+    rmultinom,
+    rnbinom,
+    rnorm,
+    rsignrank,
+    rsmirnov,
+    rweibull,
+    rwilcox,
+    rWishart,
     sd,
     seq,
     seq_along,
     seq_len,
+    set_seed,
     signed_rank,
     sort,
     summary,
-    tail,
     tabulate,
+    tail,
     unique,
     var,
     which,
     which_max,
     which_min,
-    # distributions (a representative subset; full grid checked elsewhere)
-    dnorm,
-    pnorm,
-    qnorm,
-    rnorm,
-    dt,
-    pt,
-    qt,
-    dchisq,
-    qchisq,
-    pchisq,
-    qf,
-    pf,
-    ptukey,
-    qtukey,
-    dhyper,
-    phyper,
-    dsignrank,
-    psignrank,
-    qsignrank,
-    dwilcox,
-    pwilcox,
-    qwilcox,
-    dbinom,
-    pbinom,
-    dpois,
-    ppois,
-    punif,
-    qexp,
-    pgamma,
-    pbeta,
-    dcauchy,
-    pcauchy,
-    qcauchy,
-    rcauchy,
-    dlogis,
-    plogis,
-    qlogis,
-    dlnorm,
-    plnorm,
-    qlnorm,
-    dweibull,
-    pweibull,
-    qweibull,
-    rweibull,
-    dgeom,
-    pgeom,
-    qgeom,
-    rgeom,
-    qhyper,
-    dnbinom,
-    pnbinom,
-    qnbinom,
-    rnbinom,
-    rhyper,
-    rsignrank,
-    rwilcox,
-    rmultinom,
-    r2dtable,
-    rWishart,
-    dmultinom,
-    pbirthday,
-    qbirthday,
-    psmirnov,
-    qsmirnov,
-    rsmirnov,
-    set_seed,
 )
-
+from hea.R import nmath as _nm
+from hea.R import (
+    rank as R_rank,
+)
 
 # ---------------------------------------------------------------------------
 # Public surface
@@ -628,8 +628,8 @@ def test_ordered_factor_renders_with_lt_separators():
     unnamed inputs like ``ordered([a,b,c])``) and the global
     ``_ORDERED_COLS_CV`` contextvar (covers named columns).
     """
-    from hea.R import ordered
     from hea.formula import _ORDERED_COLS_CV, set_ordered_cols
+    from hea.R import ordered
 
     # 1. Bare-list input (unnamed): local marker path
     y = ordered(["a", "b", "c"])
@@ -1100,7 +1100,7 @@ def test_R_vector_functions_dispatch_on_expr():
         extra_args, extra_kwargs = _R_EXPR_EXTRA.get(name, lambda _: ((), {}))(c)
         try:
             result = fn(c, *extra_args, **extra_kwargs)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             failures.append(
                 f"  hea.R.{name}(pl.col('x'), *{extra_args}) raised "
                 f"{type(e).__name__}: {e}"
@@ -1806,7 +1806,7 @@ def test_public_r_surface_routes_through_mersenne_twister():
     ``set.seed(1)`` reference values; (2) every routed function reproduces a
     fresh ``RMersenneTwister(seed)`` draw, and all share ONE advancing stream
     like R's global RNG."""
-    from hea.R import runif, sample, rpois, rgamma, rbinom, rexp, rchisq, rt, rf, rbeta
+    from hea.R import rbeta, rbinom, rchisq, rexp, rf, rgamma, rpois, rt, runif, sample
     from hea.R.rng import RMersenneTwister as MT
 
     # (1) R parity — set.seed(1); runif(5) / rnorm(5) (R 4.x reference values).
@@ -1915,8 +1915,8 @@ def test_rgenerator_family_rd_matches_r():
     Covers all ten built-in families: gaussian, Gamma, poisson, binomial,
     gaulss, shash, negbin, scat, inverse.gaussian (mgcv ``rig``) and tweedie
     (per-jump ``rTweedie``)."""
-    from hea.R.rng import RGenerator
     from hea import family as F
+    from hea.R.rng import RGenerator
 
     mu = np.array([0.5, 1.5, 3.0, 6.0, 10.0])
     wt = np.array([1, 1, 2, 1, 3.0])
@@ -2059,9 +2059,13 @@ def test_rmvn_matches_r():
 # ---------------------------------------------------------------------------
 
 
-from hea.R import (  # noqa: E402  — grouped with the model-generic tests
+from hea.R import (
     AIC as R_AIC,
+)
+from hea.R import (
     BIC as R_BIC,
+)
+from hea.R import (
     coef,
     coefficients,
     confint,
@@ -2070,16 +2074,22 @@ from hea.R import (  # noqa: E402  — grouped with the model-generic tests
     fitted,
     fitted_values,
     fixef,
-    formula as R_formula,
     logLik,
     model_frame,
     model_matrix,
     nobs,
-    predict as R_predict,
     ranef,
     resid,
-    residuals as R_residuals,
     vcov,
+)
+from hea.R import (
+    formula as R_formula,
+)
+from hea.R import (
+    predict as R_predict,
+)
+from hea.R import (
+    residuals as R_residuals,
 )
 
 
@@ -2248,8 +2258,8 @@ def test_confint_dispatches_to_profile_object():
     mirroring R's S3 ``confint.profile`` dispatch — the
     ``lme4::profile`` workflow Bates uses in the gmm book.
     """
-    from hea.models import gmm
     from hea import data
+    from hea.models import gmm
 
     dye = data("Dyestuff")
     fm = gmm("Yield ~ 1 + (1 | Batch)", dye, REML=False)
@@ -2395,7 +2405,7 @@ def test_R_AIC_does_not_print_or_return_none(m_lm, capsys):
 # ---------------------------------------------------------------------------
 
 
-from hea.R import (  # noqa: E402  — grouped with the diagnostic tests
+from hea.R import (
     cooks_distance,
     dfbetas,
     dffits,
@@ -2596,7 +2606,7 @@ def test_weighted_lm_rstudent_dffits_consistent(gala):
 # ---------------------------------------------------------------------------
 
 
-from hea.R import (  # noqa: E402  — grouped with the test-batch tests
+from hea.R import (
     HTest,
     ansari_test,
     bartlett_test,
@@ -2740,8 +2750,10 @@ def test_fisher_test_exact_rxc_bit_exact_vs_r():
                         ]
                     )
                 ).p_value,
-                "fisher.test(matrix(c(1,8,5,4,4,2,2,5,3,3,4,3,1,0,"
-                "10,1,4,0,0,0,0),3,7,byrow=TRUE))$p.value",
+                (
+                    "fisher.test(matrix(c(1,8,5,4,4,2,2,5,3,3,4,3,1,0,"
+                    "10,1,4,0,0,0,0),3,7,byrow=TRUE))$p.value"
+                ),
                 0.0035599802033163706,
             ),
             (
@@ -2755,8 +2767,10 @@ def test_fisher_test_exact_rxc_bit_exact_vs_r():
                         [[1, 2, 1, 0], [3, 3, 6, 1], [10, 10, 14, 9], [6, 7, 12, 11]]
                     )
                 ).p_value,
-                "fisher.test(matrix(c(1,2,1,0,3,3,6,1,10,10,14,9,6,7,12,11),"
-                "4,4,byrow=TRUE))$p.value",
+                (
+                    "fisher.test(matrix(c(1,2,1,0,3,3,6,1,10,10,14,9,6,7,12,11),"
+                    "4,4,byrow=TRUE))$p.value"
+                ),
                 0.78268493896653246,
             ),
         ]
@@ -2777,8 +2791,10 @@ def test_fisher_test_exact_hybrid_vs_r():
         [
             (
                 r.p_value,
-                "fisher.test(matrix(c(3,5,2,7,2,8,4,6,1),3,3,byrow=TRUE),"
-                "hybrid=TRUE)$p.value",
+                (
+                    "fisher.test(matrix(c(3,5,2,7,2,8,4,6,1),3,3,byrow=TRUE),"
+                    "hybrid=TRUE)$p.value"
+                ),
                 0.07481072655669109,
             ),
         ]
@@ -2910,14 +2926,18 @@ def test_oneway_fligner_mood_quade_bit_exact_vs_r():
             (md.p_value, f"mood.test({x1},{y1})$p.value", 0.51821735512522893),
             (
                 md2.statistic["Z"],
-                'mood.test(c(1,2,2,3,4,4),c(2,3,3,4,5,5,1),alternative="greater")'
-                "$statistic",
+                (
+                    'mood.test(c(1,2,2,3,4,4),c(2,3,3,4,5,5,1),alternative="greater")'
+                    "$statistic"
+                ),
                 -0.65547418123743129,
             ),
             (
                 md2.p_value,
-                'mood.test(c(1,2,2,3,4,4),c(2,3,3,4,5,5,1),alternative="greater")'
-                "$p.value",
+                (
+                    'mood.test(c(1,2,2,3,4,4),c(2,3,3,4,5,5,1),alternative="greater")'
+                    "$p.value"
+                ),
                 0.74391874786547685,
             ),
             (
@@ -3006,8 +3026,10 @@ def test_ansari_test_bit_exact_vs_r():
             ),
             (
                 at.p_value,
-                "suppressWarnings(ansari.test(c(1,2,3,4,5,6,3,4),"
-                "c(2,3,4,5,6,7,4,5,3),exact=TRUE))$p.value",
+                (
+                    "suppressWarnings(ansari.test(c(1,2,3,4,5,6,3,4),"
+                    "c(2,3,4,5,6,7,4,5,3),exact=TRUE))$p.value"
+                ),
                 0.99117150596872883,
             ),
         ]
@@ -3128,14 +3150,18 @@ def test_pairwise_tests_bit_exact_vs_r():
             ),
             (
                 ptb.p_value[1, 0],
-                f'pairwise.t.test({X},{G},p.adjust.method="bonferroni",'
-                "pool.sd=FALSE)$p.value[2,1]",
+                (
+                    f'pairwise.t.test({X},{G},p.adjust.method="bonferroni",'
+                    "pool.sd=FALSE)$p.value[2,1]"
+                ),
                 0.042118794320873593,
             ),
             (
                 pw.p_value[1, 0],
-                f"suppressWarnings(pairwise.wilcox.test({X},{G},"
-                'p.adjust.method="BH"))$p.value[2,1]',
+                (
+                    f"suppressWarnings(pairwise.wilcox.test({X},{G},"
+                    'p.adjust.method="BH"))$p.value[2,1]'
+                ),
                 0.085714285714285715,
             ),
         ]
@@ -3207,16 +3233,14 @@ def test_power_tests_vs_r():
         power_t_test(n=20, delta=1.0, power=0.8)
 
 
-from hea.R import (  # noqa: E402  — grouped with the formula-helper tests
+from hea.R import (
     DF2formula,
     MFclass,
     NAAction,
     as_formula,
     delete_response,
     drop_terms,
-    factor as R_factor,
     get_all_vars,
-    ordered as R_ordered,
     na_exclude,
     na_fail,
     na_pass,
@@ -3228,6 +3252,12 @@ from hea.R import (  # noqa: E402  — grouped with the formula-helper tests
     predict_poly,
     reformulate,
     update_formula,
+)
+from hea.R import (
+    factor as R_factor,
+)
+from hea.R import (
+    ordered as R_ordered,
 )
 
 
@@ -3384,7 +3414,7 @@ def test_poly_polym_vs_r():
     )
 
 
-from hea.R import (  # noqa: E402  — grouped with the lm/aov-extras tests
+from hea.R import (
     cov2cor,
     covratio,
     influence_measures,
@@ -3791,8 +3821,10 @@ def test_cor_test_spearman_exact():
         [
             (
                 res_g.p_value,
-                f'cor.test({xr}, {yr}, method="spearman", '
-                f'alternative="greater")$p.value',
+                (
+                    f'cor.test({xr}, {yr}, method="spearman", '
+                    f'alternative="greater")$p.value'
+                ),
                 0.00069013357072883431,
             )
         ]
@@ -4059,7 +4091,7 @@ def test_htest_repr_contains_method_and_p():
 # ---------------------------------------------------------------------------
 
 
-from hea.R import (  # noqa: E402  — grouped with the helper tests
+from hea.R import (
     addmargins,
     cut,
     findInterval,
@@ -4067,7 +4099,6 @@ from hea.R import (  # noqa: E402  — grouped with the helper tests
     table,
     xtabs,
 )
-
 
 # ---- cut ------------------------------------------------------------
 
@@ -4325,12 +4356,11 @@ def test_addmargins_oneway_appends_sum_row():
 # ---------------------------------------------------------------------------
 
 
-from hea.R import (  # noqa: E402  — grouped with the deferred-fn tests
+from hea.R import (
     Terms,
     terms,
     update,
 )
-
 
 # ---- glm/gam jackknife: rstudent / dffits / dfbetas / influence -----
 

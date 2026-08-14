@@ -36,22 +36,24 @@ from scipy.linalg import solve_triangular
 from scipy.special import (
     digamma,
     expit,
-    gamma as _gamma_fn,
     gammaln,
     log_ndtr,
     logit,
     polygamma,
 )
+from scipy.special import (
+    gamma as _gamma_fn,
+)
 
+from ._dispatch import rs_fn as _rs_fn
 from .R import nmath as _nmath
 from .R.nmath import (
-    _dpois_raw,
     _dbinom_raw,
+    _dpois_raw,
     _lgammafn_arr,
     dnorm5_vec,
     pnorm5_vec,
 )
-from ._dispatch import rs_fn as _rs_fn
 
 
 def _polygamma(deriv, x):
@@ -896,7 +898,7 @@ def _brent_fmin(f, ax: float, bx: float, tol: float) -> tuple[float, float]:
     return x, fx
 
 
-def find_null_dev(family: "Family", y, eta, offset, weights) -> float:
+def find_null_dev(family: Family, y, eta, offset, weights) -> float:
     """mgcv ``find.null.dev`` (efam.r:98-117): the null deviance of an
     extended family — deviance of the best single-constant model on the
     link scale, found by 1-D ``optimize`` over the constant with mgcv's
@@ -1221,7 +1223,7 @@ class Family:
         such state override; ``ind=None`` restores the full view. Default:
         no per-row state — no-op (mgcv's ``is.null(family$setInd)``).
         """
-        return None
+        return
 
     # ----- qq.gam hooks (mgcv fix.family.qf / fix.family.rd,
     # plots.r:31-91). ``None`` means unavailable: the qq machinery then
@@ -2018,7 +2020,7 @@ def _tweedie_log_a_one(y_i: float, phi_i: float, p: float):
 
     j_star = np.exp((log_z + alpha * np.log(-alpha)) / one_minus_alpha)
     j_star = max(j_star, 1.0)
-    j_int = max(1, int(round(j_star)))
+    j_int = max(1, round(j_star))
 
     def _lw(j):
         return j * log_z - _nmath._lgammafn(j + 1.0) - _nmath._lgammafn(-j * alpha)
@@ -2032,8 +2034,7 @@ def _tweedie_log_a_one(y_i: float, phi_i: float, p: float):
         v = _lw(j)
         j_list.append(float(j))
         lw_list.append(v)
-        if v > log_max:
-            log_max = v
+        log_max = max(log_max, v)
         if v - log_max < -_LD_EPS:
             break
         j += 1
@@ -2042,8 +2043,7 @@ def _tweedie_log_a_one(y_i: float, phi_i: float, p: float):
         v = _lw(j)
         j_list.append(float(j))
         lw_list.append(v)
-        if v > log_max:
-            log_max = v
+        log_max = max(log_max, v)
         if v - log_max < -_LD_EPS:
             break
         j -= 1
@@ -2123,7 +2123,8 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     ``m_dwpp`` (E[wp1·j/(1−p)+wpp]) — the same set as :func:`_tweedie_log_a_one`,
     matching mgcv ``tweedious`` (`wdlogwdp/wi`, `wdW2d2W/wi`, `dWpp/wi`,
     misc.c:346-503) BEFORE the θ-chain. Combining ``wp1²+wp2`` per term (rather
-    than the old separate ``E[(jψ)²]``/``E[j²ψ']`` moments + subtraction) avoids
+    than accumulating ``E[(jψ)²]`` and ``E[j²ψ']`` separately and subtracting)
+    avoids
     the ~1e-11 catastrophic cancellation in the 2nd derivatives. Entries with
     y==0 are 0 (the y=0 row uses the closed-form point mass, not the series).
     Per-obs phi handles weights via ``φ_i = φ/wt_i``.
@@ -4514,7 +4515,7 @@ class Tweedie(Family):
             # well-conditioned working accumulators: m_wp1 = E[∂logW/∂p],
             # m_comb = E[(∂logW/∂p)² + ∂²logW/∂p²], m_dwpp = E[∂logW/∂p·j/(1−p)
             # + ∂²logW/∂p∂logφ]. Combining (∂logW/∂p)²+∂²logW/∂p² PER TERM avoids
-            # the ~1e-11 cancellation the old separate-moment split incurred.
+            # the ~1e-11 cancellation a separate-moment split incurs.
             d2p_ser[~zero] = m_comb - m_wp1**2
             cross_ser[~zero] = m_dwpp - (jb / om1) * m_wp1
 
@@ -6522,7 +6523,7 @@ def _ocat_dev_signed(y1, mu, wt, theta) -> tuple[np.ndarray, np.ndarray]:
     y1 = np.asarray(y1).astype(int)
     mu = np.asarray(mu, dtype=float)
     wt = np.asarray(wt, dtype=float)
-    alpha, R = _ocat_alpha_full(theta)
+    alpha, _R = _ocat_alpha_full(theta)
     al1 = alpha[y1]
     al0 = alpha[y1 - 1]
     s = np.sign((al1 + al0) / 2.0 - mu)
@@ -7445,7 +7446,7 @@ def _cnorm_ls_val(y, wt, theta, censor):
     y = np.asarray(y, dtype=float)
     wt = np.asarray(wt, dtype=float)
     th = float(theta) - np.log(wt) / 2.0
-    yat, iu, ii, il, ir = _cnorm_cases(y, censor)
+    yat, iu, ii, _il, _ir = _cnorm_cases(y, censor)
     ls = 0.0
     if iu.size:
         ls += float(np.sum(-th[iu] - _LOG2PI / 2.0))
@@ -7485,7 +7486,7 @@ def _cnorm_Dd(y, mu, theta, wt, censor, level=0):
     Dmu4 = np.zeros(n)
     Dmu3th = np.zeros(n)
 
-    _es = dict(divide="ignore", invalid="ignore", over="ignore")
+    _es = {"divide": "ignore", "invalid": "ignore", "over": "ignore"}
 
     if iu.size:  # uncensored
         ethi = eth[iu]
@@ -8095,7 +8096,7 @@ def _cpois_Dd(y, mu, censor, level=0):
     f3 = np.zeros(n) if level > 0 else None
     f4 = np.zeros(n) if level > 1 else None
 
-    _es = dict(divide="ignore", invalid="ignore", over="ignore")
+    _es = {"divide": "ignore", "invalid": "ignore", "over": "ignore"}
 
     if iu.size:  # uncensored
         yiu = y[iu]
@@ -8183,7 +8184,7 @@ def _cpois_ls_val(y, censor):
     dppois at the saturated μ; left/right-censored rows are exactly 0,
     as are all θ/scale derivatives."""
     y = np.asarray(y, dtype=float)
-    yat, iu, ii, il, ir = _cnorm_cases(y, censor)
+    yat, iu, ii, _il, _ir = _cnorm_cases(y, censor)
     d = np.zeros(y.shape[0])
     if iu.size:
         d[iu] = _cpois_dpois_log(y[iu], y[iu])
@@ -8467,7 +8468,7 @@ def _clog_Dd(y, mu, theta, wt, censor, level=0):
         Dmu2th2 = np.zeros(n)
         Dmu3th = np.zeros(n)
 
-    _es = dict(divide="ignore", invalid="ignore", over="ignore")
+    _es = {"divide": "ignore", "invalid": "ignore", "over": "ignore"}
 
     if iu.size:  # uncensored
         si = np.exp(theta) / np.sqrt(wt[iu])
@@ -8760,7 +8761,7 @@ def _clog_ls(y, wt, theta, censor):
     y = np.asarray(y, dtype=float)
     wt = np.asarray(wt, dtype=float)
     theta = float(theta)
-    yat, iu, ii, il, ir = _cnorm_cases(y, censor)
+    yat, iu, ii, _il, _ir = _cnorm_cases(y, censor)
     n = y.shape[0]
     l0 = np.zeros(n)
     l1 = np.zeros(n)
@@ -9008,11 +9009,10 @@ def _r_pow_scalar(x, p):
             return 0.0 if p < 0 else math.inf
         if math.isfinite(p) and p == math.floor(p):
             return 0.0 if p < 0 else (x if math.fmod(p, 2.0) != 0 else -x)
-    if not math.isfinite(p):
-        if x >= 0:
-            if p > 0:
-                return math.inf if x >= 1 else 0.0
-            return math.inf if x < 1 else 0.0
+    if not math.isfinite(p) and x >= 0:
+        if p > 0:
+            return math.inf if x >= 1 else 0.0
+        return math.inf if x < 1 else 0.0
     return math.nan
 
 
@@ -9256,7 +9256,7 @@ def _bcg_ls(y, wt, theta, censor):
     theta = np.asarray(theta, dtype=float).reshape(-1)
     th = theta[1] - np.log(wt) / 2.0
     la = float(theta[0])
-    yat, iu, ii, il, ir = _bcg_cases(y, censor)
+    yat, iu, ii, _il, _ir = _bcg_cases(y, censor)
     ls = 0.0
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
         if iu.size:
@@ -9313,7 +9313,7 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
         Dmu4 = np.zeros(n)
         Dmu3th = np.zeros((n, 2))
 
-    _es = dict(divide="ignore", invalid="ignore", over="ignore")
+    _es = {"divide": "ignore", "invalid": "ignore", "over": "ignore"}
 
     if iu.size:  # uncensored
         ethi = eth[iu]
@@ -10156,7 +10156,7 @@ def _gfam_exp_ls(fam, y, w, scale):
     raise ValueError("family not recognised")
 
 
-def _gfam_is_ext(f: "Family") -> bool:
+def _gfam_is_ext(f: Family) -> bool:
     """mgcv's ``inherits(fam, "extended.family")`` for gfam member
     classification. hea's ``Family.is_extended`` flag serves bam's
     Newton-branch gating and is False on ``tw`` (which the engine
@@ -10200,7 +10200,7 @@ class _GfamLink(Link):
     exactly as mgcv's dDeta does for gfam (``family$link != "identity"``
     even when every member link is identity)."""
 
-    def __init__(self, fam: "gfam"):
+    def __init__(self, fam: gfam):
         self._fam = fam
         self.name = "{" + ",".join(f.link.name for f in fam._fl) + "}"
 
@@ -11011,19 +11011,17 @@ def trind_generator(
         # mgcv's closed forms (1-based); wrap for 0-based i/o.
         def i2(i: int, j: int) -> int:
             i, j = sorted((i + 1, j + 1))
-            return int(round((i - 1) * (2 * K + 2 - i) / 2 + j - i + 1)) - 1
+            return round((i - 1) * (2 * K + 2 - i) / 2 + j - i + 1) - 1
 
         def i3(i: int, j: int, k: int) -> int:
             i, j, k = sorted((i + 1, j + 1, k + 1))
             return (
-                int(
-                    round(
-                        (i - 1) * (3 * K * (K + 1) + (i - 2) * (i - 3 * (K + 1))) / 6
-                        + (j - i) * (2 * K + 3 - i - j) / 2
-                        + k
-                        - j
-                        + 1
-                    )
+                round(
+                    (i - 1) * (3 * K * (K + 1) + (i - 2) * (i - 3 * (K + 1))) / 6
+                    + (j - i) * (2 * K + 3 - i - j) / 2
+                    + k
+                    - j
+                    + 1
                 )
                 - 1
             )
@@ -11033,26 +11031,23 @@ def trind_generator(
             i1 = i - 1
             i1i2 = i1 * (i - 2) / 2
             return (
-                int(
-                    round(
-                        ll_
-                        - k
-                        + 1
-                        + (k - j) * (2 * K + 3 - j - k) / 2
-                        + (j - i)
-                        * (
-                            3 * (K + 1 - i) ** 2
-                            + 3 * (K + 1 - i)
-                            + (j - i - 1) * (j + 2 * i - 3 * K - 5)
-                        )
-                        / 6
-                        + (
-                            i1 * (K**3 + 3 * K**2 + 2 * K)
-                            + i1i2
-                            * ((K + 1) * (2 * i - 3) - (3 * K**2 + 6 * K + 2) - i1i2)
-                        )
-                        / 6
+                round(
+                    ll_
+                    - k
+                    + 1
+                    + (k - j) * (2 * K + 3 - j - k) / 2
+                    + (j - i)
+                    * (
+                        3 * (K + 1 - i) ** 2
+                        + 3 * (K + 1 - i)
+                        + (j - i - 1) * (j + 2 * i - 3 * K - 5)
                     )
+                    / 6
+                    + (
+                        i1 * (K**3 + 3 * K**2 + 2 * K)
+                        + i1i2 * ((K + 1) * (2 * i - 3) - (3 * K**2 + 6 * K + 2) - i1i2)
+                    )
+                    / 6
                 )
                 - 1
             )
@@ -11128,10 +11123,9 @@ def _deriv_orders(idx: tuple[int, ...]) -> np.ndarray:
         if idx[0] == idx[3]:
             ord_[0] += 1
             ord_[3] = 0
-        if ord_[1]:
-            if idx[1] == idx[3]:
-                ord_[1] += 1
-                ord_[3] = 0
+        if ord_[1] and idx[1] == idx[3]:
+            ord_[1] += 1
+            ord_[3] = 0
         if ord_[2] and idx[2] == idx[3]:
             ord_[2] += 1
             ord_[3] = 0
@@ -16036,8 +16030,9 @@ class mvn(GeneralFamily):
         differ from mgcv's while every fitted quantity still pins."""
         # local import: hea.models.gam imports this module at load time,
         # so the reverse import must be deferred to call time.
-        from .models.gam import _magic_gcv
         from types import SimpleNamespace
+
+        from .models.gam import _magic_gcv
 
         y = np.asarray(y, dtype=float)
         X = np.asarray(X, dtype=float)
@@ -16192,7 +16187,7 @@ class mvn(GeneralFamily):
         return f"mvn(d={self.d})"
 
 
-def _coerce_response(y_series: pl.Series, family: "Family") -> np.ndarray:
+def _coerce_response(y_series: pl.Series, family: Family) -> np.ndarray:
     """Cast the response column to a numeric float array, with R's
     factor-response convention for :class:`Binomial`.
 
@@ -16241,60 +16236,60 @@ quasipoisson = QuasiPoisson
 quasibinomial = QuasiBinomial
 scat = Scat  # mgcv-style lowercase alias
 __all__ = [
-    "Family",
-    "Link",
-    "Gaussian",
-    "gaussian",
-    "Gamma",
-    "Poisson",
-    "poisson",
     "Binomial",
-    "binomial",
-    "InverseGaussian",
-    "inverse_gaussian",
-    "Quasi",
-    "quasi",
-    "QuasiPoisson",
-    "quasipoisson",
-    "QuasiBinomial",
-    "quasibinomial",
-    "Tweedie",
-    "tw",
-    "Scat",
-    "scat",
-    "nb",
-    "betar",
-    "ocat",
-    "ziP",
-    "cnorm",
-    "GeneralFamily",
-    "gaulss",
-    "twlss",
-    "shash",
-    "gammals",
-    "gumbls",
-    "gevlss",
-    "cox_ph",
-    "ziplss",
-    "multinom",
-    "mvn",
-    "LogebLink",
-    "SoftplusLink",
     "BoundedLogLink",
-    "ShiftedLogitLink",
-    "trind_generator",
-    "gamlss_etamu",
-    "gamlss_gH",
-    "DiscreteX",
-    "IdentityLink",
-    "LogLink",
-    "InverseLink",
-    "SqrtLink",
-    "LogitLink",
-    "ProbitLink",
     "CauchitLink",
     "CloglogLink",
+    "DiscreteX",
+    "Family",
+    "Gamma",
+    "Gaussian",
+    "GeneralFamily",
+    "IdentityLink",
+    "InverseGaussian",
+    "InverseLink",
     "InverseSquareLink",
+    "Link",
+    "LogLink",
+    "LogebLink",
+    "LogitLink",
+    "Poisson",
     "PowerLink",
+    "ProbitLink",
+    "Quasi",
+    "QuasiBinomial",
+    "QuasiPoisson",
+    "Scat",
+    "ShiftedLogitLink",
+    "SoftplusLink",
+    "SqrtLink",
+    "Tweedie",
+    "betar",
+    "binomial",
+    "cnorm",
+    "cox_ph",
+    "gamlss_etamu",
+    "gamlss_gH",
+    "gammals",
+    "gaulss",
+    "gaussian",
+    "gevlss",
+    "gumbls",
+    "inverse_gaussian",
+    "multinom",
+    "mvn",
+    "nb",
+    "ocat",
+    "poisson",
     "power",
+    "quasi",
+    "quasibinomial",
+    "quasipoisson",
+    "scat",
+    "shash",
+    "trind_generator",
+    "tw",
+    "twlss",
+    "ziP",
+    "ziplss",
 ]

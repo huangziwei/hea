@@ -23,7 +23,6 @@ import pytest
 
 from hea.translate import from_R, to_R
 
-
 # ---------------------------------------------------------------------------
 # Body-comparison helpers — strip preambles that differ by direction.
 # ---------------------------------------------------------------------------

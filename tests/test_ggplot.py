@@ -13,16 +13,8 @@ matplotlib.use("Agg")  # headless
 import matplotlib.pyplot as plt
 import polars as pl
 import pytest
-
 from conftest import load_dataset
 
-from hea.tidy import (
-    fct_infreq,
-    fct_relevel,
-    fct_rev,
-    fct_reorder,
-    fct_reorder2,
-)
 from hea.ggplot import (
     PlotGrid,
     aes,
@@ -34,13 +26,10 @@ from hea.ggplot import (
     coord_flip,
     coord_polar,
     coord_trans,
-    expansion,
     element_blank,
     element_rect,
-    plot_annotation,
-    plot_layout,
-    wrap_plots,
     element_text,
+    expansion,
     facet_grid,
     facet_wrap,
     geom_abline,
@@ -58,6 +47,7 @@ from hea.ggplot import (
     geom_dotplot,
     geom_errorbar,
     geom_errorbarh,
+    geom_function,
     geom_hex,
     geom_histogram,
     geom_hline,
@@ -82,28 +72,23 @@ from hea.ggplot import (
     geom_vline,
     ggplot,
     ggtitle,
-    labs,
-    lims,
     guide_axis,
     guide_legend,
     guides,
+    labs,
+    lims,
+    plot_annotation,
+    plot_layout,
     position_dodge,
     position_fill,
     position_jitter,
     position_nudge,
     position_stack,
-    scale_color_hue,
-    stat_ecdf,
-    stat_function,
-    stat_qq,
-    stat_qq_line,
-    stat_summary,
-    stat_unique,
-    geom_function,
     scale_color_brewer,
     scale_color_gradient,
     scale_color_gradient2,
     scale_color_gradientn,
+    scale_color_hue,
     scale_color_identity,
     scale_color_manual,
     scale_color_viridis_c,
@@ -125,16 +110,30 @@ from hea.ggplot import (
     scale_y_log10,
     scale_y_percent,
     scale_y_sqrt,
+    stat_ecdf,
+    stat_function,
+    stat_qq,
+    stat_qq_line,
+    stat_summary,
+    stat_unique,
     theme,
     theme_bw,
     theme_classic,
     theme_gray,
     theme_minimal,
     theme_void,
+    wrap_plots,
     xlab,
     xlim,
     ylab,
     ylim,
+)
+from hea.tidy import (
+    fct_infreq,
+    fct_relevel,
+    fct_reorder,
+    fct_reorder2,
+    fct_rev,
 )
 
 
@@ -224,7 +223,7 @@ def test_plus_unknown_type_errors():
     mtcars = load_dataset("datasets", "mtcars")
     p = ggplot(mtcars)
     with pytest.raises(TypeError, match="can't add"):
-        p + 42  # noqa: B015
+        p + 42
 
 
 def test_plus_list_adds_each_in_order():
@@ -234,7 +233,7 @@ def test_plus_list_adds_each_in_order():
 
 
 def test_aes_expression_evaluated_via_formula_parser():
-    """Per plan §13 Q3: aes value `"log(wt)"` parses as a Call node and is
+    """aes value `"log(wt)"` parses as a Call node and is
     evaluated, not treated as a (missing) column literally named `log(wt)`."""
     import numpy as np
 
@@ -905,6 +904,7 @@ def test_geom_smooth_lm_fit_matches_hea_lm():
     """The fit line from geom_smooth(method="lm") must match a hea.lm fit
     on the same data — no surprise drift."""
     import polars as pl
+
     from hea.models import lm
 
     mtcars = load_dataset("datasets", "mtcars")
@@ -1214,8 +1214,9 @@ def test_discrete_color_levels_sorted_alphabetically():
     mapping, so the level → colour assignment is alphabetical regardless
     of CSV row order. The penguins dataset lists Adelie/Gentoo/Chinstrap
     in that order; ggplot2 still gives Chinstrap green and Gentoo blue."""
-    from hea import data as _hea_data
     from matplotlib.colors import to_rgb
+
+    from hea import data as _hea_data
 
     penguins = _hea_data("penguins", package="palmerpenguins")
     p = (
@@ -1289,8 +1290,8 @@ def test_scale_color_manual_applies_user_palette():
 
 def test_scale_color_manual_dict_form():
     """Dict form lets the user pin specific colours per level explicitly."""
-    from matplotlib.colors import to_rgba
     import polars as pl
+    from matplotlib.colors import to_rgba
 
     df = pl.DataFrame(
         {"x": [1.0, 2, 3, 4], "y": [1.0, 2, 3, 4], "g": ["a", "b", "a", "b"]}
@@ -1312,8 +1313,8 @@ def test_scale_color_manual_dict_form():
 
 def test_scale_color_identity_passes_hex_through():
     """When the column already has hex codes, identity scale skips palette."""
-    from matplotlib.colors import to_rgba
     import polars as pl
+    from matplotlib.colors import to_rgba
 
     df = pl.DataFrame(
         {
@@ -1511,8 +1512,8 @@ def test_scale_color_viridis_d_direction_reverses_ordering():
 def test_scale_color_brewer_set1():
     """ColorBrewer Set1 — qualitative; matplotlib's bundled palette matches
     ``RColorBrewer::brewer.pal(_, 'Set1')`` colour-for-colour."""
-    from matplotlib.colors import to_hex
     import matplotlib
+    from matplotlib.colors import to_hex
 
     mtcars = load_dataset("datasets", "mtcars")
     p = (
@@ -1784,7 +1785,7 @@ def test_facet_wrap_with_geom_smooth_per_panel_fits():
             xy = a.lines[0].get_xydata()
             if len(xy) >= 2:
                 slopes.append((xy[-1, 1] - xy[0, 1]) / (xy[-1, 0] - xy[0, 0]))
-        assert len(set(round(s, 3) for s in slopes)) >= 2
+        assert len({round(s, 3) for s in slopes}) >= 2
     finally:
         plt.close(fig)
 
@@ -2028,7 +2029,7 @@ def test_facet_grid_per_panel_stat_fit():
             xy = a.lines[0].get_xydata()
             if len(xy) >= 2:
                 slopes.append((xy[-1, 1] - xy[0, 1]) / (xy[-1, 0] - xy[0, 0]))
-        assert len(set(round(s, 3) for s in slopes)) >= 2
+        assert len({round(s, 3) for s in slopes}) >= 2
     finally:
         plt.close(fig)
 
@@ -2741,7 +2742,7 @@ def test_stat_summary_auto_orientation_picks_y_for_discrete_y():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        xs, ys = ax.lines[0].get_data()
+        xs, _ys = ax.lines[0].get_data()
         # Two means: x=mean of a-group, then x=mean of b-group. y stays
         # categorical, rendered at categorical positions 0 and 1.
         import numpy as np
@@ -2765,7 +2766,7 @@ def test_stat_summary_explicit_orientation_overrides_auto():
     p = ggplot(df, aes("x", "y")) + stat_summary(
         geom="line", fun="mean", orientation="x", group=1
     )
-    with pytest.raises(Exception):  # numpy can't average enum codes
+    with pytest.raises(TypeError):  # numpy can't average enum codes
         p.draw()
 
 
@@ -3534,6 +3535,7 @@ def test_scale_x_date_uses_concise_formatter():
     to tick spacing (year-aligned ticks render as bare years, etc.).
     Mirrors ggplot2's ``scales::label_date_short()``."""
     import datetime
+
     import matplotlib.dates as mdates
 
     df = pl.DataFrame(
@@ -3606,9 +3608,9 @@ def test_scale_x_datetime_includes_time():
     df = pl.DataFrame(
         {
             "x": [
-                datetime.datetime(2020, 1, 1, 12, 30),
-                datetime.datetime(2020, 1, 1, 13, 30),
-                datetime.datetime(2020, 1, 1, 14, 30),
+                datetime.datetime(2020, 1, 1, 12, 30),  # noqa: DTZ001 - tz-naive is the fixture
+                datetime.datetime(2020, 1, 1, 13, 30),  # noqa: DTZ001
+                datetime.datetime(2020, 1, 1, 14, 30),  # noqa: DTZ001
             ],
             "y": [1.0, 2.0, 3.0],
         }
@@ -5530,8 +5532,9 @@ def test_geom_point_warns_on_missing_values():
 
 def test_geom_point_na_rm_silences_warning():
     """``geom_point(na_rm=True)`` drops NAs without warning, matching ggplot2."""
-    import polars as pl
     import warnings as _w
+
+    import polars as pl
 
     df = pl.DataFrame(
         {
@@ -5563,8 +5566,8 @@ def test_geom_point_scatter_size_uses_pt_per_mm_conversion():
 
 def test_aes_color_constant_kwarg_overrides_mapping():
     """`geom_point(colour="red")` (constant) wins over `aes(colour=…)` mapping."""
-    from matplotlib.colors import to_rgba
     import polars as pl
+    from matplotlib.colors import to_rgba
 
     df = pl.DataFrame({"x": [1.0, 2, 3], "y": [1.0, 2, 3], "g": ["a", "b", "c"]})
     p = ggplot(df, aes("x", "y", colour="g")) + geom_point(colour="red")

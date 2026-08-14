@@ -188,7 +188,7 @@ class KwargAlias:
     """
 
     py_name: str
-    value_slot: "Slot | None" = None
+    value_slot: Slot | None = None
 
 
 # Kwarg name aliases — R-side dotted form → (Python-side name, value slot).

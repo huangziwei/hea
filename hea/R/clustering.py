@@ -27,23 +27,21 @@ from .distance import Dist, _pmatch, as_dist, as_matrix_dist
 from .distributions import _r_rng
 
 __all__ = [
-    "Hclust",
-    "Kmeans",
-    "hclust",
-    "as_hclust",
-    "cophenetic",
-    "cutree",
-    "fitted_kmeans",
-    "kmeans",
-    "print_hclust",
-    "print_kmeans",
     # dendrogram subsystem (cluster_dendrogram.R)
     "Dendrogram",
+    "Hclust",
+    "Kmeans",
     "as_dendrogram",
+    "as_hclust",
+    "cophenetic",
     "cophenetic_dendrogram",
     "cut_dendrogram",
+    "cutree",
     "dendrapply",
+    "fitted_kmeans",
+    "hclust",
     "is_leaf",
+    "kmeans",
     "labels_dendrogram",
     "merge_dendrogram",
     "midcache_dendrogram",
@@ -51,6 +49,8 @@ __all__ = [
     "nobs_dendrogram",
     "order_dendrogram",
     "print_dendrogram",
+    "print_hclust",
+    "print_kmeans",
     "reorder",
     "reorder_dendrogram",
     "rev_dendrogram",
@@ -754,7 +754,7 @@ class Hclust:
     * ``labels`` / ``method`` / ``call`` / ``dist_method``.
     """
 
-    __slots__ = ("merge", "height", "order", "labels", "method", "call", "dist_method")
+    __slots__ = ("call", "dist_method", "height", "labels", "merge", "method", "order")
 
     def __init__(
         self,
@@ -1009,15 +1009,15 @@ class Kmeans:
     """
 
     __slots__ = (
-        "cluster",
+        "betweenss",
         "centers",
+        "cluster",
+        "ifault",
+        "iter",
+        "size",
+        "tot_withinss",
         "totss",
         "withinss",
-        "tot_withinss",
-        "betweenss",
-        "size",
-        "iter",
-        "ifault",
     )
 
     def __init__(
@@ -1258,7 +1258,7 @@ class Dendrogram:
     ``[[`` follow R: ``len`` is the branch count (1 for a leaf) and ``d[k]`` is
     R's **1-based** ``[[.dendrogram`` (a tuple descends recursively)."""
 
-    __slots__ = ("children", "value", "attrs")
+    __slots__ = ("attrs", "children", "value")
 
     def __init__(self, children=None, value=None, attrs=None):
         self.children = children

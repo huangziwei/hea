@@ -136,10 +136,10 @@ def main(argv: list[str]) -> int:
         tree = ast.parse(src, str(user_script))
         _rewrite_last_expr(tree)
         ns = _build_namespace()
-        exec(compile(tree, str(user_script), "exec"), ns)
+        exec(compile(tree, str(user_script), "exec"), ns)  # noqa: S102 - running the user script is this module's job
         result = ns.get("__hea_last__")
         _serialize_result(result, out_csv, out_schema)
-    except Exception:
+    except Exception:  # noqa: BLE001
         traceback.print_exc()
         return 1
 

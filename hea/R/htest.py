@@ -12,23 +12,22 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Optional, Union
 
 import numpy as np
 import polars as pl
+
 from . import _fexact
 from . import distributions as _dist
 from . import nmath as _nm
-
 from ._shared import _as_array, _fmt, _fmt_pval, _rfma
 
 # ``lm`` is imported inside the three functions that call it, not here.
 # Module level closes a cycle: ``hea.family`` imports ``hea.R.nmath``, which
 # runs ``hea/R/__init__.py``, which imports this module, which would import
 # ``hea.models`` -- whose ``bam`` imports ``hea.family`` straight back. The
-# eager ``hea/__init__.py`` used to hide it by loading ``hea.R`` first; a lazy
-# one does not, and whichever of the two a caller touches first decides. It is
-# also weight: nothing in ``hea.R`` needs ``bam``/``gam``/``glm`` at import.
+# An eager ``hea/__init__.py`` hides that by loading ``hea.R`` first; a lazy one
+# does not, and whichever of the two a caller touches first decides. It is also
+# weight: nothing in ``hea.R`` needs ``bam``/``gam``/``glm`` at import.
 
 
 def _avg_rank(a) -> np.ndarray:
@@ -65,10 +64,10 @@ class HTest:
     method: str
     statistic: dict = field(default_factory=dict)
     parameter: dict = field(default_factory=dict)
-    p_value: Optional[float] = None
-    conf_int: Optional[tuple] = None
+    p_value: float | None = None
+    conf_int: tuple | None = None
     estimate: dict = field(default_factory=dict)
-    null_value: Optional[Union[float, dict]] = None
+    null_value: float | dict | None = None
     alternative: str = "two.sided"
     data_name: str = ""
     conf_level: float = 0.95
@@ -189,7 +188,7 @@ p_adjust_methods = (
 )
 
 
-def p_adjust(p, method: str = "holm", n: Optional[int] = None):
+def p_adjust(p, method: str = "holm", n: int | None = None):
     """Adjust p-values for multiple comparisons — R's ``p.adjust``.
 
     Faithful port of ``stats::p.adjust`` (``p.adjust.R``). ``method`` is
@@ -456,7 +455,7 @@ def _dpermdist2(scores, m: int) -> list:
     s_b = 0
     for k in range(n):
         sk = int(scores[k])
-        s_a += 1
+        s_a = k + 1
         s_b += sk
         min_b = min(sum_b, s_b)
         for i in range(min(sum_a, s_a), 0, -1):
@@ -482,7 +481,7 @@ def _dsignrank_z(s, z) -> np.ndarray:
     out = np.zeros(len(s))
     xv = f * np.asarray(s, dtype=float)
     for idx, val in enumerate(xv):
-        iv = int(round(val))
+        iv = round(val)
         if abs(val - iv) < 1e-9 and 0 <= iv < len(d):
             out[idx] = d[iv]
     return out
@@ -510,7 +509,7 @@ def _dwilcox_z(s, m, n, z) -> np.ndarray:
     out = np.zeros(len(s))
     xv = f * (np.asarray(s, dtype=float) + m * (m + 1) / 2.0)
     for idx, val in enumerate(xv):
-        iv = int(round(val))
+        iv = round(val)
         if abs(val - iv) < 1e-9 and 1 <= iv <= len(d):
             out[idx] = d[iv - 1]
     return out
@@ -547,7 +546,7 @@ def wilcox_test(
     mu: float = 0.0,
     paired: bool = False,
     alternative: str = "two.sided",
-    exact: Optional[bool] = None,
+    exact: bool | None = None,
     correct=True,
 ) -> HTest:
     """R's ``wilcox.test`` — Wilcoxon signed-rank / rank-sum test.
@@ -872,7 +871,7 @@ def cor_test(
     alternative: str = "two.sided",
     conf_level: float = 0.95,
     continuity: bool = False,
-    exact: Optional[bool] = None,
+    exact: bool | None = None,
 ) -> HTest:
     """R's ``cor.test`` with ``method`` in {pearson, spearman, kendall}.
 
@@ -1191,7 +1190,7 @@ def _chisq_table(
     B: int = 2000,
 ) -> HTest:
     tbl = np.asarray(tbl, dtype=float)
-    nr, nc = tbl.shape
+    _nr, _nc = tbl.shape
     n = tbl.sum()
     sr = tbl.sum(axis=1)
     sc = tbl.sum(axis=0)
@@ -1350,7 +1349,7 @@ def _fisher_test_exact(tbl, name, *, workspace, hybrid, hybrid_pars, mult):
         )
         method = (
             "Fisher's Exact Test for Count Data hybrid using "
-            "asym.chisq. iff (exp=%g, perc=%g, Emin=%g)" % (expect, percnt, emin)
+            f"asym.chisq. iff (exp={expect:g}, perc={percnt:g}, Emin={emin:g})"
         )
     else:
         expect, percnt, emin = -1.0, 100.0, 0.0
@@ -1912,8 +1911,7 @@ def _swilk(x: np.ndarray):
         pi6 = 1.90985931710274  # = 6/pi
         stqr = 1.04719755119660  # = asin(sqrt(3/4))
         pw = pi6 * (math.asin(math.sqrt(w)) - stqr)
-        if pw < 0.0:
-            pw = 0.0
+        pw = max(pw, 0.0)
         return w, pw, ifault
     y = math.log(w1)
     xx = math.log(an)
@@ -2087,14 +2085,14 @@ def _ks_K2x(n: int, d: float) -> float:
 
 def _pkolmogorov_one_exact(q, n, lower_tail=True):
     """One-sided one-sample exact Kolmogorov (Birnbaum-Tingey 1951)."""
-    jmax = int(math.floor(n * (1 - q)))
+    jmax = math.floor(n * (1 - q))
     terms = [
         math.exp(
             _nm.lchoose(n, j)
             + (n - j) * math.log(1 - q - j / n)
             + (j - 1) * math.log(q + j / n)
         )
-        for j in range(0, jmax + 1)
+        for j in range(jmax + 1)
     ]
     p = q * _rsum_ld(terms)
     return (1 - p) if lower_tail else p
@@ -2306,8 +2304,7 @@ def _smirnov_sim(nrowt, ncolt, B, twosided, rng):
             diff = cs0 / c0 - cs1 / c1
             if twosided:
                 diff = abs(diff)
-            if diff > s:
-                s = diff
+            s = max(s, diff)
         results[it] = s
     return results
 
@@ -2330,9 +2327,9 @@ def rsmirnov(n, sizes, z=None, alternative="two.sided"):
         return np.array([])
     if n < 0:
         raise ValueError("invalid arguments")
-    B = int(math.floor(n))
-    n_x = int(math.floor(sizes[0]))
-    n_y = int(math.floor(sizes[1]))
+    B = math.floor(n)
+    n_x = math.floor(sizes[0])
+    n_y = math.floor(sizes[1])
     if n_x < 1:
         raise ValueError("not enough 'x' data")
     if n_y < 1:
@@ -2364,8 +2361,8 @@ def psmirnov(
     bit-exact; ``simulate=True`` draws ``B`` Monte-Carlo variates via
     :func:`rsmirnov` (stream bit-exact to R)."""
     qarr = np.atleast_1d(np.asarray(q, dtype=float))
-    n_x = int(math.floor(sizes[0]))
-    n_y = int(math.floor(sizes[1]))
+    n_x = math.floor(sizes[0])
+    n_y = math.floor(sizes[1])
     exact = exact and not simulate
     dsim = rsmirnov(B, sizes, z, alternative) if simulate else None
     ret = np.empty(qarr.shape, dtype=float)
@@ -2402,8 +2399,8 @@ def qsmirnov(
     """R's ``qsmirnov(p, sizes, z, alternative, exact, simulate, B)`` — the
     Smirnov quantile: the smallest support point ``d`` with ``psmirnov(d) >= p``
     (ks.test.R). With ``p=None`` returns the ``{stat, prob}`` support table."""
-    n_x = int(math.floor(sizes[0]))
-    n_y = int(math.floor(sizes[1]))
+    n_x = math.floor(sizes[0])
+    n_y = math.floor(sizes[1])
     if n_x * n_y < 1e4:
         stat = np.unique(
             np.subtract.outer(
@@ -2477,7 +2474,7 @@ def ks_test(
     y,
     *args,
     alternative: str = "two.sided",
-    exact: Optional[bool] = None,
+    exact: bool | None = None,
     **kwargs,
 ) -> HTest:
     """R's ``ks.test`` — Kolmogorov-Smirnov test, faithful to ``ks.test.R``.
@@ -3078,7 +3075,7 @@ def _pansari(q, m: int, n: int) -> float:
 
 
 def ansari_test(
-    x, y, alternative: str = "two.sided", exact: Optional[bool] = None
+    x, y, alternative: str = "two.sided", exact: bool | None = None
 ) -> HTest:
     """R's ``ansari.test`` — Ansari-Bradley two-sample test of scale.
 
@@ -3111,7 +3108,7 @@ def ansari_test(
         exact = (m < 50) and (n < 50)
 
     if exact and not ties:
-        si = int(round(stat))
+        si = round(stat)
         if alternative == "two.sided":
             thr = (m + 1) ** 2 // 4 + ((m * n) // 2) / 2
             if si > thr:
@@ -3448,13 +3445,13 @@ class PairwiseHTest:
         out.append("")
         cw = max(8, max((len(str(c)) for c in self.col_names), default=1) + 1)
         rw = max((len(str(r)) for r in self.row_names), default=1)
-        out.append(" " * rw + "".join(f"{str(c):>{cw}}" for c in self.col_names))
+        out.append(" " * rw + "".join(f"{c!s:>{cw}}" for c in self.col_names))
         for i, rn in enumerate(self.row_names):
             cells = []
             for j in range(len(self.col_names)):
                 v = self.p_value[i, j]
                 cells.append("-" if (v is None or math.isnan(v)) else _fmt_pval(v))
-            out.append(f"{str(rn):<{rw}}" + "".join(f"{c:>{cw}}" for c in cells))
+            out.append(f"{rn!s:<{rw}}" + "".join(f"{c:>{cw}}" for c in cells))
         out.append("")
         out.append(f"P value adjustment method: {self.p_adjust_method} ")
         return "\n".join(out)
@@ -3703,7 +3700,7 @@ class PowerHTest:
 
     method: str
     params: dict
-    note: Optional[str] = None
+    note: str | None = None
 
     def __repr__(self) -> str:
         out = ["", f"     {self.method}", ""]

@@ -19,7 +19,6 @@ import polars as pl
 
 from .cartesian import CoordCartesian
 
-
 # Aesthetic column pairs swapped by coord_flip.
 _FLIP_PAIRS = [
     ("x", "y"),

@@ -41,10 +41,10 @@ from ._shared import _rfma_vec
 
 __all__ = [
     "Dist",
-    "cmdscale",
-    "dist",
     "as_dist",
     "as_matrix_dist",
+    "cmdscale",
+    "dist",
     "format_dist",
     "labels_dist",
     "mahalanobis",
@@ -262,7 +262,7 @@ class Dist:
     exactly as in R.
     """
 
-    __slots__ = ("data", "Size", "Labels", "Diag", "Upper", "method", "p", "call")
+    __slots__ = ("Diag", "Labels", "Size", "Upper", "call", "data", "method", "p")
 
     def __init__(
         self,
@@ -561,7 +561,7 @@ def print_dist(x, diag=None, upper=None, _return=False):
     if diag or upper:
         ri, ci = range(n), range(n)
     else:
-        ri, ci = range(1, n), range(0, n - 1)  # drop empty first row / last col
+        ri, ci = range(1, n), range(n - 1)  # drop empty first row / last col
 
     widths = [
         max(len(labels[j]), max((len(cells[i][j]) for i in ri), default=0)) for j in ci

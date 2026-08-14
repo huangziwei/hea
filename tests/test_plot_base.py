@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import matplotlib
 
-matplotlib.use("Agg")  # noqa: E402
+matplotlib.use("Agg")
 
 import matplotlib.axes
 import matplotlib.pyplot as plt
@@ -210,7 +210,7 @@ def test_plot_dispatches_density_object(diastolic):
 
 
 def test_rug_overlays_ticks(diastolic):
-    fig, ax = plt.subplots()
+    _fig, ax = plt.subplots()
     hist(diastolic, ax=ax)
     n_lines_before = len(ax.lines)
     rug(diastolic, ax=ax)
@@ -219,7 +219,7 @@ def test_rug_overlays_ticks(diastolic):
 
 
 def test_rug_side_accepts_r_integer_codes(diastolic):
-    fig, ax = plt.subplots()
+    _fig, ax = plt.subplots()
     hist(diastolic, ax=ax)
     rug(diastolic, side=2, ax=ax)
     assert len(ax.lines) == diastolic.len()
@@ -246,7 +246,7 @@ def test_rug_with_no_prior_plot_errors():
 
 
 def test_rug_rejects_bad_side(diastolic):
-    fig, ax = plt.subplots()
+    _fig, ax = plt.subplots()
     with pytest.raises(ValueError, match="side="):
         rug(diastolic, side="nowhere", ax=ax)
 
@@ -268,7 +268,7 @@ def test_curve_overlay_uses_existing_xlim():
     """When ``add=True`` and no ``from_/to`` given, the existing axes
     x-limits are used (standard 'overlay a theoretical curve on a
     histogram' pattern)."""
-    fig, ax = plt.subplots()
+    _fig, ax = plt.subplots()
     ax.set_xlim(0.0, 5.0)
     curve(lambda x: x, add=True, ax=ax)
     xs, _ = ax.lines[0].get_data()
@@ -277,7 +277,7 @@ def test_curve_overlay_uses_existing_xlim():
 
 
 def test_curve_overlay_does_not_overwrite_labels():
-    fig, ax = plt.subplots()
+    _fig, ax = plt.subplots()
     ax.set_xlabel("kept")
     curve(lambda x: x, 0, 1, add=True, ax=ax, xlab="ignored")
     assert ax.get_xlabel() == "kept"

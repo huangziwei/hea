@@ -26,7 +26,6 @@ from .layer import Layer
 from .positions import resolve_position
 from .stats.identity import StatIdentity
 
-
 _NAME_TO_GEOM_CLS: dict[str, str] = {
     "point": "geoms.point.GeomPoint",
     "text": "geoms.text.GeomText",
@@ -187,7 +186,7 @@ def annotate(
 # annotation_custom — drop a matplotlib Artist at given data coordinates
 # ---------------------------------------------------------------------------
 
-from .geoms.geom import Geom  # noqa: E402
+from .geoms.geom import Geom
 
 
 class _GeomCustomArtist(Geom):

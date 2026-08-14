@@ -30,9 +30,8 @@ Notable R quirks handled here:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Iterator
-
 
 Span = tuple[int, int]
 
@@ -140,7 +139,7 @@ def tokenize(src: str) -> list[Token]:
 
 
 class _Lexer:
-    __slots__ = ("src", "i", "n", "tokens", "bracket_depth", "last_kind")
+    __slots__ = ("bracket_depth", "i", "last_kind", "n", "src", "tokens")
 
     def __init__(self, src: str):
         self.src = src
@@ -203,9 +202,8 @@ class _Lexer:
                 (c == "r" or c == "R")
                 and self.i + 1 < self.n
                 and self.src[self.i + 1] in ('"', "'")
-            ):
-                if self._try_raw_string():
-                    continue
+            ) and self._try_raw_string():
+                continue
 
             # Quoted strings.
             if c == '"' or c == "'":

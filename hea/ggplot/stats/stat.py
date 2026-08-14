@@ -17,7 +17,6 @@ from dataclasses import dataclass
 
 import polars as pl
 
-
 _GROUPING_AES = ("group", "colour", "fill", "linetype")
 
 

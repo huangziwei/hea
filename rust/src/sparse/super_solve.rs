@@ -23,6 +23,11 @@
 //! applies through `perm`/`iperm` rather than `ptrans`/`iptrans`, and there is
 //! no blocking over columns — the whole right-hand side goes through at once.
 //!
+//! **Memory contract.** `Y` and `E` are [`SuperSolveWork`], owned by the
+//! caller and grown never shrunk, for the reason [`super::solve`] gives:
+//! `cholmod_solve2` takes them as handles (`cholmod_solve.c:669-679`) so that
+//! a caller issuing many solves allocates once.
+//!
 //! **`E` is the gather buffer.** A supernode's rows below its diagonal block
 //! are scattered through `X`, so the off-diagonal update cannot be a strided
 //! block operation. Upstream gathers those `nsrow2` rows into a dense
@@ -66,7 +71,7 @@ impl SuperSolveWork {
     }
 }
 
-/// `t_cholmod_super_lsolve_worker.c:20-303` — `X := L \ X`.
+/// `t_cholmod_super_solve_worker.c:20-303` (`cholmod_super_lsolve_worker`) — `X := L \ X`.
 ///
 /// `x` is `n`-by-`nrhs` column-major with leading dimension `d`, overwritten in
 /// place. `e` is scratch of at least `nrhs * maxesize` doubles; its contents
@@ -129,7 +134,7 @@ pub fn lsolve(l: &SuperFactor, x: &mut [f64], nrhs: usize, d: usize, e: &mut [f6
     }
 }
 
-/// `t_cholmod_super_ltsolve_worker.c:309-580` — `X := L' \ X`.
+/// `t_cholmod_super_solve_worker.c:309-580` (`cholmod_super_ltsolve_worker`) — `X := L' \ X`.
 ///
 /// The back substitution: supernodes in reverse, and each one's off-diagonal
 /// rows are *read* from `X` rather than written to it, so there is no scatter
@@ -204,27 +209,41 @@ fn scatter1(ls: &[i64], ps2: usize, nsrow2: usize, e: &[f64], x: &mut [f64]) {
 }
 
 /// `Ex [ii + j*nsrow2] = Xx [i + j*d]`.
+///
+/// **`j` is hoisted outside `ii`, where upstream nests it inside.** This is a
+/// copy — no arithmetic, every destination written exactly once — so the order
+/// cannot change a value, and the two nests differ only in what they ask of the
+/// cache. Upstream's holds one row and walks the right-hand sides, which at
+/// `d = n` puts consecutive reads `n` doubles apart: on a 48400-row system with
+/// 32 right-hand sides that is a separate 387 KB stride per read, a line
+/// touched per element on both sides, and the whole set revisited for every
+/// row. Taking one right-hand side at a time makes the writes to `E`
+/// contiguous and leaves the reads an *ascending* gather inside a single column
+/// of `X`, since a supernode's row indices are sorted.
 #[inline]
 fn gather(ls: &[i64], ps2: usize, nsrow2: usize, nrhs: usize, d: usize, x: &[f64], e: &mut [f64]) {
     let (ls, x) = (Ws::new_ref(ls), Ws::new_ref(x));
     let e = Ws::new(e);
-    for ii in 0..nsrow2 {
-        let i = ls[ps2 + ii] as usize;
-        for j in 0..nrhs {
-            e[ii + j * nsrow2] = x[i + j * d];
+    for j in 0..nrhs {
+        let (xo, eo) = (j * d, j * nsrow2);
+        for ii in 0..nsrow2 {
+            e[eo + ii] = x[xo + ls[ps2 + ii] as usize];
         }
     }
 }
 
 /// `Xx [i + j*d] = Ex [ii + j*nsrow2]`.
+///
+/// Interchanged for the reason [`gather`] gives, with the contiguous side now
+/// the read.
 #[inline]
 fn scatter(ls: &[i64], ps2: usize, nsrow2: usize, nrhs: usize, d: usize, e: &[f64], x: &mut [f64]) {
     let (ls, e) = (Ws::new_ref(ls), Ws::new_ref(e));
     let x = Ws::new(x);
-    for ii in 0..nsrow2 {
-        let i = ls[ps2 + ii] as usize;
-        for j in 0..nrhs {
-            x[i + j * d] = e[ii + j * nsrow2];
+    for j in 0..nrhs {
+        let (xo, eo) = (j * d, j * nsrow2);
+        for ii in 0..nsrow2 {
+            x[xo + ls[ps2 + ii] as usize] = e[eo + ii];
         }
     }
 }
@@ -301,29 +320,35 @@ mod tests {
 
     /// A corpus matrix, factorized supernodally the way `mod.rs` does it, with
     /// the triangle it was built from kept for the residual check.
-    fn factor(n: usize, edges: &[(usize, usize)], ordering: Ordering) -> (SuperFactor, Sparse) {
+    fn factor(
+        n: usize,
+        edges: &[(usize, usize)],
+        ordering: Ordering,
+    ) -> (SuperFactor, Sparse<'static>) {
         let (p, i, v) = spd_triangle(n, edges, false);
         let a = Sparse {
+            nrow: n,
             n,
-            p: p.clone(),
-            i: i.clone(),
-            x: v.clone(),
+            p: p.clone().into(),
+            i: i.clone().into(),
+            x: v.clone().into(),
             numeric: true,
             stype: 1,
             sorted: columns_are_sorted(n, &p, &i),
         };
-        let s = analyze_sparse(&a, Method::Pinned(ordering), IntWidth::I64).unwrap();
         let mut w = Work::new(n);
+        let s = analyze_sparse(&a, Method::Pinned(ordering), IntWidth::I64, &mut w).unwrap();
         let a2 = permute_sym(&a, s.ordering, &s.perm, false, false, &mut w.all());
         let sym = super_symbolic(
             a2.as_ref().unwrap_or(&a),
+            None,
             &s.parent,
             &s.colcount,
             &Relax::default(),
             &mut w,
         )
         .unwrap();
-        let mut l = SuperFactor::new(&s, sym);
+        let mut l = SuperFactor::new(s, sym);
         let mut cw = SuperWork::new();
         super_factorize(&a, 0.0, &mut l, &mut w, &mut cw).unwrap();
         (l, a)

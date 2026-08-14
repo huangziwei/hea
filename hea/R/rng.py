@@ -42,7 +42,7 @@ from scipy.linalg.lapack import dpstrf
 from .._dispatch import rs as _rs_mod
 from ._shared import _rfma, _rfma_vec
 
-__all__ = ["RMersenneTwister", "RGenerator"]
+__all__ = ["RGenerator", "RMersenneTwister"]
 
 
 def _make_impl(seed):
@@ -342,7 +342,7 @@ class RMersenneTwister:
     """R's default RNG after ``set.seed(seed)``, bit-exact and
     platform-independent."""
 
-    __slots__ = ("_mt", "_buf", "_pos", "_impl")
+    __slots__ = ("_buf", "_impl", "_mt", "_pos")
 
     def __init__(self, seed: int, *, force_py: bool = False):
         self._impl = None
@@ -579,8 +579,7 @@ class RMersenneTwister:
         umin = ustar
         while True:
             ustar = self.unif_rand()
-            if umin > ustar:
-                umin = ustar
+            umin = min(umin, ustar)
             i += 1
             if u <= q[i]:
                 break
@@ -698,12 +697,12 @@ class RMersenneTwister:
             if c * abs(u) <= py * math.exp(px + e) - fy * math.exp(fx + e):
                 return float(pois)
 
-    def rbinom(self, size: int, prob: float) -> float:
+    def rbinom(self, size: float, prob: float) -> float:
         """R's ``rbinom(size, prob)`` — rbinom.c. Inversion for small
         ``size·min(p,1-p)``, BTPE rejection otherwise."""
         if self._impl is not None:
             return self._impl.rbinom(float(size), float(prob))
-        n = int(round(size))
+        n = round(size)
         if n == 0 or prob <= 0.0:
             return 0.0
         if prob >= 1.0:
@@ -973,8 +972,8 @@ class RMersenneTwister:
             raise ValueError("rbeta: shapes must be >= 0")
         if aa == 0.0 and bb == 0.0:
             return 0.0 if self.unif_rand() < 0.5 else 1.0
-        a = aa if aa < bb else bb  # min(aa, bb)
-        b = bb if aa < bb else aa  # max(aa, bb)
+        a = min(bb, aa)  # min(aa, bb)
+        b = max(aa, bb)  # max(aa, bb)
         alpha = a + b
         if a <= 1.0:  # --- Algorithm BC ---
             beta = 1.0 / a
@@ -1431,7 +1430,7 @@ class RMersenneTwister:
         if self._impl is not None:
             return self._impl.rbinom_n(size, prob)
         return np.array(
-            [self.rbinom(int(round(float(s))), float(p)) for s, p in zip(size, prob)]
+            [self.rbinom(round(float(s)), float(p)) for s, p in zip(size, prob)]
         )
 
     def rgamma_n(self, shape, scale) -> np.ndarray:
@@ -1652,22 +1651,22 @@ class RGenerator:
         return float(out[0]) if scalar else out
 
     def gamma(self, shape, scale=1.0, size=None):
-        n, scalar, (shape, scale) = _rgen_resolve(size, shape, scale)
+        _n, scalar, (shape, scale) = _rgen_resolve(size, shape, scale)
         out = self.mt.rgamma_n(shape, scale)
         return float(out[0]) if scalar else out
 
     def poisson(self, lam=1.0, size=None):
-        n, scalar, (lam,) = _rgen_resolve(size, lam)
+        _n, scalar, (lam,) = _rgen_resolve(size, lam)
         out = self.mt.rpois_n(lam)
         return float(out[0]) if scalar else out
 
     def binomial(self, n, p, size=None):
-        m, scalar, (nt, pp) = _rgen_resolve(size, n, p)
+        _m, scalar, (nt, pp) = _rgen_resolve(size, n, p)
         out = self.mt.rbinom_n(nt, pp)  # rounds size per-element
         return float(out[0]) if scalar else out
 
     def standard_t(self, df, size=None):
-        n, scalar, (df,) = _rgen_resolve(size, df)
+        _n, scalar, (df,) = _rgen_resolve(size, df)
         out = self.mt.rt_n(df)
         return float(out[0]) if scalar else out
 

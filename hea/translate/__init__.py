@@ -23,11 +23,11 @@ from .r_to_py import translate as translate_r
 from .runner import parity
 
 __all__ = [
-    "from_R",
-    "to_R",
-    "translate_r",
-    "translate_py",
-    "parity",
-    "Result",
     "HeaTranslationGap",
+    "Result",
+    "from_R",
+    "parity",
+    "to_R",
+    "translate_py",
+    "translate_r",
 ]

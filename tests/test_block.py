@@ -35,7 +35,6 @@ from hea.ggplot._block import (
 )
 from hea.ggplot.build import build
 
-
 # ----- Measurement --------------------------------------------------------
 
 

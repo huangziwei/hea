@@ -20,10 +20,9 @@ from dataclasses import dataclass, field
 import numpy as np
 import polars as pl
 
+from ...R import distributions as _dist
 from ..aes import split_layer_kwargs
 from .stat import Stat
-from ...R import distributions as _dist
-
 
 # ---------------------------------------------------------------------------
 # Built-in summary helpers

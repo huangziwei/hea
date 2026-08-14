@@ -28,12 +28,10 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from . import gaps as _gaps
 from .gaps import Gap
 from .r_to_py import translate as _r_to_py
-
 
 # ---------------------------------------------------------------------------
 # Result containers
@@ -53,8 +51,8 @@ class RunResult:
     returncode: int
     stdout: str
     stderr: str
-    out_csv: Optional[Path] = None
-    out_schema: Optional[Path] = None
+    out_csv: Path | None = None
+    out_schema: Path | None = None
     captured: bool = False
 
     @property
@@ -216,6 +214,7 @@ def run_r(script_path: Path, out_dir: Path, *, timeout: float = 60.0) -> RunResu
             ["R", "--vanilla", "--slave", "-e", driver],
             capture_output=True,
             text=True,
+            check=False,
             timeout=timeout,
         )
     except FileNotFoundError as e:
@@ -256,6 +255,7 @@ def run_py(script_path: Path, out_dir: Path, *, timeout: float = 60.0) -> RunRes
         capture_output=True,
         text=True,
         timeout=timeout,
+        check=False,
     )
     captured = out_csv.exists() and out_schema.exists()
     return RunResult(
@@ -482,7 +482,7 @@ def parity(
     r_source = r_script_path.read_text(encoding="utf-8")
     try:
         py_source = _r_to_py(r_source)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         gap = Gap(
             kind="parse_error",
             subject=r_script_path.name,

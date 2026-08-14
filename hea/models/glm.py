@@ -13,15 +13,10 @@ The module is family-agnostic: it never branches on ``family.name`` /
 
 from __future__ import annotations
 
-from typing import Optional, Union
-
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from scipy.linalg import qr, solve_triangular
-
-from ..R import distributions as _dist
-from ..R import nmath as _nmath
 
 from ..family import (
     Binomial,
@@ -31,8 +26,9 @@ from ..family import (
     QuasiBinomial,
     _coerce_response,
 )
-from ..formula import _eval_atom, deparse, materialize, parse, prepare_design, Call
-from .lm import _label_top_n, _lowess, _qq_plot
+from ..formula import Call, _eval_atom, deparse, materialize, parse, prepare_design
+from ..R import distributions as _dist
+from ..R import nmath as _nmath
 from ..utils import (
     _dig_tst,
     format_df,
@@ -41,6 +37,7 @@ from ..utils import (
     format_signif_jointly,
     significance_code,
 )
+from .lm import _label_top_n, _lowess, _qq_plot
 
 __all__ = ["glm"]
 
@@ -55,16 +52,16 @@ class _IRLSResult:
     the main fit and the null-deviance fit."""
 
     __slots__ = (
-        "beta",
-        "eta",
-        "mu",
-        "w",
-        "deviance",
-        "iter",
-        "converged",
         "R",
-        "rank",
         "X_used",
+        "beta",
+        "converged",
+        "deviance",
+        "eta",
+        "iter",
+        "mu",
+        "rank",
+        "w",
     )
 
     def __init__(self, *, beta, eta, mu, w, deviance, iter, converged, R, rank, X_used):
@@ -106,7 +103,7 @@ def _fit_irls(
     trials distinct from the merged ``weights = pw·n``).
     """
     link: Link = family.link
-    n, p = X.shape
+    _n, p = X.shape
 
     mu = (
         family.initialize(y, prior_w, n=binom_n)
@@ -318,10 +315,10 @@ class glm:
         self,
         formula: str,
         data: pl.DataFrame,
-        family: Optional[Family] = None,
-        weights: Union[None, np.ndarray, list] = None,
-        offset: Union[None, np.ndarray, list] = None,
-        control: Optional[dict] = None,
+        family: Family | None = None,
+        weights: None | np.ndarray | list = None,
+        offset: None | np.ndarray | list = None,
+        control: dict | None = None,
     ):
         self.formula = formula
         self.data = data
@@ -703,10 +700,10 @@ class glm:
 
     def predict(
         self,
-        new: Optional[pl.DataFrame] = None,
+        new: pl.DataFrame | None = None,
         type: str = "response",
         se_fit: bool = False,
-        offset: Union[None, np.ndarray, list] = None,
+        offset: None | np.ndarray | list = None,
         alpha: float = 0.05,
     ):
         """Generate predictions on new data — :func:`predict.glm` parity.

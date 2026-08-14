@@ -24,7 +24,6 @@ import sys
 from dataclasses import dataclass, field
 from importlib import metadata
 
-
 # Packages worth showing in the "attached" section when loaded. These
 # are the libraries a hea user is likely to be using directly — the
 # rest are deps that landed via transitive imports.
@@ -119,7 +118,7 @@ def session_info() -> SessionInfo:
     try:
         parts = [p for p in locale.getlocale() if p]
         loc = ".".join(parts) if parts else "C"
-    except Exception:
+    except Exception:  # noqa: BLE001
         loc = "C"
 
     tz = datetime.datetime.now().astimezone().tzname() or "unknown"
@@ -185,7 +184,7 @@ def _numpy_blas_lapack() -> tuple[str, str]:
         blas = deps.get("blas", {}).get("name", "unknown")
         lapack = deps.get("lapack", {}).get("name", "unknown")
         return blas, lapack
-    except Exception:
+    except Exception:  # noqa: BLE001
         return "unknown", "unknown"
 
 

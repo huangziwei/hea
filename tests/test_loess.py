@@ -54,7 +54,7 @@ def test_loess_predict_se_positive_in_data_range():
 
     fit = loess(x, y, span=0.5, degree=1)
     grid = np.linspace(1, 9, 9)
-    pred, se = fit.predict(grid, se=True)
+    _pred, se = fit.predict(grid, se=True)
     assert (se > 0).all()
     assert (se < fit.sigma).any(), "interior SE should be smaller than residual sd"
 

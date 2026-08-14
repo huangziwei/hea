@@ -14,7 +14,6 @@ from scipy.stats import gaussian_kde
 
 from .stat import Stat
 
-
 _PANEL_X_RANGE_KEY = "_stat_density_panel_x_range"
 
 

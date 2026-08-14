@@ -6,7 +6,7 @@
 //! parallel map produces bit-for-bit the same `Vec<f64>` as a serial one, so
 //! the 0-ulp parity gate (tests/test_rs_parity.py) stays green.
 //!
-//! Strategy (plan §"Closing the remaining scipy gap", lever #1):
+//! Strategy:
 //!   - len >= `PAR_THRESHOLD` → split across cores with rayon, under
 //!     `py.allow_threads` so other Python threads run while we compute.
 //!   - len <  `PAR_THRESHOLD` → plain serial map (parallel split/join overhead
@@ -24,7 +24,6 @@ use rayon::prelude::*;
 /// dispatch costs a few µs, so the crossover sits where serial work clears
 /// that; one uniform value keeps behavior predictable across kernels and is
 /// safely above the per-fit family-hook sizes that arrive as length-1 scalars.
-/// Tuned against the benchmark in the plan.
 pub const PAR_THRESHOLD: usize = 2048;
 
 /// Map a unary kernel over `a`.

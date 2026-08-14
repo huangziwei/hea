@@ -14,11 +14,10 @@ An ``Aes`` is a dict from canonical aesthetic name (``"x"``, ``"y"``,
 Disambiguation between "bare column name" and "expression" is delegated
 to the formula parser: it produces a typed AST. A single :class:`Name`
 node whose identifier matches a column means column lookup; any other
-AST shape is evaluated as an expression. See plan §13 Q3.
+AST shape is evaluated as an expression.
 """
 
 from __future__ import annotations
-
 
 # Canonical names use British spellings. American aliases canonicalise on
 # input so internal code can assume one spelling. Matches ggplot2.
@@ -122,7 +121,7 @@ class Aes(dict):
     bare aes objects this way; you'd write ``ggplot(d, aes(x=a)) + aes(y=b)``,
     which the plot's ``+`` dispatch then merges into the layer mapping.)"""
 
-    def __add__(self, other: "Aes") -> "Aes":
+    def __add__(self, other: Aes) -> Aes:
         return Aes({**self, **other})
 
     def __repr__(self) -> str:
@@ -148,7 +147,7 @@ class AfterStat:
         return f"after_stat({self.expr!r})"
 
 
-def after_stat(expr) -> "AfterStat":
+def after_stat(expr) -> AfterStat:
     return AfterStat(expr)
 
 
@@ -165,7 +164,7 @@ class AfterScale:
         return f"after_scale({self.expr!r})"
 
 
-def after_scale(expr) -> "AfterScale":
+def after_scale(expr) -> AfterScale:
     return AfterScale(expr)
 
 

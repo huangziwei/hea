@@ -11,7 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-
 # Sentinel for "user did not pass an explicit name=" to a scale factory.
 # Lets us distinguish that case from ``name=None`` (which mirrors R's
 # ``name = NULL`` and means *suppress the axis title*). Factories opt in

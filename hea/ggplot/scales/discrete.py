@@ -20,7 +20,7 @@ from ._palettes import (
     manual_pal,
     viridis_pal_discrete,
 )
-from .scale import Scale, _NAME_MISSING
+from .scale import _NAME_MISSING, Scale
 
 
 def _polars_dtype_for(values) -> pl.DataType:
@@ -57,7 +57,7 @@ class ScaleDiscreteColor(Scale):
                 # order ends up sorted regardless of CSV row order.
                 new_levels = sorted(data.drop_nulls().unique().to_list())
         else:
-            new_levels = sorted(set(v for v in data if v is not None))
+            new_levels = sorted({v for v in data if v is not None})
         if self.levels is None:
             self.levels = list(new_levels)
         else:
