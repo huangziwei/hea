@@ -409,8 +409,25 @@ class Factor:
 
         So the test is not "is my trace noisy" but "how well conditioned is the
         arithmetic I feed it to". Where the answer is "badly", an exact trace
-        is the difference between a determinate result and a coin flip; where
-        it is "fine", this buys nothing that probes do not already give.
+        replaces a coin flip with a determinate answer — which is not the same
+        as a correct one. Inside the region described next it returns one wrong
+        number rather than a spread of them, and a caller who reads
+        determinism as correctness is worse off than with visible noise. Where
+        the answer is "fine", this buys nothing probes do not already give.
+
+        Exactness moves that cancellation rather than removing it. The trace is
+        exact on the pattern but still computed in floating point, so a
+        difference taken against it runs out of digits once it falls to the
+        level of its own rounding error — around ``sqrt(eps)*n``, equivalently
+        ``cond(A)*eps``. For the GCV case that is roughly six orders below
+        where a stochastic trace fails, which is the entire gain.
+
+        That floor grows with ``n``: it is near 3e-6 at ``n = 200`` and 6e-4 at
+        ``n = 40,000``, so a search bracket that was safe on a small system can
+        lie wholly inside it on a large one, and the same bracket then returns
+        a repeatable answer with no digits behind it. Test ``n - edf`` at the
+        end of the bracket against that floor rather than reusing a bracket
+        because it worked before.
 
         Entries outside this pattern are not computed and are not zero; they
         are simply absent. Same cost and memory as :meth:`inv_diagonal`, which
@@ -528,6 +545,15 @@ def cho_factor(
     form and takes it once per factorization, which trades a full-values
     transpose of ``A`` for the product it removes. Reach for this because it is
     the correct API and one fewer intermediate, not because it is faster.
+
+    What it does not *preserve* is the ordering. The pattern this path hands the
+    ordering is identical, entry for entry, to a formed product's — but the
+    adjacency lists arrive in a different order, since ``cholmod_aat`` returns
+    its columns unsorted, and both AMD and METIS break ties by that order. So
+    the permutation differs from factorizing a product built outside, and with
+    it ``nnz(L)`` in either direction and the last couple of digits of the
+    solution. Neither permutation is the better one. A caller pinned to another
+    implementation's output to the last digit should keep forming the product.
 
     ``order`` is the fill-reducing ordering: ``"best"`` (the default) is
     CHOLMOD's ``Common->nmethods == 0`` strategy, AMD then METIS, keeping the
