@@ -2088,9 +2088,9 @@ class Translator:
         iterable, shifted = self._visit_for_iter(n.iterable)
         # When the R loop ``for(i in a:b)`` is shifted to a 0-based
         # ``range(a-1, b)``, body references to ``(i - 1)`` (R's manual
-        # "shift to 0-based for arithmetic") are no longer needed — the
-        # loop counter is already 0-based. Rewrite them so the math
-        # matches the original R script.
+        # "shift to 0-based for arithmetic") are redundant — the loop
+        # counter is already 0-based. Rewrite them so the math matches
+        # the original R script.
         if shifted:
             self._shifted_loop_vars.add(n.var)
         try:

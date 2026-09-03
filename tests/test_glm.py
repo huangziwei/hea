@@ -10,13 +10,12 @@ Sections (top → bottom):
    tests fail with a confusing FileNotFoundError.
 
 2. **Per-oracle parity** — ``hea.models.glm(...)`` outputs pinned against the
-   corresponding ``stats::glm(...)`` oracle. Phase 1 (engine + core
-   fit), Phase 2 (Wald inference), Phase 3 (null deviance / AIC / BIC
-   / logLik), Phase 4 (predict link/response, se.fit). Tolerances
-   tight (5e-5 on coef / dev / dispersion / AIC) — Fisher-IRLS is
-   essentially deterministic.
+   corresponding ``stats::glm(...)`` oracle: engine + core fit, Wald
+   inference, null deviance / AIC / BIC / logLik, and predict
+   (link/response, se.fit). Tolerances tight (5e-5 on coef / dev /
+   dispersion / AIC) — Fisher-IRLS is essentially deterministic.
 
-3. **Edge cases** — Phase 6 API surface that's commonly used in R but
+3. **Edge cases** — API surface that's commonly used in R but
    easy to overlook in a port: cbind LHS, formula-side offset, prior
    weights, intercept-only, rank-deficient X, factor-response
    binomial, Quasi family.
@@ -119,7 +118,7 @@ def test_oracle_present(oid: str, family: str, link: str):
 
 
 # =============================================================================
-# 2. Per-oracle parity (Phase 1-4 of glm-port plan)
+# 2. Per-oracle parity
 # =============================================================================
 #
 # Per-oracle case construction. Each entry is a dict that knows how to
@@ -153,7 +152,7 @@ def _build_quine(link: str):
 
 def _build_menarche(link: str):
     # cbind(Menarche, Total - Menarche) ~ Age. hea's parser doesn't yet
-    # accept cbind() on the LHS (Phase 6.1), so we pre-convert to
+    # accept cbind() on the LHS, so we pre-convert to
     # (proportion, weights=Total) which is the algebraically equivalent
     # binomial-with-size form.
     d = load_dataset("MASS", "menarche")
@@ -200,7 +199,7 @@ def _allclose(actual, expected, *, atol, rtol=0.0, name=""):
     )
 
 
-# Phase 1 — engine + core fit (coef, deviance, fitted/η, residuals, iter).
+# engine + core fit (coef, deviance, fitted/η, residuals, iter).
 # Tight tolerances: Fisher IRLS is essentially deterministic.
 
 
@@ -252,7 +251,7 @@ def test_glm_core_fit(oid: str):
     )
 
 
-# Phase 2 — Wald inference (vcov, SE, t/z, p, CI). The t-vs-z dispatch is
+# Wald inference (vcov, SE, t/z, p, CI). The t-vs-z dispatch is
 # scale_known-driven; the column header for the printed summary follows
 # the same rule.
 
@@ -301,7 +300,7 @@ def test_glm_inference(oid: str):
     _allclose(m.dispersion, o["dispersion"], atol=5e-5, name="dispersion")
 
 
-# Phase 3 — null deviance, AIC, BIC, logLik. Family/link-aware AIC routes
+# null deviance, AIC, BIC, logLik. Family/link-aware AIC routes
 # through family.aic + 2·rank (R glm convention; the dispersion df is
 # folded into family.aic for unknown-scale families).
 
@@ -321,7 +320,7 @@ def test_glm_aic_bic_loglik(oid: str):
     _allclose(m.bic, o["bic"], atol=5e-3, name="bic")
 
 
-# Phase 4 — predict(type=link/response, se.fit=TRUE). The link-scale SE
+# predict(type=link/response, se.fit=TRUE). The link-scale SE
 # is √diag(X·vcov·Xᵀ); the response-scale SE is |dμ/dη(η̂)|·se_link
 # (delta method). predict.glm with no newdata reuses the fit-time
 # offset so η̂ matches `m$linear.predictors`.
@@ -368,7 +367,7 @@ def test_glm_predict(oid: str):
 
 
 # =============================================================================
-# 3. Edge cases (Phase 6)
+# 3. Edge cases
 # =============================================================================
 #
 # Each block here covers one ``glm()`` API surface that's commonly used
@@ -554,7 +553,7 @@ def test_formula_offset_sums_with_kwarg_offset():
     np.testing.assert_allclose(m_split._bhat_arr, m_all._bhat_arr, atol=1e-10)
 
 
-# 6.3 — frequency weights (Phase 1 already plumbed; just pin one oracle).
+# 6.3 — frequency weights: one pinned oracle.
 
 
 def test_weighted_poisson_matches_r():

@@ -44,9 +44,8 @@ class Trans:
         return np.asarray(x, dtype=float)
 
     def matplotlib_scale(self):
-        """Pre-transform-on-data approach means the matplotlib axis stays
-        linear; subclasses no longer need to return a scale name. Kept
-        for any caller that still inspects this."""
+        """No matplotlib scale name: the data is pre-transformed, so the
+        axis stays linear. Present for callers that inspect it."""
         return
 
     def reversed(self) -> bool:

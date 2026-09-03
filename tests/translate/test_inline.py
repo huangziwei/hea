@@ -1,4 +1,4 @@
-"""Tests for hea.translate.inline — Phase 9 acceptance.
+"""Tests for hea.translate.inline.
 
 Most tests use module-level fixtures because Python's ``exec`` can't
 mutate a function's local namespace — function-level variable assignments

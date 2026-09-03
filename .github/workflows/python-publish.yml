@@ -36,10 +36,9 @@
 # builds take the portable-kernel fallback, which is a real difference between
 # the Alpine wheel and the others and why the assertion is skipped there.
 #
-# The reason recorded for that used to be "scipy-openblas32 publishes no
-# musllinux wheel". **It does** — `musllinux_1_2_{x86_64,aarch64}`, since
-# 0.3.31.22.1 — so this is now a choice and not a constraint, and turning it on
-# is a change to what Alpine users get that wants its own dry run.
+# It is a choice, not a constraint: scipy-openblas32 does publish
+# `musllinux_1_2_{x86_64,aarch64}` wheels. Linking them would change what
+# Alpine users get, so it wants its own dry run before being turned on.
 name: Publish to PyPI
 
 on:
@@ -95,13 +94,13 @@ jobs:
   linux:
     needs: wheels-gate
     if: needs.wheels-gate.outputs.run == 'true'
-    # **Both arches build natively; neither is cross-compiled.** aarch64 used to
-    # be, on an x86_64 `manylinux2014-cross` container, and every stage of that
-    # broke in a different way: pip resolved the x86_64 OpenBLAS for an aarch64
-    # link, and once that was fixed maturin's *repair* could not locate the
-    # library again — it resolves the wheel's `DT_NEEDED` against an ELF the
-    # host loader cannot touch, so it read `libscipy_openblas.so => not found`
-    # with the rpath sitting right there and `LD_LIBRARY_PATH` exported.
+    # **Both arches build natively; neither is cross-compiled.** Keep it that
+    # way. Cross-compiling aarch64 in an x86_64 `manylinux2014-cross` container
+    # does not work with a vendored BLAS: pip resolves the host-arch OpenBLAS
+    # for the target link, and maturin's repair step then resolves the wheel's
+    # `DT_NEEDED` against an ELF the host loader cannot read, reporting
+    # `libscipy_openblas.so => not found` regardless of rpath or
+    # `LD_LIBRARY_PATH`.
     #
     # A native ARM runner deletes the whole class: pip resolves for the machine
     # it is on, auditwheel resolves against its own architecture, and — the part

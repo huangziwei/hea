@@ -418,7 +418,7 @@ def test_tensor_unrelated_knots_ignored():
     assert blocks
 
 
-# --- new tensor margin bases cc/cp/ps/bs (Phase 2, Tier 1) -------------------
+# --- new tensor margin bases cc/cp/ps/bs (Tier 1) -------------------
 # Headline: a cyclic `cc` tensor margin reproduces mgcv with the supplied period.
 # Grid with x in (0, 2pi) so the cc/cp margins are meaningful.
 _J = np.arange(64)
@@ -487,7 +487,7 @@ def test_te_new_margin_knots_match_mgcv(margin):
     assert fit.sum() == pytest.approx(refsum, abs=1e-3)
 
 
-# --- standalone shrinkage bases ts / cs (Phase 2, Tier 1) --------------------
+# --- standalone shrinkage bases ts / cs (Tier 1) --------------------
 # ts = tp + 0.1 null-space shrinkage; cs = cr + 0.1 shrinkage. Verify the fit
 # reproduces mgcv AND differs from the un-shrunk tp/cr base, so a missing- or
 # wrong-shrinkage regression is caught (the shrink effect ~7e-5 > the 1e-5 tol).
@@ -531,7 +531,7 @@ def test_shrinkage_basis_matches_mgcv(bs):
     assert fit.sum() == pytest.approx(refsum, abs=1e-4)
 
 
-# --- ds (Duchon spline, Phase 2 Tier 2) --------------------------------------
+# --- ds (Duchon spline, Tier 2) --------------------------------------
 # Reproducible NON-GRID points (√2,√3,√5 mod 1). A regular grid's symmetry makes
 # the kernel eigenvalues degenerate at the rank-k truncation boundary, where
 # eigh and mgcv's slanczos pick different (equally valid) bases of the degenerate
@@ -593,7 +593,7 @@ def test_duchon_spline_matches_mgcv(formula):
     assert fit.sum() == pytest.approx(refsum, abs=1e-4)
 
 
-# --- sos (spline on the sphere, Phase 2 Tier 2) ------------------------------
+# --- sos (spline on the sphere, Tier 2) ------------------------------
 # The intrinsic sphere smoother. Default m=0 uses the dilogarithm kernel (mgcv's
 # C rksos, ported as a closed form via scipy.special.spence); m=1..4 are
 # closed-form. Non-grid lat/long points (deg).

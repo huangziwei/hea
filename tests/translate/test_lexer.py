@@ -1,4 +1,4 @@
-"""Tests for hea.translate.r_lexer — Phase 0 acceptance.
+"""Tests for hea.translate.r_lexer.
 
 Covers every token kind the lexer can emit, the maximal-munch resolution of
 overlapping operators, and the newline-suppression rules. End-to-end smoke

@@ -1716,7 +1716,8 @@ def test_refactorize_grows_the_pattern_on_the_simplicial_path():
     The shape is ``nlme::Machines`` with ``(Machine|Worker)``: no observation is
     on two machines at once, so each worker's ``Zᵀ Z`` block has a structural
     zero off the diagonal, and the moment a correlation parameter goes nonzero
-    ``Λ Zᵀ Z Λᵀ`` fills it in. Refusing that broke the fit outright.
+    ``Λ Zᵀ Z Λᵀ`` fills it in, so refusing the wider pattern would refuse
+    the fit.
     """
     ztz = np.array([[9.0, 3, 3], [3, 3, 0], [3, 0, 3]])
     lam = np.array([[1.0, 0, 0], [0.3, 1, 0], [0.2, 0.4, 1]])
@@ -1746,9 +1747,9 @@ def test_refactorize_reanalyzes_when_the_supernodes_cannot_hold_the_pattern():
     """The supernodal path grows too — by re-analyzing, not by refusing.
 
     Its supernodes fix where every entry of ``L`` lives, so unlike ``rowfac`` it
-    cannot absorb a wider ``A`` in place. Refusing was the first fix and it was
-    wrong: it broke ``InstEval`` with three crossed grouping factors, where the
-    pattern grows on the supernodal side. Redoing the analysis is what
+    cannot absorb a wider ``A`` in place. Refusing the pattern is not an option:
+    ``InstEval`` with three crossed grouping factors grows it on the supernodal
+    side. Redoing the analysis is what
     ``cholmod_analyze`` + ``cholmod_factorize`` amount to, and it is bounded —
     a pattern can only grow up to the structural product that produced it.
     """

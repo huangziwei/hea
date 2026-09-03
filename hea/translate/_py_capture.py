@@ -108,13 +108,15 @@ def _capture_factors(df) -> dict:
     """Extract Enum/Categorical column levels so the diff can compare them."""
     import polars as pl
 
+    from .._polars_compat import cat_pool
+
     out: dict = {}
     for col, dtype in zip(df.columns, df.dtypes):
         if isinstance(dtype, pl.Enum):
             levels = list(dtype.categories)
             out[col] = {"levels": levels, "ordered": False}
         elif isinstance(dtype, pl.Categorical):
-            levels = list(df[col].cat.get_categories())
+            levels = list(cat_pool(df[col]))
             out[col] = {"levels": levels, "ordered": False}
     return out
 

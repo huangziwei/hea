@@ -82,9 +82,30 @@ def rbind(*args):
 
 
 def cbind(*args):
-    """R: column-bind. Concatenates vectors as columns of a matrix."""
+    """R: column-bind. Concatenates vectors as columns of a matrix.
+
+    Frames follow ``cbind.data.frame``, which delegates to R's
+    ``data.frame()``: the result height is the tallest input, and a shorter
+    block is recycled to it — ``rep(x, length.out = nr)``, i.e. tiled
+    cyclically — but only when its height divides the tallest exactly.
+    Anything else raises.
+    """
     if all(isinstance(a, pl.DataFrame) for a in args):
-        return pl.concat(args, how="horizontal")
+        heights = [a.height for a in args]
+        nr = max(heights) if heights else 0
+        blocks = []
+        for a in args:
+            if a.height == nr:
+                blocks.append(a)
+            elif a.height > 0 and nr % a.height == 0:
+                blocks.append(a[np.arange(nr) % a.height])
+            else:
+                uniq = list(dict.fromkeys(heights))
+                raise ValueError(
+                    "arguments imply differing number of rows: "
+                    + ", ".join(str(h) for h in uniq)
+                )
+        return pl.concat(blocks, how="horizontal")
     arrs = []
     for a in args:
         arr = np.asarray(a)

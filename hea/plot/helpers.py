@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
+from .._polars_compat import cat_pool
 from ..R import nmath as _nmath
 from ._util import draw_points, r_lty, resolve_ax, to_value_series
 
@@ -347,7 +348,7 @@ def _level_order(s: pl.Series) -> list:
     """Level order for grouping: Enum/Categorical use their cat order;
     everything else uses sorted unique."""
     if s.dtype in (pl.Enum, pl.Categorical):
-        return list(s.cat.get_categories())
+        return list(cat_pool(s))
     return s.drop_nulls().unique().sort().to_list()
 
 

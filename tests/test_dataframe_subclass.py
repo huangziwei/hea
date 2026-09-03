@@ -8,8 +8,8 @@ need ``tbl(...)`` to re-wrap. Two layers:
    assert ``isinstance(result, hea.tidy.DataFrame)`` (or ``hea.tidy.LazyFrame``).
 2. **Coverage check** — every public method on ``pl.DataFrame`` / ``pl.LazyFrame``
    must be in exactly one of: the curated map, ``DF_NON_DF`` (returns
-   something else), or ``DF_ALLOWLIST`` (known leak; Phase 3 will fix). When
-   polars adds a new public method, this fails until categorized.
+   something else), or ``DF_ALLOWLIST`` (an accepted leak). When polars
+   adds a new public method, this fails until categorized.
 
 Polars is pinned (see ``pyproject.toml``), so the categorization is stable
 within a pinned release. The version-bump cadence runs this test.
@@ -22,10 +22,10 @@ import pytest
 
 from hea.tidy import DataFrame, LazyFrame, Series, tbl
 
-# A few exercised methods are deprecated upstream (e.g. ``approx_n_unique``,
-# ``with_context``). They still return DataFrame/LazyFrame correctly today, so
-# they belong in the curated set. The coverage test below will flag them when
-# polars removes them.
+# The curated set may exercise methods polars has deprecated but still ships;
+# they belong here for as long as they return DataFrame/LazyFrame correctly.
+# The coverage test below is the tripwire: it fails on a listed method polars
+# has since removed, and on a new public method nothing has categorized yet.
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
 
@@ -64,7 +64,7 @@ def s() -> Series:
 
 
 # ---------------------------------------------------------------------------
-# Categorization — known leaks (Phase 3 will fix)
+# Categorization — known leaks
 # ---------------------------------------------------------------------------
 
 # Methods that drop subclass today. Adding to this set should be a deliberate
@@ -105,6 +105,7 @@ DF_NON_DF: set[str] = {
     "get_column_index",
     "glimpse",
     "is_empty",
+    "is_sorted",
     "item",
     "iter_columns",
     "iter_rows",
@@ -145,9 +146,6 @@ DF_NON_DF: set[str] = {
     "write_json",
     "write_ndjson",
     "write_parquet",
-    # Deprecated alias.
-    "melt",
-    "with_row_count",
 }
 
 # Public pl.LazyFrame methods whose return is not a LazyFrame.
@@ -160,7 +158,6 @@ LF_NON_DF: set[str] = {
     "collect_async",
     "collect_batches",
     "execute",
-    "fetch",
     # Sinks — write to disk, return None or async result.
     "sink_batches",
     "sink_csv",
@@ -174,16 +171,12 @@ LF_NON_DF: set[str] = {
     "explain",
     "group_by",
     "group_by_dynamic",
-    "profile",
     "remote",
     "rolling",
     "show",
     "show_graph",
     "deserialize",
     "serialize",
-    # Deprecated.
-    "melt",
-    "with_row_count",
 }
 
 
@@ -243,7 +236,6 @@ DF_METHODS = {
         0, pl.Series("x", [10, 20, 30, 40])
     ),
     # aggregations that return one-row DataFrame
-    "approx_n_unique": lambda d: d.approx_n_unique(),
     "count": lambda d: d.count(),
     "max": lambda d: d.max(),
     "mean": lambda d: d.mean(),
@@ -265,7 +257,7 @@ DF_METHODS = {
     "pivot": lambda d: d.pivot(on="g", values="y", aggregate_function="first"),
     "unpivot": lambda d: d.unpivot(on=["x", "y"], index="g"),
     "unstack": lambda d: d.unstack(step=2),
-    # bypass-_from_pydf overrides (Phase 3)
+    # bypass-_from_pydf overrides
     "describe": lambda d: d.describe(),
     "corr": lambda d: d.select("x", "y").corr(),
     "sql": lambda d: d.sql("SELECT * FROM self"),
@@ -300,7 +292,6 @@ LF_METHODS = {
     "with_columns": lambda lf: lf.with_columns(z=pl.col("x") * 2),
     "with_columns_seq": lambda lf: lf.with_columns_seq(z=pl.col("x") * 2),
     "with_row_index": lambda lf: lf.with_row_index(),
-    "with_context": lambda lf: lf.with_context(lf),
     "select": lambda lf: lf.select("x"),
     "select_seq": lambda lf: lf.select_seq("x"),
     "drop": lambda lf: lf.drop("y"),
@@ -319,7 +310,6 @@ LF_METHODS = {
     "merge_sorted": lambda lf: lf.sort("x").merge_sorted(lf.sort("x"), key="x"),
     "update": lambda lf: lf.update(lf, on="x"),
     # aggregations
-    "approx_n_unique": lambda lf: lf.approx_n_unique(),
     "count": lambda lf: lf.count(),
     "max": lambda lf: lf.max(),
     "mean": lambda lf: lf.mean(),
@@ -341,7 +331,7 @@ LF_METHODS = {
     "explode": lambda lf: tbl(pl.DataFrame({"a": [[1, 2]]})).lazy().explode("a"),
     "unpivot": lambda lf: lf.unpivot(on=["x", "y"], index="g"),
     "unnest": lambda lf: lf.with_columns(s=pl.struct("x", "y")).select("s").unnest("s"),
-    # bypass-_from_pyldf overrides (Phase 3)
+    # bypass-_from_pyldf overrides
     "match_to_schema": lambda lf: lf.match_to_schema(lf.collect_schema()),
     "sql": lambda lf: lf.sql("SELECT * FROM self"),
     # user functions
@@ -444,9 +434,9 @@ def test_df_method_coverage():
     """Every public ``pl.DataFrame`` method must be categorized.
 
     Categories: ``DF_METHODS`` (returns DataFrame, exercised), ``DF_NON_DF``
-    (returns something else, OK to ignore), or ``DF_ALLOWLIST`` (known leak,
-    Phase 3 will fix). New polars releases that add public methods break
-    this test until categorized.
+    (returns something else, OK to ignore), or ``DF_ALLOWLIST`` (an
+    accepted leak). New polars releases that add public methods break this
+    test until categorized.
     """
     public = _public_callables(pl.DataFrame)
     categorized = set(DF_METHODS) | DF_NON_DF | DF_ALLOWLIST
@@ -486,7 +476,7 @@ def test_lf_method_coverage():
 
 
 # ---------------------------------------------------------------------------
-# Series — Phase 4
+# Series
 # ---------------------------------------------------------------------------
 
 # Most of the leak surface on Series is "expression-dispatched" methods
@@ -582,7 +572,6 @@ SERIES_NON_S: set[str] = {
     "estimated_size",
     "first",
     "has_nulls",
-    "has_validity",
     "index_of",
     "is_empty",
     "is_sorted",

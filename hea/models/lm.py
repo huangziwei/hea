@@ -965,10 +965,10 @@ class lm:
         self.se_bhat = _row_frame(self._se_bhat_arr, self.column_names)
 
         # hat-matrix diagonal h_ii (leverages) and internally studentized
-        # residuals are now LAZY (``leverage`` / ``std_residuals`` cached
+        # residuals are LAZY (``leverage`` / ``std_residuals`` cached
         # properties below): only diagnostics (hatvalues/rstandard/rstudent/
         # cooks/dffits/influence) and plot_* read them, never the fit/predict/
-        # summary path, so a plain fit no longer pays the O(n·p²) hat matmul.
+        # summary path, so a plain fit does not pay the O(n·p²) hat matmul.
         # R is lazy here too (lm() omits leverage; hat()/lm.influence compute it).
 
         # compute confidence interval for β̂

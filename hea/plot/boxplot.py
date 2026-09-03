@@ -7,6 +7,7 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
+from .._polars_compat import cat_pool
 from ._util import resolve_ax, to_value_series
 
 
@@ -96,7 +97,7 @@ def boxplot_by(
 
     if isinstance(group, pl.Series):
         if group.dtype == pl.Enum or group.dtype == pl.Categorical:
-            levels = group.cat.get_categories().to_list()
+            levels = cat_pool(group).to_list()
         else:
             levels = sorted(group.drop_nulls().unique().to_list())
         g_arr = group.to_numpy()

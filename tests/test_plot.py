@@ -1,4 +1,4 @@
-"""Phase 1 of ``hea.plot``: dispatch + scatter + boxplot + diagnostic.
+"""``hea.plot``: dispatch + scatter + boxplot + diagnostic.
 
 These tests use the Agg backend so they run headless. Each one checks the
 *structural* result (axes returned, labels set, dtype-driven dispatch
@@ -161,7 +161,7 @@ def test_formula_requires_lhs(numeric_df):
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: annotations
+# Annotations
 # ---------------------------------------------------------------------------
 
 
@@ -326,7 +326,7 @@ def test_qqline_through_quartiles():
 
 
 # ---------------------------------------------------------------------------
-# Phase 3: Faraway helpers — qqnorm, halfnorm, termplot
+# Faraway helpers — qqnorm, halfnorm, termplot
 # ---------------------------------------------------------------------------
 
 

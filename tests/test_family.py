@@ -1541,7 +1541,7 @@ def test_scat_bam_nondiscrete_matches_mgcv(sub, formula, has_g):
 
 
 # ---------------------------------------------------------------------------
-# General-family seam (mgcv gamlss.r authoring kit) + gaulss — §5.3
+# General-family seam (mgcv gamlss.r authoring kit) + gaulss
 # prerequisite 5. mgcv 1.9-4 oracle references: gaulss()$ll evaluated in R
 # at identical (y, X, lpi, coef, d1b, d2b, fh, D) for every deriv level.
 # ---------------------------------------------------------------------------

@@ -19,6 +19,8 @@ from typing import Any
 
 import polars as pl
 
+from .._polars_compat import cat_pool
+
 
 @dataclass(slots=True)
 class _SummaryBlock:
@@ -232,7 +234,7 @@ def _factor_entries(
     }
 
     if isinstance(s.dtype, (pl.Enum, pl.Categorical)):
-        all_levels = s.cat.get_categories().to_list()
+        all_levels = cat_pool(s).to_list()
     else:
         all_levels = sorted(counted.keys())
 

@@ -263,3 +263,60 @@ def test_end_to_end_chain_stays_in_hea():
         .collect()
     )
     assert isinstance(out, hea.tidy.DataFrame)
+
+
+# ---------------------------------------------------------------------------
+# 5. Behaviour hea pins independently of polars
+# ---------------------------------------------------------------------------
+
+
+def test_headerless_read_csv_uses_readr_names(tmp_path):
+    """``col_names=False`` names columns ``X1``…``Xn``, as readr does.
+
+    hea's ``read_csv`` is a readr shim, so it pins readr's names rather than
+    passing through whatever placeholders polars generates.
+    """
+    p = tmp_path / "x.csv"
+    p.write_text("a,b,c\n1,2,3\n")
+    assert hea.io.read_csv(str(p), col_names=False).columns == ["X1", "X2", "X3"]
+    # A header is still read normally, and explicit names still win.
+    assert hea.io.read_csv(str(p)).columns == ["a", "b", "c"]
+    assert hea.io.read_csv(str(p), col_names=["p", "q", "r"]).columns == ["p", "q", "r"]
+
+
+def test_lazy_group_by_order_matches_eager():
+    """``hea.LazyFrame.group_by`` defaults ``maintain_order=True``.
+
+    polars leaves it False and picks the streaming engine for lazy queries,
+    which returns groups in a different order on every run. hea's eager
+    ``group_by`` is stable, so the lazy path is pinned to agree with it —
+    the same code must not answer differently for having a ``.lazy()`` in it.
+    """
+    df = hea.tidy.DataFrame({"g": ["b", "a", "c", "a"], "x": [1, 2, 3, 4]})
+    eager = df.group_by("g").summarize(n=hea.tidy.n())["g"].to_list()
+    runs = {
+        tuple(df.lazy().group_by("g").agg(pl.len()).collect()["g"].to_list())
+        for _ in range(8)
+    }
+    assert runs == {tuple(eager)}
+    # Explicit opt-out still reaches polars' own behaviour.
+    out = df.lazy().group_by("g", maintain_order=False).agg(pl.len()).collect()
+    assert sorted(out["g"].to_list()) == ["a", "b", "c"]
+
+
+def test_collect_batches_yields_hea_dataframes(tmp_path):
+    """Streaming chunks are ``hea.DataFrame``, not bare polars.
+
+    ``scan_csv(...).collect_batches()`` is hea's streaming read path, so its
+    chunks have to carry the tidyverse verbs.
+    """
+    p = tmp_path / "b.csv"
+    p.write_text("a,b\n1,2\n3,4\n5,6\n")
+    batches = list(hea.io.scan_csv(str(p)).collect_batches(chunk_size=1))
+    assert batches, "collect_batches yielded nothing"
+    for b in batches:
+        assert isinstance(b, hea.tidy.DataFrame)
+    # And the verbs actually work on a chunk.
+    assert batches[0].mutate(c=hea.tidy.col("a") * 2)["c"].to_list() == [
+        batches[0]["a"][0] * 2
+    ]

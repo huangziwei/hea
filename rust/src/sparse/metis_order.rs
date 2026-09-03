@@ -14,11 +14,10 @@ use super::ws::CscError;
 /// `Common->metis_nswitch` / `metis_dswitch`
 /// (`Utility/t_cholmod_defaults.c:51-52`).
 ///
-/// The comment at `cholmod_metis.c:719-733` is worth keeping: METIS 4.0.1 seg
-/// faulted on one matrix of order 3005 with 66% density, and the workaround is
-/// to return the identity for anything that dense. It has never been retested
-/// against 5.1.0, and it fires before `METIS_NodeND` is ever called, so it is
-/// part of the ordering CHOLMOD produces whether or not the bug still exists.
+/// Per `cholmod_metis.c:719-733`, CHOLMOD returns the identity for anything at
+/// or above this order and density rather than calling METIS. The guard fires
+/// before `METIS_NodeND` is reached, so it is part of the ordering CHOLMOD
+/// produces and has to be mirrored to stay bit-identical.
 const METIS_NSWITCH: i64 = 3000;
 const METIS_DSWITCH: f64 = 0.66;
 

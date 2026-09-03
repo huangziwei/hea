@@ -1037,6 +1037,7 @@ import polars as pl
 from scipy.linalg import eigh_tridiagonal as _eigh_tridiagonal
 
 from hea._dispatch import rs_fn
+from hea._polars_compat import cat_pool
 from hea._rfma import _rfma_vec
 
 # Rust tp kernel-eval: rayon-parallel build of b=[E|T] (XBuild) and the knot
@@ -1046,10 +1047,10 @@ _tp_eval_b_rs = rs_fn("tp_eval_b")
 _tp_eval_E_rs = rs_fn("tp_eval_E")
 
 
-# Polars 1.40+ made pl.Categorical process-global (shared string cache across
-# DataFrames), so hea can no longer use pl.Enum vs pl.Categorical as the
-# ordered-vs-unordered factor signal — only pl.Enum preserves per-column level
-# order. Callers instead declare ordered columns via `with_ordered_cols(...)`
+# pl.Categorical's string pool is process-global (shared across DataFrames),
+# so only pl.Enum preserves a per-column level order — which rules out
+# Enum-vs-Categorical as the ordered-vs-unordered factor signal.
+# Callers declare ordered columns via `with_ordered_cols(...)`
 # (or the helper `set_ordered_cols`) before materializing. `_factor_from_series`
 # consults this context to decide whether a factor should use poly contrasts.
 _ORDERED_COLS_CV: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
@@ -1445,20 +1446,20 @@ def _factor_from_series_impl(
             forced_contrast=forced,
         )
     if dt in (pl.Categorical, pl.Enum):
-        # polars 1.40+ gives all pl.Categorical columns in one DataFrame a merged
-        # string pool, so cat.get_categories() returns every category seen across
-        # sibling columns and to_physical() indexes into that merged pool. Drop
-        # levels absent from this column (matches R's droplevels semantics lme4
-        # and mgcv use when building Z / model matrices) and remap codes densely.
+        # A pl.Categorical's string pool is process-global: it holds every
+        # category any Categorical column has interned, and to_physical()
+        # indexes into that shared pool. Drop levels absent from this column
+        # (matches R's droplevels semantics lme4 and mgcv use when building
+        # Z / model matrices) and remap codes densely.
         #
-        # Enum declares its own per-column level pool so we can read levels via
-        # the dtype (~10× faster than .cat.get_categories()) and skip the remap
-        # when every declared level appears (the common case for schema-cast
-        # fixtures).
+        # Enum declares its own per-column level pool, so its dtype gives the
+        # levels directly (~10× faster than materializing a global pool) and
+        # the remap is skipped when every declared level appears — the common
+        # case for schema-cast fixtures.
         if dt == pl.Enum:
             full = dt.categories.to_list()
         else:
-            full = series.cat.get_categories().to_list()
+            full = cat_pool(series).to_list()
         codes_raw = series.to_physical().to_numpy()
         null_mask = series.is_null().to_numpy() if series.null_count() > 0 else None
         valid = codes_raw if null_mask is None else codes_raw[~null_mask]
@@ -4337,11 +4338,10 @@ def _factor_levels(col: pl.Series) -> list:
     """R-style factor levels: sorted unique values (alphabetic for strings,
     numeric for numerics)."""
     if col.dtype in (pl.Categorical, pl.Enum):
-        # See `_factor_from_series`: polars 1.40+ merges Categorical category
-        # pools across sibling columns in a DataFrame, so cat.get_categories()
-        # may include levels from other columns. Restrict to levels actually
-        # present in this column, keeping their schema order.
-        full = col.cat.get_categories().to_list()
+        # See `_factor_from_series`: a Categorical's pool is process-global, so
+        # it may include levels interned by other columns. Restrict to levels
+        # actually present in this column, keeping their schema order.
+        full = cat_pool(col).to_list()
         codes = col.drop_nulls().to_physical().to_numpy().astype(np.int64)
         present = np.unique(codes) if codes.size else np.empty(0, dtype=np.int64)
         return [full[int(c)] for c in present]
@@ -7104,7 +7104,7 @@ def _build_ts_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
 # penalty has fractional Sobolev order m+s (``m = c(m, s)``; s=0 ⇒ thin-plate).
 # Reuses tp's null-space polynomials (``_tp_gen_poly_powers``) — but NOT tp's
 # m-bump, since Duchon's whole point is allowing m+s > d/2 with small m. The
-# low-rank reduction (``_lowrank_kernel_reduce``) is shared with sos (§9).
+# low-rank reduction (``_lowrank_kernel_reduce``) is shared with sos.
 
 
 def _lowrank_kernel_reduce(

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import polars as pl
 
+from .._polars_compat import cat_pool
 from ..formula import set_ordered_cols
 
 
@@ -245,7 +246,7 @@ def levels(x):
         if isinstance(x.dtype, pl.Enum):
             return x.dtype.categories.to_list()
         if isinstance(x.dtype, pl.Categorical):
-            return x.cat.get_categories().to_list()
+            return cat_pool(x).to_list()
     return None
 
 

@@ -1,4 +1,4 @@
-"""Tests for hea.translate.r_to_py — Phase 1+2 acceptance.
+"""Tests for hea.translate.r_to_py.
 
 Each test parses an R snippet, runs the translator, and asserts on the
 emitted Python source. We use string equality on the canonical
@@ -460,7 +460,7 @@ def test_translate_output_is_valid_python():
 
 
 class TestMutateSummarize:
-    """Phase 3 — mutate / summarize NSE and dplyr's dot-prefixed kwargs."""
+    """mutate / summarize NSE and dplyr's dot-prefixed kwargs."""
 
     def test_mutate_sequential_columns(self):
         # Sequential evaluation is hea's runtime concern — the translator
@@ -550,7 +550,7 @@ class TestMutateSummarize:
 
 
 class TestJoins:
-    """Phase 4 — every dplyr join, plus the `by = c("a" = "b")` named-vec."""
+    """every dplyr join, plus the `by = c("a" = "b")` named-vec."""
 
     def test_string_by(self):
         assert _tr('inner_join(x, y, by = "id")') == "x.inner_join(y, by='id')"
@@ -591,7 +591,7 @@ class TestJoins:
 
 
 class TestCaseWhen:
-    """Phase 4 — case_when's tilde syntax → tuple-pair form."""
+    """case_when's tilde syntax → tuple-pair form."""
 
     def test_basic(self):
         out = _tr('case_when(x > 0 ~ "pos", x < 0 ~ "neg", .default = "zero")')
@@ -624,7 +624,7 @@ class TestCaseWhen:
 
 
 class TestExpressionHelpers:
-    """Phase 4 — if_else, coalesce, na_if, between, near."""
+    """if_else, coalesce, na_if, between, near."""
 
     def test_if_else(self):
         out = _tr('mutate(df, status = if_else(x > 0, "pos", "neg"))')
@@ -653,7 +653,7 @@ class TestExpressionHelpers:
 
 
 class TestPivot:
-    """Phase 4 — pivot_longer / pivot_wider full kwarg coverage."""
+    """pivot_longer / pivot_wider full kwarg coverage."""
 
     def test_pivot_longer_simple(self):
         out = _tr(
@@ -702,7 +702,7 @@ class TestPivot:
 
 
 class TestAcross:
-    """Phase 4 — across() expansion at translate time."""
+    """across() expansion at translate time."""
 
     def test_single_col_single_fn(self):
         out = _tr("mutate(df, across(x, mean))")
@@ -746,7 +746,7 @@ class TestAcross:
 
 
 class TestGgplot:
-    """Phase 5 — ``ggplot(df, aes(...)) + geom_*()`` chain detection,
+    """``ggplot(df, aes(...)) + geom_*()`` chain detection,
     aes() unwrapping, facet formulas, and patchwork operators."""
 
     # ----- ggplot root + simplest chains -----

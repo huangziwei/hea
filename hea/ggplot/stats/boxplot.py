@@ -90,9 +90,9 @@ class StatBoxplot(Stat):
 
         # ggplot2 groups continuous-x boxplots by the layer's ``group``
         # aesthetic only — including ``x`` in groupby would over-split,
-        # producing one box per unique x value instead of one per group
-        # (the bug behind ``aes(group=cut_width(carat, 0.1))`` collapsing
-        # to many tiny boxes regardless of bin width).
+        # producing one box per unique x value instead of one per group —
+        # ``aes(group=cut_width(carat, 0.1))`` would then collapse to many
+        # tiny boxes regardless of bin width.
         groupby_cols: list[str] = []
         if x_is_discrete:
             groupby_cols.append("x")

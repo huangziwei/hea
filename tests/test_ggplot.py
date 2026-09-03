@@ -140,7 +140,7 @@ from hea.tidy import (
 def test_gg_c1_minimal_scatter_renders():
     """GG-C1: ``ggplot(mtcars, aes(wt, mpg)) + geom_point()`` renders identifiably.
 
-    Asserts (Phase 0 form):
+    Asserts:
     - ``draw()`` returns a matplotlib Figure;
     - the figure has exactly one axes with one PathCollection (scatter);
     - that scatter holds N=nrow(mtcars) points;
@@ -183,7 +183,7 @@ def test_gg_c1_minimal_scatter_renders():
 
 
 def test_geom_blank_layer_adds_no_artists():
-    """`geom_blank()` extends scales but draws nothing (Phase 0: no scales yet,
+    """`geom_blank()` extends scales but draws nothing (no scales yet,
     so this just asserts the layer doesn't put anything on the axes)."""
     mtcars = load_dataset("datasets", "mtcars")
 
@@ -262,7 +262,7 @@ def test_aes_callable_value():
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.1 — Continuous scales: scale_x/y_continuous knobs (limits, breaks,
+# Continuous scales: scale_x/y_continuous knobs (limits, breaks,
 # labels) plus auto-default registration in build.
 # ---------------------------------------------------------------------------
 
@@ -356,7 +356,7 @@ def test_scale_plus_is_non_mutating():
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.1d — Trans objects: log10, sqrt, reverse, identity
+# Trans objects: log10, sqrt, reverse, identity
 # ---------------------------------------------------------------------------
 
 
@@ -467,8 +467,8 @@ def test_scale_y_sqrt_tick_labels_in_raw_units_for_geom_col():
         ax = fig.axes[0]
         labels = [t.get_text() for t in ax.get_yticklabels() if t.get_text()]
         # The labels should be in raw units (hundreds), not sqrt-units
-        # (tens). Bar tops at sqrt(1600)=40; if labels were "10..40" we'd
-        # be back in the bug. Look for at least one >= 100.
+        # (tens). Bar tops at sqrt(1600)=40; labels reading "10..40" would
+        # mean sqrt-units. Look for at least one >= 100.
         large_labels = [
             lbl
             for lbl in labels
@@ -518,7 +518,7 @@ def test_log10_with_explicit_breaks():
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.1c — Wilkinson extended_breaks algorithm
+# Wilkinson extended_breaks algorithm
 #
 # These cases lock parity with ggplot2's `labeling::extended` defaults on the
 # canonical R datasets used throughout Faraway's textbook. R-oracle dump
@@ -567,7 +567,7 @@ def test_extended_breaks_degenerate_range_returns_single_tick():
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.2a — geom_line, geom_path, geom_step
+# geom_line, geom_path, geom_step
 # ---------------------------------------------------------------------------
 
 
@@ -646,7 +646,7 @@ def test_geom_line_constant_aes_overrides():
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.3 — Positions: jitter, nudge, dodge, stack, fill
+# Positions: jitter, nudge, dodge, stack, fill
 # ---------------------------------------------------------------------------
 
 
@@ -805,7 +805,7 @@ def test_position_unknown_string_raises():
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.4 — Smoothing: stat_smooth + geom_smooth (and the underlying
+# Smoothing: stat_smooth + geom_smooth (and the underlying
 # geom_ribbon / geom_area)
 # ---------------------------------------------------------------------------
 
@@ -1045,7 +1045,7 @@ def test_stat_smooth_glm_unknown_family_errors():
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.9c — geom_boxplot
+# geom_boxplot
 # ---------------------------------------------------------------------------
 
 
@@ -1127,7 +1127,7 @@ def test_geom_boxplot_extracts_outliers():
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.9d — geom_violin
+# geom_violin
 # ---------------------------------------------------------------------------
 
 
@@ -1165,12 +1165,12 @@ def test_stat_ydensity_violinwidth_normalised_to_one():
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.3d — GG-C9: boxplot + jittered points overlay
+# GG-C9: boxplot + jittered points overlay
 # ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.5 — Color/fill scales: auto-default discrete, manual, identity,
+# Color/fill scales: auto-default discrete, manual, identity,
 # plus 1.5a auto-grouping rule.
 # ---------------------------------------------------------------------------
 
@@ -1354,7 +1354,7 @@ def test_add_group_auto_creates_group_from_discrete_aesthetic():
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.5d/e/f — viridis / gradient / brewer
+# viridis / gradient / brewer
 # ---------------------------------------------------------------------------
 
 
@@ -1534,7 +1534,7 @@ def test_scale_color_brewer_set1():
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.6 — Non-colour aes scales: size, alpha, shape, linetype
+# Non-colour aes scales: size, alpha, shape, linetype
 # ---------------------------------------------------------------------------
 
 
@@ -1653,7 +1653,7 @@ def test_aes_linetype_continuous_raises():
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.7 — facet_wrap
+# facet_wrap
 # ---------------------------------------------------------------------------
 
 
@@ -1827,7 +1827,7 @@ def test_facet_wrap_preserves_colour_mapping_per_panel():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2.1 — facet_grid
+# facet_grid
 # ---------------------------------------------------------------------------
 
 
@@ -2102,7 +2102,7 @@ def test_facet_grid_with_enum_facet_var():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2.4 — geom_rect, geom_tile, geom_raster, geom_polygon
+# geom_rect, geom_tile, geom_raster, geom_polygon
 # ---------------------------------------------------------------------------
 
 
@@ -2311,7 +2311,7 @@ def test_geom_polygon_skips_groups_with_under_three_vertices():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2.5 — geom_errorbar / errorbarh / linerange / pointrange / crossbar
+# geom_errorbar / errorbarh / linerange / pointrange / crossbar
 # ---------------------------------------------------------------------------
 
 
@@ -2433,7 +2433,7 @@ def test_geom_crossbar_box_plus_median():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2.6 — geom_segment, geom_curve
+# geom_segment, geom_curve
 # ---------------------------------------------------------------------------
 
 
@@ -2540,7 +2540,7 @@ def test_geom_curve_curvature_kwarg_controls_arc():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2.7 — stat_summary
+# stat_summary
 # ---------------------------------------------------------------------------
 
 
@@ -2676,7 +2676,7 @@ def test_stat_summary_unknown_geom_errors():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2.7b — ggplot2 parity: geom registry + orientation
+# ggplot2 parity: geom registry + orientation
 # ---------------------------------------------------------------------------
 
 
@@ -2794,7 +2794,7 @@ def test_stat_summary_accepts_a_geom_instance_directly():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2.9 — qq, qq_line, ecdf, unique, sum/count, contour, hex, dotplot
+# qq, qq_line, ecdf, unique, sum/count, contour, hex, dotplot
 # ---------------------------------------------------------------------------
 
 
@@ -3000,7 +3000,7 @@ def test_geom_dotplot_stacks_within_bin():
 
 
 # ---------------------------------------------------------------------------
-# Phase 3.1 — guide_legend
+# guide_legend
 # ---------------------------------------------------------------------------
 
 
@@ -3205,7 +3205,7 @@ def test_guides_addition_to_plot_stores_overrides():
 
 
 # ---------------------------------------------------------------------------
-# Phase 3.2 — guide_colorbar
+# guide_colorbar
 # ---------------------------------------------------------------------------
 
 
@@ -3348,7 +3348,7 @@ def test_colorbar_position_none_hides():
 
 
 # ---------------------------------------------------------------------------
-# Phase 3.3 — guide_axis
+# guide_axis
 # ---------------------------------------------------------------------------
 
 
@@ -3526,7 +3526,7 @@ def test_guide_axis_factory_holds_metadata():
 
 
 # ---------------------------------------------------------------------------
-# Phase 3.4 — temporal / percent / ordinal / radius scales
+# temporal / percent / ordinal / radius scales
 # ---------------------------------------------------------------------------
 
 
@@ -4032,7 +4032,7 @@ def test_fct_reorder_works_inside_mutate():
     out = df.mutate(g=fct_reorder("g", "v"))
     assert isinstance(out.schema["g"], pl.Enum)
     # Sorted by v ascending: b(1), c(2), a(3).
-    assert out["g"].cat.get_categories().to_list() == ["b", "c", "a"]
+    assert out["g"].dtype.categories.to_list() == ["b", "c", "a"]
 
 
 def test_fct_reorder_preserves_unseen_enum_levels():
@@ -4120,19 +4120,19 @@ def test_fct_recode_renames_levels_preserving_order():
 
     df = hea.tidy.DataFrame({"g": ["a", "b", "c", "d"]})
     out = df.mutate(g=hea.tidy.fct_recode("g", A="a", B="b"))
-    assert out["g"].cat.get_categories().to_list() == ["A", "B", "c", "d"]
+    assert out["g"].dtype.categories.to_list() == ["A", "B", "c", "d"]
     assert out["g"].to_list() == ["A", "B", "c", "d"]
 
     # Quoted-key form (matches r4ds' "Republican, strong" use case).
     df2 = hea.tidy.DataFrame({"g": ["short", "long", "x"]})
     out2 = df2.mutate(g=hea.tidy.fct_recode("g", **{"renamed long": "long"}))
-    assert "renamed long" in out2["g"].cat.get_categories().to_list()
+    assert "renamed long" in out2["g"].dtype.categories.to_list()
 
     # List values trigger many:1 merge (Python equivalent of R's repeated
     # keyword names — can't be expressed as duplicate dict keys).
     df3 = hea.tidy.DataFrame({"g": ["a", "b", "c", "d"]})
     out3 = df3.mutate(g=hea.tidy.fct_recode("g", X=["a", "b"], Y="c"))
-    assert out3["g"].cat.get_categories().to_list() == ["X", "Y", "d"]
+    assert out3["g"].dtype.categories.to_list() == ["X", "Y", "d"]
     assert out3["g"].to_list() == ["X", "X", "Y", "d"]
 
     # Non-str / non-list values still rejected.
@@ -4149,11 +4149,11 @@ def test_fct_collapse_merges_levels_with_optional_other():
 
     # Partial: unmentioned c, d keep their names.
     out = df.mutate(g=hea.tidy.fct_collapse("g", X=["a", "b"]))
-    assert out["g"].cat.get_categories().to_list() == ["X", "c", "d"]
+    assert out["g"].dtype.categories.to_list() == ["X", "c", "d"]
 
     # other_level sweeps the rest.
     out2 = df.mutate(g=hea.tidy.fct_collapse("g", X=["a", "b"], other_level="Z"))
-    assert out2["g"].cat.get_categories().to_list() == ["X", "Z"]
+    assert out2["g"].dtype.categories.to_list() == ["X", "Z"]
 
     # List/tuple required (not bare string).
     with pytest.raises(TypeError, match="list/tuple"):
@@ -4171,7 +4171,7 @@ def test_fct_lump_n_keeps_top_n_by_count():
         {"g": ["a"] * 10 + ["b"] * 6 + ["c"] * 4 + ["d"] * 3 + ["e"] * 2 + ["f"] * 1}
     )
     out = df.mutate(g=hea.tidy.fct_lump_n("g", n=2))
-    cats = out["g"].cat.get_categories().to_list()
+    cats = out["g"].dtype.categories.to_list()
     assert cats == ["a", "b", "Other"]
     # Lumped: c+d+e+f = 4+3+2+1 = 10
     other_n = (out["g"] == "Other").sum()
@@ -4186,7 +4186,7 @@ def test_fct_lump_n_keeps_top_n_by_count():
     df2 = hea.tidy.DataFrame({"g": s})
     out2 = df2.mutate(g=hea.tidy.fct_lump_n("g", n=2))
     # Top 2 by count: a(10), Other(5). Kept in original Enum order.
-    assert out2["g"].cat.get_categories().to_list() == ["a", "Other"]
+    assert out2["g"].dtype.categories.to_list() == ["a", "Other"]
     # b(3) and c(1) lumped into existing Other(5): Other final = 9.
     assert (out2["g"] == "Other").sum() == 9
 
@@ -4201,13 +4201,13 @@ def test_fct_lump_lowfreq_matches_forcats_in_smallest_rule():
         {"g": ["a"] * 10 + ["b"] * 6 + ["c"] * 4 + ["d"] * 3 + ["e"] * 2 + ["f"] * 1}
     )
     out = df.mutate(g=hea.tidy.fct_lump_lowfreq("g"))
-    assert out["g"].cat.get_categories().to_list() == ["a", "b", "c", "d", "e", "Other"]
+    assert out["g"].dtype.categories.to_list() == ["a", "b", "c", "d", "e", "Other"]
     assert (out["g"] == "Other").sum() == 1
 
     # Dominant level case: a=100, others tiny → only a kept.
     df2 = hea.tidy.DataFrame({"g": ["a"] * 100 + ["b"] * 5 + ["c"] * 3 + ["d"] * 2})
     out2 = df2.mutate(g=hea.tidy.fct_lump_lowfreq("g"))
-    assert out2["g"].cat.get_categories().to_list() == ["a", "Other"]
+    assert out2["g"].dtype.categories.to_list() == ["a", "Other"]
 
 
 def test_scale_radius_is_continuous_size_alias():
@@ -4228,7 +4228,7 @@ def test_scale_radius_is_continuous_size_alias():
 
 
 # ---------------------------------------------------------------------------
-# Phase 4.2 — annotate
+# annotate
 # ---------------------------------------------------------------------------
 
 
@@ -4345,7 +4345,7 @@ def test_annotate_inconsistent_lengths_error():
 
 
 # ---------------------------------------------------------------------------
-# Phase 4.4 — coord_flip / coord_trans
+# coord_flip / coord_trans
 # ---------------------------------------------------------------------------
 
 
@@ -4442,7 +4442,7 @@ def test_coord_trans_unknown_name_errors():
 
 
 # ---------------------------------------------------------------------------
-# Phase 4.3 — annotation_custom
+# annotation_custom
 # ---------------------------------------------------------------------------
 
 
@@ -4521,7 +4521,7 @@ def test_annotation_custom_renders_on_each_facet_panel():
 
 
 # ---------------------------------------------------------------------------
-# Phase 4.5 — expansion()
+# expansion()
 # ---------------------------------------------------------------------------
 
 
@@ -4648,7 +4648,7 @@ def test_draw_with_ax_skips_resize():
 
 
 # ---------------------------------------------------------------------------
-# Phase 5 — Patchwork composition
+# Patchwork composition
 # ---------------------------------------------------------------------------
 
 
@@ -5169,12 +5169,12 @@ def test_patchwork_figsize_kwarg():
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.8 — Themes
+# Themes
 # ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.10 — after_stat / after_scale + geom_text (smallest geom needed
+# after_stat / after_scale + geom_text (smallest geom needed
 # to test stat-aware aesthetics)
 # ---------------------------------------------------------------------------
 

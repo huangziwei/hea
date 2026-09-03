@@ -668,7 +668,7 @@ def test_pirls_init_canonical_inverse_gaussian():
     # so this also serves as a valideta check on the converged fit.
     assert np.all(m.fitted > 0)
     assert np.all(m.linear_predictors > 0)
-    # Phase 2.2 wiring: unknown-scale family ⇒ log φ enters the outer
+    # Unknown-scale family ⇒ log φ enters the outer
     # vector and `m._log_phi_hat` is finite. ``m.scale = m.sigma_squared``
     # is the post-fit scale estimate (mgcv's ``m$sig2 = scale.est``) —
     # Pearson with the Fletcher (2012) correction, mgcv's default
@@ -687,7 +687,7 @@ def test_pirls_init_canonical_inverse_gaussian():
     #   m$sig2 = 0.821638681219   (plain Pearson: 0.781145231711)
     # rtol 5e-6 (~3× the measured hea-vs-mgcv stop-band): the IG canonical
     # REML optimum is shallow and the Fletcher scale rides the converged
-    # μ̂, so hea lands ~1.4e-6 rel from mgcv's sp (same §2.3 band as _scat).
+    # μ̂, so hea lands ~1.4e-6 rel from mgcv's sp — the same band as _scat.
     np.testing.assert_allclose(m.sigma_squared, 0.821638681219, rtol=5e-6)
     np.testing.assert_allclose(m._pearson_scale, 0.781145231711, rtol=5e-6)
     # Intercept ≈ link(mean(y)) = 1/mean(y)² for an intercept-only fit;
@@ -698,19 +698,19 @@ def test_pirls_init_canonical_inverse_gaussian():
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.9 — non-Gaussian post-fit smoke. trees + Gamma(log) is the canonical
+# non-Gaussian post-fit smoke. trees + Gamma(log) is the canonical
 # small-n GLM example; mgcv's r.sq, deviance_explained, and null_deviance only
 # depend on (y, μ, wt, family) and family.dev_resids, so those land at mgcv's
-# values even before the REML score is family-aware (Phase 2). sp/edf/AIC
-# still depend on the (Gaussian-only) REML score, so they're pinned at hea's
-# current values with a TODO — Phase 4's mgcv-oracle battery tightens them.
+# values. sp/edf/AIC depend on the REML score, which is Gaussian-only, so
+# they are pinned at hea's own values as a regression guard rather than
+# against mgcv.
 # ---------------------------------------------------------------------------
 
 
 def test_trees_gamma_log_smoke():
     """trees + Gamma(log), method='REML': pin family-agnostic post-fit values
-    against mgcv (those that don't depend on sp), and hea's current
-    sp-dependent values as a regression guard until Phase 2 lands."""
+    against mgcv (those that don't depend on sp), and hea's own
+    sp-dependent values as a regression guard."""
     from hea.family import Gamma
 
     d = load_dataset("R", "trees")
@@ -750,13 +750,13 @@ def test_trees_gamma_log_smoke():
     np.testing.assert_allclose(m.deviance, 0.1805645860, atol=5e-4)
     np.testing.assert_allclose(m.bhat["(Intercept)"][0], 3.2756440543, atol=5e-3)
 
-    # Looser pins on optimizer-dependent quantities. Phase 2.2 is using
-    # L-BFGS-B with finite-difference gradients on the (ρ, log φ) outer
+    # Looser pins on optimizer-dependent quantities. The outer solve uses
+    # L-BFGS-B with finite-difference gradients on the (ρ, log φ)
     # vector; the score has a long flat plateau in the Height-smooth
     # direction (its smooth saturates well before sp[0] hits the upper
     # rho bound), so sp[0] reproducibly lands ~50× larger than mgcv's
     # analytical-Newton answer while edf/scale/deviance agree to ~5e-3.
-    # Phase 3 (analytical (ρ, log φ) gradients/Hessian) will tighten this.
+    # Analytical (ρ, log φ) gradients would tighten this.
     np.testing.assert_allclose(m.sp[1], 0.2112713142, rtol=2e-3)
     np.testing.assert_allclose(m.edf_total, 4.738161, atol=5e-2)
     np.testing.assert_allclose(m.edf2_total, 5.270166, atol=5e-2)
@@ -776,8 +776,8 @@ def test_trees_gamma_log_smoke():
     # the fitted intercept lands near 3.276.
     np.testing.assert_allclose(m.bhat["(Intercept)"][0], 3.2756425861, atol=5e-5)
 
-    # First-five fitted μ vs mgcv reference — Phase 2.2 lands within ~5e-4
-    # of mgcv even with the FD optimizer plateau (the smooths matter for μ,
+    # First-five fitted μ vs mgcv reference — within ~5e-4 of mgcv
+    # even with the FD optimizer plateau (the smooths matter for μ,
     # not the saturated Height direction).
     np.testing.assert_allclose(
         m.fitted_values[:5],
@@ -828,8 +828,8 @@ def test_gaussian_residual_identities_and_aic_self_consistency():
 
 def test_reml_finite_for_trees_gamma_log():
     """Sanity: for the converged Gamma(log) fit, `_reml` returns a
-    finite value at the hea-current sp. (Phase 2.2 makes φ̂ a joint outer
-    variable; this just ensures the formula is wired up correctly.)"""
+    finite value at the hea-current sp. φ̂ is a joint outer variable, so
+    this checks the formula is wired up correctly."""
     from hea.family import Gamma
     from hea.models import gam
 
@@ -2629,7 +2629,7 @@ def test_id_singleton_is_noop():
 def test_bam_links_id_like_gam():
     """bam has gam's working-θ L-matrix layer: id= shares ONE working λ across
     the linked smooths. Full mgcv-bam parity (sp/edf/criterion/fitted) lives in
-    test_bam.py §7; this confirms bam links the same structure gam does on the
+    test_bam.py; this confirms bam links the same structure gam does on the
     shared fixture."""
     from hea.models.bam import bam
 
@@ -4658,7 +4658,7 @@ def test_plain_quasi_identity_link_full_newton_matches_mgcv():
     # identity link. quasi(identity, V=mu) would take Fisher steps under
     # a link==default test — the pins differ visibly in the sp. Same-
     # optimum stopping noise leaves sp ~1.5e-6 relative off R here
-    # (criterion agrees to 7e-9; cf. the §2.3/§2.4 band records).
+    # (the criterion itself agrees to 7e-9).
     from hea.family import Quasi
 
     d, _, _ = _cbind_fixture()
@@ -4812,7 +4812,7 @@ def test_nb_fixed_theta_matches_mgcv():
 
 
 # ---------------------------------------------------------------------------
-# Sl penalty machinery (mgcv fast-REML.r) — §5.3 prerequisite 3.
+# Sl penalty machinery (mgcv fast-REML.r).
 # mgcv 1.9-4 references via gam(fit=FALSE) + mgcv:::Sl.setup / mgcv:::ldetS
 # on identical data (full-precision CSV).
 # ---------------------------------------------------------------------------
@@ -4969,7 +4969,7 @@ def test_sl_machinery_invariants():
 
 
 # ---------------------------------------------------------------------------
-# Multi-formula front end (mgcv gam.setup.list) — §5.3 prerequisite 4.
+# Multi-formula front end (mgcv gam.setup.list).
 # mgcv 1.9-4 references via gam(list(...), family=gaulss(), fit=FALSE).
 # ---------------------------------------------------------------------------
 
@@ -5084,7 +5084,7 @@ def test_gam_family_constructor_autocall():
 
 
 # ---------------------------------------------------------------------------
-# gam.vcomp rescale=TRUE default (pre-§5.3 slice i) — mgcv 1.9-4 references.
+# gam.vcomp rescale=TRUE default — mgcv 1.9-4 references.
 # R fits read the identical data via full-precision CSV; pins are printed
 # gam.vcomp() values. S.scale is recorded per penalty by _scale_penalty
 # (mgcv smooth.r:3877-3884) and vcomp's default divides each sp by it
@@ -5170,7 +5170,7 @@ def test_vcomp_rescale_select_null_penalty_scale_one():
     # select=TRUE appends the null-space penalty Sf with mgcv S.scale=1
     # (smooth.r:4241/4259), so its row is rescale-invariant; the main
     # penalty's row rescales as usual. Wider tolerances: the select fit
-    # stops on a flatter surface (same band as the §2.3 record).
+    # stops on a flatter surface.
     m = gam("y ~ s(x0)", _vcomp_fixture(), method="REML", select=True)
     vc = m.vcomp
     np.testing.assert_allclose(
@@ -5270,7 +5270,7 @@ def test_fs_smooth_fit_matches_mgcv():
 
 
 # ---------------------------------------------------------------------------
-# summary pTerms + predict(unconditional=) (pre-§5.3 slice ii) — mgcv 1.9-4.
+# summary pTerms + predict(unconditional=) — mgcv 1.9-4.
 # pTerms (mgcv.r:3928-3977): one joint Wald test per whole parametric term,
 # assign-exact column grouping, pinv-rank df, Chi.sq (known scale, pchisq)
 # vs F (estimated scale, pf on n−Σedf). Printed via anova() exactly like
@@ -5363,7 +5363,7 @@ def test_pls_rank_drop_alias_twin_canonical_on_any_blas():
 
 
 # ---------------------------------------------------------------------------
-# §5.3 gam.fit5 — general-family inner Newton + implicit-differentiation
+# gam.fit5 — general-family inner Newton + implicit-differentiation
 # derivative system. Pinned against mgcv:::gam.fit5 called directly at
 # fixed lsp (deriv=2) after Sl.setup + Sl.initial.repara, exactly as
 # estimate.gam stages it; Mp = ncol(totalPenaltySpace(...)$Z), which
@@ -10013,7 +10013,7 @@ def test_cnorm_through_gam_matches_mgcv():
 
 
 # =============================================================================
-# Smooth-class roadmap E / Phase 3 (smooth-review-completion.md)
+# Smooth-class extras
 # -----------------------------------------------------------------------------
 # S1a — s(..., pc=) point constraints. mgcv smooth.construct3 (smooth.r:3676-
 # 3679) REPLACES the default sum-to-zero identifiability constraint
@@ -10742,7 +10742,7 @@ def test_preml_pml_gacv_gaussian_match_mgcv():
     """mcycle gaussian-identity, the three new criteria pinned to mgcv 1.9-4
     (gam(accel ~ s(times, k=20), method=...)). sp tolerance is loose-ish —
     the optimum is flat in log λ so the converged sp carries ~1e-5 stopping
-    noise (same character as REML, §2.3) — while edf/scale/score pin tight."""
+    noise (the same character as REML) — while edf/scale/score pin tight."""
     d = load_dataset("MASS", "mcycle")
     # (method, sp, edf, scale, score)
     pins = {

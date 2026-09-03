@@ -703,7 +703,7 @@ def _sl_ift_chol(
 
     if nd > 0:
         # mgcv pmmult2 cross products, via the fixed-order kernel so the REML
-        # Hessian is run/platform deterministic (numpy ``@`` is not — §D1).
+        # Hessian is run/platform deterministic (numpy ``@`` is not).
         bSb2 = np.diag(bSb1) + 2.0 * (
             _pmmult(db, D + S_db, at=True) + _pmmult(D, db, at=True)
         )
@@ -6110,12 +6110,11 @@ class bam(gam):
             # mgcv bgam.fitd:585-604 halves the β step (toward the previous
             # accepted β₀) while the PENALISED deviance fails to improve,
             # using the cheap deviance at the OLD θ — then builds (R,f)/W,z
-            # ONCE, after halving (632-665). hea formerly built first, then
-            # halved + REBUILT; reordering to mgcv's cadence (F7) means
-            # ``estimate.theta`` sees the halved μ (614-630 runs after 585-604)
-            # and the working model is built once. Identical on the monotone
-            # path: when halving never fires μ is unchanged, so θ and the build
-            # see exactly the same μ as before. ``it > 1`` == mgcv ``iter>2``
+            # ONCE, after halving (632-665). Keep that cadence: halve first,
+            # so ``estimate.theta`` sees the halved μ (614-630 runs after
+            # 585-604) and the working model is built exactly once. Building
+            # before halving would need a rebuild and would feed θ the
+            # unhalved μ. ``it > 1`` == mgcv ``iter>2``
             # (1-based; c.iter=2 since hea never warm-starts ``coef``).
             #
             # PATH SPLIT: mgcv's discrete (``bgam.fitd``) and non-discrete

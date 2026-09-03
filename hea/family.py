@@ -4715,8 +4715,7 @@ class tw(Tweedie):
         ∂/∂θ = (∂/∂p)·p′, ∂²/∂θ² = (∂²/∂p²)·p′² + (∂/∂p)·p″,
         ∂²/∂θ∂logφ = (∂²/∂p∂logφ)·p′ — exactly ldTweedie's work.param
         transform (gam.fit3.r:2808-2814). The p-space second
-        derivatives come from :meth:`Tweedie._d2ls_dp` (family-review
-        B4; previously NaN-poisoned).
+        derivatives come from :meth:`Tweedie._d2ls_dp`.
 
         ``lsth2`` feeds the analytic θ rows/cols of the REML Hessian
         (gam.py ``_reml_hessian``): the ``−2·lsth2/γ`` ``ls2`` block for
@@ -10966,7 +10965,7 @@ _GFAM_MEMBER_NAMES.update(
 
 
 # ---------------------------------------------------------------------------
-# General-family seam — mgcv gamlss.r authoring kit (§5.3 prerequisite 5).
+# General-family seam — mgcv gamlss.r authoring kit.
 #
 # General families (gam.fit5: multiple linear predictors, likelihood
 # supplied as ``ll`` instead of a deviance) are authored from per-datum

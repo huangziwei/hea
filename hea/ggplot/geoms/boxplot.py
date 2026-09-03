@@ -46,6 +46,7 @@ class GeomBoxplot(Geom):
     def draw_panel(self, data, ax) -> None:
         import polars as pl
 
+        from ..._polars_compat import cat_pool
         from .._util import r_color
 
         if len(data) == 0:
@@ -82,7 +83,7 @@ class GeomBoxplot(Geom):
         if pos_is_discrete:
             string_values = [str(v) for v in pos_series.to_list()]
             if pos_series.dtype in (pl.Categorical, pl.Enum):
-                levels = [str(v) for v in pos_series.cat.get_categories().to_list()]
+                levels = [str(v) for v in cat_pool(pos_series).to_list()]
             else:
                 levels = sorted(set(string_values))
             pos_axis.update_units(levels)

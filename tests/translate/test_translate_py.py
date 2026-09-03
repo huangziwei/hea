@@ -1,4 +1,4 @@
-"""Tests for hea.translate.py_to_r — Phase 6 acceptance (reverse direction).
+"""Tests for hea.translate.py_to_r (the reverse direction).
 
 Covers Python-side atoms, operators, verb chain → ``|>`` pipes, ggplot
 fluent → ``+``-chain, helper inversion (mean/sd/desc/case_when/is_in),
@@ -344,7 +344,7 @@ class TestPatchwork:
 
 
 class TestImportsAndDataLoaders:
-    """Phase 9 follow-ups: handle Python idioms that don't appear in R."""
+    """Python idioms that don't appear in R."""
 
     def test_imports_dropped(self):
         # ``import hea`` and ``from hea import X`` have no R equivalent —

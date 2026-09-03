@@ -10408,8 +10408,8 @@ class gam:
         1984-2005, 2060-2092): multi-formula design → Sl.setup +
         initial repara → initial.spg seed → outer Newton over the
         gam.fit5 REML closure → final deriv-2 fit. The post-fit
-        surface (gam.fit5.post.proc: Vp/edf/summary/predict/plot) is
-        the next §5.3 slice — only fitting attributes are populated.
+        surface (gam.fit5.post.proc: Vp/edf/summary/predict/plot) is not
+        built here — only fitting attributes are populated.
 
         ``method`` is coerced to REML like mgcv (mgcv.r:1894-1898,
         silently); ``sp=`` takes the working-length vector and fixes
@@ -14462,8 +14462,8 @@ class gam:
 
         Written list-generic over linear predictors like mgcv
         (``pterms <- if (is.list(object$pterms)) ... else list(...)``,
-        mgcv.r:3930): one entry until §5.3 multi-LP fits land, when
-        formula j ≥ 2 terms get mgcv's ``.{j-1}`` label suffix
+        mgcv.r:3930): one entry for a single linear predictor. With
+        several, formula j ≥ 2 terms get mgcv's ``.{j-1}`` label suffix
         (mgcv.r:3939) and per-LP (assign, pstart) blocks feed the same
         loop. The intercept (assign 0) is never a term — mgcv's
         convention. mgcv's printed surface for this table is
@@ -17622,7 +17622,7 @@ def _ldet_s(
     Singleton blocks contribute ``rank·ρ_k`` analytically (their penalty
     is a partial identity after Sl.setup); multi-S blocks go through
     ``_gam_reparam`` when ``repara=True`` — the gam.fit3 ``gam.reparam``
-    similarity transform already pinned against mgcv (§2.2) — or
+    similarity transform, pinned against mgcv — or
     :func:`_ldet_s_block` when ``repara=False`` (fast-REML.r:909-910),
     the un-transformed pivoted-Cholesky form ``Sl.fitChol`` uses on the
     initial-repara'd gauge. Updates each block's ``lam``, ``St`` and
@@ -17931,7 +17931,7 @@ def _append_extra_params(md: _MultiDesign, n_extra: int) -> _MultiDesign:
 
 # ---------------------------------------------------------------------------
 # Multi-formula front end — mgcv interpret.gam list branch (mgcv.r:431-498)
-# + gam.setup.list (mgcv.r:922-1092). §5.3 prerequisite 4.
+# + gam.setup.list (mgcv.r:922-1092).
 #
 # A list of formulas — the first with a response, the rest response-less
 # (`"~ s(z)"`) — becomes ONE stacked design matrix with `lpi`: per-linear-
@@ -17947,9 +17947,7 @@ def _append_extra_params(md: _MultiDesign, n_extra: int) -> _MultiDesign:
 # Out of scope first pass (explicit raise, never silent): mgcv's
 # numeric-label shared-term syntax (`1 + 2 ~ s(x)`) and the `olid`
 # unidentifiability dropping it requires; multivariate responses (mvn);
-# `drop.intercept`. Consumed by gam.fit5 (general families) when §5.3
-# proper lands — until then `gam()` raises NotImplementedError on list
-# formulas after this assembler is importable for tests.
+# `drop.intercept`. Consumed by gam.fit5 (general families).
 # ---------------------------------------------------------------------------
 
 
@@ -18021,8 +18019,8 @@ def _build_lp_design(
     (prepare_design → smooth-arg materialization → formula offsets →
     materialize_smooths → select penalties → gam.side → column stacking
     → per-formula id L-matrix). Kept in lockstep with the constructor's
-    design block — the single-formula path is untouched until §5.3
-    unifies them."""
+    design block — the two paths are separate, so a change to one has to
+    be mirrored in the other."""
     from ..formula import (
         _apply_smooth_arg_exprs,
         _smooth_arg_expr_map,
@@ -18477,7 +18475,7 @@ def _zero_terms_exclude(X, terms, exclude, plabels, pidx, icols, slabels, srange
 
 
 # ---------------------------------------------------------------------------
-# §5.3 gam.fit5 — general-family fitting (gam.fit4.r:941-1477)
+# gam.fit5 — general-family fitting (gam.fit4.r:941-1477)
 #
 # Inner Newton on β of the penalized log-likelihood l(β) − β'Sλβ/2 for
 # "general families" (several linear predictors, likelihood supplied

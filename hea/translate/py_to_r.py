@@ -354,11 +354,6 @@ class Translator:
         namespace. Round-trip: from_R's :meth:`_maybe_smart_data_call`
         rebuilds the assignment.
 
-        (Older revisions of this method emitted ``library(<pkg>)``
-        instead. That lost the dataset name and broke Py→R→Py
-        round-trip for the binding — there was no R-side ``X`` to
-        restore on the way back.)
-
         Returns ``None`` if the pattern doesn't match (any deviation —
         multi-target, non-Name target, mismatched names, missing
         ``package`` kwarg — falls back to the generic Assign emitter).

@@ -6,12 +6,15 @@ tidyverse-named methods (``filter`` / ``arrange`` / ``distinct`` /
 
 Closed under polars operations: every method that returns a
 DataFrame / LazyFrame / Series returns the corresponding hea subclass.
-Native polars methods propagate via ``self._from_pydf(...)``; the
-operations that bypass that route (``describe``, ``corr``, ``unstack``,
-``sql``, ``match_to_schema``, plus the lazy round-trip via ``lazy()`` /
-``collect()``) are explicitly re-wrapped. Series-returning methods
-(``get_column``, ``__getitem__``, the ``*_horizontal`` family, …) are
-wrapped via the install hooks in :mod:`hea.tidy.series`.
+Most native polars methods (``select``, ``with_columns``, ``sort``,
+``join``, …) are implemented upstream as an eager-via-lazy round-trip,
+and propagate because both ends of it are overridden — ``lazy()`` here
+and ``_collect_eager`` on :class:`hea.tidy.series.LazyFrame`. The
+operations that build a frame by some other route (``describe``,
+``corr``, ``unstack``, ``sql``, ``match_to_schema``) are explicitly
+re-wrapped below. Series-returning methods (``get_column``,
+``__getitem__``, the ``*_horizontal`` family, …) are wrapped via the
+install hooks in :mod:`hea.tidy.series`.
 """
 
 from __future__ import annotations
@@ -54,11 +57,12 @@ class DataFrame(pl.DataFrame):
 
     Closed under polars operations: every method that returns a
     DataFrame/LazyFrame/Series returns the corresponding hea subclass.
-    Native polars methods (``with_columns``, ``sort``, ``join``, …)
-    propagate the subclass through ``self._from_pydf(...)`` automatically;
-    the few methods that bypass that route (``describe``, ``corr``,
-    ``unstack``, ``sql``, ``match_to_schema``, plus the lazy round-trip
-    via ``lazy()`` / ``collect()``) are explicitly re-wrapped below.
+    Native polars methods (``with_columns``, ``sort``, ``join``, …) are
+    an eager-via-lazy round-trip upstream, and propagate because both
+    ends of it are overridden: :meth:`lazy` here and ``_collect_eager``
+    on :class:`hea.tidy.series.LazyFrame`. The few that build a frame by
+    another route (``describe``, ``corr``, ``unstack``, ``sql``,
+    ``match_to_schema``) are explicitly re-wrapped below.
     Series-returning methods (``get_column``, ``__getitem__``, the
     ``*_horizontal`` family, …) are wrapped via
     :func:`_install_df_series_overrides`.
@@ -1518,9 +1522,11 @@ class DataFrame(pl.DataFrame):
     def lazy(self) -> LazyFrame:
         """Start a lazy query; returns a hea.LazyFrame.
 
-        Overrides ``pl.DataFrame.lazy`` (which would return ``pl.LazyFrame``
-        via ``wrap_ldf`` and lose subclass identity through the eager-via-lazy
-        round-trip used by ``with_columns``/``sort``/``join``/etc.).
+        Overrides ``pl.DataFrame.lazy``, which returns ``pl.LazyFrame`` via
+        ``wrap_ldf``. This is the entry half of the eager-via-lazy round-trip
+        that ``with_columns`` / ``sort`` / ``join`` / etc. are built on; the
+        exit half is ``LazyFrame._collect_eager``. Both hops are needed —
+        either one missing drops the subclass for the whole eager surface.
         """
         from .series import LazyFrame
 

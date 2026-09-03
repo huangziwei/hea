@@ -147,11 +147,10 @@ def _lrt(m_reduced, m_full):
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 of lme-family-port.md: the public ``family=`` argument was added.
-# Default (``None``) and explicit ``Gaussian()`` must produce the same fit
-# (FP-equal — see conftest.assert_fp_equiv); non-Gaussian families must raise
-# ``NotImplementedError`` with a message pointing at the port plan until
-# Phase 2-5 land the Laplace path.
+# The public ``family=`` argument. Default (``None``) and explicit
+# ``Gaussian()`` must produce the same fit (FP-equal — see
+# conftest.assert_fp_equiv); a non-Gaussian family must raise
+# ``NotImplementedError`` while the Laplace path is unimplemented.
 # ---------------------------------------------------------------------------
 
 
@@ -168,11 +167,11 @@ def test_family_default_equals_explicit_gaussian():
 
 
 def test_family_non_gaussian_runs_glmm_path():
-    """Poisson family dispatches to the GLMM Laplace path (Phase 5).
+    """Poisson family dispatches to the GLMM Laplace path.
 
     Just smoke-checks that ``hea.models.gmm(..., family=poisson())`` fits without
     raising. Numerical parity with ``lme4::glmer`` is pinned in
-    ``test_gmm_glmm.py``'s Phase 5 acceptance tests.
+    ``test_gmm_glmm.py``'s full-fit acceptance tests.
     """
     data = load_dataset("lme4", "Dyestuff")
     # Dyestuff's Yield is continuous, but for a smoke test we can fit a

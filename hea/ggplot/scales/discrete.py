@@ -13,6 +13,7 @@ from typing import Any
 
 import polars as pl
 
+from ..._polars_compat import cat_pool
 from ._palettes import (
     brewer_pal_discrete,
     colorblind_pal,
@@ -49,7 +50,7 @@ class ScaleDiscreteColor(Scale):
                 # Categorical / Enum carry an explicit level order — honour it
                 # (matches ggplot2's behaviour for factor columns: factor levels
                 # drive the scale order regardless of which row appears first).
-                new_levels = data.cat.get_categories().to_list()
+                new_levels = cat_pool(data).to_list()
             else:
                 # Plain string / boolean: sort alphabetically — same as R's
                 # ``factor(...)`` default. ggplot2 silently runs character

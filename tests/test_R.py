@@ -4610,3 +4610,42 @@ def test_star_import_binds_functions_not_submodules():
         mod = importlib.reload(importlib.import_module("hea.R"))
         getattr(mod, first)
         assert callable(mod.factor) and not isinstance(mod.factor, types.ModuleType)
+
+
+# ---- cbind on data frames -------------------------------------------
+#
+# ``cbind.data.frame`` delegates to ``data.frame()``, whose height rule these
+# pin. Oracle values are from R 4.x directly.
+
+
+def test_cbind_frames_recycles_to_the_tallest():
+    """A shorter frame is tiled to the tallest, ``rep(x, length.out = nr)``."""
+    import polars as pl
+
+    from hea.R.matrix import cbind
+
+    tall = pl.DataFrame({"a": [1, 2, 3, 4]})
+    # R: cbind(data.frame(a=1:4), data.frame(b=c(10L,20L)))$b -> 10 20 10 20
+    assert cbind(tall, pl.DataFrame({"b": [10, 20]}))["b"].to_list() == [10, 20, 10, 20]
+    # R: cbind(data.frame(a=1:4), data.frame(c=7L))$c -> 7 7 7 7
+    assert cbind(tall, pl.DataFrame({"c": [7]}))["c"].to_list() == [7, 7, 7, 7]
+    # Equal heights are the common case and stay untouched.
+    assert cbind(tall, pl.DataFrame({"z": [9, 9, 9, 9]})).shape == (4, 2)
+
+
+def test_cbind_frames_rejects_a_non_divisor_height():
+    """R errors rather than padding when the height doesn't divide the tallest.
+
+    Polars <2.0 null-padded here, which was never R's behaviour.
+    """
+    import polars as pl
+
+    from hea.R.matrix import cbind
+
+    tall = pl.DataFrame({"a": [1, 2, 3, 4]})
+    # R: "arguments imply differing number of rows: 4, 3"
+    with pytest.raises(ValueError, match=r"differing number of rows: 4, 3"):
+        cbind(tall, pl.DataFrame({"d": [1, 2, 3]}))
+    # A zero-height frame never recycles (R guards on nrows[i] > 0L).
+    with pytest.raises(ValueError, match=r"differing number of rows: 4, 0"):
+        cbind(tall, pl.DataFrame({"e": []}))

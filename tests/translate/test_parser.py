@@ -1,4 +1,4 @@
-"""Tests for hea.translate.r_parser — Phase 0 acceptance.
+"""Tests for hea.translate.r_parser.
 
 Covers each AST node type, R's full precedence table from ``?Syntax``, the
 canonical r4ds pipeline as a golden parse, and out-of-grammar failures.

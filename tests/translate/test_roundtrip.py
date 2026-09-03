@@ -216,7 +216,7 @@ class TestDataLoadRoundtrip:
 
 
 # ---------------------------------------------------------------------------
-# User's reported case — the integrated scenario from the bug report.
+# Integrated scenario — a full user script through the round-trip.
 # ---------------------------------------------------------------------------
 
 
@@ -354,9 +354,9 @@ class TestBundledDatasetAutoload:
 
 
 class TestUserReportedCase:
-    """The exact snippet from the bug report — Py → R → Py must
-    reproduce the model fit + summary call without losing the dataset
-    binding or mangling the method call.
+    """A full user snippet — Py → R → Py must reproduce the model fit +
+    summary call without losing the dataset binding or mangling the method
+    call.
     """
 
     def test_gala_lm_summary(self):

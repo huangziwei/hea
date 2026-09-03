@@ -1,9 +1,7 @@
 [tool.pytest.ini_options]
 pythonpath = [".", "tests"]
-# The suite is tests/. dev/ is untracked scratch — benchmark harnesses and
-# vendored oracle builds (a pinned scikit-sparse sdist among them, which ships
-# its own test module) — and collecting it turns a stray checkout into a
-# collection error.
+# Pinned so collection never wanders outside the suite: the repo also carries
+# untracked scratch directories that ship test modules of their own.
 testpaths = ["tests"]
 
 [build-system]
@@ -11,12 +9,11 @@ requires = ["maturin>=1.7,<2"]
 build-backend = "maturin"
 
 # --- Rust extension (hea._rs), built from rust/ (crate hea-rs) by maturin -----
-# maturin is the build backend: `pip install` / `uv build` / a git dependency on
-# this branch compile the Rust crate into the wheel, so source-build downstreams
-# get the native `hea._rs` kernels — not just the pure-Python fallback. Building
-# from source therefore needs the Rust toolchain; prebuilt wheels (CI, §2.4 of the
-# rust-port plan) let end users `pip install` with no Rust. In-session/sandbox
-# builds need CARGO_HOME redirected into the workdir (see rust/rebuild.sh).
+# maturin is the build backend, so `pip install` / `uv build` / a git dependency
+# compile the crate into the wheel and source-build downstreams get the native
+# kernels rather than the pure-Python fallback. Building from source therefore
+# needs the Rust toolchain; the published wheels do not. A sandboxed build needs
+# CARGO_HOME redirected into the workdir — see rust/rebuild.sh.
 [tool.maturin]
 manifest-path = "rust/Cargo.toml"   # Rust crate (hea-rs) lives in rust/
 python-source = "."                  # Python package `hea` stays at repo root
@@ -31,36 +28,48 @@ requires-python = ">=3.10.0"
 dependencies = [
     "matplotlib>=3.10.0",
     "numpy>=2.2.2",
-    "polars==1.41.2",
+    # Exact. hea subclasses pl.DataFrame/LazyFrame/Series and holds that
+    # subclass across every polars operation by riding two private hooks:
+    # `_from_pydf`/`_from_pyldf`/`_from_pyseries`, and `_collect_eager`, the
+    # terminal call of polars' eager-via-lazy round-trip. Neither is public
+    # API and either can move in any release, so the version is pinned and
+    # tests/test_dataframe_subclass.py is the tripwire. Nothing below polars
+    # 1.44 works: `_collect_eager` and `Categories.to_series()` are absent.
+    "polars==2.0.0rc1",
     "scipy>=1.15.1",
 ]
 
 license = "GPL-3.0-or-later"
-# Explicit so maturin packs LICENSE into the SDIST too (not just the wheel).
-# Without it the sdist's METADATA declares `License-File: LICENSE` but omits the
-# file, and PyPI's PEP 639 check rejects the upload (400).
+# Required, not decorative: it is what makes maturin pack LICENSE into the
+# sdist as well as the wheel. An sdist whose METADATA declares `License-File`
+# without shipping the file fails PyPI's PEP 639 check at upload.
 license-files = ["LICENSE"]
 readme = {file = "README.md", content-type = "text/markdown"}
 
 [project.optional-dependencies]
 # The bundled example datasets -- `data("penguins", "palmerpenguins")` and the
-# rest of `hea.data`'s rdatasets-sourced corpus. Two packages, and they are one
-# feature: `rdatasets` is the source, `pyarrow` is what polars needs to convert
-# its pandas frames when a column carries an extension dtype.
+# rest of `hea.data`'s rdatasets-sourced corpus. Two packages, one feature:
+# `rdatasets` is the source, and `pyarrow` is what polars needs to convert its
+# pandas frames when a column carries an extension dtype.
 #
-# 177 MB of the 205 a dependent package would otherwise inherit, and nothing in
-# the modeling core touches either: with `pyarrow` genuinely absent (a shadow
-# site-packages, not a `sys.meta_path` hook -- those are silently dead on 3.12+)
-# the suite is 4567 passed / 4 failed, and all four are `hea.data()` loading
-# `palmerpenguins`. Bundled CSV datasets keep working without this.
+# Optional because it is the bulk of the install size and the modeling core
+# never touches it. Without the extra, `hea.data()` can still read the bundled
+# CSV datasets; only the rdatasets-sourced ones need it.
 data = [
     "pyarrow>=24.0.0",
     "rdatasets>=0.2.10",
 ]
-# Retained empty so existing `hea[fast]` pins keep resolving. The sparse
-# Cholesky is `hea.sparse` now -- CHOLMOD ported to Rust, in the wheel -- so
-# there is nothing optional left to install for it.
+# Empty, and kept so `hea[fast]` pins keep resolving. The sparse Cholesky is
+# `hea.sparse`, a Rust port of CHOLMOD shipped in the wheel, so there is
+# nothing optional left to install for it.
 fast = []
+
+[tool.uv]
+# The polars pin is a release candidate (see [project].dependencies) and uv
+# will not resolve a pre-release without this. It has to be "allow": the
+# narrower "explicit" covers only packages this file names, and polars pulls
+# its own `polars-runtime-*` rc transitively. Remove once the pin is final.
+prerelease = "allow"
 
 [dependency-groups]
 dev = [
@@ -77,26 +86,21 @@ dev = [
     "pyyaml>=6.0.3",
     "ipykernel>=7.2.0",
     "nbconvert>=7.17.1",
-    # >=0.16: the lint config deliberately carries no `select`, so it inherits
-    # ruff's defaults — 413 rules in 0.16, 59 before it. An older ruff would
-    # silently check a twentieth of the rules the tree is actually clean under.
+    # Floor matters: [tool.ruff.lint] carries no `select`, so the rule set is
+    # whatever ruff defaults to. An older ruff defaults to far fewer rules and
+    # would pass while checking a fraction of what the tree is clean under.
     "ruff>=0.16.1",
     "build",
     "twine",
 ]
 
 [tool.ruff.lint]
-# We run ruff's default rule set, which as of 0.16 is 413 rules rather than the
-# 59 of earlier releases. Nothing is silenced project-wide: the handful of
-# places where a rule is genuinely wrong for this codebase (deliberate blind
-# excepts in the matplotlib/polars best-effort paths, `exec` in the translate
-# runners, R's local-time `Sys.Date()` semantics, …) carry an inline
-# `# noqa: <CODE>` with the reason, so the rule stays live for new code.
-#
-# Note that 0.16 also *dropped* 18 rules from the defaults — among them F403,
-# F405 and E741, which this file used to silence for `from hea.R import *` and
-# for family.py's single-letter math names. Those ignores are gone because the
-# rules are no longer enabled, not because the policy changed.
+# No `select`: the rule set is ruff's default, and the dev-group floor is what
+# pins how large that is. Nothing is silenced project-wide — the few places a
+# rule is genuinely wrong here (deliberate blind excepts in the
+# matplotlib/polars best-effort paths, `exec` in the translate runners, R's
+# local-time `Sys.Date()` semantics, …) carry an inline `# noqa: <CODE>` with
+# its reason, so the rule stays live for new code.
 
 [tool.ruff.lint.per-file-ignores]
 # ``__init__.py`` modules deliberately re-export their submodules' public

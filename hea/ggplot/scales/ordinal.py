@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 import polars as pl
 
+from ..._polars_compat import cat_pool
 from .scale import _NAME_MISSING, Scale
 
 
@@ -51,7 +52,7 @@ class ScaleOrdinal(Scale):
             if data.dtype.is_numeric() and self.levels:
                 return
             if data.dtype in (pl.Categorical, pl.Enum):
-                new_levels = [str(v) for v in data.cat.get_categories().to_list()]
+                new_levels = [str(v) for v in cat_pool(data).to_list()]
             else:
                 new_levels = sorted(
                     str(v) for v in data.drop_nulls().unique().to_list()

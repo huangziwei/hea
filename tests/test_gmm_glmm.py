@@ -1,9 +1,8 @@
 """GLMM-specific tests for ``hea.models.gmm(family=...)``.
 
-This file accumulates Phase 2-13 tests of ``lme-family-port.md``. Phase 2
-focuses on the ``_GlmResponse`` private class — verifying its mutators
-and pure-compute methods match the documented formulas, plus a single
-R-oracle cross-check. Phase 3 tests the PIRLS inner loop (_PredState,
+Covers the ``_GlmResponse`` private class — verifying its mutators and
+pure-compute methods match the documented formulas, plus a single R-oracle
+cross-check — and the PIRLS inner loop (_PredState,
 _internal_glmer_wrk_iter, _pwrss_update) against ``lme4::glmer``.
 """
 
@@ -311,7 +310,7 @@ def test_poisson_glm_state_matches_R():
 
 
 # ----------------------------------------------------------------------
-# Phase 3: PIRLS state + inner loop. Tests that _PredState's PLS step
+# PIRLS state + inner loop. Tests that _PredState's PLS step
 # math matches the merPredD operations, and that _pwrss_update converges
 # to the same (β̂, û) as lme4::glmer at the converged θ.
 # ----------------------------------------------------------------------
@@ -571,7 +570,7 @@ def test_pwrss_update_step_halving_recovers_from_overstep():
 
 
 # ----------------------------------------------------------------------
-# Phase 4: Laplace deviance evaluator. Tests _glmm_devfun_factory's two
+# Laplace deviance evaluator. Tests _glmm_devfun_factory's two
 # closures against `lme4::mkGlmerDevfun(nAGQ=0)` and `updateGlmerDevfun(
 # nAGQ=1)` at the converged (θ̂, β̂) of a real glmer fit.
 # ----------------------------------------------------------------------
@@ -636,8 +635,7 @@ def test_devfun_stage0_matches_lme4_poisson():
 
     Stage 0 PIRLS does a joint (β, u) solve, so the deviance at θ̂ here is
     NOT the same as ``-2 logLik(m)`` — it's the joint-conditional deviance
-    that lme4 reports as ``dev0(θ̂)``. Phase 4 verifies the closure
-    machinery; Phase 5 ties this into the full optimizer.
+    that lme4 reports as ``dev0(θ̂)``.
 
     The initial :func:`_pwrss_update` before the factory mirrors
     ``mkGlmerDevfun``'s ``.Call(glmerLaplace, ...)`` warm-up at
@@ -755,7 +753,7 @@ def test_devfun_stage1_with_empty_fixef_slice():
 
 
 # ----------------------------------------------------------------------
-# Phase 5: Full glmer fit — tests the public ``hea.models.gmm(..., family=...)``
+# Full glmer fit — tests the public ``hea.models.gmm(..., family=...)``
 # entry point against ``lme4::glmer``. ≤ 1e-7 on θ̂, β̂; ≤ 1e-9 on the
 # Laplace deviance (since deviance evaluation is exact given converged
 # parameters).
@@ -1024,7 +1022,7 @@ def test_glmer_start_validation_errors():
 
 
 # ----------------------------------------------------------------------
-# Phase 6: Post-fit attributes (fitted, residuals, ranef, vcov_beta, ...)
+# Post-fit attributes (fitted, residuals, ranef, vcov_beta, ...)
 # Each attribute pinned against the corresponding ``lme4::glmer`` getter.
 # ----------------------------------------------------------------------
 
@@ -1634,7 +1632,7 @@ _GLMER_PHASE6_POISSON_REF = {
 
 
 def test_glmer_phase6_attrs_match_lme4_poisson():
-    """Every Phase 6 attribute on a Poisson fit matches lme4 — well-determined
+    """Every post-fit attribute on a Poisson fit matches lme4 — well-determined
     quantities at ≤1e-7; Hessian-derived se/t/vcov at ≤1e-5 (flat-optimum drift)."""
     from hea.family import Poisson as PoissonFamily
     from hea.models.gmm import gmm
@@ -1816,7 +1814,7 @@ def test_glmer_phase6_sigma_for_scale_unknown_family():
 
 
 # ----------------------------------------------------------------------
-# Phase 7: GLMM predict — type, re.form, random.only, allow.new.levels,
+# GLMM predict — type, re.form, random.only, allow.new.levels,
 # se.fit. Pinned against ``lme4::predict.merMod``.
 # ----------------------------------------------------------------------
 
@@ -2488,7 +2486,7 @@ def test_glmer_predict_random_only_matches_lme4_poisson():
 
 
 # ======================================================================
-# Phase 8 — Argument plumbing & validation
+# Argument plumbing & validation
 # ======================================================================
 
 
@@ -2679,7 +2677,7 @@ def test_nAGQ_validation_accepts_0_and_1():
 
 
 def test_nAGQ_validation_accepts_above_1_for_agq():
-    """``nAGQ > 1`` is accepted now that AGQ (Phase 9) lands; the
+    """``nAGQ > 1`` is accepted now that AGQ lands; the
     single-scalar-RE constraint is enforced at fit time, not here."""
     from hea.models.gmm import _validate_nagq
 
@@ -3067,7 +3065,7 @@ def test_gmm_checkscalex_warns_on_disparate_scales():
 
 
 # ----------------------------------------------------------------------
-# Phase 12 — glmer.nb (negative binomial + θ estimation, nbinom.R:96).
+# glmer.nb (negative binomial + θ estimation, nbinom.R:96).
 # Reference: lme4::glmer.nb(y ~ x + (1|g)) on the committed synthetic NB data
 # (R seed 42, rnbinom size=2). getME(m,"glmer.nb.theta") / theta / fixef /
 # -2logLik / AIC.
@@ -3127,7 +3125,7 @@ def test_gmm_fixed_theta_nb_skips_loop():
 
 
 # ----------------------------------------------------------------------
-# Phase 10 — simulate.merMod (predict.R:673-938). numpy RNG; distributions
+# simulate.merMod (predict.R:673-938). numpy RNG; distributions
 # (not R's byte-exact stream) — what the parametric bootstrap needs.
 # ----------------------------------------------------------------------
 
@@ -3229,7 +3227,7 @@ def test_gmm_simulate_negative_binomial_counts():
 
 
 # ----------------------------------------------------------------------
-# Phase 11 — bootMer / confint(method=) (bootMer.R, profile.R:807).
+# bootMer / confint(method=) (bootMer.R, profile.R:807).
 # ----------------------------------------------------------------------
 
 
@@ -3436,14 +3434,14 @@ def test_confint_profile_glmm_scale_known_matches_lme4_cbpp():
 
 
 # ----------------------------------------------------------------------
-# Phase 13 — full-parity fixture matrix (named scenarios on vendored data).
+# full-parity fixture matrix (named scenarios on vendored data).
 # Inline R recipes (the test-file convention); references from lme4 2.0-2.
 # ----------------------------------------------------------------------
 
 
 def test_glmer_salamander_crossed_re_binomial_matches_lme4():
     """Crossed-RE binomial — the canonical salamander mating model
-    (Phase 13.4 'crossed REs' edge case + a binomial scenario).
+    (the 'crossed REs' edge case + a binomial scenario).
 
     R recipe::
         m <- glmer(Mate ~ Cross + (1|Male) + (1|Female), salamander,
@@ -3454,7 +3452,7 @@ def test_glmer_salamander_crossed_re_binomial_matches_lme4():
 
     The deviance/AIC/logLik objective matches lme4 tightly (~1e-4); θ̂/β̂/SE
     sit on the GLMM flat-surface eval-noise floor (~1e-4, the documented
-    Laplace optimiser floor — see the cm1–cm4 note in Phase 8).
+    Laplace optimiser floor — see the cm1–cm4 note above).
     """
     m = gmm(
         "Mate ~ Cross + (1|Male) + (1|Female)",
@@ -3485,7 +3483,7 @@ def test_glmer_salamander_crossed_re_binomial_matches_lme4():
 
 def test_glmer_random_slope_poisson_singular_matches_lme4():
     """Vector-bar (random-slope) Poisson GLMM ``(1+x|g)`` — exercises the
-    correlated-RE Laplace path AND a singular fit (Phase 13.4: θ on the
+    correlated-RE Laplace path AND a singular fit (θ on the
     boundary, corr → −1). hea lands on lme4's singular fit to ~1e-7.
 
     Data: ``datasets/synthetic/seed_synth_vbar_poisson.csv`` (R seed 2024:

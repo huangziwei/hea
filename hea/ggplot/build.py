@@ -196,8 +196,9 @@ def _train_series(scale, series) -> None:
     ``stat_boxplot`` stores per-box outlier values in a ``List(Float64)``
     column; calling ``scale.train`` on the list directly would feed a
     length-N series of lists to ``min/max`` and miss the outlier extents.
-    Explode the list, drop nulls (empty lists explode to a single null),
-    and then train on the flattened scalars.
+    Explode the list, drop nulls, and train on the flattened scalars. The
+    drop also absorbs the empty-list case, which polars renders either as a
+    null row or as no row at all depending on its ``empty_as_null`` default.
     """
     import polars as pl
 

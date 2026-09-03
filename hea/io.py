@@ -67,7 +67,6 @@ _READERS = (
     "read_avro",
     "read_clipboard",
     "read_csv",
-    "read_csv_batched",
     "read_database",
     "read_database_uri",
     "read_delta",
@@ -83,6 +82,7 @@ _READERS = (
 
 # Lazy scanners — return ``hea.LazyFrame``.
 _SCANNERS = (
+    "scan_arrow_c_stream",
     "scan_csv",
     "scan_delta",
     "scan_iceberg",
@@ -113,13 +113,16 @@ def read_csv(source, *args, **kwargs):
     * ``na=`` → ``null_values=``
     * ``skip=`` → ``skip_rows=``
     * ``comment=`` → ``comment_prefix=``
-    * ``col_names=False`` → ``has_header=False``
+    * ``col_names=False`` → ``has_header=False``, with the columns named
+      ``X1``…``Xn`` as ``readr::read_csv(col_names = FALSE)`` names them,
+      in place of polars' own placeholders
     * ``col_names=["a", "b", ...]`` → ``has_header=False`` + ``new_columns=...``
 
     Translator-stripped readr kwargs (so the .py never carries them):
     ``col_types=`` (use polars ``schema_overrides=`` for column-type
     hints), ``id=`` (multi-file id-column — port if needed).
     """
+    readr_names = kwargs.get("col_names") is False and "new_columns" not in kwargs
     if "na" in kwargs:
         kwargs["null_values"] = kwargs.pop("na")
     if "skip" in kwargs:
@@ -147,8 +150,12 @@ def read_csv(source, *args, **kwargs):
     # each and concatenating.
     if isinstance(source, (list, tuple)):
         frames = [_polars_read_csv(p, *args, **kwargs) for p in source]
-        return _pl.concat(frames, how="vertical_relaxed")
-    return _polars_read_csv(source, *args, **kwargs)
+        out = _pl.concat(frames, how="vertical_relaxed")
+    else:
+        out = _polars_read_csv(source, *args, **kwargs)
+    if readr_names:
+        out.columns = [f"X{i}" for i in range(1, out.width + 1)]
+    return out
 
 
 __all__ = [  # noqa: PLE0604 - _READERS/_SCANNERS are the source of truth

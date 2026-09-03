@@ -45,8 +45,7 @@ jobs:
   # two of `dense.rs`'s tests are `#[cfg(not(vendor_blas))]` — they assert that
   # hea's own cache blocking is a scheduling decision and never a numerical one,
   # a property about code the vendor build does not compile in. A single
-  # default-features run silently stops covering them, which is exactly what
-  # happened when the default flipped.
+  # default-features run stops covering them, silently.
   rust:
     runs-on: ubuntu-latest
     needs: bench-gate

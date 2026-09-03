@@ -5765,12 +5765,11 @@ class gmm:
         self.AIC = opt + 2.0 * self.npar
         self.BIC = opt + np.log(n) * self.npar
 
-        # Post-fit convergence diagnostics — lme4's lmer runs ``checkConv`` with
-        # the numerical gradient/Hessian of the profiled deviance at θ̂ (the
-        # ``calc.derivs`` step that was previously inert on the LMM path). Clean
-        # fits yield no messages (summary unchanged); a singular or non-converged
-        # fit surfaces lme4's warnings, and ``m.optinfo`` is now populated for an
-        # lmer fit too.
+        # Post-fit convergence diagnostics — lme4's lmer runs ``checkConv``
+        # with the numerical gradient/Hessian of the profiled deviance at θ̂
+        # (its ``calc.derivs`` step). A clean fit yields no messages; a
+        # singular or non-converged one surfaces lme4's warnings. ``m.optinfo``
+        # is populated either way, on LMM and GLMM fits alike.
         d_grad = d_hess = None
         if inputs.calc_derivs and len(theta_hat) > 0:
             try:

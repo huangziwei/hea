@@ -5,8 +5,10 @@ into hea's tidyverse-shaped surface.
 * :class:`Series` — preserves the subclass through chains (polars'
   ``call_expr`` decorator and a couple of explicit ``wrap_s`` sites
   otherwise leak back to plain ``pl.Series``).
-* :class:`LazyFrame` — overrides ``collect()`` and ``group_by()`` so the
-  eager round-trip preserves :class:`hea.DataFrame` / :class:`GroupBy`.
+* :class:`LazyFrame` — overrides the materializing exits
+  (``collect``, ``_collect_eager``, ``collect_batches``) and
+  ``group_by()`` so the eager round-trip preserves
+  :class:`hea.DataFrame` / :class:`GroupBy`.
 * :class:`_HeaLazyGroupBy` — wraps polars' lazy GroupBy so
   ``LazyFrame.group_by(...).agg(...).collect()`` produces a hea frame.
 * ``_install_*`` hooks patch :class:`polars.Expr`, :class:`polars.Series`
@@ -347,12 +349,36 @@ class LazyFrame(pl.LazyFrame):
     (``.filter(...).with_columns(...).join(...)``) propagate
     ``hea.LazyFrame`` automatically. The overrides below cover the
     handful of methods that bypass ``self._from_pyldf`` (calling
-    ``wrap_ldf`` / ``wrap_df`` instead) — including the eager-via-lazy
-    leak point at `polars/lazyframe/frame.py:2510` (collect).
+    ``wrap_ldf`` / ``wrap_df`` instead), plus the two materializing
+    exits — ``collect`` for user-written lazy chains and
+    ``_collect_eager`` for the eager-via-lazy round-trip.
     """
 
     def _wrap(self, lf: pl.LazyFrame) -> LazyFrame:
         return type(self)._from_pyldf(lf._ldf)
+
+    def _collect_eager(self, **kwargs: Any) -> DataFrame:
+        """Re-wrap the terminal call of polars' eager-via-lazy round-trip.
+
+        ``pl.DataFrame`` implements ``select`` / ``filter`` / ``sort`` /
+        ``with_columns`` / ``join`` / ~40 more as
+        ``self.lazy().<op>(...)._collect_eager(...)``. The middle of that
+        chain is a ``hea.LazyFrame`` (``DataFrame.lazy`` is overridden, and
+        lazy ops route through ``_from_pyldf``), but ``_collect_eager``
+        itself dispatches to the in-memory engine, which builds its result
+        with ``wrap_df`` — hardcoded ``pl.DataFrame``. Without this hop the
+        whole eager verb surface returns bare polars and the tidyverse
+        methods vanish from the result.
+
+        The subclass is not recoverable here: a LazyFrame does not know
+        which ``DataFrame`` subclass it came from, so a user subclass of
+        ``hea.DataFrame`` collapses to ``hea.DataFrame`` across an eager
+        verb. That is a property of the round-trip, not of this override.
+        """
+        out = super()._collect_eager(**kwargs)
+        if isinstance(out, pl.DataFrame) and not isinstance(out, DataFrame):
+            return DataFrame._from_pydf(out._df)
+        return out
 
     def collect(self, *args: Any, **kwargs: Any):
         out = super().collect(*args, **kwargs)
@@ -362,6 +388,20 @@ class LazyFrame(pl.LazyFrame):
         # .fetch() / .fetch_blocking() still uses pl.DataFrame. Rare
         # enough to leave un-wrapped for now (allowlisted).
         return out
+
+    def collect_batches(self, *args: Any, **kwargs: Any):
+        """Stream the query out in chunks, each one a ``hea.DataFrame``.
+
+        The method returns an iterator rather than a frame, so the subclass
+        has to be restored per chunk — polars builds each with ``wrap_df``.
+        ``scan_csv(...).collect_batches()`` is hea's streaming read path, so
+        the chunks a caller touches have to carry the tidyverse verbs.
+        """
+        for batch in super().collect_batches(*args, **kwargs):
+            if isinstance(batch, pl.DataFrame) and not isinstance(batch, DataFrame):
+                yield DataFrame._from_pydf(batch._df)
+            else:
+                yield batch
 
     def describe(self, *args: Any, **kwargs: Any) -> DataFrame:
         # Despite living on LazyFrame, describe() materializes — returns DataFrame.
@@ -374,6 +414,15 @@ class LazyFrame(pl.LazyFrame):
         return self._wrap(super().sql(*args, **kwargs))
 
     def group_by(self, *args: Any, **kwargs: Any) -> _HeaLazyGroupBy:
+        """Group a lazy frame, keeping group order deterministic.
+
+        polars defaults ``maintain_order`` to False, and the streaming engine
+        it selects for lazy queries then returns the group rows in a different
+        order on every run. hea's eager ``group_by`` is stable, so without this
+        the same code would answer differently for having a ``.lazy()`` in the
+        chain. An explicit ``maintain_order=False`` still opts out.
+        """
+        kwargs.setdefault("maintain_order", True)
         return _HeaLazyGroupBy(super().group_by(*args, **kwargs).lgb)
 
     def group_by_dynamic(self, *args: Any, **kwargs: Any) -> _HeaLazyGroupBy:

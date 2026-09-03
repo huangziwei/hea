@@ -1,4 +1,4 @@
-"""Tests for hea.translate.runner — Phase 7 acceptance.
+"""Tests for hea.translate.runner.
 
 End-to-end parity tests run a small R script + its translated hea Python,
 then assert the runner produces matching outputs (or a known classified

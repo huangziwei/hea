@@ -2,7 +2,7 @@
 
 Sections (top → bottom):
 
-1. **predict-API** (Phase 4.0 of bam-port plan): pin
+1. **predict-API**: pin
    ``predict(newdata=None)`` for every (type, se_fit) combo on
    Gaussian-identity, PIRLS, and discrete bam fits. The inherited
    ``gam.predict`` shape-clashes against ``_offset`` because every bam
@@ -10,12 +10,12 @@ Sections (top → bottom):
    ``hea/bam.py:2049`` covers the no-newdata case via cached arrays
    plus chunked walks.
 
-2. **chicago oracle** (Phase 3 of plan): two Poisson fits against
+2. **chicago oracle**: two Poisson fits against
    ``mgcv::bam(discrete=TRUE)``. ``simple`` exercises the multi-smooth
    non-matrix path; ``lag`` exercises the matrix-arg ``compress_df``
-   shuffle/pad that Phase 1 fixed and the POI optimiser from Phase 2′.
+   shuffle/pad and the POI optimiser.
 
-3. **small_data oracle** (Phase 1 + Phase 2′): the rank-deficient
+3. **small_data oracle**: the rank-deficient
    Poisson ``te(pm10, lag, k=c(5, 3))`` toy. Force-sp matches mgcv at
    ≤ 1e-9; auto-sp lands in a different specific point of the flat
    REML basin so we only assert ≤ 1e-5 on fitted (gauge-invariant).
@@ -48,7 +48,7 @@ import hea
 from hea.family import Binomial, Gamma, Gaussian, Poisson
 
 # =============================================================================
-# 1. predict-API regression (Phase 4.0)
+# 1. predict-API regression
 # =============================================================================
 
 
@@ -242,11 +242,11 @@ _BAM_PREDICT_D = Path(__file__).parent / "fixtures" / "bam_predict_discrete"
 def test_predict_bamd_matches_mgcv(tag, family):
     """Discrete bam prediction == mgcv predict.bamd (F1).
 
-    Before F1, hea routed discrete fits through predict.gam (exact basis
-    evaluation); mgcv routes them through predict.bamd, which bins newdata's
+    mgcv routes discrete fits through predict.bamd, which bins newdata's
     covariates to the compress.df grid and gathers via the discrete kernels.
-    For a continuous covariate the binning is lossy, so exact-eval diverged
-    from mgcv (and broke ``lpmatrix @ coef == fitted``). The fit uses the
+    For a continuous covariate that binning is lossy, so exact basis
+    evaluation diverges from mgcv and breaks ``lpmatrix @ coef == fitted``.
+    The fit uses the
     DEFAULT discretisation on n=3000 (where hea-bam matches mgcv-bam) but
     n > 1000 grid levels, so the binning is genuinely lossy — exact-eval
     differs from mgcv-bamd by ~3e-3, this port matches to fit precision.
@@ -310,7 +310,7 @@ def test_predict_bamd_matches_mgcv(tag, family):
 
 
 # =============================================================================
-# 2. chicago oracle (Phase 3)
+# 2. chicago oracle
 # =============================================================================
 
 _CHICAGO = Path(__file__).parent / "fixtures" / "chicago"
@@ -345,8 +345,8 @@ def test_chicago_simple():
     sp_mgcv = np.atleast_1d(np.loadtxt(_CHICAGO / "simple" / "sp.csv"))
     sp_hea = np.asarray(m.sp)
     log_sp_diff = np.abs(np.log(sp_hea) - np.log(sp_mgcv))
-    # 15× upper bound covers the flat-basin sp ambiguity (log15 ≈ 2.7).
-    # Tighten only after Phase 2′.7 (POI optimizer) lands.
+    # 15× upper bound covers the flat-basin sp ambiguity (log15 ≈ 2.7);
+    # a tighter bound needs a sharper POI optimizer.
     assert float(log_sp_diff.max()) < 3.0, (
         f"chicago simple sp out of basin: hea={sp_hea}, mgcv={sp_mgcv}"
     )
@@ -358,7 +358,7 @@ def test_chicago_simple():
 )
 def test_chicago_lag():
     """Distributed-lag matrix-arg te() on chicago — exercises the
-    matrix-arg ``compress_df`` shuffle / pad path that Phase 1 fixed."""
+    matrix-arg ``compress_df`` shuffle / pad path."""
     dat = _to_dat(_load_chicago())
 
     # Build the lag matrix (exact mirror of dump_bam_chicago.R::lagard).
@@ -1250,7 +1250,7 @@ def test_distinct_exceeds_1d_exact_vs_npunique():
 
 
 # =============================================================================
-# 3. small_data oracle (Phase 1 + Phase 2′)
+# 3. small_data oracle
 # =============================================================================
 
 _SMALL = Path(__file__).parent / "fixtures" / "small_data"
@@ -2298,7 +2298,7 @@ def test_bam_discrete_matrix_arg_te_predict():
         )
         sp = next(b.spec for b in mod._blocks if "Stim" in (b.label or ""))
         assert sp.summation_dim is not None and sp.matrix_vars == ("Lag", "Xc")
-        # predict must not crash (the bug) and must return one value per grid row
+        # predict must return one value per grid row
         preds[disc] = np.asarray(mod.predict(grid, type="terms").to_numpy()).ravel()
         assert preds[disc].shape == (m,)
     # discrete (bamT, binned by) vs non-discrete (bamF, exact by): same RF up to
