@@ -40,21 +40,14 @@ class PyToRError(Exception):
     documented sublanguage."""
 
 
-# ---------------------------------------------------------------------------
-# Inverse-direction registries (built at module load).
-# ---------------------------------------------------------------------------
-
-
 def _build_inverse_verbs() -> dict[str, str]:
     """``hea_method`` → canonical R name. Canonical = the American /
     primary form when multiple R names map to the same hea method.
     """
-    # Default: first-seen R name wins.
     inverse: dict[str, str] = {}
     for r_name, verb in VERB_TABLE.items():
         inverse.setdefault(verb.hea_method, r_name)
 
-    # Explicit canonicals — supersede whatever first-seen happened to pick.
     canonical = {
         "mutate": "mutate",  # NOT transmute (auto-kwargs encode that)
         "summarize": "summarize",  # NOT summarise
@@ -69,11 +62,9 @@ def _build_inverse_functions() -> dict[str, str]:
     """``hea_name`` → canonical R name."""
     inverse: dict[str, str] = {}
     for r_name, func in FUNCTION_TABLE.items():
-        # Bespoke markers like "__list__" map back to c() explicitly.
         if func.hea_name == "__list__":
             continue
         inverse.setdefault(func.hea_name, r_name)
-    # Canonical overrides.
     canonical = {
         "if_else": "if_else",  # NOT ifelse
         "is_null": "is.na",  # forward maps both is.na and is.null to is_null
@@ -81,7 +72,6 @@ def _build_inverse_functions() -> dict[str, str]:
     for hea_name, r_name in canonical.items():
         if r_name in FUNCTION_TABLE:
             inverse[hea_name] = r_name
-    # Special: __list__ is the marker for c() / list() — reverse always c().
     inverse["__list__"] = "c"
     return inverse
 
@@ -99,16 +89,10 @@ def _build_function_arg_slots() -> dict[str, Slot]:
 
 
 def _build_inverse_kwargs() -> dict[str, str]:
-    """Python kwarg name → R kwarg name.
-
-    Built from KWARG_ALIASES (the user-defined map), plus the universal
-    rule ``na_rm`` → ``na.rm`` (which the forward direction handles via
-    its dot→underscore default).
-    """
+    """Python kwarg name → R kwarg name."""
     inverse: dict[str, str] = {}
     for r_name, alias in KWARG_ALIASES.items():
         inverse[alias.py_name] = r_name
-    # Universal additions — Python names that always reverse to dotted R.
     universal = {
         "na_rm": "na.rm",
         "keep_all": ".keep_all",  # already in KWARG_ALIASES but double-check
@@ -123,10 +107,6 @@ _HEA_FN_ARG_SLOTS: dict[str, Slot] = _build_function_arg_slots()
 _PY_KWARG_TO_R: dict[str, str] = _build_inverse_kwargs()
 
 
-# Aesthetic kwarg names — reverse direction uses this set to decide
-# whether a geom kwarg gets wrapped in ``aes(...)``. Sourced from
-# ``hea/ggplot/aes.py`` (kept in sync; if hea adds aesthetics we may
-# under-detect in reverse, which is a benign gap not a crash).
 _AESTHETIC_NAMES: frozenset[str] = frozenset(
     {
         "x",
@@ -167,11 +147,6 @@ _AESTHETIC_NAMES: frozenset[str] = frozenset(
 )
 
 
-# ---------------------------------------------------------------------------
-# Operator emission tables
-# ---------------------------------------------------------------------------
-
-
 _PY_BIN_TO_R = {
     P.Add: "+",
     P.Sub: "-",
@@ -209,10 +184,6 @@ _PY_BOOL_TO_R = {
 }
 
 
-# Operator precedence — lower number = tighter binding. We track this so
-# we can decide when to parenthesize a sub-expression. R's precedence
-# table mirrors :data:`hea.translate.r_parser._LBP` but with our own
-# tightness encoding (higher = looser).
 _PREC = {
     "::": 1,
     ":::": 1,
@@ -250,20 +221,10 @@ _PREC = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Public entry
-# ---------------------------------------------------------------------------
-
-
 def translate(src: str) -> str:
     """Translate Python source to R source."""
     module = P.parse(src)
     return Translator().translate(module)
-
-
-# ---------------------------------------------------------------------------
-# Translator
-# ---------------------------------------------------------------------------
 
 
 class Translator:
@@ -271,19 +232,9 @@ class Translator:
 
     def __init__(self):
         self.nse = NSEContext()
-        # Packages discovered during translation that need a top-level
-        # ``library()`` call in the preamble. Populated by
-        # :meth:`_maybe_smart_data_assign`; merged with auto-detected
-        # tidyverse / patchwork usage in :meth:`translate`.
         self._extra_libs: set[str] = set()
 
-    # -- top-level --------------------------------------------------------
-
     def translate(self, module: P.Module) -> str:
-        # Detect autoloaded-dataset references before emitting so any
-        # uniquely-resolved package gets a library() in the preamble. The
-        # heuristic: bare names that are referenced but never bound in
-        # this script — those are the hea autoload candidates.
         for name, pkg in _collect_dataset_refs(module):
             self._extra_libs.add(pkg)
 
@@ -299,20 +250,10 @@ class Translator:
             return "\n".join(preamble) + "\n" + body
         return body
 
-    # -- statements -------------------------------------------------------
-
     def _emit_stmt(self, stmt: P.stmt) -> str:
-        # Drop ``import`` / ``from X import Y`` — Python's import machinery
-        # has no clean R analog (R uses ``library()``, which is a runtime
-        # call). The hea side's translated output is run in a namespace
-        # that already has the relevant names available.
         if isinstance(stmt, (P.Import, P.ImportFrom)):
             return ""
         if isinstance(stmt, P.Assign):
-            # Smart rewrite: ``X = data("X", package="pkg")`` →
-            # ``library(pkg)``. The literal translation would assign the
-            # string ``"X"`` to the variable (R's data() returns a name
-            # string, not the dataset), breaking downstream uses.
             smart = self._maybe_smart_data_assign(stmt)
             if smart is not None:
                 return smart
@@ -345,18 +286,6 @@ class Translator:
     def _maybe_smart_data_assign(self, stmt: P.Assign) -> str | None:
         """Detect ``<X> = data("<X>", package="<pkg>")`` and reverse to
         ``data("<X>", package = "<pkg>")``.
-
-        R's ``data()`` is side-effectful: it loads a dataset by name into
-        the calling environment and returns the name string. Emitting
-        the standalone call mirrors the Python binding — after R runs
-        the line, ``X`` is available in the env, the same way the
-        Python assignment makes ``X`` available in the module
-        namespace. Round-trip: from_R's :meth:`_maybe_smart_data_call`
-        rebuilds the assignment.
-
-        Returns ``None`` if the pattern doesn't match (any deviation —
-        multi-target, non-Name target, mismatched names, missing
-        ``package`` kwarg — falls back to the generic Assign emitter).
         """
         if len(stmt.targets) != 1:
             return None
@@ -366,8 +295,6 @@ class Translator:
         value = stmt.value
         if not isinstance(value, P.Call):
             return None
-        # Accept bare ``data(...)`` and ``hea.data(...)`` — both reverse
-        # to the same R ``data()`` declaration.
         func = value.func
         if (
             isinstance(func, P.Name)
@@ -382,14 +309,10 @@ class Translator:
             pass
         else:
             return None
-        # First positional arg must be a string matching the LHS name.
         if not value.args or not isinstance(value.args[0], P.Constant):
             return None
         if value.args[0].value != target.id:
             return None
-        # ``package`` kwarg — required for this rewrite. Without it, R
-        # would need to know where to find the dataset, and we'd be
-        # guessing.
         pkg = None
         for kw in value.keywords:
             if (
@@ -408,7 +331,6 @@ class Translator:
         out = f"if ({cond}) {body}"
         if stmt.orelse:
             if len(stmt.orelse) == 1 and isinstance(stmt.orelse[0], P.If):
-                # ``elif`` chain
                 else_text = self._emit_if_stmt(stmt.orelse[0])
                 out += f" else {else_text}"
             else:
@@ -435,7 +357,6 @@ class Translator:
         return f"{stmt.name} <- function({params}) {body}"
 
     def _emit_params(self, args: P.arguments) -> str:
-        # Combine positional args + defaults.
         n_args = len(args.args)
         n_defaults = len(args.defaults)
         defaults_offset = n_args - n_defaults
@@ -448,14 +369,8 @@ class Translator:
                 parts.append(arg.arg)
         return ", ".join(parts)
 
-    # -- expressions ------------------------------------------------------
-
     def _emit_expr(self, expr: P.expr, *, prec: int) -> str:
-        """Emit an expression with its outer-context precedence ``prec``.
-
-        We wrap the result in parens iff the expression's own precedence
-        is looser than ``prec``. Smaller numbers bind tighter.
-        """
+        """Emit an expression with its outer-context precedence ``prec``."""
         if isinstance(expr, P.Constant):
             return self._emit_constant(expr.value)
         if isinstance(expr, P.Name):
@@ -463,9 +378,6 @@ class Translator:
         if isinstance(expr, P.List):
             return self._emit_c([self._emit_expr(e, prec=20) for e in expr.elts])
         if isinstance(expr, P.Tuple):
-            # In Python AST, Tuples appear inside case_when args. We
-            # handle that bespoke in _emit_case_when; bare tuples don't
-            # show up here for translatable shapes.
             return self._emit_c([self._emit_expr(e, prec=20) for e in expr.elts])
         if isinstance(expr, P.Dict):
             return self._emit_c_dict(expr.keys, expr.values)
@@ -490,11 +402,8 @@ class Translator:
         if isinstance(expr, P.Lambda):
             return self._emit_lambda(expr)
         if isinstance(expr, P.Starred):
-            # ``*args`` rare in our scope. Emit as-is for visibility.
             return f"...{self._emit_expr(expr.value, prec=20)}"
         raise PyToRError(f"unsupported expression: {type(expr).__name__}")
-
-    # -- atoms ------------------------------------------------------------
 
     def _emit_constant(self, value) -> str:
         if value is None:
@@ -514,7 +423,6 @@ class Translator:
                 return "Inf"
             if value == float("-inf"):
                 return "-Inf"
-            # Avoid scientific notation for clean output; use repr otherwise.
             if value.is_integer() and abs(value) < 1e16:
                 return f"{value:.1f}"
             return repr(value)
@@ -525,16 +433,9 @@ class Translator:
         raise PyToRError(f"unsupported constant type: {type(value).__name__}")
 
     def _emit_name(self, name: P.Name) -> str:
-        # NSE: in EXPR slot, a bare Python name is unusual (col-wrapping
-        # is the convention) but possible. Emit as-is.
         if self.nse.is_column_name():
-            # In COLUMN_NAME slot a bare name reverses to itself — but we
-            # shouldn't get here in normal usage (col names should be
-            # strings).
             return name.id
         return name.id
-
-    # -- collection literals ----------------------------------------------
 
     def _emit_c(self, parts: list[str]) -> str:
         if not parts:
@@ -549,14 +450,11 @@ class Translator:
             parts.append(f"{k_str} = {v_str}")
         return f"c({', '.join(parts)})"
 
-    # -- operators --------------------------------------------------------
-
     def _emit_binop(self, expr: P.BinOp, outer_prec: int) -> str:
         op = _PY_BIN_TO_R.get(type(expr.op))
         if op is None:
             raise PyToRError(f"unsupported binop: {type(expr.op).__name__}")
         my_prec = _PREC.get(op, 20)
-        # Right side of certain right-associative ops needs paren if same prec.
         left = self._emit_expr(expr.left, prec=my_prec)
         right = self._emit_expr(expr.right, prec=my_prec - 1 if op == "^" else my_prec)
         text = f"{left} {op} {right}"
@@ -579,7 +477,6 @@ class Translator:
         return _maybe_paren(text, my_prec, outer_prec)
 
     def _emit_compare(self, expr: P.Compare, outer_prec: int) -> str:
-        # R doesn't support chained comparison; we serialize as left-assoc &&.
         my_prec = 10
         left = self._emit_expr(expr.left, prec=my_prec)
         pieces = []
@@ -589,8 +486,6 @@ class Translator:
                 raise PyToRError(f"unsupported comparison: {type(op).__name__}")
             right_str = self._emit_expr(right, prec=my_prec)
             if r_op == "%in%":
-                # ``a %in% b`` — not a comparison in Python terms but
-                # we represent it as one for translation symmetry.
                 pieces.append((r_op, right_str))
             else:
                 pieces.append((r_op, right_str))
@@ -598,7 +493,6 @@ class Translator:
             r_op, right_str = pieces[0]
             text = f"{left} {r_op} {right_str}"
         else:
-            # Chained: a < b < c → (a < b) & (b < c)
             text_parts: list[str] = []
             prev_left = left
             for r_op, right_str in pieces:
@@ -608,7 +502,6 @@ class Translator:
         return _maybe_paren(text, my_prec, outer_prec)
 
     def _emit_ifexp(self, expr: P.IfExp, outer_prec: int) -> str:
-        # Python ``a if cond else b`` → R ``if (cond) a else b``.
         cond = self._emit_expr(expr.test, prec=20)
         body = self._emit_expr(expr.body, prec=20)
         orelse = self._emit_expr(expr.orelse, prec=20)
@@ -620,66 +513,36 @@ class Translator:
         body = self._emit_expr(expr.body, prec=20)
         return f"function({params}) {body}"
 
-    # -- subscript / attribute -------------------------------------------
-
     def _emit_subscript(self, expr: P.Subscript) -> str:
         target = self._emit_expr(expr.value, prec=3)
         slice_ = expr.slice
-        # df[i] / df[i, j]
         if isinstance(slice_, P.Tuple):
             parts = [self._emit_expr(e, prec=20) for e in slice_.elts]
             return f"{target}[{', '.join(parts)}]"
         return f"{target}[{self._emit_expr(slice_, prec=20)}]"
 
     def _emit_attribute(self, expr: P.Attribute) -> str:
-        # ``df.col`` standalone — translate to ``df$col``. Inside Call
-        # this gets intercepted by _emit_call's chain detection.
         target = self._emit_expr(expr.value, prec=2)
         return f"{target}${expr.attr}"
 
-    # -- calls ------------------------------------------------------------
-
     def _emit_call(self, call: P.Call) -> str:
-        """Four dispatch layers:
-
-        1. **Method-form helper on an expression** — ``col("x").mean()`` /
-           ``(...).sd()`` etc. Reverse to ``mean(x, ...)`` / ``sd(...)``.
-           Must beat chain detection because ``mean`` isn't a verb.
-        2. **Method chain on something** — walk the attribute chain.
-           If any method is a known verb or ggplot extension, emit as
-           ``|>`` pipe / ``+`` chain.
-        3. **Known helper function** — ``col("x")``, ``case_when(...)``,
-           ``if_else(...)``. Translate by registry inverse.
-        4. **Plain function call** — emit ``func(args)``.
-        """
-        # 1) Method-form helper inversion.
+        """Four dispatch layers:"""
         if isinstance(call.func, P.Attribute):
             method_form = self._maybe_emit_method_form_helper(call)
             if method_form is not None:
                 return method_form
 
-        # 2) Method-chain detection.
         if isinstance(call.func, P.Attribute):
             base, chain = _flatten_method_chain(call)
             if _is_translation_chain(chain):
                 return self._emit_chain(base, chain)
 
-        # 3) Helper-function calls.
         if isinstance(call.func, P.Name):
             name = call.func.id
             r = self._maybe_emit_helper(name, call)
             if r is not None:
                 return r
 
-        # ``hea.<subns>.X(...)`` / ``hea.X(...)`` / ``selectors.X(...)`` →
-        # ``X(...)``. The namespace prefix is stripped — R uses bare names
-        # for the same functions (via the dplyr / tidyselect imports).
-        # Two prefix shapes:
-        # - depth-2: ``hea.tidy.DataFrame``, ``hea.models.lm``, ``hea.io.read_csv``
-        # - depth-1: ``hea.data``, ``selectors.starts_with``, plus legacy
-        #   ``hea.DataFrame`` / ``hea.from_dict`` shims at the top level.
-        # ``DataFrame`` / ``from_dict`` route to the data.frame reverse
-        # emitter regardless of which sub-namespace they came from.
         stripped = _strip_hea_prefix(call.func)
         if stripped is not None:
             if stripped in ("DataFrame", "from_dict"):
@@ -688,21 +551,11 @@ class Translator:
                 return self._emit_gmm_call(call.args, call.keywords)
             return self._emit_plain_call(stripped, call.args, call.keywords)
 
-        # Bare ``gmm(...)`` (after ``from hea.models import gmm`` — the shape
-        # ``from_R`` emits) dispatches like the namespaced form, so the
-        # R→hea→R round-trip preserves ``lmer``/``glmer``.
         if isinstance(call.func, P.Name) and call.func.id == "gmm":
             return self._emit_gmm_call(call.args, call.keywords)
 
-        # 4) Fallback: plain call.
         if isinstance(call.func, P.Name):
             return self._emit_plain_call(call.func.id, call.args, call.keywords)
-        # Attribute callee not matched by any helper / chain / namespace
-        # rule above — assume R-generic style: ``obj.method(args)``
-        # reverses to ``method(obj, args)``. Mirrors R's S3 / S4 dispatch
-        # convention where the generic is called as ``generic(obj, ...)``,
-        # NOT ``(obj$generic)(...)`` (which would be a function-valued
-        # slot — rare and almost never the user's intent).
         if isinstance(call.func, P.Attribute):
             receiver = self._emit_expr(call.func.value, prec=20)
             method = call.func.attr
@@ -710,7 +563,6 @@ class Translator:
             if rest:
                 return f"{method}({receiver}, {rest})"
             return f"{method}({receiver})"
-        # Callee is some other expression — emit as ``(expr)(args)``.
         callee = self._emit_expr(call.func, prec=2)
         args_text = self._emit_args(call.args, call.keywords)
         return f"({callee})({args_text})"
@@ -720,41 +572,24 @@ class Translator:
         registered method-form helper (e.g. ``col("x").mean()``), reverse
         to ``r_func(<expr>, args)``. Returns ``None`` if this pattern
         doesn't apply.
-
-        Explicitly **not** matched: the namespace-qualified forms like
-        ``hea.mean(x)`` and ``selectors.starts_with("wk")``. Those are
-        handled by separate paths in :meth:`_emit_call`.
         """
         attr = call.func
         if not isinstance(attr, P.Attribute):
             return None
-        # Skip namespace-qualified calls — ``hea.X``, ``hea.<sub>.X``, and
-        # ``selectors.X`` are namespaced module references, not method-form
-        # helpers on a column expression. ``_strip_hea_prefix`` handles
-        # the actual reversal of these later in :meth:`_emit_call`.
         if _strip_hea_prefix(attr) is not None:
             return None
         method_name = attr.attr
 
-        # %in% — ``<expr>.is_in(rhs)`` → ``<expr> %in% rhs``. The forward
-        # direction turns ``a %in% b`` into ``col("a").is_in(b)``; this is
-        # the symmetric inverse.
         if method_name == "is_in" and len(call.args) == 1 and not call.keywords:
             left = self._emit_expr(attr.value, prec=7)
             right = self._emit_expr(call.args[0], prec=7)
             return f"{left} %in% {right}"
 
-        # Only reverse the FUNCTION_TABLE method-form helpers — verb
-        # methods (filter, mutate, etc.) are handled by the chain path.
         if method_name in _HEA_METHOD_TO_R:
             return None
         r_name = _HEA_FN_TO_R.get(method_name)
         if r_name is None:
             return None
-        # Build the function-form call: r_name(<receiver>, *args, **kwargs).
-        # The receiver and remaining args inherit whatever NSE slot the
-        # caller pushed (which is what makes ``col("x").mean()`` inside
-        # a summarize EXPR slot reverse to ``mean(x)`` cleanly).
         receiver = self._emit_expr(attr.value, prec=20)
         rest = self._emit_args(call.args, call.keywords)
         if rest:
@@ -766,18 +601,11 @@ class Translator:
         return f"{name}({self._emit_args(args, kwargs)})"
 
     def _emit_gmm_call(self, args: list, kwargs: list) -> str:
-        """``hea.models.gmm(...)`` → R ``lmer(...)`` or ``glmer(..., family=)``.
-
-        hea folds lme4's ``lmer`` (Gaussian LMM) and ``glmer`` (GLMM) into a
-        single ``gmm`` class. The reverse picks the R entry point from the
-        ``family=`` argument: absent or Gaussian → ``lmer`` (which takes no
-        ``family``, so it's dropped); anything else → ``glmer``.
-        """
+        """``hea.models.gmm(...)`` → R ``lmer(...)`` or ``glmer(..., family=)``."""
         family_kw = next((k for k in kwargs if k.arg == "family"), None)
         if family_kw is None or _is_gaussian_family(family_kw.value):
             kept = [k for k in kwargs if k.arg != "family"]
             return self._emit_plain_call("lmer", args, kept)
-        # glmer: emit the family as its R generator (``Poisson()`` → ``poisson``).
         others = [k for k in kwargs if k.arg != "family"]
         base = self._emit_args(args, others)
         fam = self._emit_r_family(family_kw.value)
@@ -807,15 +635,8 @@ class Translator:
         return r_name
 
     def _emit_data_frame_reverse(self, args: list, kwargs: list) -> str:
-        """``hea.DataFrame({"a": [1, 2], "b": [3, 4]})`` → ``data.frame(a = c(1, 2), b = c(3, 4))``.
-
-        Also accepts ``hea.DataFrame(a=[1, 2], b=[3, 4])`` (Python kwarg form)
-        and ``hea.from_dict({...})``. Other shapes (e.g. list-of-dicts,
-        polars Series args) fall back to a bare ``data.frame(...)`` call
-        with the original args; the user gets readable but possibly-wrong R.
-        """
+        """``hea.DataFrame({"a": [1, 2], "b": [3, 4]})`` → ``data.frame(a = c(1, 2), b = c(3, 4))``."""
         parts: list[str] = []
-        # Dict literal positional: unpack keys/values as R named args.
         if len(args) == 1 and not kwargs and isinstance(args[0], P.Dict):
             d = args[0]
             for k, v in zip(d.keys, d.values):
@@ -825,12 +646,10 @@ class Translator:
                     key_text = self._emit_expr(k, prec=20) if k is not None else "NULL"
                 parts.append(f"{key_text} = {self._emit_expr(v, prec=20)}")
             return f"data.frame({', '.join(parts)})"
-        # Python kwarg form.
         if not args and kwargs:
             for kw in kwargs:
                 parts.append(f"{kw.arg} = {self._emit_expr(kw.value, prec=20)}")
             return f"data.frame({', '.join(parts)})"
-        # Fallback — let the user figure out the shape mismatch.
         return self._emit_plain_call("data.frame", args, kwargs)
 
     def _emit_args(self, args: list, kwargs: list) -> str:
@@ -843,16 +662,9 @@ class Translator:
             parts.append(f"{r_name} = {value}")
         return ", ".join(parts)
 
-    # ---- helper dispatch ------------------------------------------------
-
     def _maybe_emit_helper(self, name: str, call: P.Call) -> str | None:
         """If ``name`` is a known hea helper, emit the R-side version.
         Returns ``None`` if ``name`` isn't a registered helper.
-
-        Helpers with a registered :attr:`Func.arg_slot` (e.g. ``desc``
-        pushes COLUMN_NAME) have that slot pushed for their args so the
-        forward direction's NSE rewrites reverse cleanly: forward
-        ``desc(x)`` → ``desc("x")`` → reverse ``desc(x)``.
         """
         if name == "col":
             return self._emit_col_unwrap(call)
@@ -860,12 +672,10 @@ class Translator:
             return self._emit_case_when(call)
         if name == "if_else":
             return self._emit_helper_call("if_else", call.args, call.keywords, name)
-        # Generic hea-helper → R name lookup.
         r_name = _HEA_FN_TO_R.get(name)
         if r_name is None:
             return None
         if r_name == "c":
-            # __list__ marker → c()
             return self._emit_helper_call("c", call.args, call.keywords, name)
         return self._emit_helper_call(r_name, call.args, call.keywords, name)
 
@@ -904,7 +714,6 @@ class Translator:
             and isinstance(call.args[0].value, str)
         ):
             return call.args[0].value
-        # Unusual shapes — keep as a function call.
         return self._emit_plain_call("col", call.args, call.keywords)
 
     def _emit_case_when(self, call: P.Call) -> str:
@@ -917,7 +726,6 @@ class Translator:
                 value = self._emit_expr(arg.elts[1], prec=20)
                 parts.append(f"{cond} ~ {value}")
             else:
-                # Non-tuple positional — keep as-is.
                 parts.append(self._emit_expr(arg, prec=20))
         for kw in call.keywords:
             r_name = _PY_KWARG_TO_R.get(kw.arg, kw.arg)
@@ -925,27 +733,17 @@ class Translator:
             parts.append(f"{r_name} = {value}")
         return f"case_when({', '.join(parts)})"
 
-    # ---- chain emission ------------------------------------------------
-
     def _emit_chain(self, base: P.expr, chain: list[tuple[str, list, list]]) -> str:
         """Emit a method chain as a mix of ``|>`` pipes and ``+`` ggplot
         composition. The chain walks left-to-right; once a ggplot
         construction starts (any ``.ggplot()`` call or chain extension),
         the rest of the chain composes with ``+``.
-
-        ``chain`` is a list of ``(method_name, args, kwargs)`` tuples in
-        application order (first applied first).
         """
-        # State machine: pipe-mode until ggplot starts, then plus-mode.
         in_ggplot = False
-        # Start with the base. We emit it via ``_emit_expr`` so nested
-        # method chains (rare) get translated.
         current = self._emit_expr(base, prec=20)
 
         for method_name, args, kwargs in chain:
             if method_name == "ggplot":
-                # Switch to ggplot mode. ``base.ggplot(x="a", y="b")``
-                # → ``ggplot(base, aes(x = a, y = b))``.
                 aes_text = self._emit_aes_kwargs(kwargs)
                 if aes_text:
                     current = f"ggplot({current}, aes({aes_text}))"
@@ -955,23 +753,17 @@ class Translator:
                 continue
 
             if in_ggplot or is_chain_extension(method_name) or method_name == "theme":
-                # ggplot chain extension — compose with ``+``.
                 in_ggplot = True
                 ext = self._emit_ggplot_extension_call(method_name, args, kwargs)
                 current = f"{current} + {ext}"
                 continue
 
-            # ``slice`` — dedicated reverse emitter: shift hea's 0-based
-            # positions back to R's 1-based and invert the ``drop(...)``
-            # marker to a negative. Falls through to the opaque pipe when
-            # the positions aren't statically invertible.
             if method_name == "slice":
                 emitted = self._emit_slice_reverse(current, args, kwargs)
                 if emitted is not None:
                     current = emitted
                     continue
 
-            # Default: dplyr pipe.
             r_method, slot, _auto = self._lookup_verb_method(method_name)
             verb_args = self._emit_verb_args(args, kwargs, slot)
             current = f"{current} |>\n  {r_method}({verb_args})"
@@ -979,15 +771,7 @@ class Translator:
         return current
 
     def _emit_slice_reverse(self, current: str, args: list, kwargs: list) -> str | None:
-        """``df.slice(...)`` → R ``df |> slice(...)``, undoing the forward map.
-
-        Keep positions shift 0→1-based (``[0, 2, 4]`` → ``c(1, 3, 5)``,
-        ``range(3)`` → ``1:3``, ``[-1]`` → ``n()``); a ``drop(...)`` marker
-        becomes a negative (``drop([0, 1])`` → ``-c(1, 2)``); the two-arg
-        polars form ``slice(off, length)`` becomes ``(off+1):(off+length)``.
-        Returns ``None`` when the positions can't be statically inverted
-        (e.g. a runtime variable), so the caller falls back to the opaque pipe.
-        """
+        """``df.slice(...)`` → R ``df |> slice(...)``, undoing the forward map."""
         if kwargs:
             return None
         if len(args) == 1:
@@ -1002,8 +786,6 @@ class Translator:
                 inner = self._shift_up_positions(arg.args[0])
                 if inner is None:
                     return None
-                # Parenthesize before negating when ``inner`` isn't an atom
-                # (``1:2`` → ``-(1:2)``, ``n() - 1`` → ``-(n() - 1)``).
                 needs_paren = any(t in inner for t in (":", " - ", " + "))
                 neg = f"-({inner})" if needs_paren else f"-{inner}"
                 return f"{current} |>\n  slice({neg})"
@@ -1027,8 +809,6 @@ class Translator:
         statically shiftable literal."""
 
         def _int_val(e):
-            # Python parses a negative literal as ``UnaryOp(USub, Constant)``,
-            # not ``Constant(-n)`` — handle both.
             if (
                 isinstance(e, P.Constant)
                 and isinstance(e.value, int)
@@ -1058,8 +838,6 @@ class Translator:
             vals = _ints(node.elts)
             if vals is None:
                 return None
-            # A single from-end negative → ``n()`` arithmetic (``-1`` is the
-            # last row, ``-2`` the second-to-last, …).
             if len(vals) == 1 and vals[0] < 0:
                 k = -vals[0]
                 return "n()" if k == 1 else f"n() - {k - 1}"
@@ -1093,23 +871,13 @@ class Translator:
         return r_name, verb.slot, verb.auto_kwargs
 
     def _emit_verb_args(self, args: list, kwargs: list, slot: Slot) -> str:
-        """Emit args for a dplyr verb call, applying inverse NSE rules.
-
-        - EXPR slot: ``col("x")`` unwraps to bare ``x``; comparisons /
-          method-form helpers reverse too (handled implicitly because
-          ``_emit_expr`` returns ``col("x").mean()`` → ``mean(x)`` via
-          the helper-call path).
-        - COLUMN_NAME slot: bare ``"x"`` string literals reverse to
-          bare ``x``.
-        - NONE slot: pass-through.
-        """
+        """Emit args for a dplyr verb call, applying inverse NSE rules."""
         parts: list[str] = []
         with self.nse.enter(slot):
             for a in args:
                 parts.append(self._emit_verb_value(a, slot))
             for kw in kwargs:
                 r_name = _PY_KWARG_TO_R.get(kw.arg, kw.arg)
-                # Per-kwarg slot override mirroring forward direction.
                 kw_slot = self._kwarg_slot(kw.arg, slot)
                 value_str = self._emit_verb_value(kw.value, kw_slot)
                 parts.append(f"{r_name} = {value_str}")
@@ -1125,8 +893,6 @@ class Translator:
     def _emit_verb_value(self, value: P.expr, slot: Slot) -> str:
         """Emit a single verb-arg value, applying COLUMN_NAME unwrap."""
         if slot is Slot.COLUMN_NAME:
-            # Strings unwrap to bare names; lists of strings unwrap to
-            # c(name, name); other values pass through.
             if isinstance(value, P.Constant) and isinstance(value.value, str):
                 return value.value
             if isinstance(value, P.List) and all(
@@ -1135,7 +901,6 @@ class Translator:
             ):
                 return "c(" + ", ".join(e.value for e in value.elts) + ")"
             if isinstance(value, P.Dict):
-                # ``by={"a": "b"}`` → ``c("a" = "b")``.
                 parts = []
                 for k, v in zip(value.keys, value.values):
                     if isinstance(k, P.Constant) and isinstance(v, P.Constant):
@@ -1148,8 +913,6 @@ class Translator:
         with self.nse.enter(slot):
             return self._emit_expr(value, prec=20)
 
-    # ---- ggplot extension reverse --------------------------------------
-
     def _emit_ggplot_extension_call(self, method: str, args: list, kwargs: list) -> str:
         """``geom_x(args)`` reverse — wrap any aesthetic-name string-valued
         kwargs in ``aes(...)``; others stay as named args."""
@@ -1157,8 +920,6 @@ class Translator:
         other_pairs: list[tuple[str, str]] = []
         positional: list[str] = []
         for a in args:
-            # facet_wrap('~island') / facet_grid('y~x') — the string
-            # carries the formula. Try to round-trip it.
             if (
                 isinstance(a, P.Constant)
                 and isinstance(a.value, str)
@@ -1175,7 +936,6 @@ class Translator:
                 and isinstance(value, P.Constant)
                 and isinstance(value.value, str)
             ):
-                # Aesthetic-name + string value = column mapping → goes in aes().
                 aes_pairs.append((r_name, value.value))
             else:
                 other_pairs.append((r_name, self._emit_expr(value, prec=20)))
@@ -1200,14 +960,6 @@ class Translator:
         return ", ".join(parts)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-# hea family class/alias name (lowercased) → R family-generator name. R
-# capitalizes ``Gamma`` (to avoid the ``gamma`` function) and dots
-# ``inverse.gaussian``; the rest are plain lowercase.
 _R_FAMILY_NAMES: dict[str, str] = {
     "gaussian": "gaussian",
     "poisson": "poisson",
@@ -1218,13 +970,7 @@ _R_FAMILY_NAMES: dict[str, str] = {
 
 
 def _is_gaussian_family(value: P.expr) -> bool:
-    """True if a ``family=`` value denotes Gaussian (→ ``lmer``, not ``glmer``).
-
-    Recognizes ``Gaussian()`` / ``gaussian()`` / ``hea.family.Gaussian`` /
-    the string ``"gaussian"``. Anything unrecognized is treated as
-    non-Gaussian — the safe default, since an explicit ``family=`` almost
-    always means a GLMM.
-    """
+    """True if a ``family=`` value denotes Gaussian (→ ``lmer``, not ``glmer``)."""
     node = value
     if isinstance(node, P.Call):
         node = node.func
@@ -1240,18 +986,11 @@ def _is_gaussian_family(value: P.expr) -> bool:
 def _strip_hea_prefix(func: P.expr) -> str | None:
     """If ``func`` is ``hea.X``, ``hea.<sub>.X``, or ``selectors.X``,
     return the bare ``X`` name. Otherwise return ``None``.
-
-    Used by the reverse direction to drop hea's namespace qualifier — R
-    has no equivalent (the loader is ``library()``, which makes names
-    bare). ``hea.<sub>.<sub2>.X`` (depth > 2) isn't emitted by the
-    forward translator, so we don't try to strip it.
     """
     if not isinstance(func, P.Attribute):
         return None
-    # depth-1: ``hea.X`` / ``selectors.X``.
     if isinstance(func.value, P.Name) and func.value.id in ("hea", "selectors"):
         return func.attr
-    # depth-2: ``hea.<sub>.X``.
     if (
         isinstance(func.value, P.Attribute)
         and isinstance(func.value.value, P.Name)
@@ -1286,8 +1025,6 @@ def _is_translation_chain(chain: list) -> bool:
             return True
         if is_chain_extension(method_name) or method_name == "theme":
             return True
-        # ``slice`` is handled by a dedicated reverse emitter (it isn't in
-        # the verb registry because the index base differs 0- vs 1-based).
         if method_name == "slice":
             return True
     return False
@@ -1301,20 +1038,8 @@ def _maybe_paren(text: str, my_prec: int, outer_prec: int) -> str:
     return text
 
 
-# ---------------------------------------------------------------------------
-# Library preamble inference
-# ---------------------------------------------------------------------------
-
-
-# Function names that, if they appear in the emitted R source, signal the
-# script needs the tidyverse meta-package. Members are gathered from the
-# forward translator's surface: dplyr/tidyr verbs, tidy-select helpers,
-# expression helpers, lubridate/forcats/stringr fns. ``ggplot``/``aes``
-# and the open-set prefixes ``geom_*``/``scale_*``/``coord_*``/``facet_*``/
-# ``theme_*`` are handled by :data:`_GGPLOT_PATTERN` below.
 _TIDYVERSE_FN_NAMES: frozenset[str] = frozenset(
     {
-        # dplyr verbs (mirror VERB_TABLE.keys minus joins which only need dplyr)
         "filter",
         "mutate",
         "transmute",
@@ -1339,7 +1064,6 @@ _TIDYVERSE_FN_NAMES: frozenset[str] = frozenset(
         "anti_join",
         "cross_join",
         "nest_join",
-        # tidyr
         "pivot_longer",
         "pivot_wider",
         "separate",
@@ -1351,7 +1075,6 @@ _TIDYVERSE_FN_NAMES: frozenset[str] = frozenset(
         "expand",
         "nest",
         "unnest",
-        # dplyr expression helpers
         "case_when",
         "if_else",
         "coalesce",
@@ -1373,7 +1096,6 @@ _TIDYVERSE_FN_NAMES: frozenset[str] = frozenset(
         "cumany",
         "consecutive_id",
         "nth",
-        # tidy-select helpers
         "starts_with",
         "ends_with",
         "contains",
@@ -1383,7 +1105,6 @@ _TIDYVERSE_FN_NAMES: frozenset[str] = frozenset(
         "any_of",
         "last_col",
         "num_range",
-        # forcats
         "fct_infreq",
         "fct_relevel",
         "fct_recode",
@@ -1393,7 +1114,6 @@ _TIDYVERSE_FN_NAMES: frozenset[str] = frozenset(
         "fct_reorder",
         "fct_reorder2",
         "fct_rev",
-        # stringr
         "str_detect",
         "str_replace",
         "str_replace_all",
@@ -1412,7 +1132,6 @@ _TIDYVERSE_FN_NAMES: frozenset[str] = frozenset(
         "str_count",
         "str_starts",
         "str_ends",
-        # lubridate
         "ymd",
         "mdy",
         "dmy",
@@ -1420,7 +1139,6 @@ _TIDYVERSE_FN_NAMES: frozenset[str] = frozenset(
         "as_date",
         "wday",
         "yday",
-        # ggplot top-level entry points
         "ggplot",
         "aes",
         "labs",
@@ -1443,7 +1161,6 @@ _PATCHWORK_FN_NAMES: frozenset[str] = frozenset(
     }
 )
 
-# Open-set ggplot prefixes — any ``geom_x(``, ``scale_y(``, etc.
 _GGPLOT_PATTERN = re.compile(
     r"\b(?:geom_|scale_|coord_|facet_|theme_|stat_|position_|element_)\w+\s*\(|\btheme\s*\("
 )
@@ -1462,13 +1179,6 @@ _PATCHWORK_PATTERN = _name_call_pattern(_PATCHWORK_FN_NAMES)
 def _collect_dataset_refs(module: P.Module) -> list[tuple[str, str]]:
     """Walk ``module`` looking for bare names that look like autoload
     references to rdatasets-known datasets.
-
-    Returns a list of ``(dataset_name, package_name)`` for each unique
-    match — names defined in the script (assignment targets, function
-    args, for-loop vars) are excluded, as are short / common names
-    listed in :data:`_DATASET_REF_EXCLUSIONS`. Ambiguous names (matched
-    by more than one package) are dropped — picking a package would be
-    a guess.
     """
     registry = _datasets.dataset_registry()
     if not registry:
@@ -1515,18 +1225,7 @@ def _collect_dataset_refs(module: P.Module) -> list[tuple[str, str]]:
 
 
 def _build_preamble(r_source: str, extra_libs: set[str]) -> list[str]:
-    """Infer the ``library()`` calls the translated R script needs.
-
-    Detection is regex-based on the emitted source — simpler than
-    tracking flags through every emit path, and accepts the rare
-    false-positive (a function name appearing inside a string literal)
-    in exchange for not missing real usages. False positives just emit
-    a redundant ``library()`` call, which loads but does no harm.
-
-    Order: tidyverse first, then patchwork, then any data packages
-    (sorted) from :attr:`Translator._extra_libs` — that's the
-    convention r4ds-style scripts use.
-    """
+    """Infer the ``library()`` calls the translated R script needs."""
     libs: list[str] = []
     if _TIDYVERSE_PATTERN.search(r_source) or _GGPLOT_PATTERN.search(r_source):
         libs.append("library(tidyverse)")

@@ -34,10 +34,6 @@ class GeomDensity(Geom):
         if len(data) == 0:
             return
 
-        # Per-group: ``aes(colour = species)`` puts a different colour on
-        # each group's rows, so plotting ``data`` whole would merge all
-        # curves into one line painted in the first group's colour. Split
-        # like geom_path / geom_line do.
         if "group" in data.columns:
             for _, sub in data.group_by("group", maintain_order=True):
                 self._draw_one(sub, ax, r_lty)

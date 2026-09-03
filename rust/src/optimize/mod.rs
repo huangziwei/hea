@@ -1,11 +1,3 @@
-//! R-optimizer kernels (`nlm`'s UNCMIN and `optim`'s L-BFGS-B 2.3) —
-//! the compiled path behind `hea/R/optimize.py`. The Python modules
-//! (`hea/R/uncmin.py`, `hea/R/lbfgsb.py`) are the spec and the test
-//! oracle; the R-level semantics (nlm's function-value cache, msg
-//! bits, optim's fnscale/parscale) stay in Python — only the numeric
-//! driver loops move here, with the objective called back into Python
-//! per evaluation.
-
 mod lbfgsb;
 mod linpack;
 mod uncmin;
@@ -14,10 +6,6 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
-/// Adapter: Python callables → the uncmin `Obj` trait. `fcn(x)->float`,
-/// `d1fcn(x)->seq[n]`, `d2fcn(x, a)->None` (fills the n×n lower
-/// triangle; `a` is passed as a fresh 1-D column-major buffer and
-/// copied back).
 struct PyObj<'py> {
     py: Python<'py>,
     fcn: PyObject,
@@ -59,8 +47,6 @@ impl uncmin::Obj for PyObj<'_> {
     }
 }
 
-/// uncmin `optif9` with Python-callback objective. Returns
-/// (xpls, fpls, gpls, itrmcd, itncnt, msg).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (x0, fcn, d1fcn, d2fcn, typsiz, fscale, method, iexp, msg,
@@ -110,8 +96,6 @@ pub fn optif9(
     ))
 }
 
-/// uncmin `fdhess` (nlm's hessian=TRUE). Returns the n×n Hessian upper
-/// triangle filled, flat column-major.
 #[pyfunction]
 #[pyo3(signature = (x, fval, fcn, ndigit, typsiz))]
 pub fn uncmin_fdhess(
@@ -159,9 +143,6 @@ impl lbfgsb::Objective for PyLbObj<'_> {
     }
 }
 
-/// R's `lbfgsb()` driver with Python-callback objective (`fminfn(x)`
-/// returns the scaled f; `fmingr(x)` RETURNS the scaled gradient).
-/// Returns (x, Fmin, fail, fncount, grcount, msg).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (n, m, x0, lo, up, nbd, fminfn, fmingr, factr, pgtol, maxit))]

@@ -29,18 +29,7 @@ class Stat:
         if "group" not in data.columns or len(data) == 0:
             return self.compute_group(data, params)
 
-        # Columns to attach back to each chunk so per-group aesthetics
-        # survive the row-count change the stat may introduce.
         preserve = [col for col in _GROUPING_AES if col in data.columns]
-        # Capture the source dtype so re-attached scalars keep e.g. Enum
-        # ordering instead of falling back to Utf8. Without this, an
-        # ``Enum(['Fair','Good','Very Good','Premium','Ideal'])`` colour
-        # column survives compute_group as Utf8, and the downstream
-        # discrete colour scale trains its level catalogue alphabetically
-        # (``Fair, Good, Ideal, Premium, Very Good``) instead of by
-        # factor order. ``geom_bar``/``StatCount`` doesn't trip this
-        # because it overrides ``compute_panel`` and uses polars
-        # ``group_by(...).agg``, which preserves dtypes natively.
         preserve_dtypes = {col: data[col].dtype for col in preserve}
 
         chunks = []

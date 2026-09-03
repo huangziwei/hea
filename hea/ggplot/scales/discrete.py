@@ -47,15 +47,8 @@ class ScaleDiscreteColor(Scale):
     def train(self, data) -> None:
         if isinstance(data, pl.Series):
             if data.dtype in (pl.Categorical, pl.Enum):
-                # Categorical / Enum carry an explicit level order — honour it
-                # (matches ggplot2's behaviour for factor columns: factor levels
-                # drive the scale order regardless of which row appears first).
                 new_levels = cat_pool(data).to_list()
             else:
-                # Plain string / boolean: sort alphabetically — same as R's
-                # ``factor(...)`` default. ggplot2 silently runs character
-                # columns through ``factor()`` before mapping, so the level
-                # order ends up sorted regardless of CSV row order.
                 new_levels = sorted(data.drop_nulls().unique().to_list())
         else:
             new_levels = sorted({v for v in data if v is not None})
@@ -77,10 +70,6 @@ class ScaleDiscreteColor(Scale):
             colours = pal(len(self.levels))
             mapping = dict(zip(self.levels, colours))
 
-        # Pick the polars dtype from the mapped values themselves —
-        # discrete scales for ``size`` / ``alpha`` produce floats, while
-        # ``colour`` / ``fill`` / ``shape`` / ``linetype`` produce
-        # strings. Hardcoding Utf8 here would crash the float case.
         return_dtype = _polars_dtype_for(mapping.values())
 
         if isinstance(data, pl.Series):
@@ -137,7 +126,6 @@ def scale_fill_manual(
     )
 
 
-# British/American aliases.
 scale_colour_manual = scale_color_manual
 
 
@@ -161,11 +149,6 @@ def scale_fill_identity(*, name=_NAME_MISSING):
 
 
 scale_colour_identity = scale_color_identity
-
-
-# ---------------------------------------------------------------------------
-# Discrete palette factories — viridis_d, brewer
-# ---------------------------------------------------------------------------
 
 
 def scale_color_viridis_d(
@@ -260,11 +243,6 @@ def scale_fill_brewer(
 scale_colour_brewer = scale_color_brewer
 
 
-# ---------------------------------------------------------------------------
-# Default qualitative palette — equally-spaced HCL hues (ggplot2's default).
-# ---------------------------------------------------------------------------
-
-
 def scale_color_hue(
     *,
     h=(15, 375),
@@ -318,21 +296,9 @@ def scale_fill_hue(
 scale_colour_hue = scale_color_hue
 
 
-# ggplot2's ``scale_colour_discrete`` is the default discrete colour scale —
-# ``scale_colour_hue`` with hue defaults. R 4.0+ exposes a global option
-# (``ggplot2.discrete.colour``) to swap the default; hea always uses hue,
-# so the alias is a straight passthrough. The auto-mode (``geom_point(
-# color="class")`` with no explicit scale) already uses the same hue
-# palette via ``ScaleDiscreteColor``'s default — these aliases just give
-# users the explicit form when they want to spell it out.
 scale_color_discrete = scale_color_hue
 scale_colour_discrete = scale_color_hue
 scale_fill_discrete = scale_fill_hue
-
-
-# ---------------------------------------------------------------------------
-# Colourblind-safe palette (ggthemes' Okabe-Ito).
-# ---------------------------------------------------------------------------
 
 
 def scale_color_colorblind(

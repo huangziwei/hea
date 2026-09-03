@@ -39,8 +39,6 @@ def table(x, y=None, *, dnn=None):
     pivot = (
         counts.pivot(values="n", index="__x__", on="__y__").fill_null(0).sort("__x__")
     )
-    # sort columns alphabetically so output is reproducible (polars'
-    # pivot uses encounter order, which depends on group_by ordering)
     label_col = "__x__"
     other_cols = sorted(c for c in pivot.columns if c != label_col)
     pivot = pivot.select([label_col, *other_cols])
@@ -61,14 +59,11 @@ def xtabs(formula: str, data: pl.DataFrame):
     lhs = lhs.strip()
     cols = [p.strip() for p in rhs.split("+")]
     if lhs == "":
-        # Count form.
         if len(cols) == 1:
             return table(data[cols[0]])
         if len(cols) == 2:
             return table(data[cols[0]], data[cols[1]], dnn=(cols[0], cols[1]))
         raise NotImplementedError("xtabs(): 3+ way tables not supported")
-    # Weighted form: ``w ~ a (+ b)`` — sum ``w`` per group.
-    # Use polars directly (hea's GroupBy is dplyr-shaped).
     base = pl.DataFrame._from_pydf(data._df) if hasattr(data, "_df") else data
     if len(cols) == 1:
         return (
@@ -102,11 +97,9 @@ def prop_table(tbl, margin=None):
     :func:`xtabs`, or a plain numpy 2-D array.
     """
     if isinstance(tbl, pl.DataFrame):
-        # 1-way table from this module: cols are exactly ['value', 'n'].
         if tbl.columns == ["value", "n"]:
             n = tbl["n"].cast(pl.Float64).to_numpy()
             return tbl.with_columns(pl.Series("n", n / n.sum()))
-        # 2-way: first col carries row labels; rest are counts.
         label_col = tbl.columns[0]
         count_cols = tbl.columns[1:]
         mat = tbl.select(count_cols).to_numpy().astype(float)
@@ -150,7 +143,6 @@ def addmargins(tbl, margin=None):
             "addmargins(): only polars DataFrame inputs supported"
         )
     if tbl.columns == ["value", "n"]:
-        # 1-way: append a "Sum" row, cast `n` to keep types consistent
         n_total = float(tbl["n"].sum())
         n_cast = tbl["n"].cast(pl.Float64)
         return pl.concat(
@@ -163,7 +155,6 @@ def addmargins(tbl, margin=None):
     count_cols = tbl.columns[1:]
     mat = tbl.select(count_cols).to_numpy().astype(float)
     margins = (1, 2) if margin is None else (margin,)
-    # Cast count columns to Float64 so the appended Sum row (float) lines up.
     new_tbl = tbl.with_columns(*(pl.col(c).cast(pl.Float64) for c in count_cols))
     if 2 in margins:
         new_tbl = new_tbl.with_columns(pl.Series("Sum", mat.sum(axis=1)))

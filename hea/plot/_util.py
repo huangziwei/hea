@@ -8,11 +8,6 @@ import polars as pl
 _R_MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*", "+", "x"]
 
 
-# The most recently used ``Axes`` for any hea primary plotter (``hist``,
-# ``plot``, ``boxplot``, …). Used by overlay calls (``abline``, ``points``,
-# ``lines``, ``segments``, ``qqline``, ``rug``, ``legend``) when their
-# ``ax=`` is not given — R's ``abline(lmod)`` idiom without surfacing
-# matplotlib's ``plt.gca()``. ``None`` until the first hea primary draws.
 _LAST_AX = None
 
 
@@ -43,8 +38,6 @@ def resolve_ax(ax, *, figsize=None):
     if ax is not None:
         _remember_ax(ax)
         return ax
-    # Local import keeps _util.py free of plt at module load (R's plotters
-    # are sometimes used headless / with backend swaps in tests).
     from .par import _current_par
 
     p = _current_par()

@@ -30,9 +30,7 @@ def _spd(n, seed):
 def test_chol_lower_reconstructs(n):
     a = _spd(n, n)
     lo = np.asarray(rs.chol_lower(a))
-    # lower-triangular
     assert np.allclose(np.triu(lo, 1), 0.0)
-    # faithful factor
     assert np.abs(lo @ lo.T - a).max() / np.abs(a).max() < 1e-13
 
 

@@ -28,13 +28,6 @@ from hea.models.gmm import (
     gmm,
 )
 
-# ----------------------------------------------------------------------
-# Math-formula tests — each verifies one or two methods against the
-# documented relation. These should be obvious from the GLM formulas
-# alone (no R needed), but the explicit numerical assertions are what
-# guards against regression.
-# ----------------------------------------------------------------------
-
 
 def test_gaussian_identity_passes_through():
     """Gaussian-identity: μ = η, V(μ) = 1, μ_η = 1 → sqrt weights = √w."""
@@ -42,7 +35,6 @@ def test_gaussian_identity_passes_through():
     y = np.array([1.0, 2.0, 3.0, 4.0])
     r = _GlmResponse(family, y)
 
-    # Replace whatever mustart/etastart did with a clean state.
     r.update_mu(np.array([0.5, 1.5, 2.5, 3.5]))
     r.update_weights()
 
@@ -53,12 +45,10 @@ def test_gaussian_identity_passes_through():
     np.testing.assert_allclose(r.wt_res, [0.5, 0.5, 0.5, 0.5])
     assert r.wrss == pytest.approx(1.0)
 
-    # Working pieces
     np.testing.assert_allclose(r.working_residuals(), [0.5, 0.5, 0.5, 0.5])
     np.testing.assert_allclose(r.working_response(), [1.0, 2.0, 3.0, 4.0])
     np.testing.assert_allclose(r.weighted_working_response(), [1.0, 2.0, 3.0, 4.0])
 
-    # Deviance for Gaussian: Σ wt·(y - μ)²
     np.testing.assert_allclose(r.deviance(), 4 * 0.25)
 
 
@@ -73,34 +63,24 @@ def test_poisson_log_at_saturated_eta():
     r.update_weights()
 
     np.testing.assert_allclose(r.mu, y)
-    # μ_η = exp(η) = μ; V(μ) = μ → sqrt_r_wt = √(1/μ); sqrt_x_wt = μ·√(1/μ) = √μ
     np.testing.assert_allclose(r.sqrt_r_wt, np.sqrt(1.0 / y))
     np.testing.assert_allclose(r.sqrt_x_wt, np.sqrt(y))
     np.testing.assert_allclose(r.wt_res, np.zeros(5), atol=1e-15)
     assert r.wrss == pytest.approx(0.0, abs=1e-15)
 
-    # At saturated η, deviance residuals all zero
     np.testing.assert_allclose(r.deviance_residuals(), np.zeros(5), atol=1e-12)
     assert r.deviance() == pytest.approx(0.0, abs=1e-12)
 
-    # Working response: (η - 0) + (y - y)/y = η
     np.testing.assert_allclose(r.working_response(), eta)
 
 
 def test_binomial_logit_proportion_input():
-    """Binomial(logit): y is proportion ∈ [0,1], weights = m (binomial size).
-
-    V(μ) = μ(1-μ). At μ = y, devResid = 0 (saturated). Working weight
-    sqrt_x_wt = μ_η·√(m/V) where μ_η = μ(1-μ) for logit.
-    """
+    """Binomial(logit): y is proportion ∈ [0,1], weights = m (binomial size)."""
     family = Binomial()
     y = np.array([0.2, 0.5, 0.7])
     weights = np.array([10.0, 20.0, 30.0])  # binomial sizes
     r = _GlmResponse(family, y, weights=weights)
 
-    # Set η = logit(y) (saturated). Note __init__ already does this
-    # implicitly via update_mu(link.link(mustart)), but mustart is
-    # smoothed via the (w·y+0.5)/(w+1) formula — set our own clean η.
     eta = np.log(y / (1.0 - y))
     r.update_mu(eta)
     r.update_weights()
@@ -108,11 +88,9 @@ def test_binomial_logit_proportion_input():
     np.testing.assert_allclose(r.mu, y, atol=1e-12)
     expected_v = y * (1.0 - y)
     np.testing.assert_allclose(r.sqrt_r_wt, np.sqrt(weights / expected_v))
-    # μ_η for logit = μ(1-μ)
     expected_mu_eta = y * (1.0 - y)
     np.testing.assert_allclose(r.sqrt_x_wt, expected_mu_eta * r.sqrt_r_wt)
 
-    # At saturated η, dev = 0
     assert r.deviance() == pytest.approx(0.0, abs=1e-12)
 
 
@@ -123,7 +101,6 @@ def test_gamma_initialization_replaces_mustart_with_mean():
     y = np.array([1.0, 4.0, 9.0, 16.0, 25.0])
     r = _GlmResponse(family, y)
 
-    # Initial μ should be the mean, not y itself.
     expected_mu = np.full(5, y.mean())
     np.testing.assert_allclose(r.mu, expected_mu, atol=1e-12)
 
@@ -133,11 +110,9 @@ def test_gamma_initialization_respects_etastart():
     the user explicitly chose the initial η."""
     family = Gamma()
     y = np.array([1.0, 4.0, 9.0, 16.0, 25.0])
-    # Provide etastart matching saturated η for the inverse link
     eta0 = 1.0 / y  # inverse link: η = 1/μ; at saturated μ = y, η = 1/y
     r = _GlmResponse(family, y, etastart=eta0)
 
-    # With etastart, mustart stability fix is skipped, so μ = linkinv(η) = y.
     np.testing.assert_allclose(r.mu, y, atol=1e-12)
 
 
@@ -147,12 +122,10 @@ def test_update_wts_changes_wrss_when_weights_shift():
     y = np.array([2.0, 4.0, 6.0])
     r = _GlmResponse(family, y)
 
-    # Stash initial state
     r.update_mu(np.log(np.array([1.0, 5.0, 5.0])))  # μ ≠ y → nonzero wrss
     r.update_weights()
     wrss_before = r.wrss
 
-    # Now scale weights up — sqrt_r_wt grows, wrss grows
     r.weights = np.full(3, 4.0)
     r.update_weights()
     wrss_after = r.wrss
@@ -169,9 +142,7 @@ def test_laplace_formula_glmm():
     r.update_weights()
 
     aic = r.aic()
-    # Pick arbitrary ldL2 / sqrL — Laplace just sums them.
     laplace = r.laplace(log_det_l_sq=3.7, log_det_rx_sq=999.0, sqr_len_u=1.25)
-    # log_det_rx_sq is intentionally ignored in the GLMM Laplace.
     assert laplace == pytest.approx(3.7 + 1.25 + aic)
 
 
@@ -191,34 +162,11 @@ def test_offset_shifts_eta_only():
     np.testing.assert_allclose(r.mu, y, atol=1e-12)
     np.testing.assert_allclose(r.eta, np.log(y))
 
-    # working_response = (η - offset) + (y - μ)/μ_η = (log(y) - offset) + 0
     np.testing.assert_allclose(r.working_response(), np.log(y) - offset)
 
 
-# ----------------------------------------------------------------------
-# R-oracle cross-check — fit a Poisson glm in R, extract its converged
-# (μ, η), then build a _GlmResponse with the same state and compare the
-# computed quantities. This guards against family.aic / dev_resids /
-# variance subtleties that the mathematical-formula tests above can't
-# catch on their own.
-# ----------------------------------------------------------------------
-
-
 def test_poisson_glm_state_matches_R():
-    """Build _GlmResponse at R's converged glm() state and compare.
-
-    Uses the canonical R example: ``count ~ outcome + treatment``
-    from ?glm. We pin R's μ̂ / η̂ / weights / residuals / deviance and
-    verify _GlmResponse reproduces every R-side value PIRLS cares about.
-
-    R recipe::
-        counts <- c(18,17,15,20,10,20,25,13,12)
-        outcome <- gl(3,1,9)
-        treatment <- gl(3,3)
-        m <- glm(counts ~ outcome + treatment, family=poisson())
-        # m$y, m$linear.predictors, m$fitted.values, m$weights,
-        # residuals(m, "working"), residuals(m, "deviance"), deviance(m)
-    """
+    """Build _GlmResponse at R's converged glm() state and compare."""
     y = np.array([18.0, 17.0, 15.0, 20.0, 10.0, 20.0, 25.0, 13.0, 12.0])
     eta = np.array(
         [
@@ -287,7 +235,6 @@ def test_poisson_glm_state_matches_R():
     )
     dev_r = 5.1291410770011439
 
-    # Build _GlmResponse and drive it to R's converged (η, μ).
     family = Poisson()
     r = _GlmResponse(family, y)
     r.update_mu(eta)  # offset=0, so γ = η
@@ -296,7 +243,6 @@ def test_poisson_glm_state_matches_R():
     np.testing.assert_allclose(r.mu, mu_r, atol=1e-12)
     np.testing.assert_allclose(r.working_residuals(), wrk_resids_r, atol=1e-12)
 
-    # R's residuals(m, type="deviance") returns *signed* sqrt of dev contribs.
     np.testing.assert_allclose(
         np.sign(y - mu_r) * np.sqrt(r.deviance_residuals()),
         dev_resids_r,
@@ -304,16 +250,7 @@ def test_poisson_glm_state_matches_R():
     )
     np.testing.assert_allclose(r.deviance(), dev_r, atol=1e-10)
 
-    # R's m$weights are PIRLS working weights (= μ_η² / V for Poisson-log:
-    # = μ² / μ = μ). _GlmResponse.sqrt_x_wt² should equal that.
     np.testing.assert_allclose(r.sqrt_x_wt**2, r_wts, atol=1e-12)
-
-
-# ----------------------------------------------------------------------
-# PIRLS state + inner loop. Tests that _PredState's PLS step
-# math matches the merPredD operations, and that _pwrss_update converges
-# to the same (β̂, û) as lme4::glmer at the converged θ.
-# ----------------------------------------------------------------------
 
 
 def _build_design_pieces(formula: str, data: pl.DataFrame):
@@ -336,7 +273,6 @@ def test_predstate_basic_state_shape():
     X = rng.standard_normal((n, p))
     Z_dense = rng.standard_normal((n, q))
     Z_sp = csc_array(Z_dense)
-    # Build a minimal ReTerms-like object: scalar bars, q=5 levels, identity Λᵀ
     from hea.formula import ReTerms
 
     Lambdat = np.eye(q, dtype=int)  # template = identity; θ-position = 1 on diag
@@ -360,30 +296,7 @@ def test_predstate_basic_state_shape():
 
 
 def test_pirls_one_iter_matches_lme4_RglmerWrkIter():
-    """Pin one PIRLS iteration against lme4's ``RglmerWrkIter``.
-
-    Setup: synthetic Poisson GLMM. Build lme4's ``mkGlmerDevfun``, set θ
-    to a fixed value, call ``RglmerWrkIter`` once — pin the resulting
-    pp@delu / delb / pdev and resp$mu. In Python, build identical state
-    and call ``_internal_glmer_wrk_iter`` with u_only=True.
-
-    One-step matching avoids the multi-iteration noise near convergence.
-
-    R recipe (run locally; data materialized from the same numpy
-    ``default_rng(2026)`` synthetic recipe below)::
-        d <- read.csv("...")
-        d$g <- factor(d$g)
-        glmod <- glFormula(y ~ x + (1|g), data=d, family=poisson)
-        devfun <- mkGlmerDevfun(glmod$fr, glmod$X, glmod$reTrms,
-                                family=poisson(), nAGQ=0)
-        rho <- environment(devfun)
-        invisible(rho$pp$setDelu(rep(0.0, length(rho$pp$delu))))
-        invisible(rho$pp$setDelb(rep(0.0, length(rho$pp$delb))))
-        invisible(rho$resp$updateMu(rho$lp0))
-        invisible(rho$pp$setTheta(0.7))
-        pdev <- lme4:::RglmerWrkIter(rho$pp, rho$resp, uOnly=TRUE)
-        # capture rho$lp0, pdev, rho$pp$delu, rho$pp$delb, rho$resp$mu
-    """
+    """Pin one PIRLS iteration against lme4's ``RglmerWrkIter``."""
     from hea.R.rng import RGenerator
 
     gen = RGenerator(2026)
@@ -396,8 +309,6 @@ def test_pirls_one_iter_matches_lme4_RglmerWrkIter():
     y = gen.poisson(np.exp(eta)).astype(float)
     fixed_theta = 0.7
 
-    # lme4 reference (see R recipe above). lp0 is the post-init-PIRLS
-    # linear predictor; PIRLS one-step produces pdev / delu / delb / mu.
     lp0_r = np.array(
         [
             -0.38559841412085882,
@@ -467,8 +378,6 @@ def test_pirls_one_iter_matches_lme4_RglmerWrkIter():
             -0.4473243967846941,
         ]
     )
-    # MU is piecewise-constant per group (β=0 in pp$delb means x has no
-    # effect; each group's η = Zb is one value, repeated n_per times).
     mu_per_group = np.array(
         [
             0.73150958340811034,
@@ -485,7 +394,6 @@ def test_pirls_one_iter_matches_lme4_RglmerWrkIter():
     )
     mu_r = np.repeat(mu_per_group, n_per)
 
-    # Build hea state and run one iteration with the same θ AND η.
     df = pl.DataFrame(
         {
             "y": y,
@@ -496,9 +404,7 @@ def test_pirls_one_iter_matches_lme4_RglmerWrkIter():
     X, y_arr, Z_sp, re_terms, _ = _build_design_pieces("y ~ x + (1|g)", df)
     state = _PredState(X, Z_sp, re_terms)
     state.set_theta(np.array([fixed_theta]))
-    # Seed η to R's lp0 so initial state matches what RglmerWrkIter saw.
     resp = _GlmResponse(Poisson(), y_arr, etastart=lp0_r)
-    # _GlmResponse.__init__ called update_mu(lp0_r) already (offset=0).
 
     pdev = _internal_glmer_wrk_iter(state, resp, u_only=True)
 
@@ -535,7 +441,6 @@ def test_pirls_u_only_keeps_beta_at_zero():
 
     _pwrss_update(state, resp, u_only=True, tol=1e-7, maxit=200)
     np.testing.assert_array_equal(state.delb, np.zeros(X.shape[1]))
-    # And delu should be nonzero (PIRLS moved u).
     assert np.any(state.delu != 0.0)
 
 
@@ -563,17 +468,9 @@ def test_pwrss_update_step_halving_recovers_from_overstep():
     state.set_theta(np.array([1.0]))
     resp = _GlmResponse(Poisson(), y_arr)
 
-    # Should converge without raising even with default tol.
     pdev = _pwrss_update(state, resp, u_only=False, tol=1e-8, maxit=200)
     assert np.isfinite(pdev)
     assert pdev > 0
-
-
-# ----------------------------------------------------------------------
-# Laplace deviance evaluator. Tests _glmm_devfun_factory's two
-# closures against `lme4::mkGlmerDevfun(nAGQ=0)` and `updateGlmerDevfun(
-# nAGQ=1)` at the converged (θ̂, β̂) of a real glmer fit.
-# ----------------------------------------------------------------------
 
 
 def _synthetic_poisson_grouped(seed: int, n_groups: int = 12, n_per: int = 6):
@@ -597,22 +494,6 @@ def _synthetic_poisson_grouped(seed: int, n_groups: int = 12, n_per: int = 6):
     return df
 
 
-# lme4 reference values for ``glmer(y ~ x + (1|g), poisson, data=...)``
-# fit to the seed-2026 synthetic Poisson grouped data. Used by the
-# Stage-0 and Stage-1 devfun pin tests below.
-#
-# R recipe::
-#     d <- read.csv("...")   # the seed-2026 synthetic data
-#     d$g <- factor(d$g)
-#     m <- glmer(y ~ x + (1|g), data=d, family=poisson())
-#     theta_hat <- getME(m, "theta")
-#     beta_hat  <- getME(m, "beta")
-#     glmod <- glFormula(y ~ x + (1|g), data=d, family=poisson())
-#     dev0  <- mkGlmerDevfun(glmod$fr, glmod$X, glmod$reTrms,
-#                            family=poisson(), nAGQ=0)
-#     dev_stage0 <- dev0(theta_hat)
-#     dev1  <- updateGlmerDevfun(dev0, glmod$reTrms, nAGQ=1L)
-#     dev_stage1 <- dev1(c(theta_hat, beta_hat))
 _GLMER_DEVFUN_POISSON_REF = {
     "theta": np.array(
         [
@@ -632,15 +513,7 @@ _GLMER_DEVFUN_POISSON_REF = {
 
 def test_devfun_stage0_matches_lme4_poisson():
     """``devfun_stage0(θ̂)`` ≡ lme4's ``mkGlmerDevfun(nAGQ=0)(θ̂)`` at ≤ 1e-9.
-
-    Stage 0 PIRLS does a joint (β, u) solve, so the deviance at θ̂ here is
-    NOT the same as ``-2 logLik(m)`` — it's the joint-conditional deviance
-    that lme4 reports as ``dev0(θ̂)``.
-
-    The initial :func:`_pwrss_update` before the factory mirrors
-    ``mkGlmerDevfun``'s ``.Call(glmerLaplace, ...)`` warm-up at
     modular.R:888 — without it, the cold-start lp0 would change the PIRLS
-    iteration count and the stale ``ldL2`` lme4 reports drifts by ~1e-4.
     """
     df = _synthetic_poisson_grouped(seed=2026)
     theta_hat = _GLMER_DEVFUN_POISSON_REF["theta"]
@@ -660,12 +533,7 @@ def test_devfun_stage0_matches_lme4_poisson():
 
 
 def test_devfun_stage1_matches_lme4_poisson():
-    """``devfun_stage1([θ̂, β̂])`` ≡ lme4's ``nAGQ=1`` devfun at ≤ 1e-9.
-
-    Stage 1 folds β̂ into the offset and runs PIRLS with ``u_only=True``.
-    The returned deviance equals ``-2 logLik(m)`` at the converged
-    parameters — the value lme4's outer optimizer minimises.
-    """
+    """``devfun_stage1([θ̂, β̂])`` ≡ lme4's ``nAGQ=1`` devfun at ≤ 1e-9."""
     df = _synthetic_poisson_grouped(seed=2026)
     theta_hat = _GLMER_DEVFUN_POISSON_REF["theta"]
     beta_hat = _GLMER_DEVFUN_POISSON_REF["beta"]
@@ -674,12 +542,6 @@ def test_devfun_stage1_matches_lme4_poisson():
     pred = _PredState(X, Z_sp, re_terms)
     resp = _GlmResponse(Poisson(), y_arr)
 
-    # Mirror the R script's full lme4 sequence: (a) init PIRLS via
-    # mkGlmerDevfun(nAGQ=0) with joint solve, (b) one call to the Stage 0
-    # closure at θ̂, (c) updateGlmerDevfun(nAGQ=1) re-snapshots lp0 from
-    # post-step-(b) state, then dev_stage1 uses that lp0. Without step (b)
-    # the Stage 1 lp0 captures state at θ₀ instead of θ̂, and PIRLS in the
-    # Stage 1 closure follows a different iteration trajectory.
     _pwrss_update(pred, resp, u_only=False, tol=1e-7, maxit=100)
     devfun_stage0 = _glmm_devfun_factory(pred, resp, nagq=0)
     devfun_stage0(theta_hat)
@@ -694,12 +556,7 @@ def test_devfun_stage1_matches_lme4_poisson():
 
 
 def test_devfun_factory_pure_function_property():
-    """Calling devfun(θ) twice with the same arg must give the same value.
-
-    Each call resets PIRLS to the snapshotted ``lp0``, so the optimizer
-    can rely on devfun being a pure function of its argument regardless
-    of how many times it was called or with what intermediate values.
-    """
+    """Calling devfun(θ) twice with the same arg must give the same value."""
     df = _synthetic_poisson_grouped(seed=42)
     X, y_arr, Z_sp, re_terms, _ = _build_design_pieces("y ~ x + (1|g)", df)
     pred = _PredState(X, Z_sp, re_terms)
@@ -709,8 +566,6 @@ def test_devfun_factory_pure_function_property():
     devfun_stage0 = _glmm_devfun_factory(pred, resp, nagq=0)
     theta_a = np.array([0.5])
     theta_b = np.array([1.3])
-    # Probe values in a noisy interleaved order so any state-carryover bug
-    # would show up as a mismatch on the repeat.
     d_a_1 = devfun_stage0(theta_a)
     d_b = devfun_stage0(theta_b)
     d_a_2 = devfun_stage0(theta_a)
@@ -721,30 +576,15 @@ def test_devfun_factory_pure_function_property():
 def test_devfun_stage1_with_empty_fixef_slice():
     """When the model has no fixed effects (p=0), the Stage-1 closure must
     handle the empty β slice without trying to do ``X @ empty``.
-
-    R recipe (seed=7 / n_groups=8 / n_per=5 synthetic Poisson grouped data)::
-        m <- glmer(y ~ 0 + (1|g), data=d, family=poisson())
-        theta_hat <- getME(m, "theta"); beta_hat <- getME(m, "beta")
-        glmod <- glFormula(y ~ 0 + (1|g), data=d, family=poisson())
-        dev0  <- mkGlmerDevfun(glmod$fr, glmod$X, glmod$reTrms,
-                               family=poisson(), nAGQ=0)
-        dev1  <- updateGlmerDevfun(dev0, glmod$reTrms, nAGQ=1L)
-        dev1(c(theta_hat, beta_hat))
     """
     df = _synthetic_poisson_grouped(seed=7, n_groups=8, n_per=5)
     theta_hat = np.array([0.7368656664375749])
     dev1_r = 136.7418329949486804
 
-    # polars to_numpy on a 0-column DataFrame returns shape (0, 0) — work
-    # around by building X explicitly. The rest of _build_design_pieces is
-    # still usable for y/Z.
     _, y_arr, Z_sp, re_terms, _ = _build_design_pieces("y ~ 0 + (1|g)", df)
     X = np.zeros((df.height, 0), dtype=float)
     pred = _PredState(X, Z_sp, re_terms)
     resp = _GlmResponse(Poisson(), y_arr)
-    # The R recipe does NOT call dev0(theta_hat) between mkGlmerDevfun and
-    # updateGlmerDevfun, so Stage 1's lp0 is captured right after the init
-    # PIRLS at θ₀. Match that — single init pass then Stage 1 factory.
     _pwrss_update(pred, resp, u_only=False, tol=1e-7, maxit=100)
 
     devfun_stage1 = _glmm_devfun_factory(pred, resp, nagq=1)
@@ -752,23 +592,6 @@ def test_devfun_stage1_with_empty_fixef_slice():
     assert dev_hea == pytest.approx(dev1_r, rel=1e-9, abs=1e-9)
 
 
-# ----------------------------------------------------------------------
-# Full glmer fit — tests the public ``hea.models.gmm(..., family=...)``
-# entry point against ``lme4::glmer``. ≤ 1e-7 on θ̂, β̂; ≤ 1e-9 on the
-# Laplace deviance (since deviance evaluation is exact given converged
-# parameters).
-# ----------------------------------------------------------------------
-
-
-# lme4 reference values for ``glmer(y ~ x + (1|g), poisson, data=...)`` on
-# the seed-2026 synthetic Poisson grouped data with both Stage-0 and
-# Stage-1 optimizers set to ``Nelder_Mead`` (lme4 defaults to bobyqa for
-# Stage 0). Used by the Poisson full-fit test below.
-#
-# R recipe (same data as ``_GLMER_DEVFUN_POISSON_REF``)::
-#     m <- glmer(y ~ x + (1|g), data=d, family=poisson(),
-#                control=glmerControl(
-#                    optimizer=c("Nelder_Mead", "Nelder_Mead")))
 _GLMER_POISSON_FULLFIT_REF = {
     "theta": np.array(
         [
@@ -790,13 +613,7 @@ _GLMER_POISSON_FULLFIT_REF = {
 
 
 def test_glmer_poisson_full_fit_matches_lme4():
-    """Full ``hea.models.gmm(..., family=poisson())`` fit ≡ ``lme4::glmer(..., family=poisson)``.
-
-    Compared to ``lme4::glmer`` with its default optimizer chain
-    ``optimizer=c("bobyqa", "Nelder_Mead")`` — both stages of hea use the
-    ported BOBYQA + Nelder-Mead implementations. Tolerance ≤ 1e-7 on
-    θ̂/β̂ — anything looser would mask actual bugs.
-    """
+    """Full ``hea.models.gmm(..., family=poisson())`` fit ≡ ``lme4::glmer(..., family=poisson)``."""
     from hea.family import Poisson as PoissonFamily
     from hea.models.gmm import gmm  # local import — keep test file's top imports lean
 
@@ -807,17 +624,11 @@ def test_glmer_poisson_full_fit_matches_lme4():
 
     np.testing.assert_allclose(m.theta, r["theta"], atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m._beta, r["beta"], atol=1e-7, rtol=1e-7)
-    # ``deviance(m)`` for glmer fits = residual deviance (= Σ dev_resids),
-    # NOT the Laplace value. The Laplace value is on ``deviance_laplace``.
-    # deviance/laplace/AIC/BIC: rtol 1e-7 — the glmer θ̂/β̂ match lme4 to
-    # ~1e-8 but these criterion-scale quantities amplify that to ~rel 2.6e-8
-    # (optimizer stop-band on this data); θ̂/β̂ themselves stay tight above.
     np.testing.assert_allclose(m.deviance, r["deviance"], atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m.deviance_laplace, r["laplace"], atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m.AIC, r["aic"], atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m.BIC, r["bic"], atol=1e-7, rtol=1e-7)
     assert m.sigma == pytest.approx(r["sigma"])  # = 1 for Poisson
-    # Public-API check: bhat as a DataFrame with R-canonical column names.
     assert m.bhat.columns == ["(Intercept)", "x"]
     np.testing.assert_allclose(
         m.bhat.row(0),
@@ -828,18 +639,7 @@ def test_glmer_poisson_full_fit_matches_lme4():
 
 
 def test_glmer_binomial_full_fit_matches_lme4_cbpp():
-    """Full ``hea.gmm`` fit on cbpp matches ``lme4::glmer(family=binomial)``.
-
-    cbpp is the canonical lme4 GLMM example. Uses proportion response
-    (incidence/size) with binomial weights (size).
-
-    R recipe (lme4 defaults — ``optimizer=c("bobyqa","Nelder_Mead")``)::
-        suppressMessages(library(lme4)); data(cbpp)
-        m <- glmer(cbind(incidence, size-incidence) ~ period + (1|herd),
-                   data=cbpp, family=binomial())
-        # captured getME(m, "theta"), getME(m, "beta"),
-        # -2*as.numeric(logLik(m)), deviance(m)
-    """
+    """Full ``hea.gmm`` fit on cbpp matches ``lme4::glmer(family=binomial)``."""
     from hea import data as hea_data
     from hea.family import Binomial as BinomialFamily
     from hea.models.gmm import gmm
@@ -867,31 +667,16 @@ def test_glmer_binomial_full_fit_matches_lme4_cbpp():
 
     np.testing.assert_allclose(m.theta, theta_r, atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m._beta, beta_r, atol=1e-7, rtol=1e-7)
-    # Residual deviance is Σ_i dev_resid_i over 56 binomial contributions
-    # — a BLAS-touched reduction. The references were dumped on R-Intel-MKL;
-    # OpenBLAS-on-Linux-CI drifts by ~1e-7 abs (well below the 1e-5 floor
-    # the user policy guards). Same fit; identical algorithm; FP-rounding-
-    # order intrinsic.
     np.testing.assert_allclose(m.deviance, dev_r, atol=1e-6, rtol=1e-7)
     np.testing.assert_allclose(m.deviance_laplace, laplace_r, atol=1e-6, rtol=1e-7)
 
 
 def test_glmer_intercept_only_poisson():
-    """No fixed effects (p=0) → Stage 1 has empty β slice, optimize θ only.
-
-    Edge case: Stage 1's par vector is just θ. lme4 happily fits these too;
-    we should match.
-
-    R recipe (seed=11 / n_groups=8 / n_per=5 synthetic data)::
-        m <- glmer(y ~ 0 + (1|g), data=d, family=poisson(),
-                   control=glmerControl(
-                       optimizer=c("Nelder_Mead","Nelder_Mead")))
-    """
+    """No fixed effects (p=0) → Stage 1 has empty β slice, optimize θ only."""
     from hea.family import Poisson as PoissonFamily
     from hea.models.gmm import gmm
 
     df = _synthetic_poisson_grouped(seed=11, n_groups=8, n_per=5)
-    # R defaults: bobyqa + Nelder_Mead.
     theta_r = np.array([0.53024471740897927])
     laplace_r = 119.792872854065422
 
@@ -922,11 +707,6 @@ def test_glmer_nagq0_init_step_false_runs_stage1_directly():
 
     assert m_default._optim_stage0 is not None
     assert m_no_stage0._optim_stage0 is None
-    # Without Stage 0 warm-up, Stage 1 starts cold (β=0); Nelder-Mead is
-    # derivative-free and gets stuck at slightly different simplex
-    # configurations within its xtol band when starting cold vs warm.
-    # That's expected — the warm-started path (default) is more numerically
-    # accurate. ~1e-3 is the realistic agreement.
     np.testing.assert_allclose(
         m_default.theta,
         m_no_stage0.theta,
@@ -950,7 +730,6 @@ def test_glmer_start_numeric_overrides_theta():
 
     df = _synthetic_poisson_grouped(seed=2026)
     m_default = gmm("y ~ x + (1|g)", df, family=PoissonFamily())
-    # Start from a different θ — should still find the same optimum.
     m_alt = gmm(
         "y ~ x + (1|g)",
         df,
@@ -1021,22 +800,6 @@ def test_glmer_start_validation_errors():
         )  # wrong p
 
 
-# ----------------------------------------------------------------------
-# Post-fit attributes (fitted, residuals, ranef, vcov_beta, ...)
-# Each attribute pinned against the corresponding ``lme4::glmer`` getter.
-# ----------------------------------------------------------------------
-
-
-# Phase-6 attribute pins for ``glmer(y ~ x + (1|g), poisson)`` on the
-# seed-2026 synthetic data. Captured locally; reproducible from the same
-# R recipe used by ``_GLMER_POISSON_FULLFIT_REF`` plus::
-#     fitted(m); predict(m, type="link")
-#     residuals(m, type="deviance" | "pearson" | "working" | "response")
-#     m@resp$sqrtXwt^2; m@resp$weights
-#     AIC(m); BIC(m); sigma(m)
-#     vcov(m)                      # default = Hessian-based (calc.derivs=TRUE)
-#     VarCorr(m)$g                 # per-bar SD
-#     ranef(m)$g                   # BLUPs
 _GLMER_PHASE6_POISSON_REF = {
     "theta": np.array(
         [
@@ -1641,20 +1404,10 @@ def test_glmer_phase6_attrs_match_lme4_poisson():
     r = _GLMER_PHASE6_POISSON_REF
     m = gmm("y ~ x + (1|g)", df, family=PoissonFamily())
 
-    # Linear predictor / fitted values. The reference is R-on-Intel and we
-    # run on arbitrary platforms. Audit (2026-05) verified that scipy.sparse
-    # `@` matches Eigen3's Gustavson at 0 ULP, sqrt_x_wt's 4-op chain matches
-    # R at 0 ULP, and np.cumsum tracks R's deviance() within ~1 ULP on
-    # n=1934. The remaining floor is CHOLMOD-internal accumulator noise
-    # (~2 ULP per factorization) plus bobyqa's rhoend-tolerance walk
-    # (~5e-8 in θ̂), which compounds through PIRLS into ~1e-9 abs on η and
-    # ~1e-7 rel on residuals/AIC. R itself has the same cross-arch drift
-    # on this fit (verified arm64↔x86_64). Pin at 1e-7.
     np.testing.assert_allclose(m.eta, r["eta"], atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m.mu, r["mu"], atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m.fitted_values, r["mu"], atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m.linear_predictors, r["eta"], atol=1e-7, rtol=1e-7)
-    # Residuals — all four types.
     np.testing.assert_allclose(m.residuals, r["res_dev"], atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(
         m.residuals_of("deviance"), r["res_dev"], atol=1e-7, rtol=1e-7
@@ -1668,33 +1421,17 @@ def test_glmer_phase6_attrs_match_lme4_poisson():
     np.testing.assert_allclose(
         m.residuals_of("response"), r["res_response"], atol=1e-7, rtol=1e-7
     )
-    # Working weights = sqrt_x_wt² — matches lme4's m@resp$sqrtXwt^2.
     np.testing.assert_allclose(
         m.working_weights, r["working_wts"], atol=1e-7, rtol=1e-7
     )
-    # Prior weights = the user-supplied ``weights=`` (1s when not given).
     np.testing.assert_allclose(m.prior_weights, r["prior_wts"], atol=1e-12, rtol=1e-12)
-    # Summary statistics.
     np.testing.assert_allclose(m.AIC, r["aic"], atol=1e-7, rtol=1e-7)
     np.testing.assert_allclose(m.BIC, r["bic"], atol=1e-7, rtol=1e-7)
     assert m.sigma == pytest.approx(r["sigma"])
-    # SE(β̂), t-values and vcov are all derived from the Hessian-based vcov,
-    # computed by deriv12 (central differences, δ=1e-4) on the Stage-1 closure:
-    # the FD formula ``(f+ − 2f₀ + f−)/δ²`` divides a ~3e-9-scale second
-    # difference by 1e-8 — ~11 digits of catastrophic cancellation. That FD
-    # floor sits ON TOP OF the glmer flat-optimum θ̂-wander, which differs across
-    # BLAS/LAPACK builds (CI Linux OpenBLAS vs the reference); the vcov, being an
-    # inverse Hessian, amplifies it. A measured CI flip on vcov[0,0] (≈0.105) was
-    # 1.7e-6 rel — so this Hessian-derived TRIO (se/t/vcov) is pinned at
-    # rtol=1e-5 (≈6× margin), distinct from the well-determined quantities above
-    # which stay at 1e-7. (T4 — bit-exact reference-BLAS linalg — would remove
-    # this cross-platform drift; held for now.)
     np.testing.assert_allclose(m._se_beta, r["se_beta"], atol=1e-9, rtol=1e-5)
     np.testing.assert_allclose(m.t_values.row(0), r["t_value"], atol=1e-7, rtol=1e-5)
     np.testing.assert_allclose(m._vcov_beta_arr, r["vcov"], atol=5e-9, rtol=1e-5)
-    # Variance components: SD per bar.
     np.testing.assert_allclose(m.sd_re["g"], r["sd_re_g"], atol=1e-9, rtol=1e-7)
-    # method string.
     assert m.method == "glmer.ML"
 
 
@@ -1706,7 +1443,6 @@ def test_glmer_phase6_ranef_match_lme4_poisson():
     df = _synthetic_poisson_grouped(seed=2026)
     m = gmm("y ~ x + (1|g)", df, family=PoissonFamily())
     rf = m.ranef()
-    # Single bar named ``g`` — match the BLUPs column-by-column.
     assert "g" in rf
     blups_py = rf["g"]["(Intercept)"].to_numpy()
     np.testing.assert_allclose(
@@ -1718,13 +1454,7 @@ def test_glmer_phase6_ranef_match_lme4_poisson():
 
 
 def test_glmer_phase6_attrs_match_lme4_binomial_cbpp():
-    """cbpp binomial — verify per-period β̂ SE/t, sd_re, deviance breakdown.
-
-    R recipe (same fit as ``test_glmer_binomial_full_fit_matches_lme4_cbpp``)::
-        vc_rx <- as.matrix(suppressWarnings(vcov(m, use.hessian=FALSE)))
-        # captured AIC, deviance, -2*logLik, sigma, sqrt(diag(vc_rx)),
-        # attr(VarCorr(m)$herd, "stddev")
-    """
+    """cbpp binomial — verify per-period β̂ SE/t, sd_re, deviance breakdown."""
     from hea import data as hea_data
     from hea.family import Binomial as BinomialFamily
     from hea.models.gmm import gmm
@@ -1740,7 +1470,6 @@ def test_glmer_phase6_attrs_match_lme4_binomial_cbpp():
     dev_r = 73.47428361870440483017
     aic_r = 194.0531327790863542759
     sigma_r = 1.0
-    # ``vcov(m)`` — default Hessian-based.
     se_beta_r = np.array(
         [
             0.2312140667690355255726,
@@ -1752,33 +1481,16 @@ def test_glmer_phase6_attrs_match_lme4_binomial_cbpp():
     sd_herd_r = np.array([0.6420699254034050174056])
 
     m = gmm("y_prop ~ period + (1|herd)", df, family=BinomialFamily(), weights=size)
-    # Reference dumped on R-Intel-MKL; OpenBLAS-on-Linux-CI drifts ~1e-7 abs
-    # on these BLAS-touched reductions. Same algorithm; FP-rounding-order
-    # intrinsic. Pin at the documented 1e-7-rel floor.
     assert m.deviance_laplace == pytest.approx(laplace_r, rel=1e-7, abs=1e-6)
     assert m.deviance == pytest.approx(dev_r, rel=1e-7, abs=1e-6)
     assert m.AIC == pytest.approx(aic_r, rel=1e-7, abs=1e-6)
     assert m.sigma == pytest.approx(sigma_r)  # = 1
-    # See test_glmer_phase6_attrs_match_lme4_poisson for the deriv12
-    # cancellation floor that drives the SE tolerance here.
     np.testing.assert_allclose(m._se_beta, se_beta_r, atol=1e-9, rtol=2e-6)
     np.testing.assert_allclose(m.sd_re["herd"], sd_herd_r, atol=1e-9, rtol=1e-7)
 
 
 def test_glmer_phase6_sigma_for_scale_unknown_family():
-    """Scale-unknown families (Gamma) report a Pearson dispersion estimate.
-
-    For canonical-link scale-known (Poisson, Binomial), ``m.sigma == 1``.
-    For scale-unknown (Gamma, Inverse-Gaussian, etc.), ``m.sigma`` =
-    ``sqrt(sum(w·(y−μ)²/V(μ)) / df_resid)`` — Pearson estimate.
-
-    R recipe (synthetic seed=11 / n_groups=10 / n_per=6 Gamma(log) data)::
-        m <- glmer(y ~ x + (1|g), data=d, family=Gamma(link="log"),
-                   control=glmerControl(
-                       optimizer=c("Nelder_Mead","Nelder_Mead")))
-        sqrt(sum(residuals(m,"pearson")^2)/(nrow(d)-2))  # → 0.4140884...
-        # (lme4's own sigma(m) = 0.4477 uses a different scale convention)
-    """
+    """Scale-unknown families (Gamma) report a Pearson dispersion estimate."""
     from hea.family import Gamma as GammaFamily
     from hea.models.gmm import gmm
     from hea.R.rng import RGenerator
@@ -1789,57 +1501,21 @@ def test_glmer_phase6_sigma_for_scale_unknown_family():
     g = np.repeat(np.arange(n_groups), n_per)
     x = gen.normal(0, 1, n)
     b = gen.normal(0, 1, n_groups) * 0.3
-    # Generate positive responses with mean linked to log(eta).
     eta = 1.0 + 0.2 * x + b[g]
     mu = np.exp(eta)
     y = gen.gamma(4.0, scale=mu / 4.0, size=n)
     df = pl.DataFrame({"y": y, "x": x, "g": [f"G{gi:02d}" for gi in g]})
 
-    # Pearson dispersion sqrt(Σ pearson²/(n−p)) from the lme4 fit (R:
-    # sqrt(sum(residuals(m,"pearson")^2)/(nrow(d)-2))). NOTE: lme4's own
-    # sigma(m) uses a different (profiled-scale) convention — 0.4477 here —
-    # which only coincided with Pearson on the previous data; hea reports
-    # the Pearson estimate, so pin to that.
     sigma_r = 0.41408845
 
     from hea.family import LogLink
 
     m = gmm("y ~ x + (1|g)", df, family=GammaFamily(link=LogLink()))
-    # σ should be the Pearson estimate, not 1. Tolerance loose since
-    # Nelder-Mead doesn't drive Gamma fits to byte-equal endpoints.
     assert m.sigma > 0.0 and m.sigma != 1.0
     np.testing.assert_allclose(m.sigma, sigma_r, atol=1e-3, rtol=1e-3)
-    # npar formula: p + n_theta + useSc (=1 for unknown-scale).
     assert m.npar == m.p + len(m.theta) + 1
 
 
-# ----------------------------------------------------------------------
-# GLMM predict — type, re.form, random.only, allow.new.levels,
-# se.fit. Pinned against ``lme4::predict.merMod``.
-# ----------------------------------------------------------------------
-
-
-# lme4 reference values for ``predict(m, ...)`` on the same Poisson fit
-# used by ``_GLMER_POISSON_FULLFIT_REF``. Each entry is the output of
-# ``predict(m, ...)`` for a specific arg combination; ``SE_*`` are the
-# ``se.fit`` companion arrays.
-#
-# R recipe::
-#     m <- glmer(y ~ x + (1|g), data=d, family=poisson(),
-#                control=glmerControl(
-#                    optimizer=c("Nelder_Mead","Nelder_Mead")))
-#     predict(m, type="link")                       # → FIT_LINK
-#     predict(m, type="response")                   # → FIT_RESPONSE
-#     predict(m, newdata=nd, type="response")       # → FIT_NEWDATA (see below)
-#     predict(m, re.form=~0, type="response")       # → FIT_NORE
-#     predict(m, type="link", random.only=TRUE)     # → FIT_RANDOM
-#     out <- predict(m, type="link",     se.fit=TRUE)  # → SE_LINK_*
-#     out <- predict(m, type="response", se.fit=TRUE)  # → SE_RESP_*
-#
-# newdata::  nd <- data.frame(
-#                x = c(-1.0, 0.0, 1.0, -0.5, 0.5, 0.0),
-#                g = factor(c("G00","G05","G11","G00","G05","G11"),
-#                           levels=levels(d$g)))
 _GLMER_PREDICT_POISSON_REF = {
     "fit_link": np.array(
         [
@@ -2311,10 +1987,7 @@ _GLMER_PREDICT_POISSON_REF = {
 
 
 def test_glmer_predict_link_and_response_match_lme4_poisson():
-    """``predict(m, type="link")`` returns η; ``type="response"`` returns μ.
-
-    For Poisson(log): ``μ = exp(η)``. Pin both against ``lme4::predict``.
-    """
+    """``predict(m, type="link")`` returns η; ``type="response"`` returns μ."""
     from hea.family import Poisson as PoissonFamily
     from hea.models.gmm import gmm
 
@@ -2335,7 +2008,6 @@ def test_glmer_predict_link_and_response_match_lme4_poisson():
         atol=1e-7,
         rtol=1e-7,
     )
-    # Consistency: μ = linkinv(η) = exp(η) for Poisson(log).
     np.testing.assert_allclose(
         p_resp["fit"].to_numpy(),
         np.exp(p_link["fit"].to_numpy()),
@@ -2352,7 +2024,6 @@ def test_glmer_predict_newdata_matches_lme4_poisson():
     df = _synthetic_poisson_grouped(seed=2026)
     m = gmm("y ~ x + (1|g)", df, family=PoissonFamily())
 
-    # 6 rows over 3 known groups — see ``_GLMER_PREDICT_POISSON_REF`` recipe.
     nd_x = np.array([-1.0, 0.0, 1.0, -0.5, 0.5, 0.0])
     nd_g = ["G00", "G05", "G11", "G00", "G05", "G11"]
     nd_df = pl.DataFrame({"y": np.zeros(len(nd_x)), "x": nd_x, "g": nd_g})
@@ -2391,18 +2062,14 @@ def test_glmer_predict_allow_new_levels_matches_lme4():
     df = _synthetic_poisson_grouped(seed=2026)
     m = gmm("y ~ x + (1|g)", df, family=PoissonFamily())
 
-    # Mix existing + brand-new levels.
     nd_x = np.array([0.5, 0.0, -0.5, 0.5])
     nd_g = ["G00", "NEWGROUP1", "NEWGROUP2", "G05"]
     nd_df = pl.DataFrame({"y": np.zeros(len(nd_x)), "x": nd_x, "g": nd_g})
 
-    # Default ``allow_new_levels=False`` should raise.
     with pytest.raises(ValueError, match="new level"):
         m.predict(nd_df)
 
-    # With ``allow_new_levels=True``: new levels → b=0 → population mean.
     p = m.predict(nd_df, allow_new_levels=True, type="response")
-    # For the new levels, expectation equals exp(X·β + 0).
     eta_pop = nd_df.select(pl.col("x")).to_numpy().ravel() * m._beta[1] + m._beta[0]
     new_rows = [1, 2]
     np.testing.assert_allclose(
@@ -2414,12 +2081,7 @@ def test_glmer_predict_allow_new_levels_matches_lme4():
 
 
 def test_glmer_predict_se_fit_link_matches_lme4_poisson():
-    """``se.fit`` on link scale matches lme4 at ≤ 1e-7.
-
-    lme4's ``vcov_full`` builds (b, β) covariance via the L / RX / RZX
-    factors. We build the same M densely and solve — equivalent algebra,
-    same machinery as the LMM se.fit path with working weights added.
-    """
+    """``se.fit`` on link scale matches lme4 at ≤ 1e-7."""
     from hea.family import Poisson as PoissonFamily
     from hea.models.gmm import gmm
 
@@ -2465,11 +2127,7 @@ def test_glmer_predict_se_fit_response_matches_lme4_poisson():
 
 
 def test_glmer_predict_random_only_matches_lme4_poisson():
-    """``random.only=True`` returns Z·b on the link scale (no X·β, no offset).
-
-    Tolerance covers cross-BLAS drift in the Z·b dense multiplication path
-    (~3e-9 abs Linux-OpenBLAS vs reference).
-    """
+    """``random.only=True`` returns Z·b on the link scale (no X·β, no offset)."""
     from hea.family import Poisson as PoissonFamily
     from hea.models.gmm import gmm
 
@@ -2485,18 +2143,8 @@ def test_glmer_predict_random_only_matches_lme4_poisson():
     )
 
 
-# ======================================================================
-# Argument plumbing & validation
-# ======================================================================
-
-
 def test_deriv12_quadratic_matches_lme4():
-    """Smooth quadratic — gradient and Hessian are exact at any step.
-
-    R recipe::
-        fn <- function(x) (x[1]-2)^2 + 3*(x[2]+1)^2 + x[1]*x[2]
-        lme4:::deriv12(fn, c(0.5, -0.3))
-    """
+    """Smooth quadratic — gradient and Hessian are exact at any step."""
 
     def py_fn(x):
         return float((x[0] - 2.0) ** 2 + 3.0 * (x[1] + 1.0) ** 2 + x[0] * x[1])
@@ -2504,7 +2152,6 @@ def test_deriv12_quadratic_matches_lme4():
     x0 = np.array([0.5, -0.3])
     g_py, H_py = _deriv12(py_fn, x0)
     expected_grad = np.array([-3.2999999999994145, 4.6999999999974840])
-    # Hessian flattened in R's column-major order.
     expected_hess = np.array(
         [
             [1.9999999403953552, 1.0000000000000000],
@@ -2516,12 +2163,7 @@ def test_deriv12_quadratic_matches_lme4():
 
 
 def test_deriv12_rosenbrock_matches_lme4():
-    """Non-quadratic — central differences should still byte-match.
-
-    R recipe::
-        fn <- function(x) 100 * (x[2] - x[1]^2)^2 + (1 - x[1])^2
-        lme4:::deriv12(fn, c(0.7, 0.4))
-    """
+    """Non-quadratic — central differences should still byte-match."""
 
     def py_fn(x):
         return float(100.0 * (x[1] - x[0] ** 2) ** 2 + (1.0 - x[0]) ** 2)
@@ -2540,13 +2182,7 @@ def test_deriv12_rosenbrock_matches_lme4():
 
 
 def test_deriv12_bound_shrinks_step_matches_lme4():
-    """Optimum near upper bound — udelta shrinks; asymmetric central diff.
-
-    R recipe::
-        fn <- function(x) (x[1]-0.99995)^2 + (x[2]+0.5)^2
-        lme4:::deriv12(fn, c(0.99995, 0.0),
-                       lower=c(0, NA_real_), upper=c(1, NA_real_))
-    """
+    """Optimum near upper bound — udelta shrinks; asymmetric central diff."""
 
     def py_fn(x):
         return float((x[0] - 0.99995) ** 2 + (x[1] + 0.5) ** 2)
@@ -2567,12 +2203,7 @@ def test_deriv12_bound_shrinks_step_matches_lme4():
 
 
 def test_deriv12_1d_matches_lme4():
-    """1D objective — Hessian is a 1×1 matrix, no off-diagonal loop.
-
-    R recipe::
-        fn <- function(x) exp(0.3 * x[1]) - 2 * x[1]
-        lme4:::deriv12(fn, c(1.5))
-    """
+    """1D objective — Hessian is a 1×1 matrix, no off-diagonal loop."""
 
     def py_fn(x):
         return float(np.exp(0.3 * x[0]) - 2.0 * x[0])
@@ -2583,11 +2214,6 @@ def test_deriv12_1d_matches_lme4():
     expected_hess = np.array([[0.1411481499671936]])
     np.testing.assert_allclose(g_py, expected_grad, atol=1e-10, rtol=1e-10)
     np.testing.assert_allclose(H_py, expected_hess, atol=1e-10, rtol=1e-10)
-
-
-# ----------------------------------------------------------------------
-# 8.10 — family= validation
-# ----------------------------------------------------------------------
 
 
 def test_family_validation_accepts_instance():
@@ -2663,11 +2289,6 @@ def test_family_validation_rejects_garbage_input():
         _resolve_lme_family(42)
 
 
-# ----------------------------------------------------------------------
-# 8.11 — nAGQ validation
-# ----------------------------------------------------------------------
-
-
 def test_nAGQ_validation_accepts_0_and_1():
     """Both Laplace (1) and θ-only (0) are supported now."""
     from hea.models.gmm import _validate_nagq
@@ -2705,11 +2326,6 @@ def test_nAGQ_validation_rejects_non_integer():
         _validate_nagq("not-a-number")
 
 
-# ----------------------------------------------------------------------
-# 9.1 — GHrule: Gauss-Hermite quadrature nodes/weights (nAGQ>1)
-# Reference values from ``lme4:::GHrule(n)`` (lme4 2.0-2), columns (z, w, ldnorm).
-# ----------------------------------------------------------------------
-
 _GHRULE_REF = {
     1: [(0.0, 1.0, -0.918938533204673)],
     2: [(-1.0, 0.5, -1.41893853320467), (1.0, 0.5, -1.41893853320467)],
@@ -2730,11 +2346,7 @@ _GHRULE_REF = {
 
 @pytest.mark.parametrize("n", [1, 2, 3, 5])
 def test_gh_rule_matches_lme4_table(n):
-    """``_gh_rule(n)`` reproduces ``lme4:::GHrule(n)`` (z, w, ldnorm) columns.
-
-    atol carries the near-zero middle node of odd rules (scipy vs lme4 differ
-    at ~1e-16 there); rtol pins the O(1) nodes/weights.
-    """
+    """``_gh_rule(n)`` reproduces ``lme4:::GHrule(n)`` (z, w, ldnorm) columns."""
     from hea.models.gmm import _gh_rule
 
     got = _gh_rule(n)
@@ -2767,7 +2379,6 @@ def test_gh_rule_spot_checks_high_order():
         rtol=1e-9,
         atol=1e-20,
     )
-    # central weight (row 13, 1-based) of the order-25 rule
     np.testing.assert_allclose(r25[12, 1], 0.248169351176485, rtol=1e-9)
 
 
@@ -2780,7 +2391,6 @@ def test_gh_rule_structural_properties(n):
     z, w, ldnorm = r[:, 0], r[:, 1], r[:, 2]
     assert r.shape == (n, 3)
     np.testing.assert_allclose(w.sum(), 1.0, rtol=0, atol=1e-12)
-    # forward/reverse symmetry (the lme4 #968 symmetrization guarantees it)
     np.testing.assert_allclose(z, -z[::-1], rtol=0, atol=1e-13)
     np.testing.assert_allclose(w, w[::-1], rtol=0, atol=1e-15)
     np.testing.assert_allclose(
@@ -2798,14 +2408,6 @@ def test_gh_rule_order_zero_and_out_of_range():
     with pytest.raises(ValueError, match=r"\[0, 100\]"):
         _gh_rule(-1)
 
-
-# ----------------------------------------------------------------------
-# 9.2–9.5 — nAGQ>1 adaptive Gauss-Hermite end-to-end (cbpp binomial).
-# References from ``lme4::glmer(cbind(incidence, size-incidence) ~ period +
-# (1|herd), cbpp, binomial(), nAGQ=k)`` (lme4 2.0-2, default optimizer chain).
-# ``lap`` = -2*logLik(m): on the aic scale at nAGQ=1 (glmerLaplace), on the
-# deviance scale at nAGQ>1 (glmerAGQ) — the ~84 jump is lme4's own behaviour.
-# ----------------------------------------------------------------------
 
 _CBPP_AGQ_REF = {
     1: {
@@ -2842,12 +2444,7 @@ def cbpp_frame():
 
 @pytest.mark.parametrize("k", [1, 5, 25])
 def test_glmer_cbpp_agq_matches_lme4(cbpp_frame, k):
-    """nAGQ ∈ {1, 5, 25} on cbpp matches ``lme4::glmer(..., nAGQ=k)``.
-
-    θ̂/β̂ and the AGQ-corrected -2logL pin to lme4 at ~1e-9 (cbpp is a
-    well-conditioned surface). Residual deviance is a BLAS-touched reduction —
-    1e-6 abs covers OpenBLAS-vs-MKL FP-order drift.
-    """
+    """nAGQ ∈ {1, 5, 25} on cbpp matches ``lme4::glmer(..., nAGQ=k)``."""
     from hea.family import Binomial
     from hea.models.gmm import gmm
 
@@ -2883,7 +2480,6 @@ def test_glmer_agq_deviance_decreases_with_nagq(cbpp_frame):
         ).deviance_laplace
         for k in (5, 10)
     }
-    # k=5 → k=10 is a clean ~1.3e-3 decrease, well above optimizer noise.
     assert lap[5] > lap[10]
 
 
@@ -2907,12 +2503,6 @@ def test_glmer_agq_rejects_non_scalar_re():
         gmm("y ~ x + (1|a) + (1|b)", df, family=Binomial(), nAGQ=3)
     with pytest.raises(ValueError, match="single, scalar random-effects term"):
         gmm("y ~ x + (1 + x|a)", df, family=Binomial(), nAGQ=3)
-
-
-# ----------------------------------------------------------------------
-# 8.15 — pre-fit identifiability / response validation (checkNlevels /
-# checkZdims / checkZrank / checkResponse — modular.R lFormula/glFormula).
-# ----------------------------------------------------------------------
 
 
 def _pois_df(n, glevels, *, const_y=False, seed=0):
@@ -3053,7 +2643,6 @@ def test_gmm_checkscalex_warns_on_disparate_scales():
     )
     with pytest.warns(UserWarning, match="very different scales"):
         gmm("y ~ x1 + x2 + (1|g)", df, family=Poisson())
-    # 'ignore' suppresses it
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         gmm(
@@ -3174,9 +2763,6 @@ def test_gmm_simulate_shares_one_r_stream_with_set_seed():
         "set_seed(k); simulate() must equal simulate(seed=k) — one R stream"
     )
 
-    # simulate(seed=k) and set_seed(k) leave the stream in the identical state,
-    # and runif() reads that very same stream (cross-module): same prefix → same
-    # continuation, deterministically.
     R.set_seed(314)
     m.simulate(nsim=4)
     a = np.asarray(R.runif(3))
@@ -3213,7 +2799,6 @@ def test_gmm_simulate_binomial_bernoulli_and_gaussian_sd():
     yg = 0.4 + 0.7 * x + b[g] + rng.normal(0, 0.5, ng * npg)
     mg = gmm("y ~ x + (1|g)", pl.DataFrame({"y": yg, "x": x, "g": g.astype(str)}))
     sg = mg.simulate(nsim=150, seed=5, use_u=True).to_numpy()
-    # residual SD of conditional draws ≈ σ̂
     np.testing.assert_allclose((sg - mg.fitted[:, None]).std(), mg.sigma, rtol=0.1)
 
 
@@ -3234,14 +2819,6 @@ def test_gmm_simulate_negative_binomial_counts():
 def test_boot_ci_conversions_match_boot_package():
     """``_norm_inter`` + the perc/basic/norm conversions byte-match R's
     ``boot::boot.ci`` (which ``confint.bootMer`` calls).
-
-    R recipe (reproduce the replicate vector with the bit-exact RNG)::
-        set.seed(7); t <- rnorm(500, 3.4, 0.8); t0 <- 3.5
-        b <- structure(list(t0=t0,t=matrix(t,ncol=1),R=500,sim="parametric"),
-                       class="boot")
-        sapply(c("perc","basic","norm"),
-               function(ty) boot.ci(b, type=ty)[[c(perc="percent",
-                   basic="basic",norm="normal")[[ty]]]])
     """
     from hea.models.gmm import _boot_ci_one
     from hea.R.rng import RMersenneTwister
@@ -3269,11 +2846,6 @@ def test_bootMer_sleepstudy_fixef_ci_matches_lme4():
     """``bootMer(m, fixef, nsim=20, seed=101)`` then percentile CI matches
     lme4 — the NLopt-BOBYQA fit makes simulate byte-exact, so the whole
     simulate→refit→boot.ci chain tracks lme4 to the CHOLMOD floor.
-
-    R recipe::
-        m <- lmer(Reaction ~ Days + (Days|Subject), sleepstudy)
-        b <- bootMer(m, function(x) fixef(x), nsim=20, seed=101, use.u=FALSE)
-        confint(b, type="perc")
     """
     m = gmm(
         "Reaction ~ Days + (Days|Subject)",
@@ -3305,7 +2877,6 @@ def test_bootMer_is_seed_reproducible():
     the BLAS cross-fit floor (~1e-12 — refits go through CHOLMOD/BLAS, whose
     reductions aren't bit-stable across separate fits)."""
     m = gmm("Yield ~ 1 + (1|Batch)", load_dataset("lme4", "Dyestuff"))
-    # the RNG-driven part is exactly reproducible
     s1 = m.simulate(nsim=15, seed=99).to_numpy()
     s2 = m.simulate(nsim=15, seed=99).to_numpy()
     np.testing.assert_array_equal(s1, s2)
@@ -3319,15 +2890,11 @@ def test_bootMer_is_seed_reproducible():
 
 
 def test_confint_wald_matches_lme4_dyestuff():
-    """``confint(method="Wald")`` — β̂ ± z·SE; NaN rows for variance comps.
-
-    R: ``confint(lmer(Yield ~ 1 + (1|Batch), Dyestuff), method="Wald")``.
-    """
+    """``confint(method="Wald")`` — β̂ ± z·SE; NaN rows for variance comps."""
     m = gmm("Yield ~ 1 + (1|Batch)", load_dataset("lme4", "Dyestuff"))
     ci = m.confint(method="Wald")
     row = ci.filter(pl.col("parameter") == "(Intercept)").row(0)
     np.testing.assert_allclose(row[1:], [1489.50921023, 1565.49078977], atol=1e-4)
-    # variance components are NaN under Wald
     sig = ci.filter(pl.col("parameter") == ".sig01").row(0)
     assert np.isnan(sig[1]) and np.isnan(sig[2])
 
@@ -3337,8 +2904,6 @@ def test_confint_boot_matches_lme4_dyestuff():
     bootstrap CIs (NLopt fit ⇒ simulate byte-exact). ``.sigma`` and the
     intercept pin tightly; ``.sig01``'s lower bound is a near-zero-variance
     boundary case (one replicate fits θ≈0) so only its upper bound is pinned.
-
-    R: ``confint(m, method="boot", nsim=100, seed=42, boot.type="perc")``.
     """
     m = gmm("Yield ~ 1 + (1|Batch)", load_dataset("lme4", "Dyestuff"))
     ci = m.confint(method="boot", nsim=100, seed=42, boot_type="perc")
@@ -3352,7 +2917,6 @@ def test_confint_boot_matches_lme4_dyestuff():
         [1486.1377486083, 1565.6216518725],
         atol=1e-3,
     )
-    # .sig01 upper bound (lower is a θ≈0 boundary flip vs R's exact 0)
     assert ci.filter(pl.col("parameter") == ".sig01").row(0)[2] == pytest.approx(
         69.1179477023, abs=1e-2
     )
@@ -3361,8 +2925,6 @@ def test_confint_boot_matches_lme4_dyestuff():
 def test_confint_profile_matches_lme4_dyestuff():
     """``confint(method="profile")`` (the default) inverts the profile-ζ
     curve — the canonical Dyestuff CIs (Bates §1.5).
-
-    R: ``confint(m)`` (default method="profile").
     """
     m = gmm("Yield ~ 1 + (1|Batch)", load_dataset("lme4", "Dyestuff"))
     ci = m.confint(method="profile")
@@ -3406,11 +2968,6 @@ def test_confint_profile_glmm_scale_known_matches_lme4_cbpp():
     constrained-Laplace profile (pin one param, re-optimise the rest over the
     Stage-1 ``[θ,β]`` devfun) matches lme4's ``confint(method="profile")`` to
     ~1e-3 (the profile-spline-inversion floor).
-
-    R recipe::
-        m <- glmer(cbind(incidence, size-incidence) ~ period + (1|herd),
-                   cbpp, binomial)
-        confint(m, method="profile")
     """
     d = load_dataset("lme4", "cbpp")
     df = d.with_columns((pl.col("incidence") / pl.col("size")).alias("yp"))
@@ -3433,26 +2990,9 @@ def test_confint_profile_glmm_scale_known_matches_lme4_cbpp():
     )
 
 
-# ----------------------------------------------------------------------
-# full-parity fixture matrix (named scenarios on vendored data).
-# Inline R recipes (the test-file convention); references from lme4 2.0-2.
-# ----------------------------------------------------------------------
-
-
 def test_glmer_salamander_crossed_re_binomial_matches_lme4():
     """Crossed-RE binomial — the canonical salamander mating model
     (the 'crossed REs' edge case + a binomial scenario).
-
-    R recipe::
-        m <- glmer(Mate ~ Cross + (1|Male) + (1|Female), salamander,
-                   family=binomial,
-                   control=glmerControl(optimizer=c("bobyqa","Nelder_Mead")))
-        getME(m,"theta"); fixef(m); AIC(m); logLik(m); deviance(m)
-        sqrt(diag(vcov(m)))
-
-    The deviance/AIC/logLik objective matches lme4 tightly (~1e-4); θ̂/β̂/SE
-    sit on the GLMM flat-surface eval-noise floor (~1e-4, the documented
-    Laplace optimiser floor — see the cm1–cm4 note above).
     """
     m = gmm(
         "Mate ~ Cross + (1|Male) + (1|Female)",
@@ -3461,11 +3001,9 @@ def test_glmer_salamander_crossed_re_binomial_matches_lme4():
     )
     assert m.n_groups == {"Male": 60, "Female": 60}
     assert m.npar == 6
-    # objective — tight
     assert m.AIC == pytest.approx(430.55321272338, abs=1e-3)
     assert m.loglike == pytest.approx(-209.27660636169, abs=1e-3)
     assert m.deviance == pytest.approx(280.05266923684, abs=5e-2)  # residual dev
-    # variance components (= θ since σ≡1 for binomial) + β̂ — flat-surface floor
     np.testing.assert_allclose(
         [m.sd_re["Male"][0], m.sd_re["Female"][0]],
         [1.02031290360, 1.08368233431],
@@ -3485,38 +3023,22 @@ def test_glmer_random_slope_poisson_singular_matches_lme4():
     """Vector-bar (random-slope) Poisson GLMM ``(1+x|g)`` — exercises the
     correlated-RE Laplace path AND a singular fit (θ on the
     boundary, corr → −1). hea lands on lme4's singular fit to ~1e-7.
-
-    Data: ``datasets/synthetic/seed_synth_vbar_poisson.csv`` (R seed 2024:
-    x=rnorm·0.6, b0=rnorm·0.5, b1=rnorm·0.3, y=rpois(exp(0.4+0.5x+b0+b1·x))).
-    R recipe::
-        m <- glmer(y ~ x + (1+x|g), d, family=poisson,
-                   control=glmerControl(optimizer=c("bobyqa","Nelder_Mead")))
-        getME(m,"theta"); fixef(m); AIC(m); logLik(m); isSingular(m)
     """
     import polars as pl
 
     d = pl.read_csv("datasets/synthetic/seed_synth_vbar_poisson.csv")
     m = gmm("y ~ x + (1+x|g)", d, family=Poisson())
-    # singular vector-bar fit is sharply determined → tight (~1e-7) parity
     np.testing.assert_allclose(
         m.theta, [0.13383940, -0.11718276, 3.4184318e-05], atol=1e-6
     )
     np.testing.assert_allclose(m._beta, [0.3396320812, 0.2940939975], atol=1e-6)
     assert m.AIC == pytest.approx(363.072516146, abs=1e-5)
     assert m.loglike == pytest.approx(-176.536258073, abs=1e-5)
-    # correlation driven to the −1 boundary (singular), matching lme4.
     assert m.corr_re["g"][0, 1] == pytest.approx(-0.99999996, abs=1e-6)
 
 
 def test_glmm_predicates_and_logLik_method():
-    """GLMM predicate surface + the logLik() method (gmm-lmer-parity #17/#19).
-
-    isGLMM=True / isLMM=isREML=isNLMM=False; a boundary GLMM is isSingular. The
-    logLik() METHOD must return the Laplace log-likelihood (= ``m.loglike`` =
-    −deviance_Laplace/2), NOT −residual_deviance/2 — this regression-locks the
-    GLMM branch fix (``self.deviance`` holds Σ deviance-residuals, a different
-    quantity). The hea.R generics route to the same answers.
-    """
+    """GLMM predicate surface + the logLik() method (gmm-lmer-parity #17/#19)."""
     import polars as pl
 
     from hea import R
@@ -3526,12 +3048,9 @@ def test_glmm_predicates_and_logLik_method():
     assert m.isGLMM() is True and m.isLMM() is False
     assert m.isREML() is False and m.isNLMM() is False
     assert m.isSingular() is True  # corr → −1 boundary
-    # logLik() == Laplace logLik (= loglike == −deviance_Laplace/2)
     assert m.logLik() == pytest.approx(m.loglike, abs=0)
     assert m.logLik() == pytest.approx(-0.5 * m.deviance_laplace, abs=0)
-    # the two deviances genuinely differ, so −residual_dev/2 is not logLik
     assert m.deviance != pytest.approx(m.deviance_laplace, abs=1e-6)
-    # getME on a GLMM + generic routing
     np.testing.assert_array_equal(R.getME(m, "theta"), m.theta)
     assert R.isGLMM(m) is True and R.isSingular(m) is True
     assert R.logLik(m) == pytest.approx(m.loglike, abs=0)
@@ -3541,9 +3060,6 @@ def test_lmer_sleepstudy_uncorrelated_bars_matches_lme4():
     """gaussian_no_corr — the ``||`` uncorrelated-slopes syntax expands to two
     independent scalar bars. With the NLopt-BOBYQA optimizer θ̂ matches lme4
     to the CHOLMOD floor (~1e-7).
-
-    R: ``lmer(Reaction ~ Days + (Days || Subject), sleepstudy)`` →
-    ``getME(m,"theta")`` / ``fixef`` / ``sigma`` / ``REMLcrit``.
     """
     m = gmm(
         "Reaction ~ Days + (Days || Subject)",
@@ -3576,7 +3092,6 @@ def test_check_boundary_pins_near_zero_when_improving():
     )
     assert out[0] == 0.0  # pinned to the bound
 
-    # not pinned when the interior point is strictly better
     def devfun2(p):
         return float((p[0] - 1e-7) ** 2)
 
@@ -3590,7 +3105,6 @@ def test_restart_edge_restarts_only_on_negative_inward_gradient():
     from hea.models.gmm import _restart_edge
 
     lower, upper = np.array([0.0]), np.array([np.inf])
-    # decreasing in θ at the lower bound → inward gradient < 0 → restart
     called = []
 
     def refit(p0):
@@ -3601,7 +3115,6 @@ def test_restart_edge_restarts_only_on_negative_inward_gradient():
         lambda p: float(-p[0] + 1), np.array([0.0]), lower, upper, refit
     )
     assert called and out[0] == 2.0
-    # interior point → no restart
     out2 = _restart_edge(
         lambda p: float((p[0] - 1) ** 2),
         np.array([1.0]),
@@ -3620,7 +3133,6 @@ def test_gmm_restart_edge_rejected_for_glmer():
     df = _poisson_re_df()
     with pytest.raises(NotImplementedError, match="restart_edge"):
         gmm("y ~ x + (1|g)", df, family=Poisson(), control={"restart_edge": True})
-    # default (off) fits fine
     m = gmm("y ~ x + (1|g)", df, family=Poisson())
     assert m.theta.shape == (1,)
 
@@ -3689,11 +3201,6 @@ def test_gmm_devfunonly_lmer_profiled_deviance():
     np.testing.assert_allclose(h.devfun(m.theta), m._optim.fun, atol=1e-9, rtol=1e-9)
 
 
-# ----------------------------------------------------------------------
-# 8.6 — control= dict normalization
-# ----------------------------------------------------------------------
-
-
 def test_glmer_control_defaults_match_lme4():
     """No user override → defaults exactly match ``glmerControl()``."""
     from hea.models.gmm import _normalize_glmer_control
@@ -3703,8 +3210,6 @@ def test_glmer_control_defaults_match_lme4():
     # Stage 0, Nelder_Mead for Stage 1 — both ported.
     assert out["optimizer"] == ["bobyqa", "Nelder_Mead"]
     assert out["tolPwrss"] == 1e-7
-    # lme4's glmerControl()$calc.derivs is literally NULL (resolved to the
-    # smart rule at fit time using nobsmax/nparmax — see __init__).
     assert out["calc.derivs"] is None
     assert out["nAGQ0initStep"] is True
     assert out["use.last.params"] is False
@@ -3729,7 +3234,6 @@ def test_glmer_control_merges_user_overrides():
     out = _normalize_glmer_control({"tolPwrss": 1e-9, "calc.derivs": False})
     assert out["tolPwrss"] == 1e-9
     assert out["calc.derivs"] is False
-    # Unspecified key untouched.
     assert out["nAGQ0initStep"] is True
 
 
@@ -3748,7 +3252,6 @@ def test_glmer_control_optimizer_chain():
     optimx / L-BFGS-B) raise ``NotImplementedError``."""
     from hea.models.gmm import _normalize_glmer_control
 
-    # bobyqa is ported now → accepted, replicated to a 2-stage chain.
     assert _normalize_glmer_control({"optimizer": "bobyqa"})["optimizer"] == [
         "bobyqa",
         "bobyqa",
@@ -3760,7 +3263,6 @@ def test_glmer_control_optimizer_chain():
     assert _normalize_glmer_control({"optimizer": ["bobyqa", "Nelder_Mead"]})[
         "optimizer"
     ] == ["bobyqa", "Nelder_Mead"]
-    # Unported optimizers still raise with a clear message.
     for opt in ("nloptwrap", "optimx", "L-BFGS-B"):
         with pytest.raises(NotImplementedError, match="optimizer"):
             _normalize_glmer_control({"optimizer": opt})
@@ -3782,11 +3284,9 @@ def test_glmer_optimizer_dispatch_per_stage():
         family=Poisson(),
         control={"optimizer": ["bobyqa", "Nelder_Mead"]},
     )
-    # Default and the explicit default chain are the same path → identical.
     np.testing.assert_array_equal(base.theta, explicit.theta)
     assert base.optinfo["optimizer"] == "bobyqa+Nelder_Mead"
 
-    # Every ported (stage0, stage1) combo fits and minimises the same devfun.
     for chain in (
         ["Nelder_Mead", "Nelder_Mead"],
         ["bobyqa", "bobyqa"],
@@ -3831,11 +3331,8 @@ def test_glmer_control_optCtrl_routes_per_optimizer():
     mixed = {"rhoend": 1e-9, "XtolRel": 1e-10, "maxfun": 9}
     assert _bobyqa_kwargs_from_opt_ctrl(mixed) == {"rhoend": 1e-9, "maxfun": 9}
     assert _nm_kwargs_from_opt_ctrl(mixed) == {"xtol_rel": 1e-10, "maxeval": 9}
-    # bobyqa-only keys no longer crash the NM translator (skipped, not raised).
     assert _nm_kwargs_from_opt_ctrl({"rhoend": 1e-9}) == {}
-    # NM-only keys are skipped by the bobyqa translator.
     assert _bobyqa_kwargs_from_opt_ctrl({"XtolRel": 1e-9}) == {}
-    # Genuine typos still raise from both.
     for fn in (_bobyqa_kwargs_from_opt_ctrl, _nm_kwargs_from_opt_ctrl):
         with pytest.raises(ValueError, match="unknown optCtrl key"):
             fn({"bogus": 1})
@@ -3867,23 +3364,15 @@ def test_glmer_calc_derivs_null_resolves_to_smart_rule():
     from hea.models.gmm import gmm
 
     df = _synthetic_poisson_grouped(seed=2026)
-    # None (default) → True for this small problem → same path as explicit True.
     m_null = gmm("y ~ x + (1|g)", df, family=Poisson())
     m_true = gmm("y ~ x + (1|g)", df, family=Poisson(), control={"calc.derivs": True})
     np.testing.assert_array_equal(m_null._se_beta, m_true._se_beta)
-    # Squeezing nparmax below npar flips the smart rule OFF → RX fallback,
-    # i.e. the same path as an explicit calc.derivs=False.
     m_off = gmm(
         "y ~ x + (1|g)", df, family=Poisson(), control={"check.conv.nparmax": 1}
     )
     m_false = gmm("y ~ x + (1|g)", df, family=Poisson(), control={"calc.derivs": False})
     np.testing.assert_array_equal(m_off._se_beta, m_false._se_beta)
     assert np.all(np.isfinite(m_off._se_beta))
-
-
-# ----------------------------------------------------------------------
-# 8.9 — devFunOnly handle (currently raises NotImplementedError pending port)
-# ----------------------------------------------------------------------
 
 
 def test_gmm_devFunOnly_returns_callable_handle():
@@ -3897,11 +3386,6 @@ def test_gmm_devFunOnly_returns_callable_handle():
     assert isinstance(h.devfun, _DevFunHandle)
     val = h.devfun(np.concatenate([np.array([0.5]), np.zeros(2)]))
     assert np.isfinite(val)
-
-
-# ----------------------------------------------------------------------
-# 8.2 — direct offset= numeric vector (in addition to formula offset())
-# ----------------------------------------------------------------------
 
 
 def test_gmm_offset_arg_adds_to_formula_offset():
@@ -3936,13 +3420,6 @@ def test_gmm_offset_arg_length_mismatch_errors():
     df = _synthetic_poisson_grouped(seed=2026)
     with pytest.raises(ValueError, match="offset= must have length"):
         gmm("y ~ x + (1|g)", df, family=Poisson(), offset=np.zeros(df.height + 1))
-
-
-# ----------------------------------------------------------------------
-# 8.3 — subset= / na_action= argument plumbing.
-# Mirrors R's ``glmer(subset=, na.action=)`` (modular.R passes to the
-# model.frame builder; we apply before prepare_design's NA-omit pass).
-# ----------------------------------------------------------------------
 
 
 def test_gmm_subset_bool_mask_matches_pre_filter():
@@ -3986,8 +3463,6 @@ def test_gmm_subset_negative_int_indices_drop():
     from hea.models.gmm import gmm
 
     df = _synthetic_poisson_grouped(seed=2026)
-    # Drop first 5 rows: 0-based positions [0..4] → reference as -n, -(n-1),
-    # ..., -(n-4) under Python's slice convention.
     n = df.height
     idx_drop = -np.arange(n, n - 5, -1)
     m_arg = gmm("y ~ x + (1|g)", df, family=Poisson(), subset=idx_drop)
@@ -4002,7 +3477,6 @@ def test_gmm_na_action_omit_default_drops_silently():
     from hea.models.gmm import gmm
 
     df = _synthetic_poisson_grouped(seed=2026)
-    # Inject NAs in `x` for the first 3 rows
     x_arr = df["x"].to_numpy().astype(float)
     x_arr[:3] = np.nan
     df_na = df.with_columns(pl.Series("x", x_arr))
@@ -4052,16 +3526,7 @@ def test_glmer_summary_prints_signif_codes_legend(capsys):
     out = capsys.readouterr().out
     assert "---" in out
     assert "Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1" in out, out
-    # The trailing legend implies a ``Pr(>|z|)`` column was printed; verify.
     assert "Pr(>|z|)" in out
-
-
-# ----------------------------------------------------------------------
-# 8.4 — contrasts= dict mapping factor-column name → R contrast name.
-# Mirrors ``model.matrix(contrasts.arg=)``: overrides the default
-# treatment/poly coding on bare-name factor references. In-formula
-# ``C(...)`` still wins (R semantics).
-# ----------------------------------------------------------------------
 
 
 def _three_level_glmm_df(seed: int = 2026):
@@ -4136,8 +3601,6 @@ def test_gmm_contrasts_arg_loses_to_inline_C():
         family=Poisson(),
         contrasts={"x": "contr.treatment"},
     )
-    # The C(x, contr.sum) atom produces sum-coded columns regardless of the
-    # contrasts= argument.
     assert any(c.endswith("1") for c in m.column_names), m.column_names
     assert any(c.endswith("2") for c in m.column_names), m.column_names
 
@@ -4153,7 +3616,6 @@ def test_gmm_contrasts_arg_unrelated_column_unaffected():
     m_nop = gmm(
         "y ~ x + (1|g)", df, family=Poisson(), contrasts={"not_a_column": "contr.sum"}
     )
-    # Bit-identical fits
     np.testing.assert_allclose(m_def.theta, m_nop.theta, atol=1e-12, rtol=1e-12)
     np.testing.assert_allclose(
         m_def.bhat.to_numpy().ravel(),
@@ -4177,7 +3639,6 @@ def test_gmm_optinfo_singular_check_fires_at_boundary():
     from hea.family import Poisson
     from hea.models.gmm import gmm
 
-    # No within-group signal → θ̂ pinned at 0
     rng = np.random.default_rng(1)
     n_groups, n_per = 3, 100
     g = np.repeat(np.arange(n_groups), n_per)
@@ -4249,7 +3710,6 @@ def test_gmm_checkconv_gradient_diagnostic(capsys):
     clean = gmm("y ~ x + (1|g)", df, family=Poisson())
     assert clean.optinfo["conv"]["lme4"]["code"] == 0
     assert clean.optinfo["conv"]["lme4"]["messages"] == []
-    # derivatives are attached (calc.derivs resolves on for this small fit).
     assert clean.optinfo["derivs"] is not None
     assert clean.optinfo["derivs"]["gradient"].shape == (3,)  # θ + (intercept, x)
 
@@ -4268,7 +3728,6 @@ def test_gmm_checkconv_gradient_diagnostic(capsys):
     under.summary()
     assert "failed to converge with max|grad|" in capsys.readouterr().out
 
-    # action="ignore" → the gradient check is skipped even when under-converged.
     ignored = gmm(
         "y ~ x + (1|g)",
         df,
@@ -4302,7 +3761,6 @@ def test_lmer_summary_omits_signif_codes_legend(capsys):
     assert "Signif. codes" not in out
     assert "Pr(>|t|)" not in out
     assert "Pr(>|z|)" not in out
-    # t value column IS present though.
     assert "t value" in out
 
 
@@ -4313,15 +3771,12 @@ def test_gmm_subset_and_na_action_compose():
     from hea.models.gmm import gmm
 
     df = _synthetic_poisson_grouped(seed=2026)
-    # Inject NAs in the FIRST row only.
     x_arr = df["x"].to_numpy().astype(float)
     x_arr[0] = np.nan
     df_na = df.with_columns(pl.Series("x", x_arr))
 
-    # subset=  drops the first 5 rows → no NA remains → na.fail must NOT raise
     mask = np.arange(df_na.height) >= 5
     m = gmm("y ~ x + (1|g)", df_na, family=Poisson(), subset=mask, na_action="na.fail")
-    # Sanity: produces same fit as pre-filtering then dropping the NA-row.
     m_ref = gmm("y ~ x + (1|g)", df_na.filter(pl.Series(mask)), family=Poisson())
     np.testing.assert_allclose(m.theta, m_ref.theta, atol=1e-12, rtol=1e-12)
 
@@ -4335,16 +3790,7 @@ def test_gmm_subset_and_na_action_compose():
 
 def test_glmer_bates_fm10_contraception_matches_lme4():
     """Match against lme4's default-optimizer Contraception fit::
-
-        glmer(use ~ poly(age, 2) + urban + livch + (1 | district),
-              Contraception, binomial)
-        # optimizer = c("bobyqa", "Nelder_Mead") — lme4 default.
-
     This is the canonical Bates-book Binomial GLMM. The fit exercises
-    factor-response coercion (use ∈ {"N","Y"} → 0/1) and a multi-term
-    polynomial fixed effect via ``poly(age, 2)``. SE / vcov pinned against
-    the default Hessian-based ``vcov(m)`` (calc.derivs=TRUE).
-
     """
     from hea import data
     from hea.family import Binomial
@@ -4364,7 +3810,6 @@ def test_glmer_bates_fm10_contraception_matches_lme4():
         family=Binomial(),
     )
 
-    # lme4 reference (R defaults: bobyqa+NM, calc.derivs=TRUE):
     expected_theta = np.array([0.4752182965556530636064])
     expected_beta = np.array(
         [
@@ -4380,17 +3825,6 @@ def test_glmer_bates_fm10_contraception_matches_lme4():
     expected_dev_laplace = 2372.728706535781839193
     expected_dev_resid = 2289.732405042512255022
 
-    # BOBYQA halts on a locally-flat objective: at the FP precision floor
-    # (~4 ULP on devfun, from CHOLMOD-internal Cholesky accumulator noise
-    # plus accumulated PIRLS rounding — verified 2026-05 that scipy.sparse
-    # `@` and the 4-op weight chain match R at 0 ULP, so it's not those),
-    # the argmin shifts by √(Δdev/curvature). Curvature at θ̂ is small here
-    # → θ̂ drifts ~3e-6 rel and the badly-identified poly(age, 2)2 column
-    # of β̂ drifts ~1e-5 rel. Verified: hea-arm64 matches lme4-arm64 at
-    # ~5e-9 on (θ̂, β̂) when R is run on the same machine, so this is
-    # cross-platform-reference drift, not a hea bug — R-on-Intel and
-    # R-on-arm64 disagree by similar amounts. Pin θ̂ at 1e-5 and β̂ in
-    # SE-relative units so the test is platform-agnostic.
     expected_se_for_beta = np.array(
         [
             0.1522134608573170178047,
@@ -4408,12 +3842,7 @@ def test_glmer_bates_fm10_contraception_matches_lme4():
     )
     assert beta_se_rel.max() < 1e-4, f"|Δβ̂|/SE = {beta_se_rel}"
     assert m.deviance_laplace == pytest.approx(expected_dev_laplace, rel=1e-9)
-    # m.deviance (residual deviance) depends on fitted β̂, so it inherits the
-    # ~1e-7 rel drift; the Laplace deviance above is the optimization
-    # objective itself and stays bit-tight across platforms.
     assert m.deviance == pytest.approx(expected_dev_resid, rel=1e-6)
-    # Fixed-effect names line up with R's: (Intercept) first, then poly
-    # terms, urban dummy, then 3 livch contrasts.
     assert m.column_names == [
         "(Intercept)",
         "poly(age, 2)1",
@@ -4423,12 +3852,9 @@ def test_glmer_bates_fm10_contraception_matches_lme4():
         "livch2",
         "livch3+",
     ]
-    # AIC / BIC / logLik all match the printed summary's first row.
     assert m.AIC == pytest.approx(2388.728706535781839193, rel=1e-9)
     assert m.BIC == pytest.approx(2433.267471943887812813, rel=1e-9)
     assert m.loglike == pytest.approx(-1186.364353267890919597, rel=1e-9)
-    # Scaled (Pearson, σ-divided) residuals — what summary() prints.
-    # Pinned against ``residuals(fm10, "pearson", scaled=TRUE)`` quantiles.
     pearson_scaled = m.residuals_of("pearson") / m.sigma
     expected_qs = np.array(
         [
@@ -4445,23 +3871,6 @@ def test_glmer_bates_fm10_contraception_matches_lme4():
         atol=1e-5,
         rtol=1e-5,
     )
-    # Per-coefficient SEs match lme4's default ``vcov(m)`` (Hessian-based).
-    # vcov is built from a central-difference deriv12 (δ=1e-4) on the
-    # Stage-1 closure: the formula ``(f+ − 2f₀ + f−)/δ²`` divides a
-    # ~3e-9 second difference by 1e-8, losing ~11 digits to cancellation.
-    # The small-H_jj columns (``poly(age, 2)``, H_jj≈0.36) sit right at
-    # that cancellation floor, so any sub-ULP perturbation of the deviance
-    # maps to a visible SE shift. The reference values below are from
-    # R-Intel-MKL; observed cross-platform drift against that reference:
-    #
-    #   - hea-arm64-Accelerate (M4 dev):    poly1 SE diff ≈ 1.2e-2 (0.4% rel)
-    #   - hea-x86_64-OpenBLAS (Linux CI):   poly1 SE diff ≈ 2.4e-2 (0.7% rel)
-    #
-    # R itself drifts ~1.0e-2 between Intel-MKL and arm64-Accelerate builds
-    # on the same fit (verified). Well-identified columns (Intercept, urban,
-    # livch) have H_jj of 100-300 and stay below 1e-3 rel comfortably. The
-    # tolerance below is set to cover the BLAS-noise envelope without
-    # masking real algorithmic bugs (which would shift SEs by ≫ 1e-1).
     expected_se = np.array(
         [
             0.1522134608573170178047,
@@ -4692,35 +4101,25 @@ def test_glmer_contraception_cm_components_match_lme4(cm_frame, tag):
     ref = _CM_REF[tag]
     m = gmm(ref["formula"], data=cm_frame, family=Binomial())
 
-    # Fixed-effect names line up with R's model.matrix expansion.
     assert m.column_names == ref["colnames"]
     assert m.npar == ref["npar"]
     assert m.df_resid == ref["df_resid"]
 
-    # Laplace objective — curvature-independent, pins tight across platforms.
     assert m.deviance_laplace == pytest.approx(ref["dev_laplace"], rel=1e-7)
     assert m.AIC == pytest.approx(ref["AIC"], rel=1e-7)
     assert m.BIC == pytest.approx(ref["BIC"], rel=1e-7)
     assert m.loglike == pytest.approx(ref["logLik"], rel=1e-7)
-    # Residual deviance depends on β̂ → inherits the flat-surface drift.
     assert m.deviance == pytest.approx(ref["dev_resid"], rel=1e-5)
 
-    # θ̂ (variance components) — loose, the gradient-free optimiser floor.
     np.testing.assert_allclose(m.theta, ref["theta"], atol=1e-4, rtol=1e-4)
 
-    # β̂ in SE-relative units (fm10 convention): |Δβ̂|/SE stays small even
-    # where the raw β̂ is poorly identified.
     beta_se_rel = np.abs(m.bhat.to_numpy().ravel() - np.array(ref["beta"])) / np.array(
         ref["se"]
     )
     assert beta_se_rel.max() < 3e-3, f"{tag}: |Δβ̂|/SE = {beta_se_rel}"
 
-    # SE magnitudes — loose (FD-Hessian cancellation + cross-platform BLAS
-    # noise; see fm10). Catches gross errors, not sub-ULP drift.
     np.testing.assert_allclose(m._se_beta, ref["se"], atol=5e-2, rtol=3e-2)
 
-    # Scaled (Pearson, σ-divided) residual 5-number summary — what summary()
-    # prints. Drifts with the fit, hence the loose absolute tolerance.
     pearson_scaled = m.residuals_of("pearson") / m.sigma
     np.testing.assert_allclose(
         np.quantile(pearson_scaled, [0, 0.25, 0.5, 0.75, 1]),
@@ -4747,16 +4146,13 @@ def test_glmer_contraception_cm4_summary_layout_matches_lme4(cm_frame, capsys):
         "(Laplace Approximation) ['glmerMod']"
     ) in out
     assert "Family: binomial  ( logit )" in out
-    # 1-decimal criterion row (lme4's .prt.aictab digits=1), not 4-decimal.
     assert "2371.5" in out and "2353.5" in out
     assert "2371.5304" not in out
-    # Random-effects block with the correlated random slope.
     assert "Groups   Name        Variance Std.Dev. Corr" in out
     assert "district (Intercept)" in out
     assert "urbanY" in out
     assert "-0.79" in out
     assert "Number of obs: 1934, groups:  district, 60" in out
-    # GLMM fixed-effects table uses z + Pr(>|z|), with the signif legend.
     assert "z value" in out and "Pr(>|z|)" in out
     assert "Signif. codes:" in out
     assert "Correlation of Fixed Effects:" in out
@@ -4777,17 +4173,13 @@ def test_glmer_contraception_anova_cm1_to_cm4(cm_frame, capsys):
     anova(cm1, cm2, cm3, cm4)
     out = capsys.readouterr().out
 
-    # Caller names recovered (R-style), rows printed in npar order.
     for name in ("cm1", "cm2", "cm3", "cm4"):
         assert name in out
-    # The cm1 row's negative LRT is clamped to 0 (was -7.5474), p=1.
     assert "0.0000" in out
     assert "1.000000" in out
     assert "-7.5" not in out  # no spurious negative χ²
-    # The two genuine LRTs match lme4 (cm2→cm3, cm1→cm4).
     assert "8.0045" in out
     assert "19.1983" in out
-    # Underlying LRT is exactly the Laplace-deviance gap (format-independent).
     assert (cm2.deviance_laplace - cm3.deviance_laplace) == pytest.approx(
         8.0045111405906937, rel=1e-5
     )
@@ -4815,8 +4207,6 @@ def _parse_drop1(out):
     return rows
 
 
-# Reference: drop1(cm{1,3}, test="Chisq") in lme4.
-# LRT = Δ(-2logL); npar = #coefficients removed (livch = 3 dummies).
 _DROP1_REF = {
     "cm1": {
         "age_s": {"npar": 1, "AIC": 2386.9, "LRT": 0.14469280800858542},
@@ -4845,16 +4235,11 @@ def test_glmer_contraception_drop1_matches_lme4(cm_frame, capsys, tag):
     rows = _parse_drop1(capsys.readouterr().out)
 
     ref = _DROP1_REF[tag]
-    # Exact term selection (incl. marginality): the dropped rows are exactly
-    # the droppable terms — cm3 excludes the bare age_s / ch main effects.
     assert set(rows) == {"<none>"} | set(ref)
     for term, exp in ref.items():
         assert rows[term]["npar"] == exp["npar"], term
-        # AIC printed at 1 decimal; LRT pinned loosely (each row is a separate
-        # default-optimizer refit → the flat-surface drift, see cm-sweep note).
         assert rows[term]["AIC"] == pytest.approx(exp["AIC"], abs=0.05), term
         assert rows[term]["LRT"] == pytest.approx(exp["LRT"], abs=5e-3), term
-    # The <none> row carries the full-model AIC.
     assert rows["<none>"]["AIC"] == pytest.approx(_CM_REF[tag]["AIC"], abs=0.05)
 
 
@@ -4895,7 +4280,6 @@ def test_gmm_refitML_lmm_refits_by_ml():
     ref = gmm("y ~ x + (1|g)", df, REML=False)
     np.testing.assert_allclose(m_ml.theta, ref.theta, atol=1e-9)
     assert m_ml.AIC == pytest.approx(ref.AIC, rel=1e-9)
-    # already-ML LMM and any GLMM are no-ops (same object back).
     assert refitML(ref) is ref
     pois = gmm("y ~ x + (1|g)", _synthetic_poisson_grouped(seed=7), family=Poisson())
     assert pois.REML is False and refitML(pois) is pois
@@ -4913,12 +4297,9 @@ def test_gmm_refit_newresp_and_validation():
     df = _synthetic_poisson_grouped(seed=2026)
     m = gmm("y ~ x + (1|g)", df, family=Poisson())
     y0 = df["y"].to_numpy().astype(float)
-    # refit with the original response reproduces the fit; no-newresp too.
     np.testing.assert_allclose(refit(m, y0).theta, m.theta, atol=1e-8)
     np.testing.assert_allclose(refit(m).theta, m.theta, atol=1e-8)
-    # a different response gives a different fit.
     assert not np.allclose(refit(m, y0 + 2.0).theta, m.theta)
-    # guards
     with pytest.raises(TypeError):
         refit(lm("y ~ x", df))
     with pytest.raises(ValueError, match="length"):

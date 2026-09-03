@@ -34,13 +34,6 @@ from scipy.stats import chi2
 from hea.family import Gaussian, Poisson
 from hea.models.gmm import gmm
 
-# ---------------------------------------------------------------------------
-# Shared fits / profiles. Each model and (where applicable) its profile is
-# computed once per module — both are immutable post-construction in lmpy.gmm,
-# and `profile()` here always uses the default n_grid=41, so the results are
-# bit-identical across the tests that consume them. Cuts ~14s off the file.
-# ---------------------------------------------------------------------------
-
 
 @pytest.fixture(scope="module")
 def fm01ML():
@@ -92,11 +85,6 @@ def fm07ML():
     )
 
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
-
-
 def _assert_fixed(m, col, est, se=None, tval=None, *, atol=5e-3):
     if col not in m.bhat.columns:
         raise KeyError(f"{col!r} not in {list(m.bhat.columns)!r}")
@@ -104,9 +92,6 @@ def _assert_fixed(m, col, est, se=None, tval=None, *, atol=5e-3):
     if se is not None:
         np.testing.assert_allclose(m.se_bhat[col][0], se, atol=atol)
     if tval is not None:
-        # rtol covers large |t| where the pinned value is R's print()-rounded
-        # display (e.g. 104.2 vs full-precision 104.1623); atol covers small
-        # |t| where relative tol would be too lax.
         np.testing.assert_allclose(m.t_values[col][0], tval, atol=5e-2, rtol=1e-3)
 
 
@@ -121,7 +106,6 @@ def _assert_re_vector(m, group, sds, corr=None, *, atol=5e-3, corr_atol=5e-2):
     np.testing.assert_allclose(got, np.asarray(sds), atol=atol)
     if corr is not None:
         C = np.asarray(m.corr_re[group])
-        # Off-diagonal only — diagonal is trivially 1.
         i, j = np.triu_indices(C.shape[0], k=1)
         np.testing.assert_allclose(C[i, j], np.asarray(corr), atol=corr_atol)
 
@@ -141,19 +125,6 @@ def _lrt(m_reduced, m_full):
     return chisq, df, p
 
 
-# ---------------------------------------------------------------------------
-# Ch 1: A Simple, Linear, Mixed-effects Model
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# The public ``family=`` argument. Default (``None``) and explicit
-# ``Gaussian()`` must produce the same fit (FP-equal — see
-# conftest.assert_fp_equiv); a non-Gaussian family must raise
-# ``NotImplementedError`` while the Laplace path is unimplemented.
-# ---------------------------------------------------------------------------
-
-
 def test_family_default_equals_explicit_gaussian():
     """``family=None`` (default) and ``family=Gaussian()`` produce the same fit."""
     data = load_dataset("lme4", "Dyestuff")
@@ -167,15 +138,8 @@ def test_family_default_equals_explicit_gaussian():
 
 
 def test_family_non_gaussian_runs_glmm_path():
-    """Poisson family dispatches to the GLMM Laplace path.
-
-    Just smoke-checks that ``hea.models.gmm(..., family=poisson())`` fits without
-    raising. Numerical parity with ``lme4::glmer`` is pinned in
-    ``test_gmm_glmm.py``'s full-fit acceptance tests.
-    """
+    """Poisson family dispatches to the GLMM Laplace path."""
     data = load_dataset("lme4", "Dyestuff")
-    # Dyestuff's Yield is continuous, but for a smoke test we can fit a
-    # Poisson model — the optimizer should still converge.
     m = gmm("Yield ~ 1 + (1|Batch)", data, family=Poisson())
     assert m.theta.shape == (1,)
     assert m._beta.shape == (1,)
@@ -213,17 +177,9 @@ def test_bates_1_4_dyestuff_fm01_ML(fm01ML):
 
 
 def test_bates_1_4_dyestuff_fm01_ML_profile_confint(fm01ML_profile):
-    """confint(profile(fm01ML), level=...) — pinned to lme4 4.5/R 4.5.
-
-    The 99% lower bound for .sig01 is the regression: lme4 reports 0
-    (the natural σ ≥ 0 boundary) when the profile flattens to an
-    asymptote above the −2.576 threshold. Lmpy used to return NaN.
-    """
+    """confint(profile(fm01ML), level=...) — pinned to lme4 4.5/R 4.5."""
     pr = fm01ML_profile
 
-    # Tolerance reflects the spline-inversion residual (R uses
-    # interpSpline+backSpline, hea uses CubicSpline+brentq); the
-    # profile grid itself now matches R to ~1e-9.
     ci99 = pr.confint(level=0.99).to_dict(as_series=False)
     assert ci99["parameter"] == [".sig01", ".sigma", "(Intercept)"]
     np.testing.assert_allclose(ci99["0.5%"], [0.0, 35.5632, 1465.874], atol=2e-3)
@@ -258,11 +214,9 @@ def test_bates_1_4_dyestuff_fm01_ML_plot_fig17(fm01ML_profile):
     assert axes[2].get_title() == ".sigma²"
     assert all(ax.get_xlabel() == ".sigma" for ax in axes)
 
-    # Single-parameter via which= without ax= still builds its own figure.
     fig2 = pr.plot(which=".sigma")
     assert [a.get_title() for a in fig2.axes] == [".sigma"]
 
-    # ax= with multiple parameters is rejected.
     _fig3, ax3 = plt.subplots()
     try:
         pr.plot(ax=ax3)
@@ -273,11 +227,7 @@ def test_bates_1_4_dyestuff_fm01_ML_plot_fig17(fm01ML_profile):
 
 
 def test_bates_1_4_dyestuff_fm01_ML_plot_ranef_qqranef(fm01ML):
-    """Caterpillar (Fig 1.11) and qqmath (Fig 1.12) of ranef(., condVar=TRUE).
-
-    BLUPs and condSDs pinned to R lme4 4.5; bars use level=0.95 default
-    (±qnorm(0.975)·SE ≈ ±1.96·SE).
-    """
+    """Caterpillar (Fig 1.11) and qqmath (Fig 1.12) of ranef(., condVar=TRUE)."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -286,14 +236,12 @@ def test_bates_1_4_dyestuff_fm01_ML_plot_ranef_qqranef(fm01ML):
 
     m = fm01ML
 
-    # Numerical ranef + condSD pinned to R.
     [(_, _, _, b_mat, se_mat)] = m._ranef()
     b_ref = [-16.628222, 0.369516, 26.974671, -21.801446, 53.579825, -42.494344]
     sd_ref = [19.03445] * 6
     np.testing.assert_allclose(b_mat.ravel(), b_ref, atol=5e-3)
     np.testing.assert_allclose(se_mat.ravel(), sd_ref, atol=5e-3)
 
-    # Caterpillar (Fig 1.11): BLUP on x, sorted by BLUP, level index on y.
     m.plot_ranef(strip=False)
     ax = plt.gcf().axes[0]
     assert ax.get_title() == ""
@@ -302,7 +250,6 @@ def test_bates_1_4_dyestuff_fm01_ML_plot_ranef_qqranef(fm01ML):
     np.testing.assert_allclose(np.sort(x_dots), np.sort(b_ref), atol=5e-3)
     plt.close("all")
 
-    # qqmath (Fig 1.12): BLUP on x, normal quantiles (Hazen) on y.
     m.plot_qq_ranef(strip=False)
     ax = plt.gcf().axes[0]
     assert ax.get_title() == ""
@@ -333,18 +280,14 @@ def test_plot_ranef_layout_vertical_stacks_panels():
     fig_h = fm.plot_ranef()
     fig_v = fm.plot_ranef(layout="vertical")
     try:
-        # Horizontal: two panels in one row.
         rows_h = {ax.get_subplotspec().rowspan.start for ax in fig_h.axes}
         cols_h = {ax.get_subplotspec().colspan.start for ax in fig_h.axes}
         assert rows_h == {0} and cols_h == {0, 1}
 
-        # Vertical: two panels in one column.
         rows_v = {ax.get_subplotspec().rowspan.start for ax in fig_v.axes}
         cols_v = {ax.get_subplotspec().colspan.start for ax in fig_v.axes}
         assert rows_v == {0, 1} and cols_v == {0}
 
-        # And the vertical figure is taller than wide vs. the horizontal
-        # one (rough shape check; exact sizes depend on level counts).
         w_h, h_h = fig_h.get_size_inches()
         w_v, h_v = fig_v.get_size_inches()
         assert h_v > h_h and w_v < w_h
@@ -371,7 +314,6 @@ def test_plot_ranef_aspect_controls_subplot_width():
     try:
         w_wide, _ = fig_wide.get_size_inches()
         w_narrow, _ = fig_narrow.get_size_inches()
-        # aspect=2.0 → 4× wider subplots than aspect=0.5
         assert w_wide == pytest.approx(4.0 * w_narrow, rel=1e-9)
     finally:
         plt.close(fig_wide)
@@ -394,7 +336,6 @@ def test_plot_ranef_explicit_layout_tuple():
 
     fig = fm.plot_ranef(layout=(2, 2))
     try:
-        # Four cells allocated; two visible (one per ranef panel).
         visibles = [ax for ax in fig.axes if ax.get_visible()]
         hidden = [ax for ax in fig.axes if not ax.get_visible()]
         assert len(visibles) == 2
@@ -459,9 +400,7 @@ def test_plot_ranef_which_filters_to_one_panel_title():
     sleep = data("sleepstudy", "lme4")
     fm = gmm("Reaction ~ 1 + Days + (1 + Days | Subject)", sleep)
 
-    # Term key pulls both columns of the vector bar.
     fig_all = fm.plot_ranef(which="Subject")
-    # Full title pulls just one.
     fig_one = fm.plot_ranef(which="Subject: Days")
     try:
         assert sorted(a.get_title() for a in fig_all.axes) == [
@@ -506,10 +445,7 @@ def test_plot_ranef_which_unknown_raises():
 
 def test_bates_2_plot_design_layout_matches_fig_2_3_2_4():
     """plot_design() — 4-panel mosaic A=Z' / B=Λ / C=Z'Z / D=L.
-
-    Layout: AAA over BCD; top panel is the wide Z transpose, bottom row
     is three q×q sparsity panels. Matches Bates lme4-book Figs 2.3+2.4
-    (the Penicillin crossed-RE example).
     """
     import matplotlib
 
@@ -523,14 +459,12 @@ def test_bates_2_plot_design_layout_matches_fig_2_3_2_4():
     fm = gmm("diameter ~ 1 + (1 | plate) + (1 | sample)", penicillin)
     fig = fm.plot_design()
     try:
-        # Four labelled axes from subplot_mosaic: A, B, C, D.
         axd = {ax.get_label(): ax for ax in fig.axes if ax.get_label() in "ABCD"}
         assert set(axd) == {"A", "B", "C", "D"}
         # Bottom-row labels match Bates' panel captions.
         assert axd["B"].get_xlabel() == "Λ"
         assert axd["C"].get_xlabel() == "Z'Z"
         assert axd["D"].get_xlabel() == "L"
-        # Top panel renders the q × n shape; bottom panels render q × q.
         assert axd["A"].images[0].get_array().shape == (fm.q, fm.n)
         assert axd["B"].images[0].get_array().shape == (fm.q, fm.q)
         assert axd["C"].images[0].get_array().shape == (fm.q, fm.q)
@@ -550,9 +484,6 @@ def test_bates_1_4_dyestuff_fm01_ML_plot_density(fm01ML_profile):
     for ax in fig.axes:
         x, y = ax.get_lines()[0].get_xdata(), ax.get_lines()[0].get_ydata()
         peaks[ax.get_title()] = (float(y.max()), float(x[np.argmax(y)]))
-    # lme4:::dens reference, npts=201, upper=0.999. Peak heights agree to
-    # ~1e-3; peak x can differ a bit (lme4 uses cubic spline, hea uses
-    # monotone PCHIP) so widen the location tolerance.
     for name, (h_ref, x_ref), x_atol in [
         (".sig01", (0.0287, 33.095), 1.0),
         (".sigma", (0.0574, 47.817), 1.0),
@@ -574,11 +505,6 @@ def test_bates_1_4_dyestuff2_fm02_REML():
     _assert_fixed(m, "(Intercept)", 5.6656, se=0.6784, tval=8.352)
 
 
-# ---------------------------------------------------------------------------
-# Ch 2: Models With Multiple Random-effects Terms
-# ---------------------------------------------------------------------------
-
-
 def test_bates_2_1_penicillin_fm03_REML():
     """fm03 <- lmer(diameter ~ 1 + (1|plate) + (1|sample), Penicillin)"""
     data = load_dataset("lme4", "Penicillin")
@@ -596,11 +522,6 @@ def test_bates_2_1_penicillin_fm03_REML():
 def test_bates_2_6_penicillin_fm03_ML_profile_pairs(fm03ML_profile):
     """plot_pairs (Bates Fig 2.6): each profile row carries the full
     optimum, traces are pinned to lme4 ``profile(fm03ML)`` output.
-
-    Profile of σ₁ (.sig01): as σ₁ varies, the optimal (σ₂, σ, β₀) at
-    each grid point should match what lme4 records. Same for profile of
-    σ₂. The intercept stays orthogonal to the variance components in
-    this model, so its row is essentially constant.
     """
     import matplotlib
 
@@ -609,7 +530,6 @@ def test_bates_2_6_penicillin_fm03_ML_profile_pairs(fm03ML_profile):
 
     pr = fm03ML_profile
 
-    # Per-row schema: every parameter has a column, plus zeta.
     assert list(pr.data[".sig01"].columns) == [
         ".sig01",
         ".sig02",
@@ -628,7 +548,6 @@ def test_bates_2_6_penicillin_fm03_ML_profile_pairs(fm03ML_profile):
             if col not in (name, "zeta")
         }
 
-    # Profile of .sig01 — pinned to lme4 rows ζ ≈ -3.0 / 0 / +2.5.
     sp = _interps(".sig01")
     for sig01, refs in [
         (0.5501273, {".sig02": 1.766020, ".sigma": 0.5595737, "(Intercept)": 22.97222}),
@@ -637,7 +556,6 @@ def test_bates_2_6_penicillin_fm03_ML_profile_pairs(fm03ML_profile):
         for col, ref in refs.items():
             np.testing.assert_allclose(float(sp[col](sig01)), ref, atol=1e-2)
 
-    # Profile of .sig02 — pinned to lme4 rows ζ ≈ -2.6 / +2.5.
     sp = _interps(".sig02")
     for sig02, refs in [
         (
@@ -662,12 +580,9 @@ def test_bates_2_6_penicillin_fm03_ML_profile_pairs(fm03ML_profile):
 
     fig = pr.plot_pairs()
     assert len(fig.axes) == 16
-    # Diagonal cells (r + c == n-1) carry parameter labels.
     diag_axes_in_order = [fig.axes[r * 4 + (3 - r)] for r in range(4)]
     diag_labels = [ax.texts[0].get_text() for ax in diag_axes_in_order]
     assert diag_labels == ["(Intercept)", ".sigma", ".sig02", ".sig01"]
-    # ζ-space cell (e.g., bottom-row .sig02 column at r=3, c=1, both
-    # vid_row=0 and vid_col=1, vid_row<vid_col so ζ-space).
     mlev = float(np.sqrt(_chi2.ppf(0.99, 2)))
     ax_zeta = fig.axes[3 * 4 + 1]
     np.testing.assert_allclose(ax_zeta.get_xlim(), (-1.05 * mlev, 1.05 * mlev))
@@ -677,13 +592,6 @@ def test_bates_2_6_penicillin_fm03_ML_profile_pairs(fm03ML_profile):
 def test_bates_2_7_penicillin_fm03_ML_profile_pairs_log(fm03ML_profile):
     """plot_pairs(transform="log") (Bates Fig 2.7): the log-scale variant
     of the splom, R's ``splom(log(profile(fm03)))``.
-
-    ζ is invariant under monotone v-reparameterization, so the
-    zeta-space lower triangle is bit-identical to Fig 2.6; only the
-    upper-triangle v-space axis limits change (log applied to .sig*,
-    .sigma) and diagonal labels become ``log(.sigXX)``. Reference
-    bwd-spline values come from R's
-    ``predict(attr(log(profile(fm03)),"backward")[[nm]], ±mlev)$y``.
     """
     import matplotlib
 
@@ -696,24 +604,15 @@ def test_bates_2_7_penicillin_fm03_ML_profile_pairs_log(fm03ML_profile):
     n = 4
     assert len(fig.axes) == n * n
 
-    # Diagonal labels: log() wraps variance components only; (Intercept)
-    # stays on natural scale (matches R's logProf with signames=FALSE).
     diag_axes = [fig.axes[r * n + (n - 1 - r)] for r in range(n)]
     diag_labels = [ax.texts[0].get_text() for ax in diag_axes]
     assert diag_labels == ["(Intercept)", "log(.sigma)", "log(.sig02)", "log(.sig01)"]
 
-    # Zeta-space lower triangle: still ±1.05·mlev — log on v doesn't move ζ.
     mlev = float(np.sqrt(_chi2.ppf(0.99, 2)))
     ax_zeta = fig.axes[3 * n + 1]
     np.testing.assert_allclose(ax_zeta.get_xlim(), (-1.05 * mlev, 1.05 * mlev))
     np.testing.assert_allclose(ax_zeta.get_ylim(), (-1.05 * mlev, 1.05 * mlev))
 
-    # v-space upper triangle: each parameter's axis runs from
-    # bwd[name](-mlev) to bwd[name](+mlev), in log space for .sig*.
-    # Top row of the splom (r=0) is the (Intercept) row across all cols.
-    # axis layout: at r=0,c=k the cell is (vid_row=3=(Intercept), vid_col=k).
-    # x-axis = column parameter, y-axis = (Intercept).
-    # R reference (predict(bwd[[name]], ±mlev)$y from log(profile)):
     r_ref = {
         ".sig01": (-0.601424, 0.377905),
         ".sig02": (-0.114746, 1.797648),
@@ -771,11 +670,6 @@ def test_bates_2_2_pastes_fm04a_ML_and_LRT(fm04ML, fm04aML):
     np.testing.assert_allclose(p, 0.5234, atol=5e-3)
 
 
-# ---------------------------------------------------------------------------
-# Ch 3: Models for Longitudinal Data (sleepstudy)
-# ---------------------------------------------------------------------------
-
-
 def test_bates_3_2_sleepstudy_fm07_uncorrelated_ML(fm07ML):
     """fm07 <- lmer(Reaction ~ 1+Days + (1|Subject) + (0+Days|Subject),
     sleepstudy, REML=FALSE)"""
@@ -793,8 +687,6 @@ def test_bates_3_2_sleepstudy_fm07_uncorrelated_ML(fm07ML):
         atol=0.1,
     )
     np.testing.assert_allclose(m.sigma, 25.5556, atol=5e-3)
-    # lme4 lists the two scalar bars on Subject as two rows; we expose the
-    # second one under the disambiguated key "Subject.1".
     _assert_re_scalar(m, "Subject", 24.1717)  # (Intercept)
     _assert_re_scalar(m, "Subject.1", 5.7986)  # Days
     _assert_fixed(m, "(Intercept)", 251.405, se=6.708, tval=37.48)
@@ -825,13 +717,9 @@ def test_sleepstudy_reml_theta_matches_lme4_nloptwrap():
     """hea's lmer uses NLopt ``LN_BOBYQA`` — lme4's DEFAULT ``nloptwrap`` —
     so θ̂/σ̂ land on lme4's fit to the CHOLMOD floor (~1e-9), not the ~1e-5
     scatter the old scipy L-BFGS-B left.
-
-    Reference: ``lmer(Reaction ~ Days + (Days|Subject), sleepstudy)`` (REML,
-    default control) → ``getME(m,"theta")`` / ``sigma(m)`` at 16 digits.
     """
     data = load_dataset("lme4", "sleepstudy")
     m = gmm("Reaction ~ Days + (Days|Subject)", data, REML=True)
-    # lme4 2.0-2 nloptwrap reference (16 sig figs).
     np.testing.assert_allclose(
         m.theta,
         [0.9667417739793641, 0.01516905889466504, 0.2309099532076919],
@@ -850,15 +738,7 @@ def test_bates_3_2_sleepstudy_LRT_fm07_vs_fm06(fm06ML, fm07ML):
     np.testing.assert_allclose(p, 0.8004, atol=5e-3)
 
 
-# ---------------------------------------------------------------------------
-# lmer control parity (gmm-lmer-parity #1-#3, #5): optimizer / optCtrl / start
-# are honored on the LMM path. Each was previously read only by the GLMM
-# branch and silently dropped for a Gaussian-identity (lmer) fit.
-# ---------------------------------------------------------------------------
-
 _SLEEP_F = "Reaction ~ Days + (Days|Subject)"
-# lme4 2.0-2 nloptwrap REML reference (16 sig figs; same pin as
-# test_sleepstudy_reml_theta_matches_lme4_nloptwrap above).
 _SLEEP_THETA = (0.9667417739793641, 0.01516905889466504, 0.2309099532076919)
 _SLEEP_SIGMA = 25.591795721655899
 
@@ -955,12 +835,6 @@ def test_lmm_optctrl_unknown_key_raises(sleepstudy_data):
         gmm(_SLEEP_F, sleepstudy_data, REML=True, control={"optCtrl": {"bogus": 1}})
 
 
-# ---------------------------------------------------------------------------
-# Prior weights on the LMM path. lmer(y~x+(1|g), weights=w) is reproduced via
-# √w row-scaling of the profiled-deviance design. Reference: lme4 4.x,
-# lmer(Reaction~Days+(Days|Subject), sleepstudy, weights=rep(c(1,2,3),len=180)).
-# ---------------------------------------------------------------------------
-
 _W = np.tile([1.0, 2.0, 3.0], 60)  # == R rep(c(1,2,3), len=180)
 _W_THETA = (0.5720719237602743, 0.02526250546376536, 0.1520012796905056)
 _W_SIGMA = 38.62892535113247
@@ -1034,13 +908,6 @@ def test_lmm_weights_bad_length_raises(sleepstudy_data):
         gmm(_SLEEP_F, sleepstudy_data, REML=True, weights=np.ones(5))
 
 
-# ---------------------------------------------------------------------------
-# Fit → accessor contract (gmm._FIT_CONTRACT). Both fit paths must populate the
-# post-fit state the shared accessor layer relies on; _assert_fit_contract()
-# enforces it at fit time. Prompted by the _ranef/_Z_sp_solve coupling bug (#4).
-# ---------------------------------------------------------------------------
-
-
 def test_fit_contract_satisfied_by_lmm_fits(sleepstudy_data):
     """Every _FIT_CONTRACT attribute is present on a fitted LMM — REML, ML, and
     weighted. (The GLMM path is exercised by the glmer suite, which now also
@@ -1061,11 +928,6 @@ def test_fit_contract_is_enforced(sleepstudy_data):
     del m._Z_sp_solve
     with pytest.raises(RuntimeError, match=r"_Z_sp_solve"):
         m._assert_fit_contract()
-
-
-# ---------------------------------------------------------------------------
-# vcov() method (gmm-lmer-parity #14) — over the existing _vcov_beta_arr.
-# ---------------------------------------------------------------------------
 
 
 def test_vcov_method_matches_attr_and_se(fm06ML):
@@ -1107,12 +969,6 @@ def test_vcov_full_joint_matches_lme4(sleepstudy_data):
     np.testing.assert_allclose(A, A.T, atol=1e-9)  # symmetric
 
 
-# ---------------------------------------------------------------------------
-# logLik(REML=) toggle (gmm-lmer-parity #19) — one fit yields both criteria,
-# recomputing the other at the fitted θ̂ (lme4 devCrit). lme4 4.x reference.
-# ---------------------------------------------------------------------------
-
-
 def test_loglik_reml_toggle_matches_lme4(sleepstudy_data):
     """#19: logLik(REML=) recomputes the other criterion at the fitted θ̂ (no
     refit) — so a single REML fit reports both REML and ML log-likelihoods."""
@@ -1124,12 +980,6 @@ def test_loglik_reml_toggle_matches_lme4(sleepstudy_data):
     np.testing.assert_allclose(mM.logLik(), -875.9696722445, atol=1e-5)
     np.testing.assert_allclose(mM.logLik(REML=False), -875.9696722445, atol=1e-5)
     np.testing.assert_allclose(mM.logLik(REML=True), -871.8368952841, atol=1e-5)
-
-
-# ---------------------------------------------------------------------------
-# ranef(condVar=) (gmm-lmer-parity #21) — now a method (was a property), over
-# the posterior SDs _ranef() already computes. lme4 4.x postVar reference.
-# ---------------------------------------------------------------------------
 
 
 def test_ranef_condvar_matches_lme4_postvar(sleepstudy_data):
@@ -1167,23 +1017,13 @@ def test_ranef_postvar_drop_whichel(sleepstudy_data):
     np.testing.assert_allclose(
         cv["(Intercept) condsd"].to_numpy()[0], np.sqrt(pv[0, 0, 0]), atol=1e-7
     )
-    # drop on a scalar bar → level-named vector
     dy = gmm("Yield ~ 1 + (1|Batch)", load_dataset("lme4", "Dyestuff"), REML=True)
     dv = dy.ranef(drop=True)["Batch"]
     assert len(dv) == 6 and "A" in list(dv.names)
-    # whichel selects the grouping factor (both its bars)
     m2 = gmm(
         "Reaction ~ Days + (1|Subject) + (0+Days|Subject)", sleepstudy_data, REML=True
     )
     assert set(m2.ranef(whichel="Subject")) == {"Subject", "Subject.1"}
-
-
-# ---------------------------------------------------------------------------
-# lme4 predicate / extractor surface (gmm-lmer-parity #10–#12, #17, #18, #20):
-# isREML/isLMM/isGLMM/isNLMM/isSingular, getME, VarCorr, coef (per-group),
-# getData, extractAIC, rePCA — additive shims over the fit→accessor contract,
-# each also reachable through the hea.R generic of the same name.
-# ---------------------------------------------------------------------------
 
 
 def test_predicates_match_lme4(sleepstudy_data, fm06ML):
@@ -1201,10 +1041,8 @@ def test_predicates_match_lme4(sleepstudy_data, fm06ML):
     )
     assert fm06ML.isREML() is False and fm06ML.isLMM() is True
     assert mR.isSingular() is False
-    # classic singular fit: lmer(Yield ~ 1 + (1|Batch), Dyestuff2) → θ ≈ 0
     sing = gmm("Yield ~ 1 + (1|Batch)", load_dataset("lme4", "Dyestuff2"), REML=True)
     assert sing.isSingular() is True
-    # hea.R generics route to the same answers (and are merMod-only)
     assert R.isREML(mR) is True and R.isLMM(mR) is True
     assert R.isGLMM(mR) is False and R.isSingular(sing) is True
     with pytest.raises(TypeError):
@@ -1228,7 +1066,6 @@ def test_getME_matches_contract_and_lme4(sleepstudy_data):
     np.testing.assert_allclose(m.getME("y"), m.y, atol=0)
     assert m.getME("sigma") == pytest.approx(m.sigma)
     assert m.getME("is_REML") is True and m.getME("REML") == 2  # p when REML
-    # b = Λu == the BLUPs ranef() reports (level-major, 2 components/level)
     b = m.getME("b").reshape(18, 2)
     rf = m.ranef()["Subject"]
     np.testing.assert_allclose(b[:, 0], rf["(Intercept)"].to_numpy(), atol=1e-9)
@@ -1298,8 +1135,6 @@ def test_VarCorr_matches_lme4(sleepstudy_data):
     assert vc.correlation("Subject")[0, 1] == pytest.approx(0.0655, abs=1e-3)
     sd, corr = m.sd_re["Subject"], m.corr_re["Subject"]
     np.testing.assert_allclose(vc["Subject"], np.outer(sd, sd) * corr, atol=1e-9)
-    # print layout (lme4 print.VarCorr default): Std.Dev. + Corr, Residual row,
-    # no Variance column.
     txt = repr(vc)
     assert "Std.Dev." in txt and "Residual" in txt and "Corr" in txt
     assert "Variance" not in txt
@@ -1328,7 +1163,6 @@ def test_coef_is_fixef_plus_ranef(sleepstudy_data):
     np.testing.assert_allclose(
         [row0["(Intercept)"], row0["Days"]], [253.6637, 19.6663], atol=1e-2
     )
-    # R.coef(gmm) → per-group dict; R.fixef → fixed effects only
     assert isinstance(R.coef(m), dict)
     np.testing.assert_allclose(list(R.fixef(m)), [251.4051, 10.4673], atol=1e-3)
 
@@ -1343,7 +1177,6 @@ def test_extractAIC_and_rePCA_match_lme4(sleepstudy_data, fm06ML):
     np.testing.assert_allclose(aic, 1755.6283, atol=1e-2)  # REML AIC
     np.testing.assert_allclose(mR.extractAIC(k=0)[1], -2 * mR.logLik(), atol=1e-9)
     assert fm06ML.extractAIC() == (6, pytest.approx(fm06ML.AIC))  # ML AIC
-    # rePCA: PC SDs of the relative covariance, largest first
     pcs = mR.rePCA()["Subject"]
     np.testing.assert_allclose(pcs, [0.96687, 0.23088], atol=1e-4)
     sd_rel = mR.sd_re["Subject"] / mR.sigma
@@ -1374,15 +1207,6 @@ def test_getData_and_R_generic_routing(sleepstudy_data):
         R.logLik(object(), REML=True)
 
 
-# ---------------------------------------------------------------------------
-# Method-signature fills (gmm-lmer-parity #22, #23, #25, #26, #27): the
-# remaining lme4 keyword surface. Real-behavior args (re.form=NA sentinel,
-# boot_scale="vcov", residuals scaled=) are honored; deep ports (newparams,
-# newdata, partial-bars, custom zeta) raise NotImplementedError rather than
-# silently no-op; the bit-exact simulate/bootMer RNG path is untouched.
-# ---------------------------------------------------------------------------
-
-
 def test_residuals_type_default_and_scaled(sleepstudy_data):
     """#27: LMM residual types all collapse to y−μ; the R generic defaults to
     'response' (lme4's LMM default, not 'deviance'); scaled= divides by σ̂."""
@@ -1409,7 +1233,6 @@ def test_predict_population_sentinels(sleepstudy_data):
     for s in ("NA", "~0", "~ 0", float("nan")):
         np.testing.assert_allclose(m.predict(re_form=s)["fit"].to_numpy(), pop, atol=0)
     assert not np.allclose(pop, m.predict()["fit"].to_numpy())  # pop != full-RE
-    # a re_form naming the full bar == including all RE
     np.testing.assert_allclose(
         m.predict(re_form="~(1+Days|Subject)")["fit"].to_numpy(),
         m.predict()["fit"].to_numpy(),
@@ -1449,7 +1272,6 @@ def test_predict_newparams_partial_bars_na_action(sleepstudy_data):
     )
     with pytest.raises(ValueError, match="length"):
         fm.predict(newparams={"beta": [1, 2, 3]})
-    # na.omit drops NA rows; na.exclude pads them back with NaN
     nd = sleepstudy_data.head(4).with_columns(pl.Series("Days", [0.0, None, 2.0, 3.0]))
     base = fm.predict(sleepstudy_data.head(4))["fit"].to_numpy()
     om = fm.predict(nd, na_action="na.omit")
@@ -1505,21 +1327,15 @@ def test_profile_vector_bar_matches_lme4(sleepstudy_data):
     np.testing.assert_allclose(d[".sigma"], [22.8983, 28.8580], atol=2e-2)
     np.testing.assert_allclose(d["(Intercept)"], [237.6807, 265.1295], atol=2e-2)
     np.testing.assert_allclose(d["Days"], [7.3587, 13.5759], atol=2e-2)
-    # which= profiles a subset (maxpts is R's name for n_grid)
     assert [
         r["parameter"]
         for r in fm.profile(which=["Days"], maxpts=60).confint().iter_rows(named=True)
     ] == ["Days"]
-    # signames= controls the variance-component labelling
     assert [s[0] for s in fm._variance_component_specs(signames=False)] == [
         "sd_(Intercept)|Subject",
         "sd_Days|Subject",
         "cor_Days.(Intercept)|Subject",
     ]
-    # prof_scale='varcov' — the diagonal (variances, σ²) match lme4 (the
-    # off-diagonal covariance is numerically fragile in lme4 too — it warns NAs)
-    # which= the two asserted components: profile CIs are per-parameter, so this
-    # is identical to profiling all 6 on the varcov scale but ~3× faster.
     vc = {
         r["parameter"]: (list(r.values())[1], list(r.values())[2])
         for r in fm.profile(prof_scale="varcov", which=[".sigma", ".sig01"])
@@ -1557,7 +1373,6 @@ def test_confint_oldnames_signames_zeta():
     np.testing.assert_allclose(d[".sig01"], [12.19853, 84.06305], atol=2e-2)
     np.testing.assert_allclose(d[".sigma"], [38.22998, 67.65770], atol=2e-2)
     np.testing.assert_allclose(d["(Intercept)"], [1486.4515, 1568.5485], atol=2e-2)
-    # zeta overrides the cutoff (zeta=1 → ~68% interval, strictly narrower)
     z1 = dy.confint(method="profile", zeta=1.0)
     zc = z1.filter(pl.col("parameter") == "(Intercept)").row(0)[1:]
     assert zc[0] > d["(Intercept)"][0] and zc[1] < d["(Intercept)"][1]
@@ -1586,7 +1401,6 @@ def test_na_exclude_padding_and_varcorr_alignment(sleepstudy_data):
     assert len(fv) == 180 and np.isnan(fv[5]) and np.isfinite(fv[[0, 1, 2, 6]]).all()
     assert len(rs) == 180 and np.isnan(rs[5]) and np.isfinite(rs[[0, 1, 2, 6]]).all()
     assert len(R.fitted(gmm(_SLEEP_F, d_na))) == 179  # na.omit: unpadded
-    # VarCorr Std.Dev. decimals align (right-justified numeric column)
     fm = gmm(_SLEEP_F, sleepstudy_data, REML=True)
     lines = repr(fm.VarCorr()).split("\n")
     dot_cols = []
@@ -1606,7 +1420,6 @@ def test_confint_boot_scale_vcov_and_cosmetic_args(fm01ML):
     assert np.isclose(vc[".sig01"], sd[".sig01"] ** 2)
     assert np.isclose(vc[".sigma"], sd[".sigma"] ** 2)
     assert np.isclose(vc["(Intercept)"], sd["(Intercept)"])  # fixef unscaled
-    # Wald with the descriptive (oldNames=False) labels for the var components
     w = m.confint(method="Wald", quiet=True, oldNames=False, signames=False)
     assert w.height > 0 and "sd_(Intercept)|Batch" in w["parameter"].to_list()
     ci = m.confint(method="boot", boot_scale="vcov", nsim=25, seed=1)
@@ -1622,7 +1435,6 @@ def test_simulate_bootMer_re_form_preserve_bit_exact(fm01ML):
     s0 = m.simulate(nsim=3, seed=7)
     s1 = m.simulate(nsim=3, seed=7, re_form="NA")
     np.testing.assert_array_equal(s0.to_numpy(), s1.to_numpy())
-    # newdata=self.data and an empty newparams are no-ops → same draw
     np.testing.assert_array_equal(
         m.simulate(nsim=3, seed=7, newdata=m.data).to_numpy(), s0.to_numpy()
     )
@@ -1646,7 +1458,6 @@ def test_anova_single_model_sequential_F(sleepstudy_data):
     np.testing.assert_allclose(a["Sum Sq"][0], 30030.9390201738, atol=1e-3)
     np.testing.assert_allclose(a["Mean Sq"][0], 30030.9390201738, atol=1e-3)
     np.testing.assert_allclose(a["F value"][0], 45.85296, atol=1e-4)
-    # a multi-column factor term (Machine: 3 levels → 2 cols, one term)
     mm = gmm(
         "score ~ Machine + (1|Worker)", load_dataset("nlme", "Machines"), REML=True
     )
@@ -1677,7 +1488,6 @@ def test_influence_family_matches_lme4(sleepstudy_data):
         atol=1e-6,
     )
     np.testing.assert_allclose(R.hatvalues(fm), h)  # generic routes
-    # Dyestuff (scalar bar) — closed-form cooks + case/group-deletion influence
     dy = gmm("Yield ~ 1 + (1|Batch)", load_dataset("lme4", "Dyestuff"), REML=True)
     np.testing.assert_allclose(
         dy.cooks_distance()[:4],
@@ -1718,12 +1528,6 @@ def test_chol_permutation_is_applied_before_triangular_solves(fm04ML):
     """``L`` factors the *permuted* ``M`` (``L Lᵀ = M[p][:, p]``), so every
     consumer that solves against ``L`` directly must permute its right-hand
     side first — lme4's ``solve(L, solve(L, ., system="P"), system="L")``.
-
-    ``Pastes`` is the detector: its AMD ordering genuinely reorders ``M``, so
-    dropping the permutation makes ``XᵀX − RZXᵀRZX`` indefinite and the ``RX``
-    Cholesky fails outright. ``Penicillin``'s ordering is an automorphism of
-    ``M`` (``M[p][:, p] == M`` exactly) and ``sleepstudy``/``Dyestuff`` order
-    to the identity, so none of those three can see the difference.
     """
     from scipy.linalg import solve_triangular
 
@@ -1731,22 +1535,16 @@ def test_chol_permutation_is_applied_before_triangular_solves(fm04ML):
     L = fm04ML._L_dense()
     q = L.shape[0]
 
-    # This model is a real detector, not a P == I / automorphism freebie.
     assert not np.array_equal(p, np.arange(q))
     M_perm = L @ L.T  # P M Pᵀ
     M = np.empty_like(M_perm)
     M[np.ix_(p, p)] = M_perm
     assert np.abs(M_perm - M).max() > 1.0
 
-    # lme4 2.0.1 / Matrix 1.7-5:
-    #   fm <- lmer(strength ~ 1 + (1|sample) + (1|batch), Pastes, REML=FALSE)
     h = fm04ML.hatvalues()
     np.testing.assert_allclose(h[:4], [0.483008256986] * 4, atol=1e-6)
     np.testing.assert_allclose(h.sum(), 28.9804954191, atol=1e-6)
     RX, RZX = fm04ML._getme_rx_rzx()
-    # RZX is in CHOLMOD's ordering, so this pin is permutation-sensitive
-    # elementwise — an invariant like RXᵀRX + RZXᵀRZX = XᵀX is not, and holds
-    # by construction here whether or not the permutation was applied.
     np.testing.assert_allclose(RZX[:3, 0], [1.38661956586] * 3, atol=1e-6)
     np.testing.assert_allclose((RZX**2).sum(), 58.3557147663, atol=1e-6)
     np.testing.assert_allclose(RX.ravel(), [1.28229685866], atol=1e-6)
@@ -1759,8 +1557,6 @@ def test_chol_permutation_is_applied_before_triangular_solves(fm04ML):
         atol=1e-6,
     )
 
-    # Without the permutation the Schur complement is not positive definite —
-    # the pre-fix failure mode, pinned so a silent regression can't pass.
     ZLtX = np.asarray((fm04ML._Z_sp_solve @ fm04ML.Lambda).T @ fm04ML._X_solve)
     RZX_bad = solve_triangular(L, ZLtX, lower=True)
     with pytest.raises(np.linalg.LinAlgError):
@@ -1781,7 +1577,6 @@ def test_L_snapshot_stays_sparse(fm04ML, fm06ML):
         assert fm.L.nnz < fm.q * fm.q
         Ld = fm._L_dense()
         assert Ld.shape == (fm.q, fm.q)
-        # lower triangular, and it factors the permuted M
         np.testing.assert_array_equal(np.triu(Ld, 1), 0.0)
         np.testing.assert_allclose(np.abs(Ld).sum(), np.abs(fm.L).sum())
 
@@ -1789,15 +1584,6 @@ def test_L_snapshot_stays_sparse(fm04ML, fm06ML):
 def test_insteval_crossed_grows_the_supernodal_pattern():
     """The supernodal counterpart of the test below, and the one that reached a
     user: ``InstEval`` with three crossed grouping factors.
-
-    ``M``'s pattern grows here too, and the supernodal analysis *cannot* absorb
-    a wider ``A`` the way ``rowfac`` can — its supernodes fix where every entry
-    of ``L`` lives. So the factor has to re-analyze rather than refuse, which is
-    ``cholmod_analyze`` + ``cholmod_factorize`` together. Pinned to lme4 2.0.1,
-    ML.
-
-    73k rows, so this is the slowest test in the module (~5 s). It earns it: it
-    is the only end-to-end cover of the re-analysis path.
     """
     d = load_dataset("lme4", "InstEval")
     m = gmm("y ~ 1 + (1 | s) + (1 | d) + (1 | dept:service)", d, REML=False)
@@ -1814,19 +1600,6 @@ def test_insteval_crossed_grows_the_supernodal_pattern():
 def test_machines_correlated_slopes_grow_the_cholesky_pattern():
     """``M``'s sparsity pattern is not constant across a fit, and the factor has
     to cope. ``nlme::Machines`` is the detector.
-
-    With ``(Machine|Worker)`` no observation is on two machines at once, so each
-    worker's ``Zᵀ Z`` block carries a structural zero off the diagonal. At the
-    starting theta ``Λ`` is the identity and ``M`` inherits that zero -- scipy
-    does not emit an entry that came out numerically zero -- and the moment the
-    optimizer tries a nonzero correlation, ``Λ Zᵀ Z Λᵀ`` fills it in and the
-    pattern *grows*. A factor that assumed the analyzed pattern raised partway
-    through the fit; the simplicial path is required to factorize the wider
-    matrix instead, which is what CHOLMOD does.
-
-    Values are lme4 2.0.1, ML. The ``(Machine|Worker)`` optimum is flat -- theta
-    moves in the 4th decimal for a 1e-6 change in the deviance -- so the pins
-    are on the log-likelihood, which is the quantity the surface is flat *in*.
     """
     d = load_dataset("nlme", "Machines")
     for f, want in (
@@ -1839,22 +1612,13 @@ def test_machines_correlated_slopes_grow_the_cholesky_pattern():
 
 
 def test_gmm_factorizes_through_hea_sparse():
-    """``gmm``'s inner Cholesky is ``hea.sparse``, and shares its error class.
-
-    Both halves are load-bearing. ``_glmm_deviance`` catches ``CholmodError``
-    to *reject a theta* and let the optimizer move on, so a second exception
-    class would turn a rejected step into a crashed fit. And ``L`` factors the
-    *permuted* ``M``, which is the contract ``_apply_L_perm`` depends on --
-    see ``test_chol_permutation_is_applied_before_triangular_solves`` for the
-    fit-level detector.
-    """
+    """``gmm``'s inner Cholesky is ``hea.sparse``, and shares its error class."""
     import importlib
 
     from scipy.sparse import csc_array
 
     import hea.sparse
 
-    # the re-exported ``gmm`` callable shadows the module of the same name
     gmm_mod = importlib.import_module("hea.models.gmm")
 
     assert gmm_mod.cho_factor is hea.sparse.cho_factor
@@ -1869,8 +1633,6 @@ def test_gmm_factorizes_through_hea_sparse():
     Ld = F.L.toarray()
     np.testing.assert_allclose(Ld @ Ld.T, M.toarray()[np.ix_(p, p)], atol=1e-10)
 
-    # the analysis is reusable across refactorizations, which is the whole
-    # reason a fit can afford hundreds of them
     M2 = csc_array(A @ A.T + 12.0 * np.eye(8))
     F.factorize(M2)
     b = np.ones(8)
@@ -1884,10 +1646,10 @@ def test_gmm_factorizes_through_hea_sparse():
 
 
 def test_lmer_rejects_glmer_keys_and_wires_optinfo(sleepstudy_data):
-    """#6 remainder: lmerControl() rejects glmer-only inner-loop keys; the LMM
-    fit now populates m.optinfo via calc.derivs (the post-fit gradient/Hessian
-    checkConv that was previously inert). A clean fit yields no message; a
-    boundary (singular) fit surfaces lme4's message in optinfo + the summary."""
+    """lmerControl() rejects glmer-only inner-loop keys, and the LMM fit
+    populates m.optinfo via calc.derivs (lme4's post-fit gradient/Hessian
+    checkConv). A clean fit yields no message; a boundary (singular) fit
+    surfaces lme4's message in optinfo + the summary."""
     import contextlib
     import io
 
@@ -1904,11 +1666,6 @@ def test_lmer_rejects_glmer_keys_and_wires_optinfo(sleepstudy_data):
     with contextlib.redirect_stdout(buf):
         sing.summary()
     assert "isSingular" in buf.getvalue()
-
-
-# ---------------------------------------------------------------------------
-# Ch 4: Building Linear Mixed Models
-# ---------------------------------------------------------------------------
 
 
 def test_bates_4_1_machines_fm10_ML():
@@ -1982,13 +1739,6 @@ def test_bates_4_2_ergostool_fm17_ML():
     _assert_fixed(m, "TypeT4", 0.6667)
 
 
-# ---------------------------------------------------------------------------
-# offset(...) — algebraic identity: fitting (y-off) ~ X + (1|g) gives the
-# same β̂, û, and σ̂ as fitting y ~ X + offset(off) + (1|g). Fitted values
-# shift by the offset; residuals are unchanged.
-# ---------------------------------------------------------------------------
-
-
 def test_predict_no_args_equals_fitted():
     """predict() with no args returns a 1-col DataFrame matching self.fitted —
     R's ``predict(fm)`` → ``na.omit(fitted(fm))`` short-circuit."""
@@ -2019,18 +1769,12 @@ def test_predict_pinned_to_R_lmer():
     gpa = pl.read_csv("datasets/m-clark/gpa.csv")
     fm = gmm("gpa ~ occasion + (1 | student)", data=gpa)
 
-    # Conditional (re.form=NULL) — includes BLUPs.
     r_conditional = [2.528319363, 2.634633649, 2.740947934, 2.847262220, 2.953576506]
-    # R reference rounded to 9 sig figs; combined with BLAS-reduction-order
-    # drift in the X·β + Z·b path (~1e-6 abs on Linux/OpenBLAS), atol=1e-5
-    # is the honest floor. Tighter on platforms with matched BLAS to the
-    # R machine but kept permissive to keep CI green across Python builds.
     np.testing.assert_allclose(
         fm.predict(newdata=gpa.head(5))["fit"].to_numpy(),
         r_conditional,
         atol=1e-5,
     )
-    # Population (re.form=NA) — Xβ only.
     r_population = [2.599214286, 2.705528571, 2.811842857, 2.918157143, 3.024471429]
     np.testing.assert_allclose(
         fm.predict(newdata=gpa.head(5), re_form=False)["fit"].to_numpy(),
@@ -2112,7 +1856,6 @@ def test_gmm_offset_matches_y_minus_offset():
     np.testing.assert_allclose(m_off._beta, m_pre._beta, atol=1e-10)
     np.testing.assert_allclose(m_off.sigma, m_pre.sigma, atol=1e-10)
     np.testing.assert_allclose(m_off.residuals, m_pre.residuals, atol=1e-10)
-    # Fitted values shift by exactly the offset.
     np.testing.assert_allclose(
         m_off.fitted - m_pre.fitted,
         1.5 * o,

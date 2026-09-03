@@ -26,9 +26,6 @@ def plot_lm(
     titles or ``None`` to suppress them. Currently accepted but not
     rendered — the panels carry their own internal titles already.
     """
-    # Caption hook is accepted for R parity. ``None`` suppresses, a list
-    # would override per-panel; we honor neither yet — panels carry their
-    # own titles. Quiet pass-through avoids tripping translated scripts.
     del caption
     panels = (
         (0, 1, 2, 4)

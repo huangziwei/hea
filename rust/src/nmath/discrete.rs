@@ -1,6 +1,3 @@
-//! Discrete CDFs/PMFs + quantiles — R's nmath ppois.c / pbinom.c / dpois.c /
-//! dbinom.c / dbeta.c / qpois.c / qbinom.c (qDiscrete_search.h). Mirror of the
-//! `hea/R/nmath.py` discrete cluster.
 #![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
@@ -13,7 +10,6 @@ use super::norm::{dt0, dt1, qnorm5_scalar};
 use super::toms708::{bratio, lbeta_scalar, pbeta_scalar};
 use super::util::{rfma, round_half_even};
 
-// === CDFs ====================================================================
 pub(crate) fn ppois_scalar(x: f64, lambda: f64, lower_tail: bool, log_p: bool) -> f64 {
     if x.is_nan() || lambda.is_nan() {
         return x + lambda;
@@ -66,7 +62,6 @@ pub(crate) fn pnbinom_mu_scalar(x: f64, size: f64, mu: f64, lower_tail: bool, lo
         return f64::NAN;
     }
     if size == 0.0 {
-        // limiting case: point mass at zero
         return if x >= 0.0 {
             dt1(lower_tail, log_p)
         } else {
@@ -80,7 +75,6 @@ pub(crate) fn pnbinom_mu_scalar(x: f64, size: f64, mu: f64, lower_tail: bool, lo
         return dt1(lower_tail, log_p);
     }
     if !size.is_finite() {
-        // limit case: Poisson
         return ppois_scalar(x, mu, lower_tail, log_p);
     }
     let x = (x + 1e-7).floor();
@@ -94,7 +88,6 @@ pub(crate) fn pnbinom_mu_scalar(x: f64, size: f64, mu: f64, lower_tail: bool, lo
     }
 }
 
-// === densities ===============================================================
 fn r_nonint(x: f64) -> bool {
     (x - round_half_even(x)).abs() > 1e-9 * 1f64.max(x.abs())
 }
@@ -191,7 +184,6 @@ pub(crate) fn dbeta_scalar(x: f64, a: f64, b: f64, give_log: bool) -> f64 {
     }
 }
 
-// === discrete quantile search (qDiscrete_search.h) ===========================
 fn do_search<F: Fn(f64, bool, bool) -> f64>(
     mut y: f64,
     z: &mut f64,
@@ -255,8 +247,6 @@ fn q_discrete<F: Fn(f64, bool, bool) -> f64>(
     y_max: Option<f64>,
 ) -> f64 {
     let z = qnorm5_scalar(p, 0.0, 1.0, lower_tail, log_p);
-    // `+ 0.0` normalizes -0.0 -> +0.0 to match Python's float(round(...)) (int->float),
-    // which never yields signed-zero (R's nearbyint would).
     let mut y = round_half_even(mu + sigma * (z + gamma * (z * z - 1.0) / 6.0)) + 0.0;
     if let Some(ym) = y_max {
         if y > ym {
@@ -384,7 +374,6 @@ pub(crate) fn qbinom_scalar(p: f64, n: f64, pr: f64, lower_tail: bool, log_p: bo
 
 pub(crate) fn qnbinom_mu_scalar(p: f64, size: f64, mu: f64, lower_tail: bool, log_p: bool) -> f64 {
     if size == f64::INFINITY {
-        // limit case: Poisson
         return qpois_scalar(p, mu, lower_tail, log_p);
     }
     if p.is_nan() || size.is_nan() || mu.is_nan() {
@@ -396,7 +385,6 @@ pub(crate) fn qnbinom_mu_scalar(p: f64, size: f64, mu: f64, lower_tail: bool, lo
     if mu < 0.0 || size < 0.0 {
         return f64::NAN;
     }
-    // R_Q_P01_boundaries(p, 0, ML_POSINF)
     if log_p {
         if p > 0.0 {
             return f64::NAN;
@@ -426,8 +414,6 @@ pub(crate) fn qnbinom_mu_scalar(p: f64, size: f64, mu: f64, lower_tail: bool, lo
     q_discrete(p, lower_tail, log_p, mu, sigma, gamma, &cdf, None)
 }
 
-// === Negative binomial, prob parameterization (dnbinom.c/pnbinom.c/qnbinom.c) =
-// R_D_exp(x) = log_p ? x : exp(x); ldexp(v,-1) == v*0.5 (exact power-of-2 mul).
 pub(crate) fn dnbinom_scalar(x: f64, size: f64, prob: f64, give_log: bool) -> f64 {
     if x.is_nan() || size.is_nan() || prob.is_nan() {
         return x + size + prob;
@@ -444,7 +430,6 @@ pub(crate) fn dnbinom_scalar(x: f64, size: f64, prob: f64, give_log: bool) -> f6
     }
     let x = round_half_even(x);
     if x == 0.0 {
-        // limiting case as size -> 0 is point mass at zero
         if size == 0.0 {
             return if give_log { 0.0 } else { 1.0 };
         }
@@ -456,7 +441,6 @@ pub(crate) fn dnbinom_scalar(x: f64, size: f64, prob: f64, give_log: bool) -> f6
     }
     let size = if !size.is_finite() { f64::MAX } else { size };
     if x < 1e-10 * size {
-        // 2 terms of Abramowitz & Stegun (6.1.47)
         let xx2s = if x < f64::MAX.sqrt() {
             (x * (x - 1.0) * 0.5) / size
         } else {
@@ -560,7 +544,6 @@ pub(crate) fn pnbinom_scalar(x: f64, size: f64, prob: f64, lower_tail: bool, log
         return f64::NAN;
     }
     if size == 0.0 {
-        // limiting case: point mass at zero
         return if x >= 0.0 {
             dt1(lower_tail, log_p)
         } else {
@@ -581,7 +564,6 @@ pub(crate) fn qnbinom_scalar(p: f64, size: f64, prob: f64, lower_tail: bool, log
     if p.is_nan() || size.is_nan() || prob.is_nan() {
         return p + size + prob;
     }
-    // prob == 0 && size == 0 happens if specified via (mu, size): prob = size/(size+mu)
     if prob == 0.0 && size == 0.0 {
         return 0.0;
     }
@@ -591,7 +573,6 @@ pub(crate) fn qnbinom_scalar(p: f64, size: f64, prob: f64, lower_tail: bool, log
     if prob == 1.0 || size == 0.0 {
         return 0.0;
     }
-    // R_Q_P01_boundaries(p, 0, ML_POSINF)
     if log_p {
         if p > 0.0 {
             return f64::NAN;
@@ -622,7 +603,6 @@ pub(crate) fn qnbinom_scalar(p: f64, size: f64, prob: f64, lower_tail: bool, log
     q_discrete(p, lower_tail, log_p, mu, sigma, gamma, &cdf, None)
 }
 
-// === Geometric (dgeom.c / pgeom.c / qgeom.c) =================================
 pub(crate) fn dgeom_scalar(x: f64, p: f64, give_log: bool) -> f64 {
     if x.is_nan() || p.is_nan() {
         return x + p;
@@ -638,7 +618,6 @@ pub(crate) fn dgeom_scalar(x: f64, p: f64, give_log: bool) -> f64 {
         return rd0;
     }
     let x = round_half_even(x);
-    // prob = (1-p)^x, stable for small p
     let prob = dbinom_raw(0.0, x, p, 1.0 - p, give_log);
     if give_log {
         p.ln() + prob
@@ -662,7 +641,6 @@ pub(crate) fn pgeom_scalar(x: f64, p: f64, lower_tail: bool, log_p: bool) -> f64
     }
     let x = (x + 1e-7).floor();
     if p == 1.0 {
-        // we cannot assume IEEE
         let xv: f64 = if lower_tail { 1.0 } else { 0.0 };
         return if log_p { xv.ln() } else { xv };
     }
@@ -683,14 +661,12 @@ pub(crate) fn qgeom_scalar(p: f64, prob: f64, lower_tail: bool, log_p: bool) -> 
     if prob <= 0.0 || prob > 1.0 {
         return f64::NAN;
     }
-    // R_Q_P01_check(p)
     if (log_p && p > 0.0) || (!log_p && (p < 0.0 || p > 1.0)) {
         return f64::NAN;
     }
     if prob == 1.0 {
         return 0.0;
     }
-    // R_Q_P01_boundaries(p, 0, ML_POSINF)
     if log_p {
         if p == 0.0 {
             return if lower_tail { f64::INFINITY } else { 0.0 };
@@ -706,11 +682,9 @@ pub(crate) fn qgeom_scalar(p: f64, prob: f64, lower_tail: bool, log_p: bool) -> 
             return if lower_tail { f64::INFINITY } else { 0.0 };
         }
     }
-    // add a fuzz to ensure left continuity, but value must be >= 0
     0.0_f64.max((r_dt_clog(p, lower_tail, log_p) / (-prob).ln_1p() - 1.0 - 1e-12).ceil())
 }
 
-// === PyO3 wrappers ===========================================================
 macro_rules! wrap2 {
     ($name:literal, $fn:ident, $sc:path, ($p2:ident=$d2:literal), ($p3:ident=$d3:literal)) => {
         #[pyfunction]

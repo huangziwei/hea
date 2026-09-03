@@ -66,7 +66,6 @@ class GeomPath(Geom):
         linetype = _first(sub, "linetype", "solid")
         alpha = float(_first(sub, "alpha", 1.0))
 
-        # ggplot2 size in mm → matplotlib linewidth in pt (1pt ≈ 0.353mm).
         lines = ax.plot(
             x,
             y,
@@ -86,12 +85,7 @@ def _first(df, col, default):
 
 
 def _stairstep(x, y, direction: str):
-    """Convert (x, y) into stair-step coordinates.
-
-    * ``"hv"`` — horizontal then vertical (post step; matches ``geom_step()``).
-    * ``"vh"`` — vertical then horizontal (pre step).
-    * ``"mid"`` — step at the midpoint between consecutive x values.
-    """
+    """Convert (x, y) into stair-step coordinates."""
     n = len(x)
     if n < 2:
         return x, y
@@ -124,15 +118,9 @@ def _stairstep(x, y, direction: str):
         new_y[0::3] = y
         new_y[1::3] = y[:-1]
         new_y[2::3] = y[1:]
-        # last entry trims off
         return new_x[:-1], new_y[:-1]
 
     raise ValueError(f"step direction {direction!r} not in {{hv, vh, mid}}")
-
-
-# ---------------------------------------------------------------------------
-# Factories
-# ---------------------------------------------------------------------------
 
 
 def _layer(geom, mapping, data, position, stat, kwargs):

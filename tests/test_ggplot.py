@@ -1,7 +1,7 @@
 """hea.ggplot tests.
 
-PNG diff parity (the visual-snapshot tests) come later; these just assert the
-build pipeline runs and produces a matplotlib Figure with expected primitives.
+These assert the build pipeline runs and produces a matplotlib Figure with the
+expected primitives; they do not compare rendered pixels.
 """
 
 from __future__ import annotations
@@ -138,14 +138,7 @@ from hea.tidy import (
 
 
 def test_gg_c1_minimal_scatter_renders():
-    """GG-C1: ``ggplot(mtcars, aes(wt, mpg)) + geom_point()`` renders identifiably.
-
-    Asserts:
-    - ``draw()`` returns a matplotlib Figure;
-    - the figure has exactly one axes with one PathCollection (scatter);
-    - that scatter holds N=nrow(mtcars) points;
-    - the points span roughly the data range on each axis.
-    """
+    """GG-C1: ``ggplot(mtcars, aes(wt, mpg)) + geom_point()`` renders identifiably."""
     mtcars = load_dataset("datasets", "mtcars")
 
     p = ggplot(mtcars, aes("wt", "mpg")) + geom_point()
@@ -169,8 +162,6 @@ def test_gg_c1_minimal_scatter_renders():
 
         x_vals = mtcars["wt"].to_numpy()
         y_vals = mtcars["mpg"].to_numpy()
-        # Some matplotlib slack on autoscaling; just check the offsets cover the
-        # data extents within float precision.
         assert offsets[:, 0].min() == pytest.approx(x_vals.min())
         assert offsets[:, 0].max() == pytest.approx(x_vals.max())
         assert offsets[:, 1].min() == pytest.approx(y_vals.min())
@@ -261,12 +252,6 @@ def test_aes_callable_value():
         plt.close(fig)
 
 
-# ---------------------------------------------------------------------------
-# Continuous scales: scale_x/y_continuous knobs (limits, breaks,
-# labels) plus auto-default registration in build.
-# ---------------------------------------------------------------------------
-
-
 def test_scale_x_continuous_limits_override_autoscale():
     """``scale_x_continuous(limits=(0, 10))`` should clamp xlim regardless of data."""
     mtcars = load_dataset("datasets", "mtcars")
@@ -350,14 +335,8 @@ def test_scale_plus_is_non_mutating():
     mtcars = load_dataset("datasets", "mtcars")
     base = ggplot(mtcars, aes("wt", "mpg")) + geom_point()
     extended = base + scale_x_continuous(limits=(0, 10))
-    # original plot's scales unchanged
     assert base.scales.get("x") is None
     assert extended.scales.get("x") is not None
-
-
-# ---------------------------------------------------------------------------
-# Trans objects: log10, sqrt, reverse, identity
-# ---------------------------------------------------------------------------
 
 
 def test_gg_c6_scale_x_log10():
@@ -376,8 +355,6 @@ def test_gg_c6_scale_x_log10():
         assert ax.get_yscale() == "linear"
         offsets = ax.collections[0].get_offsets()
         assert offsets.shape == (len(mtcars), 2)
-        # disp range [71, 472] → log10 range ~[1.85, 2.67]; far below
-        # raw-units autoscale so we know the pre-transform fired.
         np.testing.assert_allclose(
             offsets[:, 0],
             np.log10(mtcars["disp"].to_numpy()),
@@ -397,15 +374,11 @@ def test_scale_y_log10():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # Both axes are linear at the matplotlib level; the data on the
-        # y axis is in log10 space (mtcars$mpg max=33.9 → ~1.53).
         assert ax.get_yscale() == "linear"
         assert ax.get_xscale() == "linear"
         offsets = ax.collections[0].get_offsets()
-        # mpg values lie in [10.4, 33.9]; transformed → [1.02, 1.53].
         assert offsets[:, 1].max() < 2.0
         assert offsets[:, 1].min() > 1.0
-        # Tick labels use original units (10^k → "10", "100", etc.).
         labels = [t.get_text() for t in ax.get_yticklabels()]
         assert any("10" in lab for lab in labels)
     finally:
@@ -423,7 +396,6 @@ def test_scale_x_sqrt():
         ax = fig.axes[0]
         assert ax.get_xscale() == "linear"
         offsets = ax.collections[0].get_offsets()
-        # disp range [71, 472] → sqrt range [~8.4, ~21.7].
         assert offsets[:, 0].max() < 25
         assert offsets[:, 0].min() > 8
     finally:
@@ -441,14 +413,11 @@ def test_scale_y_sqrt_transforms_stat_generated_y():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # Bars should be at sqrt-heights, not raw counts.
         heights = sorted(round(p.get_height(), 4) for p in ax.patches)
-        # counts: A=3, B=4, C=16, D=17 → sqrt: ~1.73, 2.00, 4.00, ~4.12
         import math
 
         assert heights[0] == pytest.approx(math.sqrt(3), abs=1e-4)
         assert heights[-1] == pytest.approx(math.sqrt(17), abs=1e-4)
-        # Tick labels should read in raw count units.
         labels = [t.get_text() for t in ax.get_yticklabels()]
         assert any(lbl in ("0", "5", "10", "15", "20") for lbl in labels), labels
     finally:
@@ -466,9 +435,6 @@ def test_scale_y_sqrt_tick_labels_in_raw_units_for_geom_col():
     try:
         ax = fig.axes[0]
         labels = [t.get_text() for t in ax.get_yticklabels() if t.get_text()]
-        # The labels should be in raw units (hundreds), not sqrt-units
-        # (tens). Bar tops at sqrt(1600)=40; labels reading "10..40" would
-        # mean sqrt-units. Look for at least one >= 100.
         large_labels = [
             lbl
             for lbl in labels
@@ -521,9 +487,8 @@ def test_log10_with_explicit_breaks():
 # Wilkinson extended_breaks algorithm
 #
 # These cases lock parity with ggplot2's `labeling::extended` defaults on the
-# canonical R datasets used throughout Faraway's textbook. R-oracle dump
-# fixtures land later (X.1) — these hand-checked values are enough to catch
-# regressions in the meantime.
+# canonical R datasets used throughout Faraway's textbook. The expected
+# values are hand-checked rather than dumped from an R oracle.
 # ---------------------------------------------------------------------------
 
 
@@ -566,11 +531,6 @@ def test_extended_breaks_degenerate_range_returns_single_tick():
     assert bk[0] == 3.14
 
 
-# ---------------------------------------------------------------------------
-# geom_line, geom_path, geom_step
-# ---------------------------------------------------------------------------
-
-
 def test_geom_line_sorts_by_x():
     """`geom_line` connects points sorted by x — what most line plots want."""
 
@@ -581,7 +541,6 @@ def test_geom_line_sorts_by_x():
         line = fig.axes[0].lines[0]
         xs = line.get_xdata()
         assert list(xs) == sorted(xs), "geom_line must sort by x"
-        # all data points present
         assert len(xs) == len(mtcars)
     finally:
         plt.close(fig)
@@ -622,7 +581,6 @@ def test_geom_step_vh_direction():
     fig_hv = p_hv.draw()
     fig_vh = p_vh.draw()
     try:
-        # Different y-trajectories; specifically the second y-value differs.
         y_hv = fig_hv.axes[0].lines[0].get_ydata()
         y_vh = fig_vh.axes[0].lines[0].get_ydata()
         assert not np.array_equal(y_hv, y_vh)
@@ -639,15 +597,9 @@ def test_geom_line_constant_aes_overrides():
     try:
         line = fig.axes[0].lines[0]
         assert line.get_color() == "red"
-        # size in mm, mapped to ~5.66 pt
         assert abs(line.get_linewidth() - 2 * 2.83) < 0.01
     finally:
         plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# Positions: jitter, nudge, dodge, stack, fill
-# ---------------------------------------------------------------------------
 
 
 def test_position_jitter_spreads_points():
@@ -655,7 +607,6 @@ def test_position_jitter_spreads_points():
     import numpy as np
 
     mtcars = load_dataset("datasets", "mtcars")
-    # cyl has 3 unique values; raw scatter would have only 3 distinct x's.
     p = ggplot(mtcars, aes("cyl", "mpg")) + geom_point(
         position=position_jitter(seed=42)
     )
@@ -715,11 +666,8 @@ def test_position_dodge_splits_bars_per_group():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # 3 cyl × 2 am = 6 bars total
         assert len(ax.patches) == 6
         centers = sorted(b.get_x() + b.get_width() / 2 for b in ax.patches)
-        # Each cyl ∈ {4, 6, 8} splits into two centers offset by ±slot_width/2.
-        # slot_width = 0.9 / 2 = 0.45 → centers at cyl ± 0.225.
         assert abs(centers[0] - (4 - 0.225)) < 0.01
         assert abs(centers[1] - (4 + 0.225)) < 0.01
         assert abs(centers[2] - (6 - 0.225)) < 0.01
@@ -735,7 +683,6 @@ def test_position_stack_stacks_bars_vertically():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # 6 bars total (3 cyl × 2 am), some with non-zero `bottom`.
         bottoms = [b.get_y() for b in ax.patches]
         assert max(bottoms) > 0, "stack should produce bars sitting on others"
     finally:
@@ -743,12 +690,7 @@ def test_position_stack_stacks_bars_vertically():
 
 
 def test_geom_bar_facet_wrap_bars_start_at_zero():
-    """Regression: position_stack must reset per facet panel.
-
-    Without per-panel position adjustment, bars in panel 1 stack on top
-    of panel 0's bars at the same x — visually offset upward instead of
-    starting at y=0.
-    """
+    """Regression: position_stack must reset per facet panel."""
     mtcars = load_dataset("datasets", "mtcars")
     p = ggplot(mtcars, aes("gear")) + geom_bar() + facet_wrap("~cyl")
     fig = p.draw()
@@ -769,7 +711,6 @@ def test_position_fill_normalises_stacks_to_one():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # For each unique x, the topmost bar's (y + height) should be 1.0.
         from collections import defaultdict
 
         tops = defaultdict(float)
@@ -785,8 +726,6 @@ def test_position_fill_normalises_stacks_to_one():
 def test_position_string_resolves_to_class():
     """`position="jitter"` should work just like `position=position_jitter()`."""
     mtcars = load_dataset("datasets", "mtcars")
-    # Determinism not asserted (no seed plumbing through string form),
-    # just confirm the dispatch and that points spread.
     import numpy as np
 
     p = ggplot(mtcars, aes("cyl", "mpg")) + geom_point(position="jitter")
@@ -804,12 +743,6 @@ def test_position_unknown_string_raises():
         ggplot(mtcars, aes("wt", "mpg")) + geom_point(position="zigzag")
 
 
-# ---------------------------------------------------------------------------
-# Smoothing: stat_smooth + geom_smooth (and the underlying
-# geom_ribbon / geom_area)
-# ---------------------------------------------------------------------------
-
-
 def test_geom_ribbon_draws_filled_band():
     """geom_ribbon needs aes(x, ymin, ymax)."""
     import polars as pl
@@ -825,8 +758,6 @@ def test_geom_ribbon_draws_filled_band():
     p = ggplot(df, aes(x="x", ymin="lo", ymax="hi")) + geom_ribbon()
     fig = p.draw()
     try:
-        # fill_between yields a PolyCollection subclass
-        # (FillBetweenPolyCollection in modern matplotlib).
         polys = [c for c in fig.axes[0].collections if isinstance(c, PolyCollection)]
         assert len(polys) == 1
     finally:
@@ -856,9 +787,7 @@ def test_gg_c2_geom_smooth_lm_with_ci_ribbon():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # 2 collections: scatter from geom_point + ribbon from geom_smooth
         assert len(ax.collections) == 2
-        # 1 line: the fitted line from geom_smooth
         assert len(ax.lines) == 1
     finally:
         plt.close(fig)
@@ -870,7 +799,6 @@ def test_geom_smooth_se_false_omits_ribbon():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # No ribbon (no scatter either since no geom_point)
         assert len(ax.collections) == 0
         assert len(ax.lines) == 1
     finally:
@@ -892,8 +820,6 @@ def test_geom_smooth_loess_default_method_works():
     try:
         ax = fig.axes[0]
         line_y = ax.lines[0].get_ydata()
-        # Smoothed curve should track the sin shape — peaks/troughs near sin's.
-        # Just check it's bounded, not a constant or a flat line.
         assert line_y.max() > 0.3
         assert line_y.min() < -0.3
     finally:
@@ -938,9 +864,7 @@ def test_stat_smooth_gam_method():
     try:
         y_lm = fig_lm.axes[0].lines[0].get_ydata()
         y_gam = fig_gam.axes[0].lines[0].get_ydata()
-        # The two fits should differ (gam picks up curvature lm misses).
         assert not np.allclose(y_lm, y_gam, atol=0.1)
-        # gam fit should be non-linear (second-difference > 0 somewhere).
         d2 = np.diff(y_gam, n=2)
         assert abs(d2).max() > 0.001
     finally:
@@ -965,7 +889,6 @@ def test_stat_smooth_gam_with_per_panel_facets():
         fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
-        # 3 cyl panels each with their own smooth + ribbon.
         for a in visible:
             assert len(a.lines) == 1
             assert len(a.collections) == 1  # ribbon only
@@ -1009,7 +932,6 @@ def test_stat_smooth_glm_binomial_logistic_regression():
     fig = p.draw()
     try:
         yhat = fig.axes[0].lines[0].get_ydata()
-        # Sigmoid: monotone in x, sweeping from low to high across the range.
         assert yhat[0] < 0.2 and yhat[-1] > 0.8
         assert (np.diff(yhat) >= -1e-9).all(), "logistic curve must be monotone"
     finally:
@@ -1044,18 +966,12 @@ def test_stat_smooth_glm_unknown_family_errors():
         p.draw()
 
 
-# ---------------------------------------------------------------------------
-# geom_boxplot
-# ---------------------------------------------------------------------------
-
-
 def test_geom_boxplot_one_box_per_group():
     """3 unique cyl values → 3 boxes."""
     mtcars = load_dataset("datasets", "mtcars")
     p = ggplot(mtcars, aes(x="cyl", y="mpg", group="cyl")) + geom_boxplot()
     fig = p.draw()
     try:
-        # patches contains the box rectangles (one per group).
         assert len(fig.axes[0].patches) == 3
     finally:
         plt.close(fig)
@@ -1095,8 +1011,6 @@ def test_geom_boxplot_per_box_colour():
     p = ggplot(df, aes(x="g", y="y", colour="g")) + geom_boxplot()
     fig = p.draw()
     try:
-        # Three boxes → three patches (one per group). Their edge colours
-        # should all differ.
         patches = fig.axes[0].patches
         assert len(patches) == 3
         edges = [
@@ -1117,7 +1031,6 @@ def test_geom_boxplot_extracts_outliers():
 
     from hea.ggplot.stats.boxplot import StatBoxplot
 
-    # Most data in [0,1]; throw in an obvious outlier at 100.
     y = list(range(20)) + [100]
     df = pl.DataFrame({"x": [0] * len(y), "y": [float(v) for v in y]})
 
@@ -1126,17 +1039,11 @@ def test_geom_boxplot_extracts_outliers():
     assert 100.0 in outliers
 
 
-# ---------------------------------------------------------------------------
-# geom_violin
-# ---------------------------------------------------------------------------
-
-
 def test_geom_violin_one_polygon_per_group():
     mtcars = load_dataset("datasets", "mtcars")
     p = ggplot(mtcars, aes(x="cyl", y="mpg", group="cyl")) + geom_violin()
     fig = p.draw()
     try:
-        # ax.fill registers patches as Polygon. 3 cyl groups → 3 polygons.
         assert len(fig.axes[0].patches) == 3
     finally:
         plt.close(fig)
@@ -1164,17 +1071,6 @@ def test_stat_ydensity_violinwidth_normalised_to_one():
         assert float(sub["violinwidth"].max()) == pytest.approx(1.0)
 
 
-# ---------------------------------------------------------------------------
-# GG-C9: boxplot + jittered points overlay
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Color/fill scales: auto-default discrete, manual, identity,
-# plus 1.5a auto-grouping rule.
-# ---------------------------------------------------------------------------
-
-
 def test_gg_c3_aes_color_factor_cyl_assigns_distinct_colors():
     """GG-C3: ``aes(color = factor(cyl))`` paints points by group."""
     mtcars = load_dataset("datasets", "mtcars")
@@ -1182,7 +1078,6 @@ def test_gg_c3_aes_color_factor_cyl_assigns_distinct_colors():
     fig = p.draw()
     try:
         fc = fig.axes[0].collections[0].get_facecolors()
-        # 3 unique cyl values → 3 unique facecolors.
         assert len({tuple(c) for c in fc}) == 3
     finally:
         plt.close(fig)
@@ -1229,7 +1124,6 @@ def test_discrete_color_levels_sorted_alphabetically():
         _w.simplefilter("ignore", UserWarning)  # NA-removal warning
         fig = p.draw()
     try:
-        # Map each species to its rendered colour.
         clean = penguins.drop_nulls(["flipper_length_mm", "body_mass_g"])
         species = clean["species"].to_list()
         fc = fig.axes[0].collections[0].get_facecolors()
@@ -1305,7 +1199,6 @@ def test_scale_color_manual_dict_form():
     fig = p.draw()
     try:
         fc = fig.axes[0].collections[0].get_facecolors()
-        # Two unique colours, each matching the palette.
         assert {tuple(c) for c in fc} == {to_rgba("#AA0000"), to_rgba("#00AA00")}
     finally:
         plt.close(fig)
@@ -1349,13 +1242,7 @@ def test_add_group_auto_creates_group_from_discrete_aesthetic():
     )
     out = _add_group(df)
     assert "group" in out.columns
-    # 3 unique levels → 3 distinct group ids
     assert out["group"].n_unique() == 3
-
-
-# ---------------------------------------------------------------------------
-# viridis / gradient / brewer
-# ---------------------------------------------------------------------------
 
 
 def test_auto_numeric_colour_uses_gradient_default():
@@ -1366,8 +1253,6 @@ def test_auto_numeric_colour_uses_gradient_default():
     fig = p.draw()
     try:
         fc = fig.axes[0].collections[0].get_facecolors()
-        # mtcars$hp has many distinct values → many distinct colours from
-        # the smooth gradient (≥ 10 to be clearly not a single fixed colour).
         assert len({tuple(c) for c in fc}) >= 10
     finally:
         plt.close(fig)
@@ -1407,7 +1292,6 @@ def test_scale_color_gradient2_midpoint_is_mid_colour():
             "z": [-1.0, 0.0, 1.0],
         }
     )
-    # Data range is [-1, 1], midpoint of palette at 0.5 maps to data midpoint 0.
     p = (
         ggplot(df, aes("x", "y", colour="z"))
         + geom_point()
@@ -1443,7 +1327,6 @@ def test_scale_color_gradientn_n_stop_palette():
     fig = p.draw()
     try:
         fc = fig.axes[0].collections[0].get_facecolors()
-        # First and last must be red and blue (palette endpoints)
         assert tuple(fc[0]) == to_rgba("red")
         assert tuple(fc[-1]) == to_rgba("blue")
     finally:
@@ -1460,10 +1343,7 @@ def test_scale_color_viridis_c_continuous():
     fig = p.draw()
     try:
         fc = fig.axes[0].collections[0].get_facecolors()
-        # Many distinct colours since hp is continuous.
         assert len({tuple(c) for c in fc}) >= 10
-        # Viridis is monotone in luminance — first row's hp determines colour;
-        # different hp ⇒ different colour.
     finally:
         plt.close(fig)
 
@@ -1501,8 +1381,6 @@ def test_scale_color_viridis_d_direction_reverses_ordering():
     try:
         c_fwd = {tuple(c) for c in f1.axes[0].collections[0].get_facecolors()}
         c_rev = {tuple(c) for c in f2.axes[0].collections[0].get_facecolors()}
-        # Same palette, same set of colours (just different level → colour
-        # mapping), so the sets are equal.
         assert c_fwd == c_rev
     finally:
         plt.close(f1)
@@ -1533,11 +1411,6 @@ def test_scale_color_brewer_set1():
         plt.close(fig)
 
 
-# ---------------------------------------------------------------------------
-# Non-colour aes scales: size, alpha, shape, linetype
-# ---------------------------------------------------------------------------
-
-
 def test_gg_c4_aes_size_continuous_qsec():
     """GG-C4: ``aes(size=qsec)`` produces a continuous size scale (default
     range 1–6 mm)."""
@@ -1548,9 +1421,7 @@ def test_gg_c4_aes_size_continuous_qsec():
     fig = p.draw()
     try:
         sizes = fig.axes[0].collections[0].get_sizes()
-        # Many distinct sizes since qsec is mostly continuous.
         assert len(np.unique(np.round(sizes, 4))) >= 10
-        # Min size = (1 mm * 2.8454)² ≈ 8.10; max = (6 mm * 2.8454)² ≈ 291.5.
         assert sizes.min() == pytest.approx(8.097, rel=0.01)
         assert sizes.max() == pytest.approx(291.5, rel=0.01)
     finally:
@@ -1567,7 +1438,6 @@ def test_scale_size_continuous_custom_range():
     fig = p.draw()
     try:
         sizes = fig.axes[0].collections[0].get_sizes()
-        # Range mapped to [2, 4] mm → s in [(2*2.8454)², (4*2.8454)²]
         assert sizes.min() == pytest.approx((2 * 2.8454) ** 2, rel=0.01)
         assert sizes.max() == pytest.approx((4 * 2.8454) ** 2, rel=0.01)
     finally:
@@ -1594,8 +1464,6 @@ def test_aes_shape_discrete_factor_cyl():
     p = ggplot(mtcars, aes("wt", "mpg", shape="factor(cyl)")) + geom_point()
     fig = p.draw()
     try:
-        # matplotlib scatter takes a single marker per call; one collection
-        # per unique shape.
         assert len(fig.axes[0].collections) == 3
     finally:
         plt.close(fig)
@@ -1621,8 +1489,6 @@ def test_scale_shape_manual_explicit_markers():
     )
     fig = p.draw()
     try:
-        # 3 collections each with a distinct marker glyph → just count
-        # the collection count and assert it matches the number of levels.
         assert len(fig.axes[0].collections) == 3
     finally:
         plt.close(fig)
@@ -1634,9 +1500,7 @@ def test_aes_linetype_discrete_on_geom_line():
     p = ggplot(mtcars, aes("wt", "mpg", linetype="factor(cyl)")) + geom_line()
     fig = p.draw()
     try:
-        # 3 cyl groups → 3 lines; each with its own linestyle.
         assert len(fig.axes[0].lines) == 3
-        # Distinct linestyles across the 3 lines.
         linestyles = {ln.get_linestyle() for ln in fig.axes[0].lines}
         assert len(linestyles) == 3
     finally:
@@ -1652,21 +1516,14 @@ def test_aes_linetype_continuous_raises():
         p.draw()
 
 
-# ---------------------------------------------------------------------------
-# facet_wrap
-# ---------------------------------------------------------------------------
-
-
 def test_gg_c5_facet_wrap_by_cyl():
     """GG-C5: ``facet_wrap("cyl")`` produces 3 panels, one per unique cyl."""
     mtcars = load_dataset("datasets", "mtcars")
     p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + facet_wrap("cyl")
     fig = p.draw()
     try:
-        # 3 panels in a 2x2 grid → 4 axes total, last hidden.
         visible_axes = [a for a in fig.axes if a.get_visible()]
         assert len(visible_axes) == 3
-        # Strip titles match cyl values (4, 6, 8) sorted.
         titles = [a.get_title() for a in visible_axes]
         assert titles == ["4", "6", "8"]
     finally:
@@ -1696,10 +1553,8 @@ def test_facet_wrap_multi_variable():
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
-        # 3 cyl × 2 am = 6 panels (all combinations exist in mtcars).
         assert len(visible) == 6
         titles = [a.get_title() for a in visible]
-        # Titles join with ", " — e.g. "4, 0", "4, 1", ...
         assert all(", " in t for t in titles)
     finally:
         plt.close(fig)
@@ -1735,7 +1590,6 @@ def test_facet_wrap_scales_free_independent_axes():
     try:
         visible = [a for a in fig.axes if a.get_visible()]
         xlims = {tuple(a.get_xlim()) for a in visible}
-        # Different cyl groups have different wt ranges → distinct xlims.
         assert len(xlims) >= 2
     finally:
         plt.close(fig)
@@ -1749,7 +1603,6 @@ def test_facet_wrap_ncol_explicit():
     try:
         visible = [a for a in fig.axes if a.get_visible()]
         assert len(visible) == 3
-        # Visible axes should all be on row 0.
         positions = sorted(a.get_subplotspec().rowspan.start for a in visible)
         assert positions == [0, 0, 0]
     finally:
@@ -1774,12 +1627,9 @@ def test_facet_wrap_with_geom_smooth_per_panel_fits():
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
-        # Each panel has its own scatter + ribbon + line.
         for a in visible:
             assert len(a.lines) == 1
             assert len(a.collections) == 2  # scatter + ribbon
-        # Per-panel slopes should differ (different cyl groups have
-        # different relationships between wt and mpg).
         slopes = []
         for a in visible:
             xy = a.lines[0].get_xydata()
@@ -1806,29 +1656,19 @@ def test_facet_wrap_preserves_colour_mapping_per_panel():
         _w.simplefilter("ignore", UserWarning)  # NA-removal warning
         fig = p.draw()
     try:
-        # Only count panel axes (filter legend host / colorbar cax).
         visible = [
             a
             for a in fig.axes
             if a.get_visible() and a.get_label() not in ("<legend>", "<colorbar>")
         ]
-        # 3 islands.
         assert len(visible) == 3
-        # Each panel's scatter still uses the species-coded colours.
         for a in visible:
             if a.collections:
                 fc = a.collections[0].get_facecolors()
                 if len(fc) > 0:
-                    # Multiple colours present in at least one panel
-                    # (penguins has multi-species islands).
                     pass
     finally:
         plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# facet_grid
-# ---------------------------------------------------------------------------
 
 
 def test_facet_grid_formula_basic():
@@ -1837,10 +1677,8 @@ def test_facet_grid_formula_basic():
     p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + facet_grid("am ~ cyl")
     fig = p.draw()
     try:
-        # 2 am × 3 cyl = 6 panels.
         visible = [a for a in fig.axes if a.get_visible()]
         assert len(visible) == 6
-        # Subplot grid is 2 rows × 3 cols.
         rows = {a.get_subplotspec().rowspan.start for a in visible}
         cols = {a.get_subplotspec().colspan.start for a in visible}
         assert rows == {0, 1}
@@ -1904,18 +1742,14 @@ def test_facet_grid_strip_labels_top_and_right():
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
-        # Top strip: only row 0 panels have non-empty titles (col values).
         for a in visible:
             row = a.get_subplotspec().rowspan.start
             title = a.get_title()
             if row == 0:
-                # Titles match the cyl values.
                 assert title in {"4", "6", "8"}
             else:
                 assert title == ""
 
-        # Right strip: only last-column panels have a right-side text annotation
-        # (rendered via ax.text with transform=transAxes).
         for a in visible:
             col = a.get_subplotspec().colspan.start
             right_texts = [
@@ -1958,20 +1792,15 @@ def test_facet_grid_scales_free_x_shares_within_column():
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
-        # Group panels by column: panels in the same column share xlim,
-        # different columns can have different xlims.
         by_col: dict[int, set] = {}
         for a in visible:
             col = a.get_subplotspec().colspan.start
             by_col.setdefault(col, set()).add(tuple(round(v, 6) for v in a.get_xlim()))
-        # Each column should have a single xlim (panels within share).
         for col_xlims in by_col.values():
             assert len(col_xlims) == 1
-        # Across columns, at least two distinct xlims.
         all_xlims = {next(iter(s)) for s in by_col.values()}
         assert len(all_xlims) >= 2
 
-        # y stays shared across all panels.
         ylims = {tuple(round(v, 6) for v in a.get_ylim()) for a in visible}
         assert len(ylims) == 1
     finally:
@@ -2003,11 +1832,7 @@ def test_facet_grid_scales_free_y_shares_within_row():
 
 
 def test_facet_grid_per_panel_stat_fit():
-    """Stat (e.g. lm smooth) fits per facet cell, not pooled.
-
-    Uses ``vs ~ am`` (4 cells, all with enough rows for lm) — ``am ~ cyl``
-    has a 2-row cell which lm can't fit (df_residual = 0).
-    """
+    """Stat (e.g. lm smooth) fits per facet cell, not pooled."""
     mtcars = load_dataset("datasets", "mtcars")
     p = (
         ggplot(mtcars, aes("wt", "mpg"))
@@ -2019,11 +1844,9 @@ def test_facet_grid_per_panel_stat_fit():
     try:
         visible = [a for a in fig.axes if a.get_visible()]
         assert len(visible) == 4
-        # Each panel has its own scatter + ribbon + line.
         for a in visible:
             assert len(a.lines) == 1
             assert len(a.collections) == 2  # scatter + ribbon
-        # Slopes should differ across panels.
         slopes = []
         for a in visible:
             xy = a.lines[0].get_xydata()
@@ -2045,11 +1868,8 @@ def test_facet_grid_multi_var_rows():
     fig = p.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
-        # mtcars: am × vs has 4 unique combos × 3 cyl = 12 cells in the grid,
-        # but not every combo appears in mtcars.
         combos = mtcars.select(["am", "vs"]).unique()
         n_row = len(combos)
-        # All 12 panels rendered (grid_dims is the full cross).
         assert len(visible) == n_row * 3
     finally:
         plt.close(fig)
@@ -2076,13 +1896,7 @@ def test_facet_grid_unknown_scales_value_errors():
 
 
 def test_facet_grid_with_enum_facet_var():
-    """Regression: factor()/Enum-typed facet variables don't break the join.
-
-    Before the dtype-preservation fix in `_stat_per_panel`, the post-stat
-    chunk re-attached the facet column as Utf8 (via ``pl.lit(val)``), which
-    didn't match the layout's original Enum dtype and matplotlib's draw
-    failed with a polars SchemaError on join.
-    """
+    """Regression: factor()/Enum-typed facet variables don't break the join."""
     df = pl.DataFrame(
         {
             "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
@@ -2095,15 +1909,9 @@ def test_facet_grid_with_enum_facet_var():
     try:
         visible = [a for a in fig.axes if a.get_visible()]
         assert len(visible) == 2
-        # Strip text uses the original Enum-categorised values.
         assert {a.get_title() for a in visible} == {"a", "b"}
     finally:
         plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# geom_rect, geom_tile, geom_raster, geom_polygon
-# ---------------------------------------------------------------------------
 
 
 def test_geom_rect_two_rectangles():
@@ -2124,10 +1932,8 @@ def test_geom_rect_two_rectangles():
     try:
         ax = fig.axes[0]
         assert len(ax.collections) == 1
-        # The collection holds 2 patches (one per row).
         coll = ax.collections[0]
         assert len(coll.get_paths()) == 2
-        # Axes auto-scale to cover the rectangles.
         xlim = ax.get_xlim()
         ylim = ax.get_ylim()
         assert xlim[0] <= 0.0 and xlim[1] >= 3.0
@@ -2158,9 +1964,7 @@ def test_geom_rect_per_row_fills():
     try:
         coll = fig.axes[0].collections[0]
         facecolors = coll.get_facecolors()
-        # Two distinct colours.
         assert len(facecolors) == 2
-        # First is reddish, second is greenish.
         assert facecolors[0][0] > 0.9 and facecolors[0][1] < 0.1
         assert facecolors[1][1] > 0.9 and facecolors[1][0] < 0.1
     finally:
@@ -2174,9 +1978,7 @@ def test_geom_tile_centres_with_default_unit_size():
     fig = p.draw()
     try:
         coll = fig.axes[0].collections[0]
-        # Two tiles → two paths.
         assert len(coll.get_paths()) == 2
-        # First tile: vertices in [-0.5, 0.5] x [-0.5, 0.5].
         verts = coll.get_paths()[0].vertices
         import numpy as np
 
@@ -2198,7 +2000,6 @@ def test_geom_tile_with_explicit_width_height():
         verts = coll.get_paths()[0].vertices
         import numpy as np
 
-        # Tile spans [-2, 2] in x, [-1, 1] in y.
         assert np.isclose(verts[:, 0].min(), -2.0)
         assert np.isclose(verts[:, 0].max(), 2.0)
         assert np.isclose(verts[:, 1].min(), -1.0)
@@ -2223,9 +2024,7 @@ def test_geom_raster_uses_imshow_on_regular_grid():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # imshow lives in ax.images, not ax.collections.
         assert len(ax.images) == 1
-        # Image extent matches the cell-centred grid: x in [-0.5, 3.5], y in [-0.5, 2.5].
         ext = ax.images[0].get_extent()
         assert np.isclose(ext[0], -0.5) and np.isclose(ext[1], 3.5)
         assert np.isclose(ext[2], -0.5) and np.isclose(ext[3], 2.5)
@@ -2246,7 +2045,6 @@ def test_geom_raster_falls_back_to_tile_on_irregular():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # Should not produce an image; should fall back to patches.
         assert len(ax.images) == 0
         assert len(ax.collections) == 1
     finally:
@@ -2263,7 +2061,6 @@ def test_geom_polygon_basic_triangle():
         assert len(ax.collections) == 1
         coll = ax.collections[0]
         assert len(coll.get_paths()) == 1
-        # Closed polygon: 4 vertices listed (last = first).
         verts = coll.get_paths()[0].vertices
         import numpy as np
 
@@ -2304,15 +2101,9 @@ def test_geom_polygon_skips_groups_with_under_three_vertices():
     fig = p.draw()
     try:
         coll = fig.axes[0].collections[0]
-        # Only group 2 (the triangle) renders.
         assert len(coll.get_paths()) == 1
     finally:
         plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# geom_errorbar / errorbarh / linerange / pointrange / crossbar
-# ---------------------------------------------------------------------------
 
 
 def _df_xy_range():
@@ -2333,9 +2124,7 @@ def test_geom_linerange_three_lines_no_caps():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # Single LineCollection from vlines.
         assert len(ax.collections) == 1
-        # 3 segments, one per row.
         segs = ax.collections[0].get_segments()
         assert len(segs) == 3
     finally:
@@ -2349,9 +2138,7 @@ def test_geom_errorbar_main_line_plus_two_caps():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # 3 LineCollections total.
         assert len(ax.collections) == 3
-        # Each cap collection has one horizontal segment per data row.
         for coll in ax.collections:
             assert len(coll.get_segments()) == 3
     finally:
@@ -2365,11 +2152,8 @@ def test_geom_errorbar_width_controls_cap_span():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # The cap collections have segments whose endpoints span x ± 0.1.
-        # First collection is vertical (vlines); cap collections are 2nd & 3rd.
         cap_coll = ax.collections[1]
         seg = cap_coll.get_segments()[0]
-        # seg is a 2-row array (start, end).
         import numpy as np
 
         span = abs(seg[1][0] - seg[0][0])
@@ -2391,7 +2175,6 @@ def test_geom_errorbarh_horizontal_form():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # Same 3-collection structure (horizontal line + 2 vertical caps).
         assert len(ax.collections) == 3
     finally:
         plt.close(fig)
@@ -2404,9 +2187,7 @@ def test_geom_pointrange_line_plus_point():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # 1 LineCollection (vlines) + 1 PathCollection (scatter).
         assert len(ax.collections) == 2
-        # Scatter has 3 points.
         scat = ax.collections[1]
         assert len(scat.get_offsets()) == 3
     finally:
@@ -2420,9 +2201,7 @@ def test_geom_crossbar_box_plus_median():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # 5 collections: top, bottom, left, right, median.
         assert len(ax.collections) == 5
-        # Median (last) line width is 2× the others.
         median_lw = ax.collections[4].get_linewidth()[0]
         edge_lw = ax.collections[0].get_linewidth()[0]
         import numpy as np
@@ -2430,11 +2209,6 @@ def test_geom_crossbar_box_plus_median():
         assert np.isclose(median_lw, edge_lw * 2)
     finally:
         plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# geom_segment, geom_curve
-# ---------------------------------------------------------------------------
 
 
 def test_geom_segment_three_segments():
@@ -2454,7 +2228,6 @@ def test_geom_segment_three_segments():
         assert len(ax.collections) == 1
         segs = ax.collections[0].get_segments()
         assert len(segs) == 3
-        # First segment endpoints.
         import numpy as np
 
         assert np.allclose(segs[0], [[0.0, 0.0], [1.0, 1.0]])
@@ -2483,7 +2256,6 @@ def test_geom_segment_per_row_colours():
         coll = fig.axes[0].collections[0]
         colours = coll.get_colors()
         assert len(colours) == 2
-        # Different RGBA per segment.
         import numpy as np
 
         assert not np.allclose(colours[0], colours[1])
@@ -2505,7 +2277,6 @@ def test_geom_curve_basic():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # Two FancyArrowPatch instances, one per row.
         from matplotlib.patches import FancyArrowPatch
 
         curve_patches = [p for p in ax.patches if isinstance(p, FancyArrowPatch)]
@@ -2532,16 +2303,10 @@ def test_geom_curve_curvature_kwarg_controls_arc():
         from matplotlib.patches import FancyArrowPatch
 
         patch = next(p for p in fig.axes[0].patches if isinstance(p, FancyArrowPatch))
-        # connectionstyle keeps the rad parameter we passed.
         cs = patch.get_connectionstyle()
         assert getattr(cs, "rad", None) == 0.8
     finally:
         plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# stat_summary
-# ---------------------------------------------------------------------------
 
 
 def _summary_test_df():
@@ -2560,9 +2325,7 @@ def test_stat_summary_default_is_mean_se_pointrange():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # Pointrange: linerange (vlines collection) + scatter (point collection).
         assert len(ax.collections) == 2
-        # The point centres are the means: x=1 → 11, x=2 → 15, x=3 → 21.
         offsets = ax.collections[1].get_offsets()
         import numpy as np
 
@@ -2583,7 +2346,6 @@ def test_stat_summary_mean_cl_normal_errorbar():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # errorbar: 3 LineCollections (vline + 2 caps).
         assert len(ax.collections) == 3
     finally:
         plt.close(fig)
@@ -2598,17 +2360,13 @@ def test_stat_summary_componentwise_min_max_median():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # pointrange
         offsets = ax.collections[1].get_offsets()
         import numpy as np
 
-        # x=1: median=11, min=10, max=12; same shape across x.
         np.testing.assert_array_almost_equal(
             sorted(offsets.tolist()), [[1.0, 11.0], [2.0, 15.0], [3.0, 21.0]]
         )
-        # vlines extents match (min..max) per x.
         segs = ax.collections[0].get_segments()
-        # Sort by x for deterministic order.
         segs_sorted = sorted(segs, key=lambda s: s[0][0])
         import numpy as np
 
@@ -2631,7 +2389,6 @@ def test_stat_summary_median_hilow():
     try:
         ax = fig.axes[0]
         offsets = ax.collections[1].get_offsets()
-        # Centre is median.
         for x_val, expected_med in [(1, 11.0), (2, 15.0), (3, 21.0)]:
             row = next(o for o in offsets if abs(o[0] - x_val) < 1e-9)
             assert abs(row[1] - expected_med) < 1e-9
@@ -2675,11 +2432,6 @@ def test_stat_summary_unknown_geom_errors():
         stat_summary(geom="weirdo")
 
 
-# ---------------------------------------------------------------------------
-# ggplot2 parity: geom registry + orientation
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "geom_name",
     [
@@ -2700,7 +2452,6 @@ def test_stat_summary_geom_registry_covers_path_and_ribbon_family(geom_name):
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # Each of these draws at least one matplotlib artist.
         assert len(ax.lines) + len(ax.collections) + len(ax.patches) > 0
     finally:
         plt.close(fig)
@@ -2714,7 +2465,6 @@ def test_stat_summary_line_replaces_two_layer_means_recipe():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # Exactly one line through the three per-x means (11, 15, 21).
         lines = ax.lines
         assert len(lines) == 1
         xs, ys = lines[0].get_data()
@@ -2743,8 +2493,6 @@ def test_stat_summary_auto_orientation_picks_y_for_discrete_y():
     try:
         ax = fig.axes[0]
         xs, _ys = ax.lines[0].get_data()
-        # Two means: x=mean of a-group, then x=mean of b-group. y stays
-        # categorical, rendered at categorical positions 0 and 1.
         import numpy as np
 
         np.testing.assert_array_almost_equal(xs, [11.0, 21.0])
@@ -2761,8 +2509,6 @@ def test_stat_summary_explicit_orientation_overrides_auto():
             "y": pl.Series(["a", "b", "a", "b"], dtype=pl.Enum(["a", "b"])),
         }
     )
-    # With orientation="x" we'd be asked to take mean of an Enum series
-    # for each x group — that's nonsensical, so the stat should explode.
     p = ggplot(df, aes("x", "y")) + stat_summary(
         geom="line", fun="mean", orientation="x", group=1
     )
@@ -2793,11 +2539,6 @@ def test_stat_summary_accepts_a_geom_instance_directly():
         plt.close(fig)
 
 
-# ---------------------------------------------------------------------------
-# qq, qq_line, ecdf, unique, sum/count, contour, hex, dotplot
-# ---------------------------------------------------------------------------
-
-
 def test_stat_qq_against_normal_quantiles():
     """`stat_qq()` produces sorted (theoretical, sample) pairs against the
     standard normal."""
@@ -2810,10 +2551,8 @@ def test_stat_qq_against_normal_quantiles():
     try:
         coll = fig.axes[0].collections[0]
         offsets = coll.get_offsets()
-        # Points are sorted by x (theoretical quantile).
         xs = offsets[:, 0]
         assert np.all(np.diff(xs) >= -1e-9)
-        # x-range covers ~ [-2.6, 2.6] for n=200 standard normal quantiles.
         assert xs.min() < -2.0 and xs.max() > 2.0
     finally:
         plt.close(fig)
@@ -2829,11 +2568,9 @@ def test_stat_qq_line_two_endpoints():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # qq_line uses GeomPath → one line in ax.lines.
         assert len(ax.lines) == 1
         line = ax.lines[0]
         xy = line.get_xydata()
-        # Line is monotone increasing in x.
         assert xy[1, 0] > xy[0, 0]
     finally:
         plt.close(fig)
@@ -2871,7 +2608,6 @@ def test_stat_ecdf_basic_step_to_one():
         ys = line.get_ydata()
         assert ys[0] == pytest.approx(0.2, abs=1e-9)
         assert ys[-1] == pytest.approx(1.0, abs=1e-9)
-        # ys is non-decreasing.
         assert np.all(np.diff(ys) >= -1e-9)
     finally:
         plt.close(fig)
@@ -2889,7 +2625,6 @@ def test_stat_unique_drops_duplicates():
     fig = p.draw()
     try:
         offsets = fig.axes[0].collections[0].get_offsets()
-        # 6 rows → 3 unique pairs.
         assert len(offsets) == 3
     finally:
         plt.close(fig)
@@ -2907,9 +2642,7 @@ def test_geom_count_size_scales_with_multiplicity():
     fig = p.draw()
     try:
         coll = fig.axes[0].collections[0]
-        # 3 unique (x,y) combinations.
         assert len(coll.get_offsets()) == 3
-        # Sizes are not all equal — multiplicity shows up.
         sizes = coll.get_sizes()
         assert len(set(sizes.tolist())) >= 2
     finally:
@@ -2927,7 +2660,6 @@ def test_geom_contour_on_regular_grid():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # contour produces a LineCollection (multiple iso-line paths).
         assert len(ax.collections) >= 1
     finally:
         plt.close(fig)
@@ -2951,7 +2683,6 @@ def test_geom_contour_filled_on_regular_grid():
 
 def test_geom_contour_irregular_grid_errors():
     """A grid with missing cells (count mismatch) is rejected."""
-    # 3 unique x × 2 unique y = 6 cells, but only 5 rows present.
     df = pl.DataFrame(
         {
             "x": [0.0, 1.0, 2.0, 0.0, 1.0],
@@ -2973,7 +2704,6 @@ def test_geom_hex_renders_polycollection():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # hexbin produces a PolyCollection.
         from matplotlib.collections import PolyCollection
 
         assert any(isinstance(c, PolyCollection) for c in ax.collections)
@@ -2989,19 +2719,12 @@ def test_geom_dotplot_stacks_within_bin():
     fig = p.draw()
     try:
         coll = fig.axes[0].collections[0]
-        # 9 dots total.
         assert len(coll.get_offsets()) == 9
-        # Dots at x=1 stack to 5 distinct y values.
         offs = coll.get_offsets()
         x1 = [o for o in offs if abs(o[0] - 1.0) < 0.5]
         assert len({round(o[1], 6) for o in x1}) == 5
     finally:
         plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# guide_legend
-# ---------------------------------------------------------------------------
 
 
 def _all_legends(host):
@@ -3063,7 +2786,6 @@ def test_legend_auto_built_for_discrete_colour():
         legs = _all_legends(fig)
         assert len(legs) == 1
         leg = legs[0]
-        # Two colour swatches at distinct hex codes.
         handles = leg.legend_handles
         c0 = handles[0].get_color()
         c1 = handles[1].get_color()
@@ -3082,12 +2804,9 @@ def test_legend_auto_merge_same_source_column():
         assert len(legs) == 1
         leg = legs[0]
         assert leg.get_title().get_text() == "g"
-        # Each handle picks up both colour and shape.
         handles = leg.legend_handles
-        # Distinct shapes per level.
         markers = {h.get_marker() for h in handles}
         assert len(markers) == 2
-        # Distinct colours per level.
         colours = {h.get_color() for h in handles}
         assert len(colours) == 2
     finally:
@@ -3136,9 +2855,7 @@ def test_legend_position_top_horizontal():
     fig = p.draw()
     try:
         leg = _all_legends(fig)[0]
-        # Anchor sits above the axes (y > 1 in axes coords).
         bbox = leg.get_bbox_to_anchor().get_points()
-        # bbox is in axes coords thanks to transAxes default.
         assert bbox.shape == (2, 2)
     finally:
         plt.close(fig)
@@ -3204,11 +2921,6 @@ def test_guides_addition_to_plot_stores_overrides():
     assert getattr(p, "guide_overrides", {}).get("colour") is not None
 
 
-# ---------------------------------------------------------------------------
-# guide_colorbar
-# ---------------------------------------------------------------------------
-
-
 def _df_continuous_colour():
     return pl.DataFrame(
         {
@@ -3230,12 +2942,9 @@ def test_continuous_colour_renders_colorbar():
         warnings.simplefilter("ignore", UserWarning)
         fig = p.draw()
     try:
-        # main axes + colorbar axes.
         assert len(fig.axes) == 2
         cb_ax = fig.axes[1]
         assert cb_ax.get_label() == "<colorbar>"
-        # Colorbar title placed ABOVE the bar via cb.ax.set_title (R/ggplot2
-        # default) — falls back to scale.name → aes-source ("z").
         assert cb_ax.get_title() == "z"
     finally:
         plt.close(fig)
@@ -3252,7 +2961,6 @@ def test_colorbar_range_matches_data():
         fig = p.draw()
     try:
         cb_ax = fig.axes[1]
-        # For a vertical colorbar matplotlib uses ylim for the range.
         ylim = cb_ax.get_ylim()
         assert ylim[0] == pytest.approx(10.0)
         assert ylim[1] == pytest.approx(50.0)
@@ -3276,9 +2984,7 @@ def test_colorbar_position_top_horizontal():
     try:
         cb_ax = fig.axes[1]
         pos = cb_ax.get_position()
-        # Horizontal colorbar: wider than tall.
         assert pos.width > pos.height
-        # And it sits in the upper half of the figure.
         assert pos.y0 > 0.5
     finally:
         plt.close(fig)
@@ -3318,7 +3024,6 @@ def test_colorbar_and_legend_can_coexist():
         warnings.simplefilter("ignore", UserWarning)
         fig = p.draw()
     try:
-        # 3 axes: panel + colorbar cax + legend host axes (block engine).
         assert len(fig.axes) == 3
         legs = _all_legends(fig)
         assert len(legs) == 1
@@ -3341,15 +3046,9 @@ def test_colorbar_position_none_hides():
         warnings.simplefilter("ignore", UserWarning)
         fig = p.draw()
     try:
-        # Only the main axes — no colorbar child.
         assert len(fig.axes) == 1
     finally:
         plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# guide_axis
-# ---------------------------------------------------------------------------
 
 
 def test_guide_axis_rotation_via_guides():
@@ -3398,27 +3097,23 @@ def test_default_fill_palette_dispatches_on_dtype_ordered_vs_not():
     polars, ``pl.Enum`` carries declared category order so it maps to
     viridis; ``Utf8`` / ``Categorical`` are unordered → hue. Pre-fix,
     everything got hue regardless of dtype."""
-    # Enum (ordered) → viridis palette
     df_ord = pl.DataFrame({"x": ["a", "b", "c", "a", "b"]}).with_columns(
         pl.col("x").cast(pl.Enum(["a", "b", "c"]))
     )
     p_ord = ggplot(df_ord, aes(x="x", fill="x")) + geom_bar()
     fig_ord = p_ord.draw()
 
-    # Utf8 (unordered) → hue palette
     df_un = pl.DataFrame({"x": ["a", "b", "c", "a", "b"]})
     p_un = ggplot(df_un, aes(x="x", fill="x")) + geom_bar()
     fig_un = p_un.draw()
 
     try:
-        # Extract fill colors per panel
+
         def fills(fig):
             return tuple(p.get_facecolor()[:3] for p in fig.axes[0].patches[:3])
 
         c_ord = fills(fig_ord)
         c_un = fills(fig_un)
-        # Viridis "a" is dark purple ~ (0.27, 0.005, 0.33); hue "a" is
-        # red-pink ~ (0.97, 0.46, 0.43). They must differ markedly.
         diff = sum(abs(c_ord[0][i] - c_un[0][i]) for i in range(3))
         assert diff > 0.5, (
             f"Expected ordered (Enum) → viridis vs unordered → hue. "
@@ -3525,11 +3220,6 @@ def test_guide_axis_factory_holds_metadata():
     assert g.position == "top"
 
 
-# ---------------------------------------------------------------------------
-# temporal / percent / ordinal / radius scales
-# ---------------------------------------------------------------------------
-
-
 def test_scale_x_date_uses_concise_formatter():
     """`scale_x_date()` defaults to ConciseDateFormatter — labels adapt
     to tick spacing (year-aligned ticks render as bare years, etc.).
@@ -3576,7 +3266,6 @@ def test_scale_x_date_custom_format():
     try:
         labels = [t.get_text() for t in fig.axes[0].xaxis.get_majorticklabels()]
         nonempty = [lbl for lbl in labels if lbl]
-        # "Jan 2020" / "Feb 2020" — month abbreviation + year.
         assert all(
             any(
                 m in lbl
@@ -3620,7 +3309,6 @@ def test_scale_x_datetime_includes_time():
     try:
         labels = [t.get_text() for t in fig.axes[0].xaxis.get_majorticklabels()]
         nonempty = [lbl for lbl in labels if lbl]
-        # Default datetime format includes ":" for the hh:mm part.
         assert any(":" in lbl for lbl in nonempty)
     finally:
         plt.close(fig)
@@ -3653,7 +3341,6 @@ def test_scale_y_percent_xmax_100():
         labels = [t.get_text() for t in fig.axes[0].yaxis.get_majorticklabels()]
         nonempty = [lbl for lbl in labels if lbl]
         assert all(lbl.endswith("%") for lbl in nonempty)
-        # 50.0 should render as "50%", not "5000%".
         assert any("50%" in lbl for lbl in nonempty)
     finally:
         plt.close(fig)
@@ -3767,7 +3454,6 @@ def test_fct_reorder_orders_levels_by_aggregate():
     try:
         labels = [t.get_text() for t in fig.axes[0].get_xticklabels()]
         assert labels == ["B", "C", "A"]
-        # Axis label resolves to the source column name, not the callable repr.
         assert fig.axes[0].get_xlabel() == "g"
     finally:
         plt.close(fig)
@@ -3791,8 +3477,6 @@ def test_geom_tile_discrete_axes_render():
         ax = fig.axes[0]
         assert [t.get_text() for t in ax.get_xticklabels()] == ["a", "b", "c"]
         assert [t.get_text() for t in ax.get_yticklabels()] == ["A", "B", "C"]
-        # GeomRect adds its rectangles via a PatchCollection, not direct
-        # ``ax.patches`` — count the collection paths instead.
         n_rects = sum(len(c.get_paths()) for c in ax.collections)
         assert n_rects >= 3
     finally:
@@ -3814,8 +3498,6 @@ def test_geom_tile_polars_expr_kwarg_evaluates_against_data():
     p = ggplot(df, aes("x", "y")) + geom_tile(fill=pl.col("n"))
     fig = p.draw()
     try:
-        # Two distinct n values → two distinct rectangle facecolours via
-        # the continuous fill scale.
         colors = set()
         for coll in fig.axes[0].collections:
             for fc in coll.get_facecolors():
@@ -3837,8 +3519,6 @@ def test_aggregating_polars_expr_broadcasts_to_data_length():
             "n": [10, 20],
         }
     )
-    # pl.len() returns the row count of the layer data — broadcast to
-    # every tile, every cell ends up the same fill colour (uniform 2.0).
     p = ggplot(df, aes("x", "y")) + geom_tile(fill=pl.len())
     fig = p.draw()
     try:
@@ -3846,7 +3526,6 @@ def test_aggregating_polars_expr_broadcasts_to_data_length():
         for coll in fig.axes[0].collections:
             for fc in coll.get_facecolors():
                 colors.add(tuple(fc))
-        # All cells share one fill — exactly one distinct colour.
         assert len(colors) == 1
     finally:
         plt.close(fig)
@@ -3858,7 +3537,6 @@ def test_guide_axis_check_overlap_drops_overlapping_labels():
     spatial axis order. Mirrors ggplot2's ``check.overlap``."""
     df = pl.DataFrame(
         {
-            # Many long category names crammed into a short axis → overlap.
             "g": [f"longcategoryname_{i:02d}" for i in range(20)],
             "v": list(range(20)),
         }
@@ -3868,7 +3546,6 @@ def test_guide_axis_check_overlap_drops_overlapping_labels():
     fig_off = p_off.draw()
     fig_on = p_on.draw()
     try:
-        # Same axes set up identically — count visible labels in each.
         n_off = sum(
             1
             for lbl in fig_off.axes[0].xaxis.get_majorticklabels()
@@ -3879,7 +3556,6 @@ def test_guide_axis_check_overlap_drops_overlapping_labels():
             for lbl in fig_on.axes[0].xaxis.get_majorticklabels()
             if lbl.get_visible() and lbl.get_text()
         )
-        # check_overlap should hide at least some labels at this density.
         assert n_on < n_off, f"check_overlap kept all {n_on} of {n_off} labels"
         assert n_on >= 1, "first label should always survive"
     finally:
@@ -3896,8 +3572,6 @@ def test_guide_axis_n_dodge_alternates_rows():
     try:
         ticks = fig.axes[0].xaxis.get_major_ticks()
         pads = [t.get_pad() for t in ticks]
-        # Even-indexed ticks keep base pad; odd-indexed get the extra
-        # row offset → distinct pad value, monotonically larger.
         assert pads[0] < pads[1]
         assert pads[0] == pads[2]  # row 0 same on indices 0, 2
         assert pads[1] == pads[3]  # row 1 same on indices 1, 3
@@ -3920,11 +3594,8 @@ def test_fct_reorder_horizontal_boxplot():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # y axis carries the categorical labels in median-ascending order:
-        # B (1.5), C (5.5), A (10.5).
         labels = [t.get_text() for t in ax.get_yticklabels()]
         assert labels == ["B", "C", "A"]
-        # x axis is the continuous distribution axis.
         assert ax.get_xlabel() == "v"
         assert ax.get_ylabel() == "g"
     finally:
@@ -4031,7 +3702,6 @@ def test_fct_reorder_works_inside_mutate():
     df = hea.tidy.DataFrame({"g": ["a", "b", "c"], "v": [3.0, 1.0, 2.0]})
     out = df.mutate(g=fct_reorder("g", "v"))
     assert isinstance(out.schema["g"], pl.Enum)
-    # Sorted by v ascending: b(1), c(2), a(3).
     assert out["g"].dtype.categories.to_list() == ["b", "c", "a"]
 
 
@@ -4045,7 +3715,6 @@ def test_fct_reorder_preserves_unseen_enum_levels():
     df = pl.DataFrame({"g": s, "v": [3.0, 1.0, 2.0]})
     callable_ = fct_reorder("g", "v")
     out = callable_(df)
-    # Data-driven order: b(1), c(2), a(3); unseen d, e tail in Enum order.
     assert out.dtype.categories.to_list() == ["b", "c", "a", "d", "e"]
 
 
@@ -4065,7 +3734,6 @@ def test_fct_reorder2_orders_by_y_at_max_x():
     out = fct_reorder2("f", "x", "y")(df)
     assert out.dtype.categories.to_list() == ["a", "c", "b"]
 
-    # desc=False reverses
     out_asc = fct_reorder2("f", "x", "y", desc=False)(df)
     assert out_asc.dtype.categories.to_list() == ["b", "c", "a"]
 
@@ -4075,7 +3743,6 @@ def test_fct_reorder2_preserves_unseen_enum_levels():
     matching R's behavior (NA aggregates sort last)."""
     s = pl.Series("f", ["a", "b", "c"]).cast(pl.Enum(["a", "b", "c", "d"]))
     df = pl.DataFrame({"f": s, "x": [1, 2, 3], "y": [10, 20, 5]})
-    # At each level's max x: a→10, b→20, c→5. desc → b, a, c; then d.
     out = fct_reorder2("f", "x", "y")(df)
     assert out.dtype.categories.to_list() == ["b", "a", "c", "d"]
 
@@ -4095,7 +3762,6 @@ def test_groupby_ggplot_passthrough():
     p = gb.ggplot(x="x", y="yy", color="g") + geom_line()
     fig = p.draw()
     try:
-        # 2 lines (one per group), as expected from the ungrouped frame
         assert len(fig.axes[0].get_lines()) == 2
     finally:
         plt.close(fig)
@@ -4106,7 +3772,6 @@ def test_fct_infreq_preserves_unseen_enum_levels():
     s = pl.Series("g", ["a", "b", "b", "c"]).cast(pl.Enum(["a", "b", "c", "d"]))
     df = pl.DataFrame({"g": s})
     out = fct_infreq("g")(df)
-    # b(2) leads; a and c (1 each) follow in encounter order; unseen d last.
     assert out.dtype.categories.to_list()[0] == "b"
     assert out.dtype.categories.to_list()[-1] == "d"
     assert set(out.dtype.categories.to_list()) == {"a", "b", "c", "d"}
@@ -4123,19 +3788,15 @@ def test_fct_recode_renames_levels_preserving_order():
     assert out["g"].dtype.categories.to_list() == ["A", "B", "c", "d"]
     assert out["g"].to_list() == ["A", "B", "c", "d"]
 
-    # Quoted-key form (matches r4ds' "Republican, strong" use case).
     df2 = hea.tidy.DataFrame({"g": ["short", "long", "x"]})
     out2 = df2.mutate(g=hea.tidy.fct_recode("g", **{"renamed long": "long"}))
     assert "renamed long" in out2["g"].dtype.categories.to_list()
 
-    # List values trigger many:1 merge (Python equivalent of R's repeated
-    # keyword names — can't be expressed as duplicate dict keys).
     df3 = hea.tidy.DataFrame({"g": ["a", "b", "c", "d"]})
     out3 = df3.mutate(g=hea.tidy.fct_recode("g", X=["a", "b"], Y="c"))
     assert out3["g"].dtype.categories.to_list() == ["X", "Y", "d"]
     assert out3["g"].to_list() == ["X", "X", "Y", "d"]
 
-    # Non-str / non-list values still rejected.
     with pytest.raises(TypeError, match="expected str or list/tuple"):
         hea.tidy.fct_recode("g", X=42)
 
@@ -4147,15 +3808,12 @@ def test_fct_collapse_merges_levels_with_optional_other():
 
     df = hea.tidy.DataFrame({"g": ["a", "b", "c", "d"]})
 
-    # Partial: unmentioned c, d keep their names.
     out = df.mutate(g=hea.tidy.fct_collapse("g", X=["a", "b"]))
     assert out["g"].dtype.categories.to_list() == ["X", "c", "d"]
 
-    # other_level sweeps the rest.
     out2 = df.mutate(g=hea.tidy.fct_collapse("g", X=["a", "b"], other_level="Z"))
     assert out2["g"].dtype.categories.to_list() == ["X", "Z"]
 
-    # List/tuple required (not bare string).
     with pytest.raises(TypeError, match="list/tuple"):
         hea.tidy.fct_collapse("g", X="a")
 
@@ -4166,28 +3824,21 @@ def test_fct_lump_n_keeps_top_n_by_count():
     that level already exists in the data)."""
     import hea
 
-    # 6 levels, n=2 keeps top 2 — bottom 4 lump into "Other".
     df = hea.tidy.DataFrame(
         {"g": ["a"] * 10 + ["b"] * 6 + ["c"] * 4 + ["d"] * 3 + ["e"] * 2 + ["f"] * 1}
     )
     out = df.mutate(g=hea.tidy.fct_lump_n("g", n=2))
     cats = out["g"].dtype.categories.to_list()
     assert cats == ["a", "b", "Other"]
-    # Lumped: c+d+e+f = 4+3+2+1 = 10
     other_n = (out["g"] == "Other").sum()
     assert other_n == 10
 
-    # Existing "Other" level absorbs the lumped values. Use an Enum with
-    # explicit level order so the test isn't sensitive to Python's
-    # Unicode sort differing from R's locale-aware default.
     s = pl.Series("g", ["a"] * 10 + ["Other"] * 5 + ["b"] * 3 + ["c"] * 1).cast(
         pl.Enum(["a", "b", "c", "Other"])
     )
     df2 = hea.tidy.DataFrame({"g": s})
     out2 = df2.mutate(g=hea.tidy.fct_lump_n("g", n=2))
-    # Top 2 by count: a(10), Other(5). Kept in original Enum order.
     assert out2["g"].dtype.categories.to_list() == ["a", "Other"]
-    # b(3) and c(1) lumped into existing Other(5): Other final = 9.
     assert (out2["g"] == "Other").sum() == 9
 
 
@@ -4204,7 +3855,6 @@ def test_fct_lump_lowfreq_matches_forcats_in_smallest_rule():
     assert out["g"].dtype.categories.to_list() == ["a", "b", "c", "d", "e", "Other"]
     assert (out["g"] == "Other").sum() == 1
 
-    # Dominant level case: a=100, others tiny → only a kept.
     df2 = hea.tidy.DataFrame({"g": ["a"] * 100 + ["b"] * 5 + ["c"] * 3 + ["d"] * 2})
     out2 = df2.mutate(g=hea.tidy.fct_lump_lowfreq("g"))
     assert out2["g"].dtype.categories.to_list() == ["a", "Other"]
@@ -4221,15 +3871,9 @@ def test_scale_radius_is_continuous_size_alias():
     )
     fig = p.draw()
     try:
-        # Just checking it draws without errors and produces a scatter.
         assert len(fig.axes[0].collections) >= 1
     finally:
         plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# annotate
-# ---------------------------------------------------------------------------
 
 
 def test_annotate_text_at_data_position():
@@ -4260,7 +3904,6 @@ def test_annotate_rect_with_fill_alpha():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # Rect produces a PatchCollection.
         from matplotlib.collections import PatchCollection
 
         assert any(isinstance(c, PatchCollection) for c in ax.collections)
@@ -4279,7 +3922,6 @@ def test_annotate_segment_constants():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # Segment uses LineCollection.
         from matplotlib.collections import LineCollection
 
         assert any(isinstance(c, LineCollection) for c in ax.collections)
@@ -4344,11 +3986,6 @@ def test_annotate_inconsistent_lengths_error():
         annotate("text", x=[1, 2, 3], y=[1, 2], label="a")
 
 
-# ---------------------------------------------------------------------------
-# coord_flip / coord_trans
-# ---------------------------------------------------------------------------
-
-
 def test_coord_flip_swaps_axis_labels():
     """`coord_flip()` swaps which aes ends up on which axis."""
     df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [10.0, 5.0, 15.0]})
@@ -4356,7 +3993,6 @@ def test_coord_flip_swaps_axis_labels():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # x label is the original y mapping; y label is the original x mapping.
         assert ax.get_xlabel() == "val"
         assert ax.get_ylabel() == "cat"
     finally:
@@ -4370,7 +4006,6 @@ def test_coord_flip_renders_horizontal_bars():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # x axis range covers the val span (10, 5, 15 → 0..15+).
         xlim = ax.get_xlim()
         assert xlim[0] <= 0.0 and xlim[1] >= 15.0
     finally:
@@ -4378,11 +4013,7 @@ def test_coord_flip_renders_horizontal_bars():
 
 
 def test_coord_flip_swaps_scale_application():
-    """A scale set on the x aesthetic applies to the visible y-axis after flip.
-
-    `scale_x_continuous(limits=(0, 5))` constrains the x aes (`cat`'s
-    integer index) — after flip, that constraint shows up on the y-axis.
-    """
+    """A scale set on the x aesthetic applies to the visible y-axis after flip."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
     p = (
         ggplot(df, aes("x", "y"))
@@ -4393,7 +4024,6 @@ def test_coord_flip_swaps_scale_application():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # The (0, 5) limits land on the visible y axis.
         ylim = ax.get_ylim()
         assert ylim == pytest.approx((0.0, 5.0), abs=1e-9)
     finally:
@@ -4441,11 +4071,6 @@ def test_coord_trans_unknown_name_errors():
         p.draw()
 
 
-# ---------------------------------------------------------------------------
-# annotation_custom
-# ---------------------------------------------------------------------------
-
-
 def test_annotation_custom_places_artist_at_bounds():
     """`annotation_custom(rect, xmin, xmax, ymin, ymax)` adds the artist
     sized to the given bounding box."""
@@ -4461,10 +4086,8 @@ def test_annotation_custom_places_artist_at_bounds():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # The custom rect now sits in the patches list.
         rects = [p for p in ax.patches if isinstance(p, Rectangle)]
         assert len(rects) >= 1
-        # Find one whose bounds match what we asked for.
         match = next(
             (
                 p
@@ -4520,11 +4143,6 @@ def test_annotation_custom_renders_on_each_facet_panel():
         plt.close(fig)
 
 
-# ---------------------------------------------------------------------------
-# expansion()
-# ---------------------------------------------------------------------------
-
-
 def test_expansion_scalar_split_returns_four_components():
     e = expansion(mult=0.1, add=0.5)
     m_lo, m_hi, a_lo, a_hi = e.split()
@@ -4554,16 +4172,10 @@ def test_expansion_mult_widens_axis_via_margins():
     fig = p.draw()
     try:
         xlim = fig.axes[0].get_xlim()
-        # 50% margin on each side widens the (0, 10) range to (-5, 15).
         assert xlim[0] == pytest.approx(-5.0, abs=0.5)
         assert xlim[1] == pytest.approx(15.0, abs=0.5)
     finally:
         plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# draw()/show()/save() figsize controls
-# ---------------------------------------------------------------------------
 
 
 def test_draw_width_height_inches():
@@ -4638,18 +4250,12 @@ def test_draw_with_ax_skips_resize():
     df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
     parent_fig, ax = plt.subplots(figsize=(4, 4))
     try:
-        # width/height kwargs should NOT change parent_fig's size.
         ggplot(df, aes("x", "y")).geom_point().draw(ax=ax, width=20, height=2)
         size = parent_fig.get_size_inches()
         assert size[0] == pytest.approx(4.0)
         assert size[1] == pytest.approx(4.0)
     finally:
         plt.close(parent_fig)
-
-
-# ---------------------------------------------------------------------------
-# Patchwork composition
-# ---------------------------------------------------------------------------
 
 
 def _two_simple_plots():
@@ -4684,7 +4290,6 @@ def test_patchwork_same_direction_flattens():
     g = p1 | p2 | p3
     assert g.direction == "h"
     assert len(g.children) == 3
-    # No PlotGrid children (all are flat ggplot).
     assert all(not isinstance(c, PlotGrid) for c in g.children)
 
 
@@ -4707,8 +4312,6 @@ def test_patchwork_flat_horizontal_renders_two_axes():
     fig = g.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
-        # At least the two main panels (some matplotlib bookkeeping axes may
-        # exist depending on the gridspec — count >= 2 is the contract).
         assert len(visible) >= 2
     finally:
         plt.close(fig)
@@ -4754,7 +4357,6 @@ def test_patchwork_with_faceted_child():
     fig = g.draw()
     try:
         visible = [a for a in fig.axes if a.get_visible()]
-        # 1 single panel + 2 facet panels = 3.
         assert len(visible) == 3
     finally:
         plt.close(fig)
@@ -4769,7 +4371,6 @@ def test_wrap_plots_byrow_default():
     g = wrap_plots([p1, p2, p3, p4])
     nrow, ncol = g._dims()
     assert (nrow, ncol) == (2, 2)
-    # First plot lands at (0, 0); second at (0, 1) row-major.
     assert g._cell_for(0) == (0, 0)
     assert g._cell_for(1) == (0, 1)
     assert g._cell_for(2) == (1, 0)
@@ -4782,7 +4383,6 @@ def test_wrap_plots_bycol():
     p3 = ggplot(df, aes("x", "y")) + geom_point()
     p4 = ggplot(df, aes("x", "y")) + geom_col()
     g = wrap_plots([p1, p2, p3, p4], byrow=False)
-    # Column-major: first plot at (0, 0), second at (1, 0), third at (0, 1).
     assert g._cell_for(0) == (0, 0)
     assert g._cell_for(1) == (1, 0)
     assert g._cell_for(2) == (0, 1)
@@ -4804,16 +4404,11 @@ def test_patchwork_plus_composes_two_plots():
     assert isinstance(g, PlotGrid)
     assert g.direction == "grid"
     assert len(g.children) == 2
-    # n=2 → 1×2 grid (visually horizontal).
     assert g._dims() == (1, 2)
 
 
 def test_patchwork_plus_chain_flattens_into_one_grid():
-    """`p1 + p2 + p3` flattens into a single 3-cell grid (not nested).
-
-    Auto-layout for n=3 is ``(1, 3)`` per ggplot2's ``wrap_dims`` (which
-    uses ``grDevices::n2mfrow`` for n ≤ 12) — not ``ceil(sqrt)``-style 2×2.
-    """
+    """`p1 + p2 + p3` flattens into a single 3-cell grid (not nested)."""
     p1, p2 = _two_simple_plots()
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})
     p3 = ggplot(df, aes("x", "y")) + geom_point()
@@ -4828,7 +4423,6 @@ def test_patchwork_plus_layer_still_adds_layer():
     `+`-composition only triggers when the rhs is a ggplot/PlotGrid."""
     p1, _ = _two_simple_plots()
     extended = p1 + geom_point(colour="red")
-    # Still a ggplot, not a PlotGrid.
     from hea.ggplot import ggplot as ggplot_cls
 
     assert isinstance(extended, ggplot_cls)
@@ -4853,11 +4447,7 @@ def test_patchwork_grid_plus_unknown_type_raises():
 
 
 def test_plot_layout_widths_set_column_ratios():
-    """`(p1 + p2) + plot_layout(widths=[1, 2])` makes col 1 twice as wide.
-
-    Block-engine path: each child's panel is a regular Axes; we compare
-    panel widths via ``ax.get_position().width``.
-    """
+    """`(p1 + p2) + plot_layout(widths=[1, 2])` makes col 1 twice as wide."""
     p1, p2 = _two_simple_plots()
     g = (p1 + p2) + plot_layout(widths=[1, 2])
     assert g.widths == [1, 2]
@@ -4902,11 +4492,6 @@ def test_wrap_plots_widths_kwarg():
 def test_patchwork_faceted_child_axis_label_scoped_to_panel_column():
     """Regression: a faceted plot inside a composition keeps its xlabel
     inside its panel column (not across the whole composed figure).
-
-    Block engine: instead of fig.supxlabel (which paints across the full
-    figure width), the faceted child renders its xlabel via fig.text at
-    the centre of its panel-area bbox. The single-panel child sets the
-    xlabel on its sole axes.
     """
     df = pl.DataFrame(
         {
@@ -4920,25 +4505,15 @@ def test_patchwork_faceted_child_axis_label_scoped_to_panel_column():
 
     fig = (p_single + p_faceted).draw(figsize=(8, 3))
     try:
-        # No fig.supxlabel — that would paint across the whole composition.
         top_supx = getattr(fig, "_supxlabel", None)
         assert top_supx is None or not top_supx.get_text()
 
-        # The single-panel child sets its xlabel on its sole axes.
         single_ax = fig.axes[0]
         assert single_ax.get_xlabel() == "x"
 
-        # Faceted child: xlabel rides as a fig.text artist (scoped to its
-        # panel column via positioning, not via fig.supxlabel).
         assert any(t.get_text() == "x" for t in fig.texts)
     finally:
         plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# patchwork doc walkthrough — https://patchwork.data-imaginist.com/articles/patchwork.html
-# Each test maps to a numbered code block in the doc.
-# ---------------------------------------------------------------------------
 
 
 def _patchwork_doc_plots():
@@ -4966,8 +4541,6 @@ def test_patchwork_doc_ex3_two_plots_compose():
     assert g._dims() == (1, 2)
     fig = g.draw()
     try:
-        # Block engine: 2 leaves × 1 panel each → 2 panel axes (no
-        # subfigures, no extra decoration axes).
         assert len(fig.axes) == 2
     finally:
         plt.close(fig)
@@ -4979,9 +4552,7 @@ def test_patchwork_doc_ex4_labs_propagates_to_last_plot():
     p1, p2, _, _ = _patchwork_doc_plots()
     g = p1 + p2 + labs(subtitle="This will appear in the last plot")
     assert isinstance(g, PlotGrid)
-    # First plot unaffected.
     assert "subtitle" not in g.children[0].labels
-    # Second plot picks up the subtitle.
     assert g.children[1].labels["subtitle"] == "This will appear in the last plot"
 
 
@@ -4999,7 +4570,6 @@ def test_patchwork_doc_ex6_layout_nrow_byrow_false():
     g = p1 + p2 + p3 + p4 + plot_layout(nrow=3, byrow=False)
     assert g.nrow == 3
     assert g.byrow is False
-    # Column-major fill: 4th plot lands at column 1 row 0.
     nrow, ncol = g._dims()
     assert nrow == 3
     assert ncol == 2  # ceil(4 / 3)
@@ -5030,12 +4600,7 @@ def test_patchwork_doc_ex8_nested_h_inside_v():
 
 
 def test_patchwork_doc_ex9_plot_annotation_title():
-    """Ex 9: ``+ plot_annotation(title=...)`` adds a figure-level title.
-
-    Block engine: the title rides as a ``fig.text`` artist in the
-    annotation row reserved above the super-grid (not ``fig.suptitle``,
-    which would interact badly with constrained_layout that we no
-    longer use)."""
+    """Ex 9: ``+ plot_annotation(title=...)`` adds a figure-level title."""
     p1, p2, p3, _ = _patchwork_doc_plots()
     g = (p1 | (p2 / p3)) + plot_annotation(title="The surprising story about mtcars")
     assert g.annotation is not None
@@ -5117,9 +4682,7 @@ def test_patchwork_plus_to_last_plot_with_theme():
     g = p1 + p2 + theme(legend_position="top")
     assert isinstance(g, PlotGrid)
     last = g.children[-1]
-    # Theme merge happened on the last child.
     assert last.theme.get("legend.position") == "top"
-    # First child is untouched.
     assert g.children[0].theme.get("legend.position") is None
 
 
@@ -5129,7 +4692,6 @@ def test_patchwork_plus_to_last_plot_with_layer():
     g = p1 + p2 + geom_point(colour="red")
     n_first = len(g.children[0].layers)
     n_last = len(g.children[-1].layers)
-    # Last plot now has one more layer than the first.
     assert n_last == n_first + 1
 
 
@@ -5137,10 +4699,8 @@ def test_patchwork_plus_to_last_plot_recurses_into_nested_grid():
     """A nested grid forwards the rhs to the last leaf at the deepest right."""
     p1, p2, p3, _ = _patchwork_doc_plots()
     g = (p1 | (p2 / p3)) + labs(caption="bottom-right caption")
-    # The rhs leaf is p3 — caption lands there.
     inner = g.children[1]
     assert inner.children[-1].labels.get("caption") == "bottom-right caption"
-    # p1 untouched.
     assert "caption" not in g.children[0].labels
 
 
@@ -5148,7 +4708,6 @@ def test_plot_layout_overrides_partial():
     """Only non-None fields on PlotLayout take effect; others inherit."""
     p1, p2 = _two_simple_plots()
     base = wrap_plots([p1, p2], ncol=2, widths=[1, 2], heights=[1])
-    # plot_layout that only changes widths leaves heights and ncol intact.
     g = base + plot_layout(widths=[3, 4])
     assert g.widths == [3, 4]
     assert g.heights == [1]
@@ -5166,17 +4725,6 @@ def test_patchwork_figsize_kwarg():
         assert size[1] == pytest.approx(4.0)
     finally:
         plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# Themes
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# after_stat / after_scale + geom_text (smallest geom needed
-# to test stat-aware aesthetics)
-# ---------------------------------------------------------------------------
 
 
 def test_gg_c11_geom_text_after_stat_count():
@@ -5211,7 +4759,6 @@ def test_after_stat_density_with_geom_text():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # stat_density emits 512 grid points by default.
         assert len(ax.texts) == 512
     finally:
         plt.close(fig)
@@ -5220,7 +4767,6 @@ def test_after_stat_density_with_geom_text():
 def test_after_stat_callable_form():
     """``after_stat(callable)`` evaluates the callable against the stat output."""
     mtcars = load_dataset("datasets", "mtcars")
-    # Label = "n=<count>" for each bar.
     p = (
         ggplot(mtcars, aes(x="cyl"))
         + geom_bar()
@@ -5246,7 +4792,6 @@ def test_after_stat_does_not_evaluate_at_compute_aesthetics():
         aes(y=after_stat("count"), label=after_stat("count")),
         stat="count",
     )
-    # Just running .draw() should succeed — no exception.
     fig = p.draw()
     plt.close(fig)
 
@@ -5280,9 +4825,7 @@ def test_default_theme_is_gray_panel():
     try:
         ax = fig.axes[0]
         bg = ax.get_facecolor()
-        # ggplot2 panel.background fill is "#EBEBEB" (≈ 0.92, 0.92, 0.92).
         assert bg[0] == pytest.approx(0.922, abs=0.01)
-        # All spines hidden (gray-panel style).
         assert not any(
             ax.spines[s].get_visible() for s in ("top", "right", "bottom", "left")
         )
@@ -5297,10 +4840,8 @@ def test_gg_c7_theme_bw_overrides_default():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # White panel.
         bg = ax.get_facecolor()
         assert bg[0] == pytest.approx(1.0, abs=0.01)
-        # All four spines visible (panel.border).
         assert all(
             ax.spines[s].get_visible() for s in ("top", "right", "bottom", "left")
         )
@@ -5314,10 +4855,8 @@ def test_theme_minimal_no_spines_no_panel_bg():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # Transparent panel (set_facecolor("none") → alpha=0).
         bg = ax.get_facecolor()
         assert bg[3] == pytest.approx(0.0, abs=0.01)
-        # No spines.
         assert not any(
             ax.spines[s].get_visible() for s in ("top", "right", "bottom", "left")
         )
@@ -5369,7 +4908,6 @@ def test_theme_partial_override_panel_background():
         assert ax.get_facecolor()[:3] == pytest.approx(
             to_rgba("lightblue")[:3], abs=0.01
         )
-        # Spines still hidden (theme_gray default survived).
         assert not any(
             ax.spines[s].get_visible() for s in ("top", "right", "bottom", "left")
         )
@@ -5388,8 +4926,6 @@ def test_theme_blank_clears_element():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # `grid(False, which='major')` flips the tick's gridOn flag → no
-        # visible major gridlines on either axis.
         major_grid = ax.xaxis.get_gridlines() + ax.yaxis.get_gridlines()
         visible = [g for g in major_grid if g.get_visible()]
         assert len(visible) == 0
@@ -5403,14 +4939,11 @@ def test_theme_addition_complete_replaces_partial_merges():
     overlay = theme(plot_title=element_text(colour="red"))
 
     merged = base + overlay
-    # Plot title gained colour="red"; everything else from theme_gray survives.
     assert merged.get("plot.title").colour == "red"
     assert merged.get("panel.background") is not None  # theme_gray's panel still there
 
-    # Now add a complete theme on top — it should replace.
     bw = theme_bw()
     final = merged + bw
-    # bw has no plot.title.colour="red" override; the overlay was wiped.
     assert final.get("plot.title").colour != "red"
 
 
@@ -5469,8 +5002,6 @@ def test_scale_size_area_uses_sqrt_scaling():
     fig = p.draw()
     try:
         sizes = fig.axes[0].collections[0].get_sizes()
-        # area_pal: size_mm = max_size * sqrt(v_normalized).
-        # v=0 → 0 mm; v=1 → max_size mm. s = (size_mm * 2.8454)².
         assert sizes[0] == pytest.approx(0.0, abs=1e-6)  # v=0 → size 0
         assert sizes[3] == pytest.approx((4 * 2.8454) ** 2, rel=0.01)
     finally:
@@ -5490,8 +5021,8 @@ def test_scale_color_brewer_unknown_palette_errors():
 
 def test_geom_smooth_fits_per_group_when_colour_mapped():
     """`aes(colour=species)` + `geom_smooth(method="lm")` → one fitted line
-    per species, each in its own colour. Bug repro: previously a single fit
-    was drawn in the default smooth colour."""
+    per species, each in its own colour — not a single fit in the default
+    smooth colour."""
     from hea import data as _hea_data
 
     penguins = _hea_data("penguins", package="palmerpenguins")
@@ -5505,7 +5036,6 @@ def test_geom_smooth_fits_per_group_when_colour_mapped():
         fig = p.draw()
     try:
         ax = fig.axes[0]
-        # 3 species → 3 lines, 3 ribbons.
         assert len(ax.lines) == 3
         line_colors = {ln.get_color() for ln in ax.lines}
         assert len(line_colors) == 3
@@ -5558,7 +5088,6 @@ def test_geom_point_scatter_size_uses_pt_per_mm_conversion():
     fig = p.draw()
     try:
         sizes = fig.axes[0].collections[0].get_sizes()
-        # Default size=1.5; expected (1.5 * 72.27/25.4)² ≈ 18.222
         assert abs(float(sizes[0]) - 18.222) < 0.01
     finally:
         plt.close(fig)
@@ -5574,7 +5103,6 @@ def test_aes_color_constant_kwarg_overrides_mapping():
     fig = p.draw()
     try:
         fc = fig.axes[0].collections[0].get_facecolors()
-        # All red despite the discrete mapping.
         assert {tuple(c) for c in fc} == {to_rgba("red")}
     finally:
         plt.close(fig)
@@ -5591,27 +5119,16 @@ def test_gg_c9_boxplot_with_jitter():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # 3 box patches + 1 scatter collection (the jittered points).
         assert len(ax.patches) == 3
         assert len(ax.collections) == 1
         offsets = ax.collections[0].get_offsets()
-        # All N points present, jittered around their cyl group center.
         assert offsets.shape == (len(mtcars), 2)
-        # Jittered x's should differ from the integer cyl values.
         import numpy as np
 
         raw_cyl = mtcars["cyl"].to_numpy()
         assert not np.array_equal(offsets[:, 0], raw_cyl)
     finally:
         plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# Faraway "Linear Models with R" page 5 — the three exploratory plots.
-# These transliterate the R one-liners directly to hea.ggplot. They lock the
-# minimum viable surface (geom_point + geom_histogram + geom_density) for
-# the use cases the book opens with.
-# ---------------------------------------------------------------------------
 
 
 def test_gg_c8_histogram_pima_diastolic():
@@ -5623,7 +5140,6 @@ def test_gg_c8_histogram_pima_diastolic():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # Default bins=30; bar heights sum to N (no missing in pima.diastolic).
         assert len(ax.patches) == 30
         total = sum(bar.get_height() for bar in ax.patches)
         assert total == len(pima), f"expected {len(pima)} obs, got {total}"
@@ -5643,8 +5159,6 @@ def test_stat_density_trim_false_uses_panel_x_range():
     from hea.ggplot.stats.density import StatDensity
 
     rng = np.random.default_rng(0)
-    # Group A is concentrated low; group B sits high. With trim=False each
-    # group's grid must span the union of both groups' x.
     df = pl.DataFrame(
         {
             "x": np.concatenate(
@@ -5663,7 +5177,6 @@ def test_stat_density_trim_false_uses_panel_x_range():
         assert float(sub["x"].max()) == pytest.approx(panel_max)
         assert len(sub) == 512
 
-    # trim=True clips each group to its own [min, max].
     out_trim = StatDensity(trim=True).compute_panel(df, {})
     for g in (1, 2):
         sub_in = df.filter(pl.col("group") == g)
@@ -5683,11 +5196,9 @@ def test_gg_c10_density_pima_diastolic():
         ax = fig.axes[0]
         assert len(ax.lines) == 1, f"expected one density curve, got {len(ax.lines)}"
         xy = ax.lines[0].get_xydata()
-        # 512 points by default, monotone in x, non-negative density.
         assert xy.shape == (512, 2)
         assert (xy[:-1, 0] <= xy[1:, 0]).all(), "x grid must be sorted ascending"
         assert (xy[:, 1] >= 0).all(), "density must be non-negative"
-        # Density integrates to ≈ 1 over its support (3·bw padding on each side).
         from numpy import trapezoid
 
         area = trapezoid(xy[:, 1], xy[:, 0])
@@ -5738,11 +5249,6 @@ def test_faraway_p5_scatter_pima_diastolic_diabetes():
         plt.close(fig)
 
 
-# ---------------------------------------------------------------------------
-# Labels & limits — `labs`, `xlab`, `ylab`, `ggtitle`, `xlim`, `ylim`, `lims`
-# ---------------------------------------------------------------------------
-
-
 def test_labs_overrides_axis_labels():
     mtcars = load_dataset("datasets", "mtcars")
     p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + labs(x="Weight", y="MPG")
@@ -5783,7 +5289,6 @@ def test_after_stat_kwarg_form_promotes_into_mapping():
         h_kwarg = sorted(round(p.get_height(), 4) for p in fig_kwarg.axes[0].patches)
         h_aes = sorted(round(p.get_height(), 4) for p in fig_aes.axes[0].patches)
         assert h_kwarg == h_aes
-        # Sanity: heights are sqrt of counts (1, 2, 3 → 1.0, 1.414, 1.732).
         assert h_aes == [1.0, round(2**0.5, 4), round(3**0.5, 4)]
     finally:
         plt.close(fig_kwarg)
@@ -5844,7 +5349,6 @@ def test_ggtitle_sets_axes_title_left_aligned():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # The 'left' title slot on an axes — that's where ggplot2's title goes.
         assert ax.get_title(loc="left") == "Cars"
     finally:
         plt.close(fig)
@@ -5890,8 +5394,6 @@ def test_labs_color_aliases_to_colour():
     """``labs(color=...)`` and ``labs(colour=...)`` collapse to the canonical key."""
     assert labs(color="C").labels == {"colour": "C"}
     assert labs(colour="C").labels == {"colour": "C"}
-    # When both supplied, ``color`` (later in the function body) wins. Match
-    # ggplot2's "last assignment wins" semantics rather than erroring.
     assert labs(colour="A", color="B").labels == {"colour": "B"}
 
 
@@ -5903,7 +5405,6 @@ def test_labs_explicit_overrides_mapping_deparse():
     try:
         ax = fig.axes[0]
         assert ax.get_xlabel() == "Custom X"
-        # Y still falls through to the mapping.
         assert ax.get_ylabel() == "mpg"
     finally:
         plt.close(fig)
@@ -6000,11 +5501,6 @@ def test_xlim_fluent_method_form():
         plt.close(fig)
 
 
-# ---------------------------------------------------------------------------
-# Reference-line geoms — geom_hline / geom_vline / geom_abline
-# ---------------------------------------------------------------------------
-
-
 def test_geom_hline_single_intercept():
     mtcars = load_dataset("datasets", "mtcars")
     p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + geom_hline(yintercept=20)
@@ -6057,8 +5553,6 @@ def test_geom_abline_default_slope_intercept():
     try:
         ax = fig.axes[0]
         assert len(ax.lines) == 1
-        # ``axline`` stores its anchor + slope on private attrs; xdata/ydata
-        # are placeholder [0,1] in matplotlib regardless of the line.
         ln = ax.lines[0]
         assert ln._xy1 == (0.0, 0.0)
         assert ln._slope == pytest.approx(1.0)
@@ -6095,7 +5589,6 @@ def test_geom_hline_aes_params_apply_colour_and_linetype():
         assert len(ax.lines) == 2
         for ln in ax.lines:
             assert ln.get_linestyle() == "--"
-            # matplotlib normalises colour names.
             from matplotlib.colors import to_rgba
 
             assert to_rgba(ln.get_color()) == to_rgba("red")
@@ -6131,7 +5624,6 @@ def test_geom_hline_does_not_inherit_main_data():
     p = ggplot(mtcars, aes("wt", "mpg")) + geom_point() + geom_hline(yintercept=20)
     fig = p.draw()
     try:
-        # One scatter (PathCollection) for points, one line (Line2D) for hline.
         ax = fig.axes[0]
         assert len(ax.lines) == 1
     finally:
@@ -6146,11 +5638,6 @@ def test_geom_hline_fluent_form():
         assert len(fig.axes[0].lines) == 1
     finally:
         plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# Coords — coord_cartesian, coord_fixed
-# ---------------------------------------------------------------------------
 
 
 def test_coord_cartesian_default_is_no_op():
@@ -6242,11 +5729,6 @@ def test_coord_cartesian_fluent_form():
         plt.close(fig)
 
 
-# ---------------------------------------------------------------------------
-# scale_color_hue / scale_fill_hue — explicit form of ggplot2's default qual palette
-# ---------------------------------------------------------------------------
-
-
 def test_scale_color_hue_assigns_distinct_colors_per_level():
     df = pl.DataFrame(
         {
@@ -6259,7 +5741,6 @@ def test_scale_color_hue_assigns_distinct_colors_per_level():
     fig = p.draw()
     try:
         sc = fig.axes[0].collections[0]
-        # 4 distinct levels → 4 distinct colours.
         from matplotlib.colors import to_hex
 
         rgba = sc.get_facecolors()
@@ -6290,11 +5771,6 @@ def test_scale_color_hue_direction_reverses_palette():
         plt.close(f2)
 
 
-# ---------------------------------------------------------------------------
-# geom_label — geom_text + background bbox
-# ---------------------------------------------------------------------------
-
-
 def test_geom_label_renders_text_with_bbox():
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0], "lbl": ["A", "B"]})
     p = ggplot(df, aes("x", "y", label="lbl")) + geom_label()
@@ -6303,8 +5779,6 @@ def test_geom_label_renders_text_with_bbox():
         ax = fig.axes[0]
         texts = ax.texts
         assert len(texts) == 2
-        # Each text artist should have an associated bbox patch — that's the
-        # difference from geom_text.
         for t in texts:
             assert t.get_bbox_patch() is not None
     finally:
@@ -6334,11 +5808,6 @@ def test_geom_label_fluent_form():
         plt.close(fig)
 
 
-# ---------------------------------------------------------------------------
-# stat_function / geom_function — y = f(x) curves
-# ---------------------------------------------------------------------------
-
-
 def test_stat_function_explicit_xlim():
     """``xlim`` directly determines the sampled x range."""
     import numpy as np
@@ -6350,14 +5819,12 @@ def test_stat_function_explicit_xlim():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # One Line2D for the function curve.
         assert len(ax.lines) == 1
         xs = ax.lines[0].get_xdata()
         ys = ax.lines[0].get_ydata()
         assert len(xs) == 51
         assert float(np.min(xs)) == pytest.approx(-2.0)
         assert float(np.max(xs)) == pytest.approx(2.0)
-        # y = x^2: each y matches its x squared.
         for x, y in zip(xs, ys):
             assert y == pytest.approx(x**2)
     finally:

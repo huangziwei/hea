@@ -15,8 +15,6 @@ import textwrap
 import numpy as np
 import polars as pl
 
-# ---- readr parsers --------------------------------------------------
-
 
 def parse_number(x):
     """readr's ``parse_number()`` — pull the first number out of a string column.
@@ -62,9 +60,6 @@ def parse_double(x):
         x = pl.Series(x, dtype=pl.Utf8)
     out = x.cast(pl.Utf8).cast(pl.Float64, strict=False)
     return out.to_list() if array_like else out
-
-
-# ---- stringr --------------------------------------------------------
 
 
 def str_wrap(string, width=80, indent=0, exdent=0, whitespace_only=True):
@@ -118,17 +113,13 @@ def str_c(*args, sep="", collapse=None):
     ``collapse`` is given, vector results get reduced to a single string
     joined by it (R's tidyverse semantics).
     """
-    # Any Expr arg → return an Expr that polars evaluates per row.
     if any(isinstance(a, pl.Expr) for a in args):
         as_exprs = [a if isinstance(a, pl.Expr) else pl.lit(a) for a in args]
         e = pl.concat_str(as_exprs, separator=sep)
         if collapse is not None:
-            # ``collapse=`` reduces to a single scalar — polars can do
-            # this with ``.str.concat()`` at evaluation time.
             return e.str.concat(collapse)
         return e
 
-    # Eager path: broadcast each arg to the longest length, then join.
     def _as_list(v):
         if isinstance(v, (pl.Series, np.ndarray)):
             return list(v)
@@ -140,7 +131,6 @@ def str_c(*args, sep="", collapse=None):
     if not cols:
         return ""
     n = max(len(c) for c in cols)
-    # Recycle (R semantics) — single-element vectors broadcast.
     cols = [(c * n if len(c) == 1 else c) for c in cols]
     out: list = []
     for i in range(n):
@@ -174,7 +164,6 @@ def str_glue(template, *, sep="", _envir=None):
     else:
         env = {**frame.f_back.f_globals, **frame.f_back.f_locals}
 
-    # Walk the template, splitting on ``{...}`` placeholders.
     parts = _re.split(r"(\{\{|\}\}|\{[^}]*\}|[^{}]+)", template)
     parts = [p for p in parts if p]
     pieces: list = []
@@ -192,7 +181,6 @@ def str_glue(template, *, sep="", _envir=None):
                     needs_expr = True
                 pieces.append(v)
             else:
-                # Treat as column reference if name looks like an identifier.
                 if _re.match(r"^[A-Za-z_]\w*$", name):
                     pieces.append(pl.col(name))
                     needs_expr = True
@@ -248,8 +236,6 @@ def str_sub(x, start=0, end=None):
     inclusive; hea follows Python.
     """
 
-    # Inputs already use Python's 0-based half-open convention — pass
-    # straight through to polars / native slicing.
     def _norm(s, e, length):
         if e is None:
             e = length
@@ -262,12 +248,10 @@ def str_sub(x, start=0, end=None):
         return s, e - s
 
     if isinstance(x, pl.Expr):
-        # polars ``.str.slice(offset, length)`` accepts negative offsets.
         if end is None:
             return x.str.slice(start)
         if end >= 0 and start >= 0:
             return x.str.slice(start, max(0, end - start))
-        # Mixed signs: defer to a length-aware expression.
         len_expr = x.str.len_chars()
         norm_start = (
             pl.when(pl.lit(start) < 0)
@@ -291,7 +275,6 @@ def str_sub(x, start=0, end=None):
         if isinstance(x, pl.Series):
             return pl.Series(x.name, out)
         return out
-    # Scalar
     if x is None:
         return None
     s, n = _norm(start, end, len(x))
@@ -416,6 +399,4 @@ def str_view(string, pattern=None, *, match=None, html=False) -> None:
         print(f"[{i:{width}d}] {text}")
 
 
-# stringr deprecated ``str_view_all`` in favor of ``str_view`` (which now
-# highlights all matches by default). Keep an alias for older scripts.
 str_view_all = str_view

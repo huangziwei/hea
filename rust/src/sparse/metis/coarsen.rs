@@ -1,16 +1,3 @@
-//! `libmetis/coarsen.c` — the matching and contraction half of the multilevel
-//! scheme.
-//!
-//! `ncon` is 1 throughout: `METIS_NodeND` calls `SetupCtrl (..., ncon = 1, ...)`
-//! and `CheckParams`'s OMETIS arm rejects anything else (`options.c`), so the
-//! multi-constraint arms of `Match_RM`/`Match_SHEM` — and with them `ivecle`,
-//! `ivecaxpylez` and `BetterVBalance` — are unreachable from here and are not
-//! ported, for the same reason the k-way partitioner is not.
-//!
-//! The graph chain is a stack: `levels[cur]` is the C's `graph` and the coarse
-//! graph each matching builds is pushed as `levels[cur + 1]`, which is
-//! `graph->coarser`.
-
 use super::super::ws::Ws;
 use super::bucketsort::bucket_sort_keys_inc;
 use super::ctrl::{Ctrl, METIS_CTYPE_RM, METIS_CTYPE_SHEM};
@@ -32,8 +19,6 @@ const HTLENGTH: Idx = (1 << 11) - 1;
 pub fn coarsen_graph(ctrl: &mut Ctrl, levels: &mut Vec<Graph>, base: usize) -> usize {
     let mut eqewgts = equal_edge_weights(&levels[base]);
 
-    // `ctrl->maxvwgt[i] = 1.5*graph->tvwgt[i]/ctrl->CoarsenTo` — a double
-    // expression truncated on the store to `idx_t`.
     for i in 0..levels[base].ncon as usize {
         ctrl.maxvwgt[i] = (1.5 * levels[base].tvwgt[i] as f64 / ctrl.coarsen_to as f64) as Idx;
     }
@@ -92,8 +77,6 @@ pub fn coarsen_graph_nlevels(
     cur
 }
 
-/// "determine if the weights on the edges are all the same" — the `eqewgts`
-/// preamble both coarsening drivers open with.
 fn equal_edge_weights(graph: &Graph) -> bool {
     for i in 1..graph.nedges as usize {
         if graph.adjwgt[0] != graph.adjwgt[i] {
@@ -103,7 +86,6 @@ fn equal_edge_weights(graph: &Graph) -> bool {
     true
 }
 
-/// The `switch (ctrl->ctype)` both drivers run per level.
 fn match_level(ctrl: &mut Ctrl, levels: &mut Vec<Graph>, cur: usize, eqewgts: bool) {
     if ctrl.ctype == METIS_CTYPE_RM {
         match_rm(ctrl, levels, cur);
@@ -157,8 +139,6 @@ fn match_rm(ctrl: &mut Ctrl, levels: &mut Vec<Graph>, cur: usize) -> Idx {
 
             if vwgt[i] < maxvwgt[0] {
                 if xadj[i] == xadj[i + 1] {
-                    // island vertex: pair it with the next unmatched one,
-                    // ignoring maxvwgt
                     last_unmatched = last_unmatched.max(pi) + 1;
                     while last_unmatched < nvtxs as usize {
                         let j = perm[last_unmatched];
@@ -195,9 +175,6 @@ fn match_rm(ctrl: &mut Ctrl, levels: &mut Vec<Graph>, cur: usize) -> Idx {
     };
 
     if ctrl.no2hop == 0 && nunmatched as f64 > UNMATCHEDFOR2HOP * nvtxs as f64 {
-        // `Match_2Hop`'s return value is dead upstream too: the renumbering
-        // below restarts the count from zero. What it does that matters is
-        // extend `match` and `cmap`.
         let _ = match_2hop(
             ctrl,
             &mut levels[cur],
@@ -228,8 +205,6 @@ fn match_shem(ctrl: &mut Ctrl, levels: &mut Vec<Graph>, cur: usize) -> Idx {
     ctrl.rng
         .irand_array_permute(nvtxs, &mut tperm, nvtxs / 8, 1);
 
-    // `avgdegree = 0.7*(xadj[nvtxs]/nvtxs)` — the inner division is integer,
-    // the 0.7 is a double, and the result truncates back to `idx_t`.
     let avgdegree = {
         let g = &levels[cur];
         (0.7 * (g.xadj[nvtxs as usize] / nvtxs) as f64) as Idx
@@ -314,9 +289,6 @@ fn match_shem(ctrl: &mut Ctrl, levels: &mut Vec<Graph>, cur: usize) -> Idx {
     };
 
     if ctrl.no2hop == 0 && nunmatched as f64 > UNMATCHEDFOR2HOP * nvtxs as f64 {
-        // `Match_2Hop`'s return value is dead upstream too: the renumbering
-        // below restarts the count from zero. What it does that matters is
-        // extend `match` and `cmap`.
         let _ = match_2hop(
             ctrl,
             &mut levels[cur],
@@ -461,8 +433,6 @@ fn match_2hop_all(
 ) -> Idx {
     let nvtxs = graph.nvtxs;
     let mut nunmatched = *r_nunmatched;
-    // `IDX_MAX/maxdegree` with `maxdegree` a `size_t`: the usual arithmetic
-    // conversions make this an unsigned division.
     let mask = (Idx::MAX as u64 / maxdegree as u64) as Idx;
 
     let mut keys = ikvwspacemalloc(nunmatched as Idx);
@@ -558,7 +528,6 @@ fn create_coarse_graph(
     let _ = ctrl;
     let mask = HTLENGTH;
 
-    // "Check if the mask-version of the code is a good choice"
     let use_mask = {
         let g = &levels[cur];
         if cnvtxs < 2 * mask || g.nedges / g.nvtxs > mask / 20 {
@@ -577,7 +546,6 @@ fn create_coarse_graph(
     let g = &levels[cur];
     let ncon = g.ncon as usize;
 
-    // The C's prologue, taken through `Ws`; see `sparse::ws`.
     let xadj = Ws::new_ref(&g.xadj);
     let adjncy = Ws::new_ref(&g.adjncy);
     let adjwgt = Ws::new_ref(&g.adjwgt);
@@ -588,9 +556,6 @@ fn create_coarse_graph(
     let cadjncy = Ws::new(&mut cgraph.adjncy);
     let cadjwgt = Ws::new(&mut cgraph.adjwgt);
 
-    // `iset (gk_min (cnvtxs+1, mask+1), -1, iwspacemalloc (ctrl, mask+1))` —
-    // this branch is only taken when `cnvtxs >= 2*mask`, so the `gk_min` always
-    // picks `mask+1` and the whole table is set.
     let mut htable_ = iwspacemalloc(mask + 1);
     for h in htable_.iter_mut().take((cnvtxs + 1).min(mask + 1) as usize) {
         *h = -1;
@@ -670,7 +635,6 @@ fn create_coarse_graph(
                 }
             }
 
-            // Remove the self-loop the contraction just created.
             let mut jj = htable[cv as Idx & mask];
             if jj >= 0 && cadjncy[cnedges + jj as usize] != cv as Idx {
                 jj = 0;
@@ -681,7 +645,6 @@ fn create_coarse_graph(
                     jj += 1;
                 }
             }
-            // "This 2nd check is needed for non-adjacent matchings"
             if jj >= 0 && (jj as usize) < nedges && cadjncy[cnedges + jj as usize] == cv as Idx {
                 nedges -= 1;
                 cadjncy[cnedges + jj as usize] = cadjncy[cnedges + nedges];
@@ -709,12 +672,6 @@ fn create_coarse_graph_nomask(levels: &mut Vec<Graph>, cur: usize, cnvtxs: Idx, 
     let g = &levels[cur];
     let ncon = g.ncon as usize;
 
-    // The C's prologue — `xadj = graph->xadj; adjncy = graph->adjncy; ...` —
-    // taken through `Ws`, which is what makes these subscripts pointer walks
-    // rather than checked accesses. Every one of them is an index the algorithm
-    // itself produced (`cmap` of an `adjncy` entry, a slot in a table sized to
-    // `cnvtxs`), so the check is walked in `cargo test` and elided here; see
-    // `sparse::ws` and `metis::tests`.
     let xadj = Ws::new_ref(&g.xadj);
     let adjncy = Ws::new_ref(&g.adjncy);
     let adjwgt = Ws::new_ref(&g.adjwgt);
@@ -806,10 +763,6 @@ fn finish_coarse_graph(levels: &mut Vec<Graph>, cur: usize, mut cgraph: Graph, c
         cgraph.invtvwgt[j] = (1.0f64 / d as f64) as super::Real;
     }
 
-    // `ReAdjustMemory` reallocates down to `cnedges` only when it is worth it;
-    // here the arrays are truncated unconditionally, because a `Vec`'s length
-    // is what bounds every later index, and `shrink_to_fit` is applied under
-    // upstream's own condition so the memory behaviour matches too.
     let shrink = cgraph.nedges > 10000 && (cgraph.nedges as f64) < 0.9 * levels[cur].nedges as f64;
     cgraph.adjncy.truncate(cnedges);
     cgraph.adjwgt.truncate(cnedges);

@@ -51,8 +51,6 @@ def _assert_summary(
         assert m.f_p_value is None
     else:
         np.testing.assert_allclose(m.fstats, fstats, atol=5e-3)
-        # Notebook prints small p-values in scientific notation (use rtol)
-        # and larger ones rounded to 2 decimals (use atol).
         if abs(f_pvalue) < 1e-3:
             np.testing.assert_allclose(m.f_p_value, f_pvalue, rtol=1e-2)
         else:
@@ -68,11 +66,6 @@ def _f_test(m_reduced, m_full):
     F = ((rss0 - rss1) / (df0 - df1)) / (rss1 / df1)
     p = f_dist.sf(F, df0 - df1, df1)
     return F, p
-
-
-# ---------------------------------------------------------------------------
-# Faraway (2014)
-# ---------------------------------------------------------------------------
 
 
 def test_faraway_2_6_gala():
@@ -124,7 +117,6 @@ def test_faraway_2_10_odor():
     _assert_coef(m, "gas", -17.000, 12.732, -1.335, 0.209)
     _assert_coef(m, "pack", -21.375, 12.732, -1.679, 0.121)
 
-    # cor=True path: odor is an orthogonal design — feature corr ≈ I.
     feats = [c for c in m.X.columns if c != "(Intercept)"]
     corr = m.X[feats].corr().to_numpy()
     np.testing.assert_allclose(corr, np.eye(len(feats)), atol=1e-2)
@@ -141,28 +133,24 @@ def test_faraway_3_2_anova_gala():
     assert m_full.df_residuals == 24
     np.testing.assert_allclose(m_full.rss, 89231.366, atol=1e-2)
 
-    # null vs full: F = 15.699, p ≈ 0
     assert m_null.df_residuals == 29
     np.testing.assert_allclose(m_null.rss, 381081.367, atol=1e-2)
     F, p = _f_test(m_null, m_full)
     np.testing.assert_allclose(F, 15.699, atol=5e-3)
     assert p < 1e-3
 
-    # m2 vs full: F = 1.140, p = 0.296
     assert m2.df_residuals == 25
     np.testing.assert_allclose(m2.rss, 93469.084, atol=1e-2)
     F, p = _f_test(m2, m_full)
     np.testing.assert_allclose(F, 1.140, atol=5e-3)
     np.testing.assert_allclose(p, 0.296, atol=5e-3)
 
-    # m3 vs full: F = 9.287, p = 0.001
     assert m3.df_residuals == 26
     np.testing.assert_allclose(m3.rss, 158291.629, atol=1e-2)
     F, p = _f_test(m3, m_full)
     np.testing.assert_allclose(F, 9.287, atol=5e-3)
     np.testing.assert_allclose(p, 0.001, atol=5e-4)
 
-    # m4 vs full: F = 5.476, p = 0.028  (uses I(Area+Adjacent))
     assert m4.df_residuals == 25
     np.testing.assert_allclose(m4.rss, 109591.121, atol=1e-2)
     F, p = _f_test(m4, m_full)
@@ -193,7 +181,6 @@ def test_faraway_4_2_fat_predict():
         BIC=1480.8573,
     )
 
-    # Prediction at the per-feature median (notebook 4.2 cells 1cae/ee3a).
     x0 = m.X.median()
     pred_pi = m.predict(newdata=x0, interval="prediction")
     np.testing.assert_allclose(pred_pi["fit"][0], 17.49322, atol=5e-4)
@@ -267,7 +254,6 @@ def test_wood_1_5_AIC_table():
     np.testing.assert_allclose(scmod1.AIC, 194.73, atol=5e-3)
     np.testing.assert_allclose(scmod3.AIC, 197.59, atol=5e-3)
     np.testing.assert_allclose(scmod4.AIC, 199.90, atol=5e-3)
-    # AIC() table reports df = p + 1 (R convention; see lm.AIC()).
     assert scmod1.p + 1 == 4
     assert scmod3.p + 1 == 3
     assert scmod4.p + 1 == 2
@@ -312,17 +298,11 @@ def test_wood_1_6_4_plantgrowth():
     )
     _assert_coef(pgm0, "(Intercept)", 5.073, 0.128, 39.627, 0.0)
 
-    # anova(pgm0, pgm1)
     np.testing.assert_allclose(pgm0.rss, 14.258, atol=5e-3)
     np.testing.assert_allclose(pgm1.rss, 10.492, atol=5e-3)
     F, p = _f_test(pgm0, pgm1)
     np.testing.assert_allclose(F, 4.846, atol=5e-3)
     np.testing.assert_allclose(p, 0.016, atol=5e-3)
-
-
-# ---------------------------------------------------------------------------
-# Gelman & Hill (2007)
-# ---------------------------------------------------------------------------
 
 
 def test_gelman_3_4_kidiq_two_predictors():
@@ -394,14 +374,7 @@ def test_gelman_3_5_kidiq_interaction():
     _assert_coef(m, "mom.hs:mom.iq", -0.484, 0.162, -2.985, 0.003)
 
 
-# ---------------------------------------------------------------------------
-# Visreg (Breheny & Burchett, 2017)
-# ---------------------------------------------------------------------------
-
-
 def test_breheny_airquality():
-    # NA-omit: Ozone has 37 NAs, Solar.R has 7. R-style na.omit on referenced
-    # columns leaves 111 rows.
     df = load_dataset("R", "airquality")
     m = lm("Ozone ~ Solar.R + Wind + Temp", data=df)
 
@@ -439,8 +412,6 @@ def test_wood_2_1_1_stomata_rank_deficient_anova():
     assert m1.df_residuals == 18
     assert m0.df_residuals == 22
     assert len(m1._aliased_cols) == 1
-    # R surfaces the alias only when the model is printed — check the
-    # header line appears in repr() (hea's summary() prints to stdout).
     assert "(1 not defined because of singularities)" in repr(m1)
     np.testing.assert_allclose(m1.rss, 0.8604, atol=5e-3)
     np.testing.assert_allclose(m0.rss, 2.1348, atol=5e-3)
@@ -458,26 +429,9 @@ def test_wood_2_1_1_stomata_anova_single_model_sequential(capsys):
     m = lm("area ~ CO2 + tree", data=df)
     anova(m)
     out = capsys.readouterr().out
-    # CO2 row
     assert "CO2" in out and "184.5452" in out and "6.686e-11" in out
-    # tree row
     assert "tree" in out and "6.6654" in out and "0.001788" in out
-    # Residuals row uses df=18 / SS=0.8604
     assert "Residuals" in out and "0.8604" in out
-
-
-# ---------------------------------------------------------------------------
-# Weighted least squares — parity with R's lm(..., weights=) inference
-#
-# R's summary.lm uses the *weighted* residual sum of squares (Σ wᵢrᵢ²) for
-# the residual variance, a weighted TSS for R², and adds Σ log wᵢ to the
-# Gaussian log-likelihood; zero-weight rows drop out of the effective
-# sample size. Oracle values below are from R 4.6.0 (hardcoded; CI never
-# calls R):
-#
-#   m1 <- lm(mpg ~ wt + hp, data = mtcars, weights = 1/wt)
-#   m2 <- lm(Ozone ~ Solar.R + Wind + Temp, data = airquality, weights = 1/Wind)
-# ---------------------------------------------------------------------------
 
 
 def test_weighted_lm_mtcars_summary_matches_R():
@@ -503,10 +457,8 @@ def test_weighted_lm_mtcars_summary_matches_R():
     _assert_coef(m, "wt", -4.4438234, 0.68829958, -6.4562344, 0.0)
     _assert_coef(m, "hp", -0.031460081, 0.0097760391, -3.2180805, 0.0031685207)
 
-    # deviance.lm == Σ wᵢ rᵢ² (weighted), not the raw Σ rᵢ²
     np.testing.assert_allclose(m.rss, 70.031852, rtol=1e-5)
 
-    # confint(m)
     ci = m.ci_bhat
     np.testing.assert_allclose(
         ci[ci.columns[1]].to_numpy(), [35.849673, -5.8515541, -0.051454326], rtol=1e-5
@@ -558,9 +510,6 @@ def test_weighted_lm_predict_intervals_match_R():
     np.testing.assert_allclose(ci["lwr"][0], 19.949818, rtol=1e-5)
     np.testing.assert_allclose(ci["upr"][0], 21.95385, rtol=1e-5)
 
-    # R's predict.lm uses a constant prediction variance (res.var) for
-    # weighted fits by default (its "Assuming constant prediction
-    # variance" path); hea matches that.
     pi = m.predict(newdata=nd, interval="prediction")
     np.testing.assert_allclose(pi["lwr"][0], 17.619351, rtol=1e-5)
     np.testing.assert_allclose(pi["upr"][0], 24.284317, rtol=1e-5)
@@ -640,8 +589,6 @@ def test_weighted_lm_zero_weights_match_R():
     assert m.df_residuals == 27  # 30 nonzero rows − 3 params
     assert m._n_eff == 30
     assert len(m._residuals_arr) == 32  # rows retained, as in R
-    # R's nobs.lm counts only nonzero-weight rows (sum(w != 0)), not the 32
-    # retained rows — matches R's nobs(m) == 30 for this fit.
     from hea.R import nobs
 
     assert nobs(m) == 30
@@ -658,34 +605,22 @@ def test_weighted_lm_input_validation():
     gala = load_dataset("faraway", "gala")
     n = gala.height
 
-    # negative weights → hard error (R: lm.wfit "missing or negative ...")
     with pytest.raises(ValueError, match="negative weights"):
         lm("Species ~ Area", gala, weights=-np.ones(n))
 
-    # NaN weights → hard error
     bad = np.ones(n)
     bad[0] = np.nan
     with pytest.raises(ValueError, match="negative weights"):
         lm("Species ~ Area", gala, weights=bad)
 
-    # length mismatch against the input frame → error
     with pytest.raises(ValueError, match="Length of weights"):
         lm("Species ~ Area", gala, weights=np.ones(n + 1))
 
-    # weights + subset: filtered in lockstep, no crash
     w = np.linspace(0.5, 2.0, n)
     m = lm("Species ~ Area", gala, weights=w, subset=np.arange(10))
     assert m.n == 10
     assert len(m.weights) == 10
     np.testing.assert_array_equal(m.weights, w[:10])
-
-
-# ---------------------------------------------------------------------------
-# predict.lm surface — se.fit, type="terms", level= (R 4.6.0 oracles)
-#
-#   m  <- lm(mpg ~ wt + hp, data = mtcars, weights = 1/wt)
-#   nd <- data.frame(wt = c(2.5, 3.5), hp = c(100, 200))
-# ---------------------------------------------------------------------------
 
 
 def test_lm_predict_se_fit_matches_R():
@@ -701,7 +636,6 @@ def test_lm_predict_se_fit_matches_R():
         p["se.fit"].to_numpy(), [0.52776628, 0.67550803], rtol=1e-5
     )
 
-    # se.fit travels with intervals too — it's the mean SE, not the PI width
     pi = m.predict(newdata=nd, interval="prediction", se_fit=True)
     assert {"fit", "se.fit", "lwr", "upr"}.issubset(pi.columns)
     np.testing.assert_allclose(pi["se.fit"].to_numpy(), p["se.fit"].to_numpy())
@@ -735,13 +669,11 @@ def test_lm_predict_terms_numeric_matches_R():
         pt["se.hp"].to_numpy(), [0.45641882, 0.52118508], rtol=1e-5
     )
 
-    # R identity: fit == constant + rowSums(terms)
     fit = m.predict(newdata=nd)["fit"].to_numpy()
     np.testing.assert_allclose(
         pt.constant + pt["wt"].to_numpy() + pt["hp"].to_numpy(), fit, rtol=1e-6
     )
 
-    # terms= selects a subset of term labels
     only_wt = m.predict(newdata=nd, type="terms", terms="wt")
     assert only_wt.columns == ["wt"]
     np.testing.assert_allclose(
@@ -765,30 +697,19 @@ def test_lm_predict_terms_factor_matches_R():
     )
 
 
-# ---------------------------------------------------------------------------
-# Rank-deficient parity — aliased coefficients kept as NA rows (R 4.6.0)
-#
-#   m <- lm(area ~ CO2 + tree, data = stomata)   # tree nested in CO2
-#   coef(m) keeps all 7 columns with tree6 = NA; summary prints the NA row.
-# ---------------------------------------------------------------------------
-
-
 def test_rank_deficient_keeps_aliased_as_NA():
     st = load_dataset("gamair", "stomata")
     m = lm("area ~ CO2 + tree", st)
 
-    # coef(m) carries every original column, NA for the aliased one (R parity)
     full = ["(Intercept)", "CO22", "tree2", "tree3", "tree4", "tree5", "tree6"]
     assert list(m.bhat.columns) == full
     assert m._aliased_cols == ["tree6"]
-    # the aliased coefficient resolves to NaN (not a KeyError) — the foot-gun fix
     from hea.R import coef
 
     assert np.isnan(coef(m)["tree6"])
     assert np.isnan(m.se_bhat["tree6"][0])
     assert np.isnan(m.p_values["tree6"][0])
 
-    # estimable coefficients + df unchanged (fit runs on the kept columns)
     assert m.df_residuals == 18
     np.testing.assert_allclose(
         [m.bhat.row(0)[i] for i in range(6)],
@@ -797,31 +718,20 @@ def test_rank_deficient_keeps_aliased_as_NA():
     )
     np.testing.assert_allclose(m.sigma, 0.21863203, rtol=1e-5)
 
-    # summary prints the singularities header + the aliased "NA" row
     s = repr(m.summary())
     assert "(1 not defined because of singularities)" in s
     assert "tree6" in s
     tree6_line = next(ln for ln in s.splitlines() if ln.startswith("tree6"))
     assert tree6_line.split() == ["tree6", "NA", "NA", "NA", "NA", "NA", "NA"]
 
-    # summary.lm$aliased is the full-width logical; $coefficients stays estimable
     su = m.summary()
     assert su.aliased.tolist() == [False, False, False, False, False, False, True]
     assert su.coefficients.shape == (6, 4)
 
-    # R's summary.lm $df is c(rank, residual_df, NCOL(qr)) = (6, 18, 7) here:
-    # rank (6, incl. intercept) — NOT df_model (5); and the *total* column
-    # count (7, counting aliased tree6) — NOT the kept count (6).
     assert su.df == (6, 18, 7)
 
 
-# ---------------------------------------------------------------------------
-# Track D — contrasts= / na.action= / subset-as-expression (R 4.6.0 oracles)
-# ---------------------------------------------------------------------------
-
-
 def test_lm_contrasts_argument_matches_R():
-    # lm(weight ~ group, contrasts=list(group="contr.sum"))
     pg = load_dataset("R", "PlantGrowth")
     m = lm("weight ~ group", pg, contrasts={"group": "contr.sum"})
     assert list(m.bhat.columns) == ["(Intercept)", "group1", "group2"]
@@ -850,13 +760,10 @@ def test_lm_na_action_exclude_pads_accessors():
     assert list(np.where(np.isnan(r))[0][:6]) == [4, 5, 9, 10, 24, 25]
     assert len(fitted(me)) == 153
     assert predict(me).height == 153
-    # raw component stays complete-case (R's m$residuals)
     assert me.residuals.height == 111
 
-    # default na.action='omit' is unchanged (drops to complete cases)
     mo = lm("Ozone ~ Solar.R + Wind + Temp", aq)
     assert len(resid(mo)) == 111
-    # coefficients identical between omit and exclude (same fit)
     np.testing.assert_allclose(me._bhat_arr, mo._bhat_arr, rtol=1e-10)
 
 
@@ -864,7 +771,6 @@ def test_lm_na_action_fail_raises():
     aq = load_dataset("R", "airquality")
     with pytest.raises(ValueError, match="missing values"):
         lm("Ozone ~ Solar.R + Wind + Temp", aq, na_action="fail")
-    # a complete-case frame fits fine under na.fail
     pg = load_dataset("R", "PlantGrowth")
     m = lm("weight ~ group", pg, na_action="fail")
     assert m.n == 30
@@ -873,29 +779,20 @@ def test_lm_na_action_fail_raises():
 def test_lm_subset_as_expression():
     g = load_dataset("faraway", "gala")
 
-    # polars expression (native Python form)
     m_e = lm("Species ~ Area", g, subset=pl.col("Area") > 10)
     assert m_e.n == 13
     np.testing.assert_allclose(m_e._bhat_arr, [134.33592, 0.058669392], rtol=1e-5)
 
-    # R-style string, single comparison
     m_s = lm("Species ~ Area", g, subset="Area > 10")
     assert m_s.n == 13
     np.testing.assert_allclose(m_s._bhat_arr, m_e._bhat_arr, rtol=1e-12)
 
-    # R-style compound: R's `&` binds looser than `<`/`>` (opposite of
-    # Python) — routed through hea's translator so precedence matches R.
     m_c = lm("Species ~ 1", g, subset="Area > 10 & Elevation < 200")
     assert m_c.n == 2  # R: subset = Area > 10 & Elevation < 200  -> 2 rows
     m_c2 = lm(
         "Species ~ 1", g, subset=(pl.col("Area") > 10) & (pl.col("Elevation") < 200)
     )
     assert m_c2.n == 2
-
-
-# ---------------------------------------------------------------------------
-# Track E — saturated guard / singular.ok / residual types / weights()
-# ---------------------------------------------------------------------------
 
 
 def test_lm_saturated_fit_returns_nan_not_crash():
@@ -917,7 +814,6 @@ def test_lm_singular_ok_false_raises():
     st = load_dataset("gamair", "stomata")
     with pytest.raises(ValueError, match="singular fit"):
         lm("area ~ CO2 + tree", st, singular_ok=False)
-    # default singular_ok=True still fits (drops the aliased dummy)
     assert lm("area ~ CO2 + tree", st, singular_ok=True).df_residuals == 18
 
 
@@ -927,7 +823,6 @@ def test_lm_residuals_types_match_R():
     mt = load_dataset("R", "mtcars")
     w = 1.0 / mt["wt"].to_numpy()
     m = lm("mpg ~ wt + hp", mt, weights=w)
-    # residuals.lm: response/working = raw r; pearson/deviance = √w·r
     np.testing.assert_allclose(
         resid(m, "response")[:3], [-2.8988903, -1.7657153, -2.9668587], rtol=1e-5
     )
@@ -936,7 +831,6 @@ def test_lm_residuals_types_match_R():
         resid(m, "pearson")[:3], [-1.7909404, -1.0413621, -1.9478381], rtol=1e-5
     )
     np.testing.assert_allclose(resid(m, "deviance"), resid(m, "pearson"))
-    # unweighted: weighted residuals equal the raw residuals
     mu = lm("mpg ~ wt", mt)
     np.testing.assert_allclose(resid(mu, "pearson"), resid(mu, "response"))
 
@@ -968,14 +862,12 @@ def test_lm_partial_residuals_match_R():
         rtol=1e-6,
     )
     np.testing.assert_allclose(pr.constant, 5.5, rtol=1e-9)
-    # identity: partial[:, j] == raw residual + predict(type='terms')[:, j]
     tt = m.predict(type="terms")
     raw = resid(m, "response")
     np.testing.assert_allclose(
         pr["x1"].to_numpy(), raw + tt["x1"].to_numpy(), rtol=1e-9
     )
 
-    # na.action='exclude': partial rows are NA exactly where resid() is NA
     aq = load_dataset("R", "airquality")
     me = lm("Ozone ~ Solar.R + Wind + Temp", aq, na_action="exclude")
     pr_e = resid(me, "partial")
@@ -1013,22 +905,18 @@ def test_lm_offset_argument_matches_R():
 
     m = lm("y ~ x1", df, offset=df["x2"])
     np.testing.assert_allclose(m.bhat.row(0), [0.89285714, 0.02380952], rtol=1e-6)
-    # offset flows into ŷ (fitted = Xβ̂ + offset)
     np.testing.assert_allclose(
         fitted(m)[:4], [2.916667, 1.940476, 4.964286, 3.988095], rtol=1e-5
     )
     np.testing.assert_allclose(m.sigma, 2.080713, rtol=1e-5)
     assert m.df_residuals == 6
 
-    # offset= AND in-formula offset() sum (R: coef = 0.4642857, -0.8809524)
     m2 = lm("y ~ x1 + offset(x2)", df, offset=df["x2"])
     np.testing.assert_allclose(m2.bhat.row(0), [0.4642857, -0.8809524], rtol=1e-6)
 
-    # offset is filtered in lockstep with subset= (R: coef = -0.266667, 0.2)
     m3 = lm("y ~ x1", df, offset=df["x2"], subset=(df["x1"] > 2).to_numpy())
     np.testing.assert_allclose(m3.bhat.row(0), [-0.266667, 0.2], rtol=1e-5)
 
-    # length mismatch against the input frame → error
     with pytest.raises(ValueError, match="Length of offset"):
         lm("y ~ x1", df, offset=np.ones(df.height + 1))
 
@@ -1057,24 +945,19 @@ def test_lm_predict_rankdeficient_nonestimable_match_R():
     m = lm("y ~ x1 + x2 + x3", tr)
     assert m._aliased_cols == ["x3"]
 
-    # row 0 satisfies x3 = x1+x2 (estimable); row 1 violates it (non-estimable)
     nd = pl.DataFrame({"x1": [2.0, 2.0], "x2": [3.0, 3.0], "x3": [5.0, 77.0]})
     with pytest.warns(UserWarning, match="rank-deficient"):
         out = m.predict(nd, se_fit=True)
-    # R: both rows predict 4.666667 (x3 ignored), se 0.481125; non-estim = row 2
     np.testing.assert_allclose(out["fit"].to_numpy(), [4.666667, 4.666667], rtol=1e-5)
     np.testing.assert_allclose(
         out["se.fit"].to_numpy(), [0.481125, 0.481125], rtol=1e-5
     )
     assert out.non_estim.tolist() == [1]
 
-    # rankdeficient='NA' → the non-estimable row becomes NA (R parity)
     out_na = m.predict(nd, rankdeficient="NA")["fit"].to_numpy()
     np.testing.assert_allclose(out_na[0], 4.666667, rtol=1e-5)
     assert np.isnan(out_na[1])
 
-    # all-estimable newdata: no warning, no .non_estim (R's 'warnif' warns
-    # only if a non-estimable case exists)
     nd_ok = pl.DataFrame({"x1": [2.0], "x2": [3.0], "x3": [5.0]})
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
@@ -1172,14 +1055,12 @@ def test_lm_name_accessors_and_dfbeta_match_R():
     assert labels(m) == ["x1", "x2"]
     assert case_names(m) == [str(i) for i in range(8)]  # 0-based (R: "1".."8")
 
-    # rank-deficient: variable_names(full=True) includes the aliased column
     mc = lm(
         "y ~ x1 + x2 + x3", df.with_columns((pl.col("x1") + pl.col("x2")).alias("x3"))
     )
     assert variable_names(mc) == ["(Intercept)", "x1", "x2"]  # rank
     assert variable_names(mc, full=True) == ["(Intercept)", "x1", "x2", "x3"]
 
-    # weighted: full=False drops the zero-weight row (R parity)
     w = np.array([0, 1, 1, 1, 1, 1, 1, 1.0])
     mw = lm("y ~ x1", df, weights=w)
     assert case_names(mw) == [str(i) for i in range(1, 8)]
@@ -1203,16 +1084,13 @@ def test_lm_method_model_frame_matches_R():
     assert mf.columns == ["y", "x1", "x2"]  # referenced cols only (no z)
     assert mf.height == 7  # NA row dropped (na.omit)
 
-    # subset applies before na
     mf2 = lm("y ~ x1", df, method="model.frame", subset=(df["x1"] > 4).to_numpy())
     assert mf2.columns == ["y", "x1"]
     assert mf2.height == 4
 
-    # na.fail errors on a missing value (R: na.fail)
     with pytest.raises(ValueError, match="missing values"):
         lm("y ~ x1 + x2", df, method="model.frame", na_action="fail")
 
-    # the interception doesn't disturb normal fitting
     assert isinstance(lm("y ~ x1 + x2", df), lm)
 
 
@@ -1220,7 +1098,6 @@ def test_lm_summary_residual_block_small_n_and_saturated():
     """print.summary.lm residual block has three forms keyed on residual df:
     each residual for 0 < rdf ≤ 5, and a perfect-fit note for rdf == 0 (R
     parity). rdf > 5 keeps the 5-number summary."""
-    # rdf == 2 (n=4): each residual printed, not the 5-number summary
     ds = pl.DataFrame({"y": [1, 3, 2, 5], "x": [1, 2, 3, 4]}).with_columns(
         pl.all().cast(pl.Float64)
     )
@@ -1231,7 +1108,6 @@ def test_lm_summary_residual_block_small_n_and_saturated():
         [float(v) for v in lines[2].split()], [-0.1, 0.8, -1.3, 0.6], atol=1e-9
     )
 
-    # rdf == 0 (saturated): the perfect-fit note (R: "ALL <rank> residuals…")
     sat = (
         pl.DataFrame({"y": [1, 3, 2], "x": [1, 2, 3]})
         .with_columns(pl.all().cast(pl.Float64))
@@ -1242,7 +1118,6 @@ def test_lm_summary_residual_block_small_n_and_saturated():
         "Residuals:",
         "ALL 3 residuals are 0: no residual degrees of freedom!",
     ]
-    # full summary repr still renders (sigma/t/p are NaN, no crash)
     assert "ALL 3 residuals are 0" in repr(msat.summary())
 
 
@@ -1263,7 +1138,6 @@ def test_lm_predict_scale_df_and_se_fit_metadata_match_R():
     assert p.df == 6  # R's df.residual
     np.testing.assert_allclose(p.residual_scale, 0.981981, rtol=1e-5)
 
-    # scale=/df= override the residual scale and quantile df
     p2 = m.predict(nd, se_fit=True, scale=2, df=10)
     np.testing.assert_allclose(p2["se.fit"].to_numpy(), [0.938591, 0.723747], rtol=1e-5)
     assert p2.df == 10
@@ -1273,21 +1147,12 @@ def test_lm_predict_scale_df_and_se_fit_metadata_match_R():
         [ci["lwr"][0], ci["upr"][0]], [1.551547, 5.734167], rtol=1e-5
     )
 
-    # default interval is unchanged (backward compatible)
     cid = m.predict(nd, interval="confidence")
     np.testing.assert_allclose(
         [cid["lwr"][0], cid["upr"][0]], [2.515225, 4.770489], rtol=1e-5
     )
 
 
-# ---------------------------------------------------------------------------
-# Multivariate response (R's mlm): cbind(y1, y2) ~ rhs. Reference from R 4.6.0:
-#   d <- data.frame(x=c(-0.626,0.184,-0.836,1.595,0.330,-0.820,0.487,0.738),
-#                   g=factor(c("a","b","a","b","a","b","a","b")),
-#                   y1=c(0.576,-0.305,1.512,0.390,-0.621,-2.215,1.125,-0.045),
-#                   y2=c(-0.016,0.944,0.821,0.594,0.919,0.782,0.075,-1.989))
-#   m <- lm(cbind(y1,y2) ~ x + g, d)
-# ---------------------------------------------------------------------------
 def test_mlm_cbind_response_matches_R():
     from hea.models.lm import lm
 
@@ -1304,7 +1169,6 @@ def test_mlm_cbind_response_matches_R():
     m = lm("cbind(y1, y2) ~ x + g", d)
     assert m._is_mlm and m._response_names == ["y1", "y2"]
 
-    # coef (p × m), R's coef(m)
     coef = m.coef
     assert coef["term"].to_list() == ["(Intercept)", "x", "gb"]
     np.testing.assert_allclose(
@@ -1318,11 +1182,9 @@ def test_mlm_cbind_response_matches_R():
         rtol=1e-9,
     )
 
-    # sigma per column; df.residual shared
     np.testing.assert_allclose(m.sigma, [1.02418005334668, 1.11233550606780], rtol=1e-9)
     assert m.df_residual == 5
 
-    # fitted (n × m), first two rows
     np.testing.assert_allclose(
         m.fitted["y1"].to_numpy()[:2],
         [0.394099113093641, -0.675002690864449],
@@ -1332,7 +1194,6 @@ def test_mlm_cbind_response_matches_R():
         m.fitted["y2"].to_numpy()[:2], [0.573626783468879, 0.146787433519953], rtol=1e-9
     )
 
-    # predict on newdata (point predictions, n × m)
     nd = pl.DataFrame(
         {"x": [0.5, -0.5], "g": pl.Series(["a", "b"], dtype=pl.Enum(["a", "b"]))}
     )
@@ -1344,13 +1205,11 @@ def test_mlm_cbind_response_matches_R():
         pred["y2"].to_numpy(), [0.273497126264021, 0.329104205747415], rtol=1e-9
     )
 
-    # summary is R's listof of per-response summary.lm
     s = m.summary()
     assert len(s) == 2 and s.names == ["Response y1", "Response y2"]
     s1 = s["y1"]
     np.testing.assert_allclose(s1.r_squared, 0.442099605289581, rtol=1e-7)
 
-    # predict interval/se on an mlm is unsupported (matches R's predict.mlm)
     with pytest.raises(NotImplementedError):
         m.predict(nd, interval="confidence")
 
@@ -1358,15 +1217,11 @@ def test_mlm_cbind_response_matches_R():
 def test_mlm_joint_na_omit_and_expression_responses():
     from hea.models.lm import lm
 
-    # joint na-omit: the NA-x row drops for BOTH columns → both sub-fits use the
-    # same 4 rows; and cbind of an expression response (log) is supported.
     d = pl.DataFrame(
         {"x": [1.0, 2, 3, None, 5], "a": [1.0, 4, 9, 16, 25], "b": [2.0, 3, 4, 5, 6]}
     )
     m = lm("cbind(sqrt(a), b) ~ x", d)
     assert m._response_names == ["sqrt(a)", "b"]
-    # sqrt(a) = 1,2,3,5 on the kept rows (x non-NA); perfectly linear in... not x,
-    # but the fit must use 4 rows shared across columns.
     assert m._mlm_models["b"].X.height == 4
     assert m.fitted.height == 4
 
@@ -1388,7 +1243,6 @@ def test_mlm_na_action_exclude_pads_combined_accessors():
     m = lm("cbind(y1, y2) ~ x", d, na_action="exclude")
     r = m.residuals
     assert r.shape == (6, 2)  # padded to full length
-    # rows 2 (y1 NA) and 4 (y2 NA) are jointly dropped → NA in both columns
     for col in ("y1", "y2"):
         arr = r[col].to_numpy()
         assert np.isnan(arr[2]) and np.isnan(arr[4])
@@ -1396,7 +1250,6 @@ def test_mlm_na_action_exclude_pads_combined_accessors():
     fit = m.fitted["y1"].to_numpy()
     np.testing.assert_allclose(fit[[0, 1, 3, 5]], [1, 2, 4, 6], atol=1e-9)
     assert np.isnan(fit[2]) and np.isnan(fit[4])
-    # coefficients unaffected by exclude vs omit (same complete-case fit)
     mo = lm("cbind(y1, y2) ~ x", d, na_action="omit")
     np.testing.assert_allclose(
         m.coef["y1"].to_numpy(), mo.coef["y1"].to_numpy(), rtol=1e-12
@@ -1431,21 +1284,6 @@ def test_mlm_bracket_response_equals_cbind():
         )
 
 
-# ---------------------------------------------------------------------------
-# predict reuses training transform parameters (R's predvars/makepredictcall)
-# for poly/ns/scale, instead of recomputing knots/centering from new data.
-# Reference from R 4.6.0 + splines; newdata is OUT OF RANGE (x,z,v all beyond
-# training) so a recompute would diverge but a correct replay matches R, incl.
-# ns's linear extrapolation beyond the boundary knots.
-#   tr <- data.frame(
-#     x=c(-1.2,-0.6,-0.1,0.3,0.8,1.1,1.5,2.0,-0.9,0.5),
-#     z=c(0.5,1.2,2.0,3.1,4.0,5.5,6.2,7.0,8.1,9.0),
-#     v=c(1,2,3,4,5,6,7,8,9,10),
-#     y=c(1.1,0.8,1.5,2.0,1.7,2.3,2.1,2.8,0.9,1.9))
-#   m <- lm(y ~ poly(x,2) + ns(z, df=3) + scale(v), tr)
-#   predict(m, data.frame(x=c(-2,0,3), z=c(-1,4.5,12), v=c(-5,5.5,20)))
-#     9.11936405516604  0.91132513915552  -3.87864686599048
-# ---------------------------------------------------------------------------
 def test_predict_reuses_training_predvars():
     from hea.models.lm import lm
 
@@ -1458,10 +1296,6 @@ def test_predict_reuses_training_predvars():
         }
     )
     m = lm("y ~ poly(x,2) + ns(z, df=3) + scale(v)", tr)
-    # training params captured under their deparse keys. ``_basis_state`` also
-    # carries the reserved ``__xlevels__`` slot (R keeps xlevels on the object
-    # rather than in predvars; hea rides it in the same fit→predict channel) —
-    # empty here since the formula has no factors.
     from hea.formula import _MFCLASS_KEY, _XLEV_KEY
 
     assert set(m._basis_state) - {_XLEV_KEY, _MFCLASS_KEY} == {
@@ -1489,11 +1323,6 @@ def test_predict_uses_fit_xlevels_not_newdata_levels():
     (``model.frame(..., xlev=object$xlevels)``, lm.R:695-696), so a prediction
     frame that omits a factor level — or carries an unseen one — cannot silently
     re-code the contrast.
-
-    Regression: hea derived contrast levels from the frame in front of it
-    (``droplevels``). Training levels {a,b} give the single dummy ``gb``; a
-    newdata holding {b, zz} then sorted to baseline ``b`` / dummy ``zz`` — the
-    SAME width, so no error, and a ``g="b"`` row silently got the baseline
     prediction. R raises ``factor g has new level zz`` (models.R:583-587).
     """
     from hea.family import Poisson
@@ -1511,14 +1340,11 @@ def test_predict_uses_fit_xlevels_not_newdata_levels():
         (lm("y ~ g + x", d), lambda mm, nd: mm.predict(nd)["fit"]),
     ):
         both = np.asarray(call(m, pl.DataFrame({"g": ["a", "b"], "x": [0.5, 0.5]})))
-        # Each level alone must reproduce its row from the joint prediction.
         for i, lv in enumerate(["a", "b"]):
             solo = np.asarray(call(m, pl.DataFrame({"g": [lv], "x": [0.5]})))
             np.testing.assert_allclose(solo[0], both[i], rtol=1e-12)
-        # ...whatever dtype carries the level, including a narrower Enum.
         narrow = pl.DataFrame({"g": pl.Series(["b"], dtype=pl.Enum(["b"])), "x": [0.5]})
         np.testing.assert_allclose(np.asarray(call(m, narrow))[0], both[1], rtol=1e-12)
-        # ...and an unseen level is refused, not silently re-coded.
         with pytest.raises(ValueError, match="factor g has new level zz"):
             call(m, pl.DataFrame({"g": ["b", "zz"], "x": [0.5, 0.5]}))
         with pytest.raises(ValueError, match="factor g has new levels ww, zz"):

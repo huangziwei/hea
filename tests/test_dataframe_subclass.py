@@ -22,16 +22,7 @@ import pytest
 
 from hea.tidy import DataFrame, LazyFrame, Series, tbl
 
-# The curated set may exercise methods polars has deprecated but still ships;
-# they belong here for as long as they return DataFrame/LazyFrame correctly.
-# The coverage test below is the tripwire: it fails on a listed method polars
-# has since removed, and on a new public method nothing has categorized yet.
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -63,30 +54,15 @@ def s() -> Series:
     return Series("x", [1, 2, 2, 3, 4, None])
 
 
-# ---------------------------------------------------------------------------
-# Categorization — known leaks
-# ---------------------------------------------------------------------------
-
-# Methods that drop subclass today. Adding to this set should be a deliberate
-# decision; new entries here mark a regression unless paired with a plan.
 DF_ALLOWLIST: set[str] = set()
 
 LF_ALLOWLIST: set[str] = {
-    # Streaming pivot needs materialized `on_columns` data; signature
-    # differs from DataFrame.pivot. Revisit when first caller appears.
     "pivot",
 }
 
 
-# ---------------------------------------------------------------------------
-# Categorization — methods that don't return DataFrame/LazyFrame
-# ---------------------------------------------------------------------------
-
-# Public pl.DataFrame methods whose return is not a DataFrame.
 DF_NON_DF: set[str] = {
-    # Returns LazyFrame — tested separately via the LazyFrame suite below.
     "lazy",
-    # Returns Series.
     "drop_in_place",
     "fold",
     "get_column",
@@ -99,7 +75,6 @@ DF_NON_DF: set[str] = {
     "sum_horizontal",
     "to_series",
     "to_struct",
-    # Returns scalar / collection / IO side-effect (not a frame).
     "equals",
     "estimated_size",
     "get_column_index",
@@ -123,14 +98,12 @@ DF_NON_DF: set[str] = {
     "to_numpy",
     "to_pandas",
     "to_torch",
-    # Returns a different polars container.
     "collect_schema",
     "get_columns",
     "group_by",
     "group_by_dynamic",
     "partition_by",
     "rolling",
-    # Class methods / serialization / IO writes.
     "deserialize",
     "serialize",
     "show",
@@ -148,17 +121,12 @@ DF_NON_DF: set[str] = {
     "write_parquet",
 }
 
-# Public pl.LazyFrame methods whose return is not a LazyFrame.
 LF_NON_DF: set[str] = {
-    # Materializing terminal ops (return DataFrame — tested in
-    # ``test_lf_materializing_methods_return_hea_dataframe``).
     "collect",
     "describe",
-    # Materializing ops that return non-DataFrame containers.
     "collect_async",
     "collect_batches",
     "execute",
-    # Sinks — write to disk, return None or async result.
     "sink_batches",
     "sink_csv",
     "sink_delta",
@@ -166,7 +134,6 @@ LF_NON_DF: set[str] = {
     "sink_ipc",
     "sink_ndjson",
     "sink_parquet",
-    # Returns scalar / different container / IO.
     "collect_schema",
     "explain",
     "group_by",
@@ -180,12 +147,7 @@ LF_NON_DF: set[str] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Curated method map — every entry must produce a hea.tidy.DataFrame.
-# ---------------------------------------------------------------------------
-
 DF_METHODS = {
-    # row verbs
     "filter": lambda d: d.filter(pl.col("x") > 1),
     "remove": lambda d: d.remove(pl.col("x") > 100),
     "sort": lambda d: d.sort("x"),
@@ -202,7 +164,6 @@ DF_METHODS = {
     "set_sorted": lambda d: d.set_sorted("x"),
     "top_k": lambda d: d.top_k(2, by="x"),
     "bottom_k": lambda d: d.bottom_k(2, by="x"),
-    # column verbs
     "with_columns": lambda d: d.with_columns(z=pl.col("x") * 2),
     "with_columns_seq": lambda d: d.with_columns_seq(z=pl.col("x") * 2),
     "with_row_index": lambda d: d.with_row_index(),
@@ -213,13 +174,11 @@ DF_METHODS = {
     "cast": lambda d: d.cast({pl.Int64: pl.Float64}),
     "to_dummies": lambda d: d.to_dummies(),
     "transpose": lambda d: d.transpose(),
-    # null handling
     "drop_nulls": lambda d: d.drop_nulls(),
     "drop_nans": lambda d: d.drop_nans(),
     "fill_null": lambda d: d.fill_null(0),
     "fill_nan": lambda d: d.fill_nan(0),
     "interpolate": lambda d: d.interpolate(),
-    # joins / set ops
     "join": lambda d: d.join(d, on="x"),
     "join_asof": lambda d: d.sort("x").join_asof(d.sort("x"), on="x"),
     "join_where": lambda d: d.join_where(d, pl.col("x") < pl.col("x_right")),
@@ -228,14 +187,12 @@ DF_METHODS = {
     "hstack": lambda d: d.hstack([pl.Series("z", [10, 20, 30, 40])]),
     "extend": lambda d: d.clone().extend(d),
     "update": lambda d: d.update(d, on="x"),
-    # column-mutating in place but returning self
     "insert_column": lambda d: d.clone().insert_column(
         0, pl.Series("z", [10, 20, 30, 40])
     ),
     "replace_column": lambda d: d.clone().replace_column(
         0, pl.Series("x", [10, 20, 30, 40])
     ),
-    # aggregations that return one-row DataFrame
     "count": lambda d: d.count(),
     "max": lambda d: d.max(),
     "mean": lambda d: d.mean(),
@@ -247,22 +204,18 @@ DF_METHODS = {
     "std": lambda d: d.std(),
     "sum": lambda d: d.sum(),
     "var": lambda d: d.var(),
-    # storage / identity
     "clone": lambda d: d.clone(),
     "clear": lambda d: d.clear(),
     "rechunk": lambda d: d.rechunk(),
     "shrink_to_fit": lambda d: d.shrink_to_fit(),
-    # reshape
     "explode": lambda d: tbl(pl.DataFrame({"a": [[1, 2]]})).explode("a"),
     "pivot": lambda d: d.pivot(on="g", values="y", aggregate_function="first"),
     "unpivot": lambda d: d.unpivot(on=["x", "y"], index="g"),
     "unstack": lambda d: d.unstack(step=2),
-    # bypass-_from_pydf overrides
     "describe": lambda d: d.describe(),
     "corr": lambda d: d.select("x", "y").corr(),
     "sql": lambda d: d.sql("SELECT * FROM self"),
     "match_to_schema": lambda d: d.match_to_schema(d.collect_schema()),
-    # user functions
     "pipe": lambda d: d.pipe(lambda x: x.head(1)),
     "map_rows": lambda d: d.map_rows(lambda r: (r[0] * 2,)),
     "map_columns": lambda d: d.map_columns("x", lambda s: s * 2),
@@ -270,7 +223,6 @@ DF_METHODS = {
 
 
 LF_METHODS = {
-    # row verbs
     "filter": lambda lf: lf.filter(pl.col("x") > 1),
     "remove": lambda lf: lf.remove(pl.col("x") > 100),
     "sort": lambda lf: lf.sort("x"),
@@ -288,7 +240,6 @@ LF_METHODS = {
     "set_sorted": lambda lf: lf.set_sorted("x"),
     "top_k": lambda lf: lf.top_k(2, by="x"),
     "bottom_k": lambda lf: lf.bottom_k(2, by="x"),
-    # column verbs
     "with_columns": lambda lf: lf.with_columns(z=pl.col("x") * 2),
     "with_columns_seq": lambda lf: lf.with_columns_seq(z=pl.col("x") * 2),
     "with_row_index": lambda lf: lf.with_row_index(),
@@ -297,19 +248,16 @@ LF_METHODS = {
     "drop": lambda lf: lf.drop("y"),
     "rename": lambda lf: lf.rename({"x": "X"}),
     "cast": lambda lf: lf.cast({pl.Int64: pl.Float64}),
-    # null handling
     "drop_nulls": lambda lf: lf.drop_nulls(),
     "drop_nans": lambda lf: lf.drop_nans(),
     "fill_null": lambda lf: lf.fill_null(0),
     "fill_nan": lambda lf: lf.fill_nan(0),
     "interpolate": lambda lf: lf.interpolate(),
-    # joins / set ops
     "join": lambda lf: lf.join(lf, on="x"),
     "join_asof": lambda lf: lf.sort("x").join_asof(lf.sort("x"), on="x"),
     "join_where": lambda lf: lf.join_where(lf, pl.col("x") < pl.col("x_right")),
     "merge_sorted": lambda lf: lf.sort("x").merge_sorted(lf.sort("x"), key="x"),
     "update": lambda lf: lf.update(lf, on="x"),
-    # aggregations
     "count": lambda lf: lf.count(),
     "max": lambda lf: lf.max(),
     "mean": lambda lf: lf.mean(),
@@ -320,35 +268,26 @@ LF_METHODS = {
     "std": lambda lf: lf.std(),
     "sum": lambda lf: lf.sum(),
     "var": lambda lf: lf.var(),
-    # planning / introspection
     "cache": lambda lf: lf.cache(),
     "lazy": lambda lf: lf.lazy(),
     "inspect": lambda lf: lf.inspect(),
-    # storage / identity
     "clone": lambda lf: lf.clone(),
     "clear": lambda lf: lf.clear(),
-    # reshape
     "explode": lambda lf: tbl(pl.DataFrame({"a": [[1, 2]]})).lazy().explode("a"),
     "unpivot": lambda lf: lf.unpivot(on=["x", "y"], index="g"),
     "unnest": lambda lf: lf.with_columns(s=pl.struct("x", "y")).select("s").unnest("s"),
-    # bypass-_from_pyldf overrides
     "match_to_schema": lambda lf: lf.match_to_schema(lf.collect_schema()),
     "sql": lambda lf: lf.sql("SELECT * FROM self"),
-    # user functions
     "pipe": lambda lf: lf.pipe(lambda x: x.head(1)),
     "pipe_with_schema": lambda lf: lf.pipe_with_schema(lambda x, schema: x.head(1)),
     "map_batches": lambda lf: lf.map_batches(lambda x: x.head(1)),
 }
 
 
-# DataFrame.unnest needs a struct column; not in the main fixture. Skip in
-# DF_METHODS but acknowledge in coverage by adding to DF_METHODS via a
-# specialised lambda.
 DF_METHODS["unnest"] = lambda d: (
     d.with_columns(s=pl.struct("x", "y")).select("s").unnest("s")
 )
 
-# upsample needs a temporal index column; build dedicated frame inline.
 DF_METHODS["upsample"] = lambda d: tbl(
     pl.DataFrame(
         {
@@ -362,11 +301,6 @@ DF_METHODS["upsample"] = lambda d: tbl(
         }
     )
 ).upsample("t", every="1d")
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 def test_curated_df_methods_preserve_subclass(df: DataFrame):
@@ -401,23 +335,18 @@ def test_curated_lf_methods_preserve_subclass(lf: LazyFrame):
 
 def test_lf_materializing_methods_return_hea_dataframe(lf: LazyFrame):
     """LazyFrame methods that materialize must return ``hea.tidy.DataFrame``.
-
-    ``collect`` is the structural fix for the lazy round-trip
     (`polars/lazyframe/frame.py:2510`). ``describe`` materializes too —
-    despite living on LazyFrame it returns a DataFrame.
     """
     out = lf.collect()
     assert isinstance(out, DataFrame), (
         f"lf.collect() returned {type(out).__module__}.{type(out).__name__}"
     )
 
-    # Multi-step lazy chains should also stay in hea-land.
     out2 = (
         lf.filter(pl.col("x") > 0).with_columns(z=pl.col("x") + pl.col("y")).collect()
     )
     assert isinstance(out2, DataFrame)
 
-    # describe() is on LazyFrame but materializes — must return hea.tidy.DataFrame.
     out3 = lf.describe()
     assert isinstance(out3, DataFrame)
 
@@ -431,13 +360,7 @@ def _public_callables(cls) -> set[str]:
 
 
 def test_df_method_coverage():
-    """Every public ``pl.DataFrame`` method must be categorized.
-
-    Categories: ``DF_METHODS`` (returns DataFrame, exercised), ``DF_NON_DF``
-    (returns something else, OK to ignore), or ``DF_ALLOWLIST`` (an
-    accepted leak). New polars releases that add public methods break this
-    test until categorized.
-    """
+    """Every public ``pl.DataFrame`` method must be categorized."""
     public = _public_callables(pl.DataFrame)
     categorized = set(DF_METHODS) | DF_NON_DF | DF_ALLOWLIST
     uncategorized = public - categorized
@@ -475,20 +398,7 @@ def test_lf_method_coverage():
     assert not msgs, "\n".join(msgs)
 
 
-# ---------------------------------------------------------------------------
-# Series
-# ---------------------------------------------------------------------------
-
-# Most of the leak surface on Series is "expression-dispatched" methods
-# (`unique`, `drop_nulls`, the `rolling_*` family, the trig family, …) — 116 of
-# them on polars 1.40.1. They're auto-detected and wrapped at module import
-# (`hea/dataframe.py:_install_series_subclass_overrides`). The test below
-# exercises a representative sample plus the methods that already preserved
-# subclass via ``self._from_pyseries``.
-
-
 SERIES_METHODS = {
-    # already preserved (use self._from_pyseries directly)
     "head": lambda s: s.head(2),
     "tail": lambda s: s.tail(2),
     "limit": lambda s: s.limit(2),
@@ -502,7 +412,6 @@ SERIES_METHODS = {
     "shrink_to_fit": lambda s: s.shrink_to_fit(),
     "extend": lambda s: s.clone().extend(s),
     "append": lambda s: s.clone().append(s),
-    # expression-dispatched — representative sample (auto-wrapped by install)
     "unique": lambda s: s.unique(),
     "reverse": lambda s: s.reverse(),
     "drop_nulls": lambda s: s.drop_nulls(),
@@ -521,12 +430,9 @@ SERIES_METHODS = {
     "is_null": lambda s: s.is_null(),
     "is_unique": lambda s: s.is_unique(),
     "rank": lambda s: s.rank(),
-    # explicit ``wrap_s`` sites
     "set": lambda s: s.set(pl.Series([True] + [False] * 5), 99),
     "shrink_dtype": lambda s: s.shrink_dtype(),
-    # arithmetic + boolean (preserves via self._from_pyseries on operator dispatch)
     "not_": lambda s: Series("b", [True, False, True]).not_(),
-    # Comparison methods returning boolean Series.
     "eq": lambda s: s.eq(s),
     "eq_missing": lambda s: s.eq_missing(s),
     "ne": lambda s: s.ne(s),
@@ -537,15 +443,12 @@ SERIES_METHODS = {
     "lt": lambda s: s.lt(2),
     "is_close": lambda s: s.cast(pl.Float64).is_close(2.0),
     "arg_true": lambda s: Series("b", [True, False, True]).arg_true(),
-    # Other element-wise.
     "pow": lambda s: s.pow(2),
     "backward_fill": lambda s: Series("x", [1, None, 3]).backward_fill(),
     "forward_fill": lambda s: Series("x", [1, None, 3]).forward_fill(),
     "set_sorted": lambda s: s.set_sorted(),
 }
 
-# Series methods that return ``pl.DataFrame``. Tested separately to assert
-# they return ``hea.tidy.DataFrame``.
 SERIES_DF_METHODS = {
     "to_frame": lambda s: s.to_frame(),
     "to_dummies": lambda s: s.to_dummies(),
@@ -555,9 +458,7 @@ SERIES_DF_METHODS = {
 }
 
 
-# Methods that don't return Series or DataFrame (scalars, lists, bools, etc.).
 SERIES_NON_S: set[str] = {
-    # scalars
     "all",
     "any",
     "approx_n_unique",
@@ -595,7 +496,6 @@ SERIES_NON_S: set[str] = {
     "std",
     "sum",
     "var",
-    # collections / external
     "chunk_lengths",
     "equals",
     "get_chunks",
@@ -606,15 +506,10 @@ SERIES_NON_S: set[str] = {
     "to_numpy",
     "to_pandas",
     "to_torch",
-    # mutators / display
     "alias",
     "rename",
-    # take user fns and return Series shaped by the fn — preserves through __getitem__
     "map_elements",
-    # complicated by-arg signatures / sql; hea.tidy.Series subclass still preserves
-    # since they go through self._from_pyseries internally.
     "scatter",
-    # not_ etc. variants
     "is_between",
     "new_from_index",
     "reshape",
@@ -623,19 +518,13 @@ SERIES_NON_S: set[str] = {
     "cumulative_eval",
     "sql",
     "implode",
-    # scalar returns we missed earlier
     "max_by",
     "min_by",
 }
 
 
 def _series_auto_wrapped_methods() -> set[str]:
-    """Names of pl.Series methods that are auto-wrapped at hea import time.
-
-    Mirrors the discovery in ``hea.tidy._install_series_subclass_overrides``
-    so the coverage test stays in sync. Every name returned here is a method
-    that returns ``hea.tidy.Series`` after install.
-    """
+    """Names of pl.Series methods that are auto-wrapped at hea import time."""
     from polars.series.utils import _is_empty_method, _undecorated
 
     out: set[str] = set()
@@ -728,13 +617,7 @@ def test_series_chain_round_trip(s: Series):
 
 
 def test_series_method_coverage():
-    """Every public ``pl.Series`` method must be categorized.
-
-    Categories: ``SERIES_METHODS`` (curated, returns Series),
-    auto-wrapped expr-dispatched names (also return Series),
-    ``SERIES_DF_METHODS`` (returns DataFrame), or ``SERIES_NON_S`` (returns
-    scalar/list/None/etc.).
-    """
+    """Every public ``pl.Series`` method must be categorized."""
     public = _public_callables(pl.Series)
     auto_wrapped = _series_auto_wrapped_methods()
     categorized = (

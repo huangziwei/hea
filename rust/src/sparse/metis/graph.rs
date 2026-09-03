@@ -1,22 +1,3 @@
-//! `libmetis/graph.c` and the `graph_t` of `libmetis/struct.h`.
-//!
-//! Two representation choices, both forced by Rust and neither observable:
-//!
-//! **Every array is owned.** `graph_t` carries `free_xadj`/`free_vwgt`/… flags
-//! because `SetupGraph` may borrow the caller's arrays. The only borrowing call
-//! site is `METIS_NodeND`'s own fallback when neither pruning nor compression
-//! happened, and it never writes them — except in `MMDOrder`, which shifts
-//! `xadj`/`adjncy` to 1-based and back. Owning throughout costs one copy of the
-//! input on that path and removes the flags entirely.
-//!
-//! **The `coarser`/`finer` chain is a `Vec<Graph>` stack, not two pointers.**
-//! Upstream links each graph to the next coarser one and walks back up through
-//! `finer` during uncoarsening. The chain is only ever a stack — `CoarsenGraph`
-//! pushes, `Refine2WayNode` pops — so the port keeps it as one, and `graph` is
-//! an index into it: `levels[base]` is the C's `graph` and `levels[base + 1]`
-//! is `graph->coarser`. That is what lets `Project2WayNodePartition` hold both
-//! at once.
-
 use super::super::ws::Ws;
 use super::gklib::isum;
 use super::{Idx, Real};
@@ -48,7 +29,6 @@ pub struct Graph {
     pub label: Vec<Idx>,
     pub cmap: Vec<Idx>,
 
-    // Partition parameters
     pub mincut: Idx,
     pub r#where: Vec<Idx>,
     pub pwgts: Vec<Idx>,
@@ -56,11 +36,9 @@ pub struct Graph {
     pub bndptr: Vec<Idx>,
     pub bndind: Vec<Idx>,
 
-    // Bisection refinement parameters
     pub id: Vec<Idx>,
     pub ed: Vec<Idx>,
 
-    // Node refinement information
     pub nrinfo: Vec<NrInfo>,
 }
 
@@ -102,7 +80,6 @@ impl Graph {
             graph.invtvwgt[i] = invtvwgt_of(graph.tvwgt[i]);
         }
 
-        // edge-cut objective: unit edge weights
         graph.adjwgt = vec![1; graph.nedges as usize];
 
         graph.setup_tvwgt();
@@ -156,8 +133,6 @@ impl Graph {
         s
     }
 
-    /// `FreeRData` (`graph.c:...`) — drops everything a refinement run built,
-    /// so the next of `nseps` runs starts clean. `cmap` and `label` survive.
     pub fn free_rdata(&mut self) {
         self.r#where = Vec::new();
         self.pwgts = Vec::new();
@@ -202,8 +177,6 @@ fn invtvwgt_of(tvwgt: Idx) -> Real {
     (1.0f64 / d as f64) as Real
 }
 
-/// `isum (nvtxs, vwgt + i, ncon)` — the strided form `SetupGraph` uses to sum
-/// one constraint's weights out of an interleaved `ncon`-wide array.
 pub(super) fn isum_strided(n: Idx, x: &[Idx], incx: Idx) -> Idx {
     if incx == 1 {
         return isum(n as usize, x);

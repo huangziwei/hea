@@ -1,12 +1,3 @@
-//! `libmetis/srefine.c` — the separator-refinement driver, i.e. uncoarsening.
-//!
-//! `Refine2WayNode` walks the level stack from the coarsest graph back up to
-//! `orggraph`, projecting the partition down one level at a time and refining
-//! it there. Upstream follows `graph->finer` pointers; here the stack is a
-//! `Vec<Graph>` and the walk is a decreasing index, with the coarse level
-//! dropped after it has been projected — which is upstream's
-//! `FreeGraph (&graph->coarser)`.
-
 use super::super::ws::Ws;
 use super::ctrl::{Ctrl, METIS_RTYPE_SEP1SIDED, METIS_RTYPE_SEP2SIDED};
 use super::graph::{bnd_insert, Graph};
@@ -52,9 +43,6 @@ pub fn allocate_2way_node_partition_memory(graph: &mut Graph) {
 
 /// `Compute2WayNodePartitionParams` (`srefine.c:85-131`).
 pub fn compute_2way_node_partition_params(graph: &mut Graph) {
-    // The C's prologue, taken through `Ws`. Every subscript is one the
-    // algorithm produced itself, so the bound is walked in `cargo test` and
-    // elided here (`sparse::ws`, `metis::tests`).
     let Graph {
         xadj,
         adjncy,

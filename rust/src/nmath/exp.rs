@@ -1,5 +1,3 @@
-//! `dexp` / `pexp` / `qexp` — R's nmath dexp.c / pexp.c / qexp.c.
-//! Mirror of the `hea/R/nmath.py` exponential cluster.
 #![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 

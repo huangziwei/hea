@@ -22,10 +22,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any
 
-# ---------------------------------------------------------------------------
-# Elements
-# ---------------------------------------------------------------------------
-
 
 @dataclass
 class element_text:
@@ -39,8 +35,6 @@ class element_text:
     lineheight: float | None = None
 
     def __init__(self, *, color=None, colour=None, **kwargs):
-        # Accept American ``color`` as a synonym for ``colour`` (ggplot2
-        # accepts both). Mutually exclusive; if both given, ``colour`` wins.
         if color is not None and colour is None:
             colour = color
         elif color is not None and colour is not None and color != colour:
@@ -112,11 +106,6 @@ class element_blank:
         return True
 
 
-# ---------------------------------------------------------------------------
-# Theme
-# ---------------------------------------------------------------------------
-
-
 def _merge_element(base, override):
     """Override's non-None fields win over base's. For non-dataclass values
     (strings/numbers/etc.) the override always wins — there are no fields
@@ -133,13 +122,6 @@ def _merge_element(base, override):
     return type(base)(**merged_kwargs)
 
 
-# Parent-to-children relationships for element inheritance. Setting a
-# parent element in a later ``theme()`` call clears any previously-set
-# children so the parent's effect is fully realized. Mirrors ggplot2's
-# element inheritance hierarchy (R/theme-elements.R). Without cascade,
-# e.g. ``theme_minimal() + theme(panel_grid=element_blank())`` would
-# leave the panel.grid.major ``element_line`` from theme_minimal in
-# place — the user's panel.grid override never wins.
 _THEME_PARENT_TO_CHILDREN: dict = {
     "panel.grid": (
         "panel.grid.major",
@@ -170,18 +152,10 @@ class Theme:
     def __add__(self, other: Theme) -> Theme:
         if not isinstance(other, Theme):
             return NotImplemented
-        # A complete theme on the right replaces wholesale (matches
-        # ggplot2's ``%+replace%`` for complete themes).
         if other.complete:
             return Theme(elements=dict(other.elements), complete=True)
-        # Otherwise merge field-by-field.
         merged = dict(self.elements)
         for name, value in other.elements.items():
-            # Parent-child cascade: setting a parent later than its
-            # children overrides them. Without this,
-            # ``theme_minimal() + theme(panel_grid=element_blank())``
-            # would still draw gridlines because theme_minimal set the
-            # panel.grid.major child first.
             for child in _THEME_PARENT_TO_CHILDREN.get(name, ()):
                 merged.pop(child, None)
             existing = merged.get(name)
@@ -220,11 +194,6 @@ def theme(*args, **kwargs) -> Theme:
     return Theme(elements=elements, complete=False)
 
 
-# ---------------------------------------------------------------------------
-# Theme presets — values mirror ggplot2/R/theme-defaults.R
-# ---------------------------------------------------------------------------
-
-
 def theme_gray() -> Theme:
     """ggplot2's default — gray panel, white gridlines, no axis spines."""
     return Theme(
@@ -235,15 +204,9 @@ def theme_gray() -> Theme:
             "axis.title.y": element_text(angle=90),
             "axis.ticks": element_line(colour="grey20", size=0.25),
             "axis.line": element_blank(),
-            # plot.title size = rel(1.2) × base 11pt = 13.2 (NOT 14).
-            # ggplot2 4.0 dropped face="bold" from plot.title — title is plain.
             "plot.title": element_text(size=13.2, colour="black", hjust=0, vjust=1),
-            # plot.subtitle inherits base size (11pt), left-aligned, plain.
             "plot.subtitle": element_text(size=11, colour="black", hjust=0, vjust=1),
-            # plot.caption size = rel(0.8) × 11 = 8.8pt, right-aligned, plain
-            # (NOT italic — that was a hea-specific deviation).
             "plot.caption": element_text(size=8.8, colour="black", hjust=1, vjust=1),
-            # plot.tag size = rel(1.2) × 11 = 13.2pt, centered.
             "plot.tag": element_text(size=13.2, colour="black", hjust=0.5, vjust=0.5),
             "plot.background": element_rect(fill="white"),
             "panel.background": element_rect(fill="#EBEBEB"),
@@ -253,9 +216,6 @@ def theme_gray() -> Theme:
             "panel.grid.minor": element_line(colour="white", size=0.25),
             "strip.text": element_text(size=8.8, colour="grey10"),
             "strip.background": element_rect(fill="grey85"),
-            # Legend defaults — match ggplot2's ``theme_grey`` look:
-            # title left-aligned to the keys, each key glyph on a panel-colour
-            # rectangle (legend.key).
             "legend.title": element_text(size=11, colour="black", hjust=0),
             "legend.text": element_text(size=8.8, colour="grey10"),
             "legend.key": element_rect(fill="#EBEBEB"),
@@ -266,10 +226,7 @@ def theme_gray() -> Theme:
 
 
 def _preset_from(base_func, overrides) -> Theme:
-    """Build a complete preset by merging ``overrides`` into ``base_func()``.
-
-    Avoids running through ``Theme.__add__`` (whose "complete replaces"
-    rule would discard the base's elements when both sides are complete)."""
+    """Build a complete preset by merging ``overrides`` into ``base_func()``."""
     base = base_func()
     elements = dict(base.elements)
     elements.update(overrides)
@@ -356,6 +313,5 @@ def theme_dark() -> Theme:
     )
 
 
-# Default applied at ``ggplot.__init__`` time.
 def theme_default() -> Theme:
     return theme_gray()

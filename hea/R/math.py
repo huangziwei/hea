@@ -20,18 +20,12 @@ import polars as pl
 
 pi = float(np.pi)
 
-# R's character-vector constants of the Latin alphabet, always
-# in scope in base R (``LETTERS`` uppercase, ``letters`` lowercase).
 LETTERS: list[str] = [chr(ord("A") + i) for i in range(26)]
 letters: list[str] = [chr(ord("a") + i) for i in range(26)]
 
 
 def _elementwise(x, fn_expr, fn_np):
-    """Dispatch math by input type.
-
-    polars Expr/Series → call its method; scalars/lists/arrays → numpy.
-    Keeps R's "math functions vectorize over containers" semantics.
-    """
+    """Dispatch math by input type."""
     if isinstance(x, (pl.Expr, pl.Series)):
         return fn_expr(x)
     return fn_np(x)

@@ -12,10 +12,6 @@ import pytest
 
 from hea.formula import set_ordered_cols
 
-# Tests must never pop GUI windows or leak figures. Force the non-interactive Agg
-# backend (force=True: hea may have imported pyplot already during the import
-# above), and the autouse `_close_figures` fixture closes every figure after each
-# test so the plot tests don't accumulate past matplotlib's 20-open warning.
 matplotlib.use("Agg", force=True)
 
 
@@ -26,16 +22,7 @@ def _close_figures():
 
 
 def assert_fp_equiv(a, b):
-    """Same-model assertion for two fits that share one code path.
-
-    These equivalences are verified as diff-exactly-0 in R, and the fits
-    are bit-identical on run-to-run-stable BLAS builds (Linux OpenBLAS,
-    arm64 Accelerate). On macOS x86_64, Accelerate's ddot/dgemv kernels
-    pick their reduction order from the 32-byte phase of heap addresses,
-    so ANY two fits — even the same call repeated — drift at the last ulp
-    (measured ≤3e-14 relative). rtol=1e-11 still pins code-path
-    equivalence: a genuine intake/model split sits orders of magnitude
-    above it."""
+    """Same-model assertion for two fits that share one code path."""
     np.testing.assert_allclose(
         np.asarray(a, dtype=float), np.asarray(b, dtype=float), rtol=1e-11
     )
@@ -62,17 +49,11 @@ _data_cache: dict[tuple[str, str], pl.DataFrame] = {}
 
 
 def _pkg_subdir(pkg: str) -> str:
-    # datasets/R/ mirrors R's built-in `datasets` package.
     return "R" if pkg == "datasets" else pkg
 
 
 def _apply_schema(df: pl.DataFrame, pkg: str, name: str) -> pl.DataFrame:
-    """Re-cast factor columns from the sidecar schema into pl.Enum.
-
-    Used by ``load_dataset`` (above) and by ``test_smooths_predict`` to
-    re-attach factor types to ``predict_data.csv`` fixtures, which lose them
-    on CSV round-trip just like the source datasets do.
-    """
+    """Re-cast factor columns from the sidecar schema into pl.Enum."""
     from hea.io import _apply_dataset_schema
 
     schema_path = DATA_ROOT / _pkg_subdir(pkg) / f"{name}.schema.json"
@@ -80,12 +61,7 @@ def _apply_schema(df: pl.DataFrame, pkg: str, name: str) -> pl.DataFrame:
 
 
 def ordered_schema_cols(pkg: str, name: str) -> frozenset[str]:
-    """Columns marked `ordered: true` in the dataset's schema sidecar.
-
-    The ``ordered`` flag is plumbed separately from level order — pl.Enum
-    carries levels for both ordered and unordered factors, so this is what
-    drives `hea.formula.with_ordered_cols(...)` for poly contrasts.
-    """
+    """Columns marked `ordered: true` in the dataset's schema sidecar."""
     path = DATA_ROOT / _pkg_subdir(pkg) / f"{name}.schema.json"
     if not path.exists():
         return frozenset()
@@ -102,13 +78,6 @@ def load_dataset(pkg: str, name: str) -> pl.DataFrame:
     """Test-side dataset loader. Delegates to ``hea.data`` (which
     routes to ``rdatasets`` when covered, bundled CSV otherwise) and caches
     the result so repeated fixture loads are cheap.
-
-    Drops the ``rowname`` column (R's row.names preserved on the bundled-CSV
-    side, ``rownames`` injected on the rdatasets side). All R-side fixtures
-    were generated without it, so ``y ~ .`` expansions and column lists
-    would mismatch otherwise. User-facing ``hea.data`` keeps the
-    column — that's the whole point of preserving meaningful row names
-    like the Galápagos island IDs in ``faraway::gala``.
     """
     from hea import data as _data
 
@@ -118,9 +87,6 @@ def load_dataset(pkg: str, name: str) -> pl.DataFrame:
         if "rowname" in df.columns:
             df = df.drop("rowname")
         _data_cache[key] = df
-    # `hea.data` already registers ordered-factor columns globally, but the
-    # autouse `_reset_ordered_cols` fixture clears them per-test. Re-register
-    # here so the contextvar accumulates across multiple loads inside one test.
     ordered = ordered_schema_cols(pkg, name)
     if ordered:
         _current_ordered_cols.update(ordered)
@@ -152,18 +118,11 @@ def fixture_X_ref(fx_id: str) -> pl.DataFrame:
     return pl.read_csv(FIXTURE_ROOT / fx_id / "X.csv", null_values="NA")
 
 
-# ---------------------------------------------------------------------------
-# glm() oracle loader — reads the JSON dumped by tests/scripts/make_glm_oracles.R.
-# ---------------------------------------------------------------------------
 GLM_ORACLE_ROOT = FIXTURE_ROOT / "glm"
 
 
 def load_glm_oracle(name: str) -> dict:
-    """Load a stats::glm() oracle by id (e.g. 'poisson_log_quine').
-
-    Returns the parsed JSON as a dict; numeric scalars are floats, vectors
-    are plain Python lists (test code converts to numpy as needed).
-    """
+    """Load a stats::glm() oracle by id (e.g. 'poisson_log_quine')."""
     path = GLM_ORACLE_ROOT / name / "oracle.json"
     if not path.exists():
         raise FileNotFoundError(
@@ -173,11 +132,6 @@ def load_glm_oracle(name: str) -> dict:
     return json.loads(path.read_text())
 
 
-# ---------------------------------------------------------------------------
-# Live-R nmath oracle — drives the hea._rs (Rust) bit-exact parity gate.
-# tests/scripts/nmath_r_oracle.R evaluates R's d/p/q on the SAME machine, so
-# Rust and R share that platform's scalar libm and agree 0-ulp everywhere.
-# ---------------------------------------------------------------------------
 _NMATH_R_ORACLE = Path(__file__).parent / "scripts" / "nmath_r_oracle.R"
 
 
@@ -186,13 +140,7 @@ def have_rscript() -> bool:
 
 
 def r_scalar_values(exprs):
-    """Evaluate each scalar R expression on THIS machine; return ``{expr: float}``.
-
-    ``sprintf("%.17g")`` round-trips an IEEE double exactly, so callers can compare
-    bit-for-bit. Drives the macOS-only live-R bit-exact checks in test_R.py (same
-    libm rationale as :func:`run_rs_r_oracle` — hea and R share the platform's
-    scalar libm only on macOS; on glibc the few-ulp floor means callers must
-    compare with tolerance instead)."""
+    """Evaluate each scalar R expression on THIS machine; return ``{expr: float}``."""
     body = "".join(f'cat(sprintf("%.17g\\n", as.double({e})))\n' for e in exprs)
     out = subprocess.run(
         ["Rscript", "-e", body],
@@ -206,14 +154,7 @@ def r_scalar_values(exprs):
 
 
 def run_rs_r_oracle(cases, workdir) -> dict:
-    """Evaluate R's d/p/q for each case and return ``{name: np.ndarray}``.
-
-    ``cases``: iterable of ``(name, fn, arrays, flags)`` where ``fn`` is the
-    hea/rs kernel name, ``arrays`` are the inputs in hea's argument order, and
-    ``flags`` are the trailing booleans (``lower_tail``/``log_p`` or
-    ``give_log``; empty for no-flag kernels). Inputs are written as raw little-
-    endian f64 so R sees the exact same bits the Rust side receives.
-    """
+    """Evaluate R's d/p/q for each case and return ``{name: np.ndarray}``."""
     workdir = str(workdir)
     os.makedirs(workdir, exist_ok=True)
     spec_lines = []
@@ -244,23 +185,12 @@ def run_rs_r_oracle(cases, workdir) -> dict:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Live-R RNG oracle — drives the 3-way (Rust / pure-Python / R) parity gate for
-# hea.R.rng (tests/test_rs_rng_parity.py). tests/scripts/rng_r_oracle.R draws
-# from R's default Mersenne-Twister stream on the SAME machine.
-# ---------------------------------------------------------------------------
 _RNG_R_ORACLE = Path(__file__).parent / "scripts" / "rng_r_oracle.R"
 
 
 def run_rng_r_oracle(seed, cases, workdir) -> dict:
     """Evaluate R's `set.seed(seed); <rcall>` for each case; return ``{name:
     np.ndarray}``.
-
-    ``cases``: iterable of ``(name, rcall, params)`` where ``rcall`` is an R
-    expression producing a numeric vector and ``params`` is a list of f64 arrays
-    exposed to it as ``p0``, ``p1``, ... (written as raw little-endian f64 so R
-    sees the exact bits the Rust/Python sides use). The seed is shared, so the
-    three implementations draw the identical MT stream.
     """
     workdir = str(workdir)
     os.makedirs(workdir, exist_ok=True)

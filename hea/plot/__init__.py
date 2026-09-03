@@ -65,9 +65,6 @@ __all__ = [
     "lines",
     "pairs",
     "par",
-    # No-op stubs for R base-graphics calls hea doesn't render yet.
-    # Surfaced so translated scripts don't crash on the side-effect lines;
-    # plotting calls between pdf()/dev.off() pairs still run.
     "pdf",
     "plot",
     "points",

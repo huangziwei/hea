@@ -18,11 +18,6 @@ def _one(src: str):
     return prog.statements[0]
 
 
-# ---------------------------------------------------------------------------
-# Atoms
-# ---------------------------------------------------------------------------
-
-
 class TestAtoms:
     def test_int(self):
         n = _one("42L")
@@ -60,75 +55,58 @@ class TestAtoms:
         assert isinstance(n, A.Identifier) and n.name == "weird name" and n.backticked
 
 
-# ---------------------------------------------------------------------------
-# Operator precedence (R's ?Syntax table)
-# ---------------------------------------------------------------------------
-
-
 class TestPrecedence:
     def test_arith_left_assoc(self):
-        # a + b + c -> (a + b) + c
         n = _one("a + b + c")
         assert isinstance(n, A.BinOp) and n.op == "+"
         assert isinstance(n.left, A.BinOp) and n.left.op == "+"
 
     def test_mul_over_add(self):
-        # a + b * c -> a + (b * c)
         n = _one("a + b * c")
         assert n.op == "+" and isinstance(n.right, A.BinOp) and n.right.op == "*"
 
     def test_caret_right_assoc(self):
-        # a ^ b ^ c -> a ^ (b ^ c)
         n = _one("a ^ b ^ c")
         assert n.op == "^" and isinstance(n.right, A.BinOp) and n.right.op == "^"
 
     def test_unary_minus_below_caret(self):
-        # -2 ^ 2 in R parses as -(2^2) = -4 (NOT (-2)^2 = 4).
         n = _one("-2 ^ 2")
         assert isinstance(n, A.UnaryOp) and n.op == "-"
         assert isinstance(n.operand, A.BinOp) and n.operand.op == "^"
 
     def test_colon_higher_than_arith(self):
-        # 1:5 + 1 -> (1:5) + 1
         n = _one("1:5 + 1")
         assert n.op == "+" and isinstance(n.left, A.BinOp) and n.left.op == ":"
 
     def test_special_infix_between_colon_and_mul(self):
-        # a %in% b * c -> (a %in% b) * c
         n = _one("a %in% b * c")
         assert n.op == "*"
         assert isinstance(n.left, A.BinOp) and n.left.op == "%in%"
 
     def test_comparison_below_arith(self):
-        # a + b == c * d -> (a+b) == (c*d)
         n = _one("a + b == c * d")
         assert n.op == "==" and n.left.op == "+" and n.right.op == "*"
 
     def test_not_above_and(self):
-        # !a & b -> (!a) & b
         n = _one("!a & b")
         assert n.op == "&" and isinstance(n.left, A.UnaryOp) and n.left.op == "!"
 
     def test_and_above_or(self):
-        # a | b & c -> a | (b & c)
         n = _one("a | b & c")
         assert n.op == "|" and isinstance(n.right, A.BinOp) and n.right.op == "&"
 
     def test_assignment_right_assoc(self):
-        # a <- b <- 1 -> a <- (b <- 1)
         n = _one("a <- b <- 1")
         assert isinstance(n, A.Assign) and n.op == "<-"
         assert isinstance(n.value, A.Assign)
 
     def test_right_arrow_flips(self):
-        # 1 -> a  is equivalent to  a <- 1
         n = _one("1 -> a")
         assert isinstance(n, A.Assign) and n.op == "<-"
         assert n.target.name == "a"
         assert n.value.value == 1.0  # NumLit
 
     def test_tilde_low_precedence(self):
-        # y ~ x + z -> y ~ (x + z)
         n = _one("y ~ x + z")
         assert isinstance(n, A.Tilde)
         assert isinstance(n.rhs, A.BinOp) and n.rhs.op == "+"
@@ -136,11 +114,6 @@ class TestPrecedence:
     def test_unary_tilde(self):
         n = _one("~ x")
         assert isinstance(n, A.Tilde) and n.lhs is None
-
-
-# ---------------------------------------------------------------------------
-# Calls, subscripts, dollar / at
-# ---------------------------------------------------------------------------
 
 
 class TestCalls:
@@ -165,7 +138,6 @@ class TestCalls:
 
     def test_chained_calls(self):
         n = _one("f()()")
-        # outer Call's func is itself a Call
         assert isinstance(n, A.Call) and isinstance(n.func, A.Call)
 
     def test_subscript(self):
@@ -193,11 +165,6 @@ class TestCalls:
         assert isinstance(n, A.At) and n.name == "slot"
 
 
-# ---------------------------------------------------------------------------
-# Pipes
-# ---------------------------------------------------------------------------
-
-
 class TestPipes:
     def test_native_pipe(self):
         n = _one("x |> f()")
@@ -210,23 +177,15 @@ class TestPipes:
         assert isinstance(n, A.Pipe) and n.op == "%>%"
 
     def test_pipe_chain_left_assoc(self):
-        # a |> b() |> c() -> (a |> b()) |> c()
         n = _one("a |> b() |> c()")
         assert isinstance(n, A.Pipe)
         assert isinstance(n.lhs, A.Pipe)
         assert n.rhs.func.name == "c"
 
     def test_pipe_below_special_infix(self):
-        # ``a %any% b |> f()`` — special infix and pipe are at the same
-        # precedence (both at the special-ops level). Left-to-right.
         n = _one("a %in% b |> f()")
         assert isinstance(n, A.Pipe)
         assert isinstance(n.lhs, A.BinOp) and n.lhs.op == "%in%"
-
-
-# ---------------------------------------------------------------------------
-# Control flow & function defs
-# ---------------------------------------------------------------------------
 
 
 class TestControlFlow:
@@ -240,8 +199,6 @@ class TestControlFlow:
         assert isinstance(n, A.If) and n.otherwise is None
 
     def test_if_else_across_term(self):
-        # Standard idiom: ``if (...) { ... } else { ... }`` with newline
-        # between the closing brace and ``else``. We must absorb the TERM.
         n = _one("if (x) {\n  a\n} else {\n  b\n}")
         assert isinstance(n, A.If)
         assert isinstance(n.then, A.Block)
@@ -263,7 +220,6 @@ class TestControlFlow:
 
     def test_break_next(self):
         prog = parse("for (i in 1:3) { if (i == 2) next; if (i == 3) break }")
-        # we only care it parses without error
         assert isinstance(prog, A.Program)
 
     def test_function_def(self):
@@ -277,11 +233,6 @@ class TestControlFlow:
     def test_lambda_shorthand(self):
         n = _one("\\(x) x + 1")
         assert isinstance(n, A.FunctionDef) and n.shorthand
-
-
-# ---------------------------------------------------------------------------
-# Blocks and multi-statement scripts
-# ---------------------------------------------------------------------------
 
 
 class TestStatements:
@@ -300,11 +251,6 @@ class TestStatements:
         assert len(prog.statements) == 3
 
 
-# ---------------------------------------------------------------------------
-# Golden: the canonical r4ds pipeline
-# ---------------------------------------------------------------------------
-
-
 def test_canonical_pipeline():
     src = """\
 flights |>
@@ -316,7 +262,6 @@ flights |>
     assert len(prog.statements) == 1
     top = prog.statements[0]
 
-    # Top of the chain: ``... |> summarize(...)``
     assert isinstance(top, A.Pipe) and top.op == "|>"
     summarize = top.rhs
     assert isinstance(summarize, A.Call) and summarize.func.name == "summarize"
@@ -325,7 +270,6 @@ flights |>
         and summarize.args[0].name == "arr_delay"
     )
 
-    # The mean(arr_delay, na.rm = TRUE) call.
     mean_call = summarize.args[0].value
     assert isinstance(mean_call, A.Call) and mean_call.func.name == "mean"
     assert (
@@ -333,18 +277,12 @@ flights |>
     )
     assert mean_call.args[1].value.value is True
 
-    # Walk down the pipe chain.
     p1 = top.lhs  # ... |> group_by(...)
     assert isinstance(p1, A.Pipe)
     p2 = p1.lhs  # ... |> filter(...)
     assert isinstance(p2, A.Pipe)
     p3 = p2.lhs  # flights
     assert isinstance(p3, A.Identifier) and p3.name == "flights"
-
-
-# ---------------------------------------------------------------------------
-# Error paths
-# ---------------------------------------------------------------------------
 
 
 class TestErrors:

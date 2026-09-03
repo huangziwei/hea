@@ -51,8 +51,6 @@ class _ParContext:
         if mfrow is None and mfcol is None:
             raise ValueError("par(): pass mfrow=(nrow,ncol) or mfcol=(nrow,ncol).")
         shape = mfrow if mfrow is not None else mfcol
-        # Accept list too — R's ``par(mfrow=c(3,3))`` translates to a Python
-        # list, and forcing the user to wrap in a tuple is needless friction.
         if isinstance(shape, list):
             shape = tuple(shape)
         if not (
@@ -77,8 +75,6 @@ class _ParContext:
         nrow, ncol = self.shape
         figsize = self.figsize or (4.0 * ncol, 3.5 * nrow)
         self.fig, axarr = plt.subplots(nrow, ncol, figsize=figsize)
-        # Flatten in fill order. plt.subplots returns a single Axes for
-        # 1×1, a 1-D array for 1×N or N×1, and a 2-D array otherwise.
         arr = np.atleast_1d(np.asarray(axarr))
         if arr.ndim == 1:
             self._cells = list(arr)
@@ -90,14 +86,9 @@ class _ParContext:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
         _PAR_STACK.pop()
-        # Hide cells that no plotter claimed — matches R's default of
-        # leaving the trailing slots blank rather than stretching the
-        # used ones.
         for ax in self._cells[self._idx :]:
             ax.set_visible(False)
         if self.fig is not None:
-            # tight_layout occasionally fails on exotic legends / colorbars;
-            # not worth raising over a layout polish.
             with contextlib.suppress(Exception):
                 self.fig.tight_layout()
         return False

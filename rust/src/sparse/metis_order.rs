@@ -71,16 +71,11 @@ pub fn cholmod_metis(
     let anz = (nz / 2 + n) as f64;
 
     let identity = if nz == 0 {
-        // "The matrix has no off-diagonal entries. METIS_NodeND fails in this
-        // case, so avoid using it. The best permutation is identity anyway."
         true
     } else {
         let d = nz as f64 / (n as f64 * n as f64);
         n as i64 > METIS_NSWITCH && d > METIS_DSWITCH
     };
-    // `metis_memory_ok` is the third workaround and it is a no-op at the
-    // default `Common->metis_memory = 0.0`, which returns TRUE without
-    // attempting anything (`cholmod_metis.c:...`).
 
     if identity {
         return Ok(((0..n as i64).collect(), anz));

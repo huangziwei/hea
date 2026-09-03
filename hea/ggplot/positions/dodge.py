@@ -37,8 +37,6 @@ class PositionDodge(Position):
         else:
             base_width = 0.9
 
-        # Per-x group rank + count. If only one group at a given x,
-        # offset stays 0 — no dodging.
         unique_xg = (
             data.select(["x", "group"])
             .unique(maintain_order=False)
@@ -48,24 +46,15 @@ class PositionDodge(Position):
             _n_at_x=pl.col("group").count().over("x"),
             _rank_at_x=(pl.col("group").rank("dense").over("x") - 1).cast(pl.Float64),
         )
-        # Short-circuit when no x has overlapping groups — the offset would
-        # be 0 everywhere, but ``x + 0`` still requires a numeric x and
-        # would fail on a discrete (string) x like ``geom_boxplot(aes(x =
-        # species, y = body_mass_g))`` where each species has one box.
         if int(unique_xg["_n_at_x"].max() or 0) <= 1:
             return data
 
-        # ggplot2 maps discrete x to integer positions before applying
-        # the dodge offset; we do the same so ``aes(x=drv)`` (string)
-        # works the same as ``aes(x=cyl)`` (numeric). Convert ``x`` in
-        # both the join keys and the data so the join still aligns.
         x_was_discrete = data["x"].dtype not in (pl.Float32, pl.Float64) and (
             not data["x"].dtype.is_numeric()
         )
         if x_was_discrete:
             data = data.with_columns(to_numeric_positions(data["x"]))
             unique_xg = unique_xg.with_columns(to_numeric_positions(unique_xg["x"]))
-        # Offset = (rank - (n-1)/2) * slot_width; slot_width = base_width/n.
         unique_xg = unique_xg.with_columns(
             _offset=pl.when(pl.col("_n_at_x") > 1)
             .then(
@@ -89,9 +78,6 @@ class PositionDodge(Position):
         return result.drop("_offset", "_slot_width")
 
 
-# ggplot2's position_dodge2 differs from dodge only when boxplot-style geoms
-# need uneven slot widths. For now we alias to PositionDodge — to be refined
-# when geom_boxplot lands.
 PositionDodge2 = PositionDodge
 
 

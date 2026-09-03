@@ -7,21 +7,11 @@ from dataclasses import dataclass, field
 from ..aes import split_layer_kwargs
 from .geom import Geom
 
-# ggplot2 size is in mm. R's grid graphics uses 72.27 pt/inch (TeX convention),
-# so 1 mm = 72.27 / 25.4 ≈ 2.8454 pt. matplotlib's ``s`` is the marker area in
-# pt² (i.e. diameter² for a circle), so ``s = (size_mm * _PT_PER_MM) ** 2``.
 _PT_PER_MM = 72.27 / 25.4
 
 
 @dataclass
 class GeomPoint(Geom):
-    # Mirrors ggplot2's ``GeomPoint$default_aes`` (R/geom-point.R):
-    # ``shape = 19`` (= matplotlib "o"), ``colour = "black"``,
-    # ``size = 1.5``, ``fill = NA``, ``alpha = NA``, ``stroke = 0.5``.
-    # ``fill = None`` is hea's NA stand-in: for fillable pch shapes
-    # 21-25, ``None`` falls back to ``colour`` in :meth:`draw_panel`
-    # (ggplot2 leaves them transparent — minor visible divergence on
-    # filled shapes used without an explicit ``fill`` mapping).
     default_aes: dict = field(
         default_factory=lambda: {
             "colour": "black",
@@ -73,10 +63,6 @@ class GeomPoint(Geom):
 
         s = (size_arr.astype(float) * _PT_PER_MM) ** 2
 
-        # Translate each shape value (ggplot2 name, R pch int, or matplotlib
-        # marker) into ``(marker, fill_mode)``. The fill_mode dictates whether
-        # the glyph's interior gets ``colour`` (solid), no fill (open), or
-        # ``fill`` aes (fillable — pch 21-25).
         translated = [r_shape(sh) for sh in shape]
         markers = [t[0] for t in translated]
         modes = [t[1] for t in translated]
@@ -88,9 +74,6 @@ class GeomPoint(Geom):
             ``"none"`` strings)."""
             return [to_rgba(c, a) for c, a in zip(colours, alphas)]
 
-        # matplotlib scatter takes a single marker per call, so we batch by
-        # ``(marker, fill_mode)`` — different fill_modes need different
-        # face/edge colour kwargs.
         keys = list(dict.fromkeys(zip(markers, modes)))
         for marker, mode in keys:
             mask = np.array(
@@ -100,9 +83,6 @@ class GeomPoint(Geom):
             sel_alpha = alpha_arr[mask]
             kw = {"s": s[mask], "marker": marker}
             if mode == "open":
-                # Transparent face by construction — no need to broadcast
-                # ``"none"`` against per-row alpha (which silently turned
-                # the face opaque-black via matplotlib's RGBA override).
                 kw["facecolors"] = "none"
                 kw["edgecolors"] = _rgba(sel_colour, sel_alpha)
             elif mode == "fillable":
@@ -110,8 +90,6 @@ class GeomPoint(Geom):
                 kw["facecolors"] = _rgba(sel_fill, sel_alpha)
                 kw["edgecolors"] = _rgba(sel_colour, sel_alpha)
             else:
-                # solid + stroke. matplotlib draws ``+``/``x`` as edge-only
-                # automatically; the rgba colour applies cleanly either way.
                 kw["c"] = _rgba(sel_colour, sel_alpha)
             ax.scatter(x[mask], y[mask], **kw)
 

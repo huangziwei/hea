@@ -53,19 +53,9 @@ class Token:
     kind: str
     value: str  # original source slice
     span: Span
-    # For literals where the parsed Python value differs from the source
-    # text — e.g. ``"0xFF"`` → 255, ``'\\n'`` → '\n'. Populated only when
-    # the cooked value cannot be re-derived from ``value`` cheaply.
     cooked: object | None = None
 
 
-# ---------------------------------------------------------------------------
-# Character classifiers
-# ---------------------------------------------------------------------------
-
-
-# R identifier start: letter or dot (with dot disambiguated against `.5`-style
-# numbers via lookahead in the scanner).
 def _is_id_start(c: str) -> bool:
     return c.isalpha() or c == "_" or c == "."
 
@@ -74,9 +64,6 @@ def _is_id_cont(c: str) -> bool:
     return c.isalnum() or c == "_" or c == "."
 
 
-# Reserved words and constant literals. Tokens for control flow keywords get
-# their own kind; literals (TRUE / FALSE / NA / etc) carry their literal kind
-# and their text in ``value``.
 _KEYWORDS = {
     "if": "if",
     "else": "else",
@@ -102,9 +89,6 @@ _CONSTANT_LITS = {
     "NaN": ("NAN", None),
 }
 
-# Tokens that can legitimately *end* an expression. After one of these,
-# a newline is a statement terminator (TERM). Pending binary operators
-# (anything else, like ``+`` waiting for its rhs) suppress the TERM.
 _EXPR_END_KINDS = frozenset(
     {
         "NUM",
@@ -127,11 +111,6 @@ _EXPR_END_KINDS = frozenset(
 )
 
 
-# ---------------------------------------------------------------------------
-# Main lexer
-# ---------------------------------------------------------------------------
-
-
 def tokenize(src: str) -> list[Token]:
     """Tokenize ``src`` into a list of :class:`Token`, ending with EOF."""
     lexer = _Lexer(src)
@@ -146,43 +125,31 @@ class _Lexer:
         self.i = 0
         self.n = len(src)
         self.tokens: list[Token] = []
-        # Depth of ``(`` / ``[`` / ``[[`` — newlines suppressed inside.
-        # Note ``{`` does NOT suppress newlines (statements separate inside
-        # blocks by newline), so it doesn't bump this counter.
         self.bracket_depth = 0
         self.last_kind: str | None = None
-
-    # -- emit helpers -------------------------------------------------------
 
     def _emit(self, kind: str, start: int, end: int, *, cooked: object | None = None):
         tok = Token(kind, self.src[start:end], (start, end), cooked)
         self.tokens.append(tok)
         self.last_kind = kind
 
-    # -- driver -------------------------------------------------------------
-
     def run(self) -> list[Token]:
         while self.i < self.n:
             c = self.src[self.i]
 
-            # Spaces and tabs are skipped.
             if c == " " or c == "\t":
                 self.i += 1
                 continue
 
-            # Carriage return — treat as part of \r\n, skip.
             if c == "\r":
                 self.i += 1
                 continue
 
-            # Comment to end of line.
             if c == "#":
                 while self.i < self.n and self.src[self.i] != "\n":
                     self.i += 1
                 continue
 
-            # Newline: terminator iff at bracket-depth 0 AND last token can
-            # end an expression. Otherwise absorbed.
             if c == "\n":
                 start = self.i
                 self.i += 1
@@ -190,14 +157,11 @@ class _Lexer:
                     self._emit("TERM", start, start + 1)
                 continue
 
-            # Semicolon — always a TERM, regardless of bracket depth.
             if c == ";":
                 self._emit("TERM", self.i, self.i + 1)
                 self.i += 1
                 continue
 
-            # Raw strings: r"..."  R"..."  r'...'  R'...' with paren/bracket/
-            # brace delimiters, optionally with matching dash padding.
             if (
                 (c == "r" or c == "R")
                 and self.i + 1 < self.n
@@ -205,35 +169,28 @@ class _Lexer:
             ) and self._try_raw_string():
                 continue
 
-            # Quoted strings.
             if c == '"' or c == "'":
                 self._scan_string(c)
                 continue
 
-            # Backtick-quoted identifier.
             if c == "`":
                 self._scan_backtick_ident()
                 continue
 
-            # Numeric literal — leading digit, or ``.`` followed by digit.
             if c.isdigit() or (
                 c == "." and self.i + 1 < self.n and self.src[self.i + 1].isdigit()
             ):
                 self._scan_number()
                 continue
 
-            # Identifier or keyword. Leading dot is allowed but only if next
-            # char isn't a digit (already handled above).
             if _is_id_start(c):
                 self._scan_ident()
                 continue
 
-            # User infix: %any%
             if c == "%":
                 self._scan_infix()
                 continue
 
-            # Multi-char operators, longest-first.
             if self._scan_operator():
                 continue
 
@@ -242,15 +199,12 @@ class _Lexer:
         self._emit("EOF", self.n, self.n)
         return self.tokens
 
-    # -- scanners -----------------------------------------------------------
-
     def _scan_number(self):
         start = self.i
         is_hex = False
         is_int = False
         is_complex = False
 
-        # Hex prefix.
         if (
             self.src[self.i] == "0"
             and self.i + 1 < self.n
@@ -261,15 +215,12 @@ class _Lexer:
             while self.i < self.n and self.src[self.i] in "0123456789abcdefABCDEF":
                 self.i += 1
         else:
-            # Integer part.
             while self.i < self.n and self.src[self.i].isdigit():
                 self.i += 1
-            # Fractional part.
             if self.i < self.n and self.src[self.i] == ".":
                 self.i += 1
                 while self.i < self.n and self.src[self.i].isdigit():
                     self.i += 1
-            # Exponent.
             if self.i < self.n and self.src[self.i] in ("e", "E"):
                 self.i += 1
                 if self.i < self.n and self.src[self.i] in ("+", "-"):
@@ -279,7 +230,6 @@ class _Lexer:
                 while self.i < self.n and self.src[self.i].isdigit():
                     self.i += 1
 
-        # Suffix: L for integer, i for complex.
         if self.i < self.n and self.src[self.i] == "L":
             is_int = True
             self.i += 1
@@ -290,17 +240,14 @@ class _Lexer:
         text = self.src[start : self.i]
 
         if is_complex:
-            # Drop trailing ``i``.
             body = text[:-1]
             value = int(body, 16) if is_hex else float(body)
             self._emit("COMPLEX", start, self.i, cooked=float(value))
         elif is_int:
-            # Drop trailing ``L``.
             body = text[:-1]
             if is_hex:
                 value = int(body, 16)
             else:
-                # ``5.0L`` is allowed in R with a warning — coerce to int.
                 try:
                     value = int(body)
                 except ValueError:
@@ -341,24 +288,19 @@ class _Lexer:
         True on success and advances ``self.i``; returns False if this looks
         like the start of an identifier ``r`` / ``R`` instead."""
         save = self.i
-        # r" or r' or R" or R'
         prefix = self.src[self.i]  # 'r' or 'R'
         quote = self.src[self.i + 1]  # '"' or "'"
-        # Need at least one dash-or-delimiter character after the quote.
-        # Try to match dashes then an opener: ( [ {.
         j = self.i + 2
         dashes = 0
         while j < self.n and self.src[j] == "-":
             dashes += 1
             j += 1
         if j >= self.n or self.src[j] not in "([{":
-            # Not a raw string — let _scan_ident pick up the ``r``/``R``.
             return False
         opener = self.src[j]
         closer = {"(": ")", "[": "]", "{": "}"}[opener]
         j += 1
         body_start = j
-        # Find matching: closer + dashes + quote.
         end_pattern = closer + ("-" * dashes) + quote
         end_idx = self.src.find(end_pattern, body_start)
         if end_idx < 0:
@@ -366,10 +308,6 @@ class _Lexer:
         body = self.src[body_start:end_idx]
         self.i = end_idx + len(end_pattern)
         self._emit("STR", save, self.i, cooked=body)
-        # Mark on the token by re-replacing? Use a flag — Token doesn't carry
-        # raw-flag, but cooked vs value distinguishes. The parser doesn't
-        # need to know; the AST StrLit will set ``raw=True`` based on
-        # whether ``value`` starts with ``r``/``R``.
         _ = prefix  # keep for clarity even if unused
         return True
 
@@ -387,24 +325,19 @@ class _Lexer:
                 "unterminated backtick identifier", (start, self.i - 1), self.src
             )
         self.i += 1  # closing backtick
-        # Inner text (without backticks) is the identifier name; the kind is
-        # IDENT but ``value`` retains the surrounding backticks for round-trip.
         self._emit("IDENT", start, self.i)
 
     def _scan_ident(self):
         start = self.i
-        # Already verified _is_id_start at caller.
         self.i += 1
         while self.i < self.n and _is_id_cont(self.src[self.i]):
             self.i += 1
         text = self.src[start : self.i]
 
-        # Keywords win first.
         if text in _KEYWORDS:
             self._emit(_KEYWORDS[text], start, self.i)
             return
 
-        # Constant literals (TRUE/FALSE/NA/NULL/Inf/NaN).
         if text in _CONSTANT_LITS:
             kind, cooked = _CONSTANT_LITS[text]
             self._emit(kind, start, self.i, cooked=cooked)
@@ -435,7 +368,6 @@ class _Lexer:
         i = self.i
 
         def emit(kind: str, length: int):
-            # Bracket-depth bookkeeping done here so the caller doesn't have to.
             if kind in ("(", "[", "[["):
                 self.bracket_depth += 1
             elif kind in (")", "]", "]]"):
@@ -445,7 +377,6 @@ class _Lexer:
 
         c = src[i]
 
-        # 3-char operators.
         three = src[i : i + 3]
         if three == "<<-":
             emit("<<-", 3)
@@ -457,7 +388,6 @@ class _Lexer:
             emit(":::", 3)
             return True
 
-        # 2-char operators.
         two = src[i : i + 2]
         if two == "<-":
             emit("<-", 2)
@@ -496,7 +426,6 @@ class _Lexer:
             emit("]]", 2)
             return True
 
-        # 1-char operators / punctuation.
         SINGLES = {
             "(": "(",
             ")": ")",
@@ -530,11 +459,6 @@ class _Lexer:
         return False
 
 
-# ---------------------------------------------------------------------------
-# String escape decoding
-# ---------------------------------------------------------------------------
-
-
 _SIMPLE_ESCAPES = {
     "n": "\n",
     "t": "\t",
@@ -564,7 +488,6 @@ def _decode_escape(esc: str, lex: _Lexer, start: int) -> str:
         return _decode_hex_escape(lex, start, max_digits=4)
     if esc == "U":
         return _decode_hex_escape(lex, start, max_digits=8)
-    # Unknown escape — R warns and uses the char as-is. We mirror that.
     return esc
 
 

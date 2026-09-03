@@ -42,14 +42,12 @@ class Verb:
 
 # fmt: off
 VERB_TABLE: dict[str, Verb] = {
-    # EXPR-slot verbs — args are expressions over column refs.
     "filter":     Verb("filter",    Slot.EXPR),
     "mutate":     Verb("mutate",    Slot.EXPR),
     "transmute":  Verb("mutate",    Slot.EXPR, auto_kwargs=(("_keep", "none"),)),
     "summarize":  Verb("summarize", Slot.EXPR),
     "summarise":  Verb("summarize", Slot.EXPR),   # British spelling
 
-    # COLUMN_NAME-slot verbs — args are column names.
     "select":     Verb("select",    Slot.COLUMN_NAME),
     "group_by":   Verb("group_by",  Slot.COLUMN_NAME),
     "count":      Verb("count",     Slot.COLUMN_NAME),
@@ -59,14 +57,10 @@ VERB_TABLE: dict[str, Verb] = {
     "relocate":   Verb("relocate",  Slot.COLUMN_NAME),
     "pull":       Verb("pull",      Slot.COLUMN_NAME),
 
-    # Stateless verbs — no NSE.
     "ungroup":    Verb("ungroup",   Slot.NONE),
     "glimpse":    Verb("glimpse",   Slot.NONE),
     "clean_names": Verb("clean_names", Slot.NONE),  # janitor::clean_names
 
-    # Joins — first arg is the receiver, second arg is the right-hand
-    # table (a Python name, not a column ref) → slot=NONE. ``by`` kwarg
-    # is handled by c()'s named-args-emit-dict behavior.
     "inner_join": Verb("inner_join", Slot.NONE),
     "left_join":  Verb("left_join",  Slot.NONE),
     "right_join": Verb("right_join", Slot.NONE),
@@ -76,30 +70,18 @@ VERB_TABLE: dict[str, Verb] = {
     "cross_join": Verb("cross_join", Slot.NONE),
     "nest_join":  Verb("nest_join",  Slot.NONE),
 
-    # Pivot — first positional arg is ``cols`` (or ``names_from`` etc),
-    # all tidy-select. Verb-wide slot=COLUMN_NAME.
     "pivot_longer": Verb("pivot_longer", Slot.COLUMN_NAME),
     "pivot_wider":  Verb("pivot_wider",  Slot.COLUMN_NAME),
 
-    # tidyr fill — fill NA values from neighbors. Tidy-select cols.
     "fill":         Verb("fill",         Slot.COLUMN_NAME),
 
-    # dplyr slice_* — first positional arg is a column name (for min/max)
-    # or an integer ``n`` (for head/tail). Method exists on both
-    # DataFrame and GroupBy, so pipe-rewriting works after group_by.
     "slice_min":    Verb("slice_min",    Slot.COLUMN_NAME),
     "slice_max":    Verb("slice_max",    Slot.COLUMN_NAME),
     "slice_head":   Verb("slice_head",   Slot.NONE),
     "slice_tail":   Verb("slice_tail",   Slot.NONE),
     "slice_sample": Verb("slice_sample", Slot.NONE),
-    # ``add_count`` / ``add_tally`` are NOT mapped here — they need a
-    # mutate(n = n(), _by = cols) expansion, which isn't a 1:1 verb
-    # rename, so they are not currently handled.
 }
 # fmt: on
 
 
-# Verbs whose first positional arg is the data frame (i.e. eligible for
-# pipe rewriting). All entries in VERB_TABLE currently fit this — kept as
-# a separate frozenset for explicitness and to make future divergence easy.
 DATAFRAME_VERBS: frozenset[str] = frozenset(VERB_TABLE.keys())

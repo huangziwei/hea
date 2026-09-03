@@ -62,19 +62,11 @@ class ScaleContinuousColor(Scale):
         else:
             normalised = np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
 
-        # Honour user-supplied limits if set: values outside become NaN
-        # in palette space (palette receives clipped values, not NaN; for
-        # NaN-handling we leave the colour as null).
         colours = self.palette(normalised)
 
         if isinstance(data, pl.Series):
             return pl.Series(name=data.name, values=colours)
         return colours
-
-
-# ---------------------------------------------------------------------------
-# Factories — gradient family
-# ---------------------------------------------------------------------------
 
 
 def scale_color_gradient(
@@ -126,12 +118,6 @@ def scale_color_gradient2(
     labels="default",
     limits=None,
 ):
-    # Mirrors ggplot2's ``scale_colour_gradient2()`` defaults:
-    # ``low = scales::muted("red") = "#832424"``,
-    # ``mid = "white"``,
-    # ``high = scales::muted("blue") = "#3A3A98"``,
-    # ``midpoint = 0`` (NOT 0.5; users want the diverging midpoint at the
-    # data scale's zero, not at 50% of the [0, 1] normalised range).
     return ScaleContinuousColor(
         aesthetics=("colour",),
         name=name,
@@ -189,20 +175,13 @@ def scale_fill_gradientn(
     )
 
 
-# ggplot2 has both spellings; expose them.
 scale_colour_gradient = scale_color_gradient
 scale_colour_gradient2 = scale_color_gradient2
 scale_colour_gradientn = scale_color_gradientn
 
-# ggplot2's `scale_color_continuous()` defaults to `gradient`. Match.
 scale_color_continuous = scale_color_gradient
 scale_colour_continuous = scale_color_gradient
 scale_fill_continuous = scale_fill_gradient
-
-
-# ---------------------------------------------------------------------------
-# Binned continuous scale — bridges continuous and discrete
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -227,17 +206,10 @@ class ScaleBinnedColor(ScaleContinuousColor):
         else:
             arr = np.asarray(data, dtype=float)
 
-        # Bin edges: ``n_breaks + 1`` evenly spaced from lo to hi.
         edges = np.linspace(lo, hi, self.n_breaks + 1)
-        # Bin index per value (0 … n_breaks-1). ``np.digitize`` returns
-        # 1-based bin indices; clip + shift so values exactly at ``hi``
-        # land in the last bin.
         idx = np.clip(np.digitize(arr, edges[1:-1], right=False), 0, self.n_breaks - 1)
-        # Normalised position is each bin's centre.
         bin_centres = (np.arange(self.n_breaks) + 0.5) / self.n_breaks
         normalised = bin_centres[idx]
-        # NaN inputs propagate (digitize maps NaN to the last bin, but
-        # we'd rather leave them as null colours).
         nan_mask = np.isnan(arr)
         if nan_mask.any():
             normalised = normalised.copy()
@@ -246,11 +218,6 @@ class ScaleBinnedColor(ScaleContinuousColor):
         if isinstance(data, pl.Series):
             return pl.Series(name=data.name, values=colours)
         return colours
-
-
-# ---------------------------------------------------------------------------
-# Factories — viridis family
-# ---------------------------------------------------------------------------
 
 
 def scale_color_viridis_c(
@@ -339,15 +306,6 @@ def scale_fill_viridis_c(
 
 
 scale_colour_viridis_c = scale_color_viridis_c
-
-
-# Discrete viridis lives with the discrete colour scale below — see
-# scales.discrete for ScaleDiscreteColor.
-
-
-# ---------------------------------------------------------------------------
-# Factories — brewer continuous (a.k.a. distiller in ggplot2 nomenclature)
-# ---------------------------------------------------------------------------
 
 
 def scale_color_distiller(

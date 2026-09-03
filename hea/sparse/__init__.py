@@ -171,9 +171,6 @@ def build_info() -> dict:
     return _build_info()
 
 
-#: The systems :meth:`Factor.solve` accepts, as ``cholmod_solve`` names them.
-#: ``D`` is the identity for an ``LL'`` factor, so ``LD``/``L`` and ``DLt``/``Lt``
-#: name the same solve there.
 SYSTEMS = ("A", "LDLt", "LD", "DLt", "L", "Lt", "D", "P", "Pt")
 
 
@@ -185,10 +182,6 @@ class CholmodError(Exception):
     """
 
 
-#: What ``sym_kind`` may be, spelled as ``scikit-sparse`` 0.5.0 spells it.
-#: ``"sym"`` factorizes ``A`` itself and needs it square; the other two take a
-#: rectangular ``A`` and factorize a Gram matrix of it *without forming the
-#: product* — CHOLMOD's ``A->stype == 0``.
 SYM_KINDS = ("sym", "row", "col")
 
 
@@ -205,25 +198,6 @@ def _parse_sym_kind(sym_kind):
 def _as_csc(A, sym_kind="sym"):
     """The input as a sorted CSC matrix with the index and value types the
     extension takes.
-
-    The full symmetric matrix may be passed: ``stype`` tells the factorization
-    which half is the stored one, and entries in the other half are ignored
-    rather than folded in — the same contract as ``A->stype``. So there is no
-    triangle to extract, which matters when refactorizing 742 times per fit.
-
-    The three arrays are handed to the extension as **views**, not copies —
-    ``cholmod_sparse`` is a view onto the caller's buffers and so is this. The
-    exception is the index type: the port is ``int64`` throughout, one ``itype``
-    the way each CHOLMOD build has one, while scipy uses ``int32`` below 2³¹
-    nonzeros. That upcast is a real copy of ``indices`` per call — 197 MB on a
-    3.4M-row system — and it is the price of the single-itype scope.
-
-    The square check applies to ``sym_kind="sym"`` only, which is the same
-    guard ``scikit-sparse`` writes as ``if sym_kind == "sym" and A.shape[0] !=
-    A.shape[1]``. ``"col"`` transposes here rather than in the extension,
-    because CHOLMOD's ``stype == 0`` factorizes ``A A'`` and ``AᵀA`` is that
-    product of ``Aᵀ`` — which is also what ``scikit-sparse`` does, with a
-    C-side ``cholmod_transpose``.
     """
     if not issparse(A):
         A = csc_array(np.asarray(A, dtype=np.float64))
@@ -274,15 +248,10 @@ class Factor:
     ):
         sym_kind = _parse_sym_kind(sym_kind)
         nrow, ncol, indptr, indices, data = _as_csc(A, sym_kind)
-        # `stype == 0` factorizes `A A'`, whose dimension is A's row count;
-        # for a symmetric A the two are the same number.
         self._n = nrow
         self._sym_kind = sym_kind
         self._lower = bool(lower)
         if supernodal is None:
-            # The supernodal factorization is ``LL'`` and only ``LL'``, so a
-            # caller who asked for ``LDL'`` has to get the simplicial one --
-            # the two disagree about which matrices are factorizable at all.
             supernodal = "auto" if use_ll else "simplicial"
         self._F = _CholFactor(
             nrow,
@@ -342,7 +311,6 @@ class Factor:
         flat = b.ndim == 1
         b2 = b.reshape(self._n, 1) if flat else b
         nrhs = b2.shape[1]
-        # cholmod_dense is column-major; ravel(order="F") is that layout flat
         x = self._F.solve(np.ravel(b2, order="F"), nrhs, system)
         x = x.reshape((self._n, nrhs), order="F")
         return x[:, 0] if flat else x
@@ -462,7 +430,6 @@ class Factor:
         """The fill-reducing permutation ``p``, with ``L @ L.T == A[p][:, p]``."""
         return np.asarray(self._F.perm, dtype=np.intp)
 
-    #: ``scikit-sparse`` spells the permutation ``perm``; both names work.
     perm = P
 
     @property

@@ -18,10 +18,6 @@ from .identity import StatIdentity
 def _function_data_callable(fun, n, xlim, args):
     """Build a callable suitable for ``Layer.data`` that produces the
     synthetic ``{x, y}`` frame at build time.
-
-    Resolving ``xlim`` from ``main`` (the plot's main data) is deferred until
-    the layer runs so the function curve can pick up whatever x range the
-    rest of the plot already implies. Override with explicit ``xlim=``.
     """
 
     def make(main):
@@ -68,9 +64,6 @@ def stat_function(
         data=_function_data_callable(fun, n, xlim, args),
         aes_params=aes_params,
         geom_params=geom_params,
-        # The synthesised ``{x, y}`` frame already carries the right columns;
-        # don't merge in the plot's mapping, which might reference columns
-        # that aren't in this layer's data.
         inherit_aes=False,
     )
     return layer

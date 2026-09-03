@@ -104,17 +104,6 @@ def to_series(x, length: int, name: str = "value") -> pl.Series:
 _GREY_RX = re.compile(r"^gr(a|e)y(\d{1,3})$", re.IGNORECASE)
 
 
-# ggplot2 shape vocabulary — names + R pch integer codes. Each entry is
-# ``(matplotlib_marker, fill_mode)`` where ``fill_mode`` is:
-#
-# * ``"solid"``    — paint with ``colour`` (matplotlib's default).
-# * ``"open"``     — hollow: face=none, edge=colour. pch 0/1/2/5/6 etc.
-# * ``"fillable"`` — pch 21–25: face=``fill`` aes, edge=``colour`` aes.
-# * ``"stroke"``   — line-only glyphs (``+``/``x``); face never paints.
-#
-# Names are sourced from ggplot2's ``translate_shape_string()``. pch codes
-# 14 has two synonymous names ("square triangle" and "triangle square");
-# both map to the same row.
 _GGPLOT_SHAPE_NAMES: dict[str, tuple[str, str]] = {
     "square open": ("s", "open"),
     "circle open": ("o", "open"),
@@ -145,8 +134,6 @@ _GGPLOT_SHAPE_NAMES: dict[str, tuple[str, str]] = {
     "triangle down filled": ("v", "fillable"),
 }
 
-# R pch integer code → ggplot2 shape name. Mirrors
-# ggplot2:::translate_shape_string's reverse table.
 _R_PCH_TO_NAME: dict[int, str] = {
     0: "square open",
     1: "circle open",
@@ -195,10 +182,8 @@ def r_shape(shape):
     if isinstance(shape, str):
         if shape in _GGPLOT_SHAPE_NAMES:
             return _GGPLOT_SHAPE_NAMES[shape]
-        # Pass-through: matplotlib markers like 'o', 's', '^', '$x$', etc.
         return (shape, "solid")
     if isinstance(shape, (bool, np.bool_)):
-        # Bool subclasses int — treat as pass-through to avoid pch=1 mapping.
         return (shape, "solid")
     if isinstance(shape, (int, np.integer)):
         name = _R_PCH_TO_NAME.get(int(shape))

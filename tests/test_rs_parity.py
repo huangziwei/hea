@@ -39,17 +39,7 @@ rs = pytest.importorskip("hea._rs")
 if not have_rscript():
     pytest.skip("Rscript not on PATH (install R)", allow_module_level=True)
 
-# Bit-exactness to R holds only where hea and R share the platform's scalar libm:
-# macOS (Apple libm) → 0-ulp on BOTH Intel & arm64. On Linux/glibc the
-# transcendental-heavy kernels drift a few ulp (Rust-std-math vs R's glibc path —
-# see the module docstring), so off-macOS this runs as a TOLERANCE check: it still
-# catches gross / platform-specific Rust regressions (notably the x86-64 `rfma`
-# plain-path, otherwise only gated on a local Intel Mac), just not at the last ulp.
 _STRICT = sys.platform == "darwin"
-# Calibrated from the diagnostic CI run (glibc, Python 3.10–3.14): off-macOS, 14
-# kernels drift and the rest are 0-ulp; the worst is ~1.8e-15 (≈8 ulp — pgamma_saddle
-# / pbeta). 1e-14 sits ~5× above that floor: it absorbs the glibc libm floor + numpy-
-# build variation, while still catching any real Rust regression (those are ≫1e-14).
 _LINUX_RTOL = 1e-14
 
 
@@ -58,20 +48,11 @@ def _bits(v: float) -> int:
 
 
 def _assert_bit_exact(got, exp):
-    """Bit-for-bit (0-ulp) equality, NaN-aware and sign-of-zero-agnostic.
-
-    ±0.0 are the same real number; for a probability/density/quantile the sign
-    bit on a zero result is an arithmetic byproduct (R and nmath disagree on it
-    in a few log_p / zero-quantile cases) carrying no numerical meaning, so the
-    gate treats them as equal — exactly how ulp-equality is conventionally
-    defined. Every non-zero value is still required to match R bit-for-bit.
-    """
+    """Bit-for-bit (0-ulp) equality, NaN-aware and sign-of-zero-agnostic."""
     got = np.asarray(got, dtype=float)
     exp = np.asarray(exp, dtype=float)
     assert got.shape == exp.shape, f"shape {got.shape} != {exp.shape}"
     if not _STRICT:
-        # Off-macOS: glibc libm floor → a few-ulp tolerance (NaN/±Inf-aware;
-        # atol covers the underflow corner where R rounds to 0).
         np.testing.assert_allclose(
             got, exp, rtol=_LINUX_RTOL, atol=1e-300, equal_nan=True
         )
@@ -85,12 +66,7 @@ def _assert_bit_exact(got, exp):
             assert _bits(g) == _bits(e), f"bit mismatch: rs={g!r} R={e!r}"
 
 
-# ---------------------------------------------------------------------------
-# Input grids — chosen to stress every internal branch of each kernel.
-# ---------------------------------------------------------------------------
 def _norm_grid() -> np.ndarray:
-    # pnorm_both branches: central, mid, far tail, the log_p/tail cutoffs,
-    # tiny, zero, non-finite.
     return np.array(
         [
             -50.0,
@@ -194,18 +170,12 @@ def _qbeta_grid():
     return np.array(AL), np.array(P), np.array(Q)
 
 
-# ---------------------------------------------------------------------------
-# Cases: (name, rs/R kernel name, [inputs in hea order], [trailing flag bools]).
-# rs is called ``getattr(rs, fn)(*inputs, *flags)``; the R oracle calls the
-# matching ``hea_<fn>`` wrapper (tests/scripts/nmath_r_oracle.R).
-# ---------------------------------------------------------------------------
 def _build_cases():
     C = []
 
     def add(name, fn, arrays, flags=()):
         C.append((name, fn, [np.asarray(a, dtype=float) for a in arrays], list(flags)))
 
-    # --- normal: pnorm / qnorm / dnorm ---
     g = _norm_grid()
     for mu, sigma in [(0.0, 1.0), (1.5, 2.0), (-3.0, 0.5)]:
         for lt in (True, False):
@@ -265,7 +235,6 @@ def _build_cases():
     for gl in (True, False):
         add(f"dnorm_{gl}", "dnorm", [xn, np.zeros_like(xn), np.ones_like(xn)], (gl,))
 
-    # --- lgamma / gamma ---
     xg = np.array(
         [
             -9.3,
@@ -298,7 +267,6 @@ def _build_cases():
     xg2 = xg[(np.abs(xg) < 171) | ~np.isfinite(xg)]
     add("gammafn", "gammafn", [xg2])
 
-    # --- gamma: pgamma / dgamma / qgamma ---
     for scale in (1.0, 2.5):
         for lt in (True, False):
             for lp in (True, False):
@@ -321,7 +289,6 @@ def _build_cases():
             (True, False),
         )
 
-    # --- beta: pbeta / qbeta / lbeta ---
     Xb, Ab, Bb = _beta_grid()
     for lt in (True, False):
         for lp in (True, False):
@@ -337,7 +304,6 @@ def _build_cases():
         add(f"qbeta_{lt}", "qbeta", [ALq, Pq, Qq], (lt, False))
         add(f"qbeta_log_{lt}", "qbeta", [np.log(ALq), Pq, Qq], (lt, True))
 
-    # --- t / F ---
     xt = np.array([-50, -3, -1, -0.1, 0, 0.1, 1, 3, 50, 1e8], dtype=float)
     nt = np.array([1.0, 2.0, 5.0, 10.0, 30.0, 0.5, 0.7, 100.0, 1e21, 3.0])
     for lt in (True, False):
@@ -359,7 +325,6 @@ def _build_cases():
     for lt in (True, False):
         add(f"qf_{lt}", "qf", [fp, qf1, qf2], (lt, False))
 
-    # --- discrete: ppois / qpois / pbinom / qbinom / dpois / dbinom / dbeta ---
     px = np.array([0.0, 1.0, 2.0, 5.0, 10.0, 50.0, 3.0, 7.0, 0.0, 100.0])
     pl = np.array([3.0, 3.0, 3.0, 4.5, 10.0, 40.0, 0.5, 7.0, 0.0, 1e3])
     for lt in (True, False):
@@ -386,7 +351,6 @@ def _build_cases():
         add(f"dbinom_{gl}", "dbinom", [bx, bn, bp], (gl,))
         add(f"dbeta_{gl}", "dbeta", [dbex, dbea, dbeb], (gl,))
 
-    # --- saddlepoint regime (exercises bd0/stirlerr/ebd0/dpois_wrap) ---
     kk = np.arange(120.0, 260.0)
     lams = np.array([2.0, 3.0, 4.0, 5.0, 7.0, 10.0])
     add(
@@ -412,7 +376,6 @@ def _build_cases():
             (True, False),
         )
 
-    # --- exponential (hea/nmath parameterise by scale; R by rate=1/scale) ---
     xe = np.array([0.0, 0.1, 1.0, 5.0, 20.0, 0.0, 2.0, 100.0, 0.5, 1e-8])
     se = np.array([1.0, 1.0, 2.0, 0.5, 1.0, 3.0, 1.0, 2.0, 0.7, 1.0])
     for gl in (True, False):
@@ -461,7 +424,6 @@ def _build_cases():
         ],
         (False, False),
     )
-    # gammafn/lgammafn negative x — platform __sinpi (cospi.c HAVE___SINPI).
     add(
         "fma_gammafn_sinpi",
         "gammafn",
@@ -504,7 +466,6 @@ def _build_cases():
     )
     # lbeta.c:76 libm lgamma (p < 1e-306).
     add("fma_lbeta_tiny", "lbeta", [np.array([1e-307, 5e-307]), np.array([5.0, 2.5])])
-    # pt.c `1 + (x/n)*x` / `n + x*x`; pf.c `df2 + df1*x`; dbeta.c lval.
     add(
         "fma_pt_log_upper",
         "pt",
@@ -534,7 +495,6 @@ def _build_cases():
         ],
         (False,),
     )
-    # qbeta swapped-tail u = R_Log1_Exp(0) — C99 log(±0) = -Inf, no exception.
     add(
         "fma_qbeta_log1exp_edge",
         "qbeta",
@@ -545,8 +505,6 @@ def _build_cases():
         ],
         (True, False),
     )
-    # qt df<1: bisection `(ux-lx)/fabs(nx)` at nx == 0 (C99 Inf, no raise) and
-    # the pt overflow lane `fma(x/n, x, 1)` -> Inf during bracket doubling.
     add(
         "fma_qt_df_lt_1",
         "qt",
@@ -586,7 +544,6 @@ def _build_cases():
         (False,),
     )
 
-    # --- cauchy / logis / lnorm / weibull / geom (closed-form → strict 0-ulp) ---
     xc = np.array([-1e6, -100.0, -3.0, -1.0, -0.2, 0.0, 0.5, 1.0, 3.0, 100.0, 1e6])
     for loc, scl in [(0.0, 1.0), (0.5, 2.0), (-2.0, 0.5)]:
         lo, sc = np.full_like(xc, loc), np.full_like(xc, scl)
@@ -662,7 +619,6 @@ def _build_cases():
             pp = np.log(pc) if lp else pc
             add(f"qgeom_{lt}_{lp}", "qgeom", [pp, np.full_like(pc, 0.3)], (lt, lp))
 
-    # --- nbinom (prob + mu) / qhyper (f64 discrete → strict 0-ulp) ---
     xnb = np.array([0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0, 40.0, 100.0])
     for sz, pr in [(1.0, 0.3), (5.0, 0.5), (10.0, 0.7), (0.5, 0.2), (20.0, 0.9)]:
         szz, prr = np.full_like(xnb, sz), np.full_like(xnb, pr)
@@ -714,15 +670,6 @@ def test_rs_matches_r(case, r_oracle):
     _assert_bit_exact(got, r_oracle[name])
 
 
-# ---------------------------------------------------------------------------
-# Noncentral / studentized-range / hypergeometric _rs kernels — these
-# accumulate their AS-275 / AS-226 / AS-243 / Copenhaver-Holland series in f64
-# where R uses 80-bit LDOUBLE (Rust std has no 80-bit float). So unlike the
-# strict gate above they match R to a TIGHT TOLERANCE, not 0-ulp; this pins port
-# correctness (catches any O(1) transcription bug or gross regression). The
-# 0-ulp Python reference for these is pinned in test_R.py; per-kernel ulp
-# characterization is documented in the rust-perf plan.
-# ---------------------------------------------------------------------------
 def _grid(*axes):
     out = [[]]
     for ax in axes:
@@ -733,7 +680,6 @@ def _grid(*axes):
 
 def _build_f64_cases():
     cases = []
-    # noncentral chi-square (bulk grid)
     (X, D, N), g = _grid(
         [0.5, 3.0, 10.0, 30.0, 60.0], [2.0, 5.0, 12.0], [2.0, 8.0, 40.0]
     )
@@ -765,7 +711,6 @@ def _build_f64_cases():
             [f"qchisq({p},{d},ncp={n})" for p, d, n in g],
         )
     )
-    # noncentral t (bulk — extreme far tails excluded; they degrade in f64)
     (T, D, N), g = _grid(
         [-2.0, -0.5, 0.5, 2.0, 5.0], [5.0, 12.0, 40.0], [1.0, 3.0, 8.0]
     )
@@ -788,7 +733,6 @@ def _build_f64_cases():
             [f"qt({p},{d},ncp={n})" for p, d, n in g],
         )
     )
-    # noncentral F
     (X, A, B, N), g = _grid([0.5, 1.0, 2.5], [3.0, 10.0], [5.0, 20.0], [2.0, 8.0])
     cases.append(
         (
@@ -809,7 +753,6 @@ def _build_f64_cases():
             [f"qf({p},{a},{b},ncp={n})" for p, a, b, n in g],
         )
     )
-    # noncentral beta
     (X, A, B, N), g = _grid([0.1, 0.3, 0.6, 0.9], [2.0, 5.0], [2.0, 5.0], [2.0, 20.0])
     cases.append(
         (
@@ -820,7 +763,6 @@ def _build_f64_cases():
             [f"pbeta({x},{a},{b},ncp={n})" for x, a, b, n in g],
         )
     )
-    # studentized range (rr = nranges = 1)
     (Q, R_, C, D), g = _grid(
         [2.0, 3.0, 4.0], [1.0], [3.0, 5.0, 10.0], [10.0, 20.0, 60.0]
     )
@@ -845,7 +787,6 @@ def _build_f64_cases():
             [f"qtukey({p},{c},{d})" for p, _r, c, d in g],
         )
     )
-    # hypergeometric (m=20 red, n=25 black, k=15 drawn)
     xs = [float(x) for x in range(16)]
     X = np.array(xs)
 
@@ -884,7 +825,6 @@ def test_rs_noncentral_f64_matches_r_tol(case):
     )
     ref = r_scalar_values(exprs)
     exp = np.array([ref[e] for e in exprs])
-    # f64 accumulators vs R's 80-bit LDOUBLE — tight tolerance, not 0-ulp.
     np.testing.assert_allclose(got, exp, rtol=1e-6, atol=1e-9, equal_nan=True)
 
 
@@ -927,14 +867,6 @@ def test_fma_cases_python_matches_rs(case):
             assert _bits(g) == _bits(e), f"py={g!r} rs={e!r}"
 
 
-# ---------------------------------------------------------------------------
-# dqrls (R's lm.fit QR kernel) — 3-way parity: Rust ≡ pure-Python ≡ live R.
-#
-# Linear algebra, not transcendental libm, so this is a *tolerance* gate (BLAS
-# reduction order differs across Accelerate/OpenBLAS/our in-order Rust), but
-# rank + pivot must match R EXACTLY (the whole point of porting dqrdc2: a
-# deterministic, R-faithful rank/pivot, immune to BLAS-bistable flakes).
-# ---------------------------------------------------------------------------
 import subprocess
 
 from hea.R import linalg
@@ -959,17 +891,14 @@ def _dqrls_cases():
     a = rng.standard_normal(12)
     b = rng.standard_normal(15)
     return {
-        # full-rank well-conditioned
         "full_rank": (
             np.c_[np.ones(20), rng.standard_normal((20, 4))],
             rng.standard_normal(20),
         ),
-        # one alias: col3 == 2·col2
         "rank_def": (
             np.c_[np.ones(12), a, 2.0 * a, rng.standard_normal(12)],
             rng.standard_normal(12),
         ),
-        # two aliases: col3 == 3·col2, col5 == col2 − col1  → rank 3 of 5
         "two_alias": (
             np.c_[np.ones(15), b, 3.0 * b, rng.standard_normal(15), b - 1.0],
             rng.standard_normal(15),
@@ -1013,32 +942,19 @@ def test_dqrls_3way_parity(name, tmp_path):
     )  # pure-Python oracle
     R = _r_lmfit(x, y, tmp_path)
 
-    # rank + pivot: EXACT, all three
     assert rust["rank"] == k == R["rank"]
     assert np.array_equal(rust["pivot"], jpvt)
     assert np.array_equal(rust["pivot"], R["pivot"])
 
     rk = R["rank"]
-    # Rust ≡ pure-Python: deterministic in-order BLAS both sides → tight
     np.testing.assert_allclose(rust["coefficients"], coef, rtol=0, atol=1e-10)
     np.testing.assert_allclose(rust["effects"], qty, rtol=0, atol=1e-10)
     np.testing.assert_allclose(rust["residuals"], rsd, rtol=0, atol=1e-10)
-    # Rust ≡ R: BLAS tolerance, but the USED (first-rank) effects/coef match tightly
     np.testing.assert_allclose(rust["effects"][:rk], R["effects"][:rk], atol=1e-9)
     np.testing.assert_allclose(rust["residuals"], R["resid"], atol=1e-9)
-    # coefficients are in pivoted order on both sides
     np.testing.assert_allclose(rust["coefficients"][:rk], R["coef"][:rk], atol=1e-9)
 
 
-# ---------------------------------------------------------------------------
-# tp basis kernel eval (XBuild + tpsE) — Rust ≡ pure-Python, BIT-EXACT.
-#
-# Pure element-wise fast_eta + polynomial powers (NO matmul inside), so the Rust
-# build of b=[E|T] and the knot matrix E are byte-identical to the numpy
-# `_tp_fast_eta_vec`/`_tp_T` build (the `b @ UZ` matmul stays in numpy). d=1 is
-# the common `s(x)`; d=2 exercises the even-d log branch, d=3 the odd-d √ branch
-# + the degree-2 polynomial null space (powi vs `**`). Sizes ≥256 hit rayon.
-# ---------------------------------------------------------------------------
 from hea.formula import (
     _tp_eta_const,
     _tp_fast_eta_vec,
@@ -1062,20 +978,7 @@ def _rsq_rfma(diff):
 
 
 def _assert_eta_parity(d, got, want):
-    """Rust ``tp_eval_*`` vs the numpy ``_tp_fast_eta_vec`` build.
-
-    For ODD d the radial kernel is ``f0·(r²)^k·√(r²)`` — only ``sqrt`` (an
-    IEEE correctly-rounded operation, so bit-identical across every libm) plus
-    integer-power multiplies, hence byte-exact on every platform.
-
-    For EVEN d it is ``f0·log(r²)·…`` and ``log`` is NOT a correctly-rounded
-    IEEE operation: rust's scalar ``f64::ln`` and numpy's vectorised ``np.log``
-    are two conformant-but-distinct implementations. They coincide bit-for-bit
-    on the darwin capture box (both Intel and arm64), but a Linux numpy wheel's
-    SIMD ``log`` can disagree by ≤1 ULP (a py3.12 CI runner did). That is far
-    below the mgcv-oracle fixture tolerance (5e-5) the basis is actually gated
-    on, so off-darwin the even-d branch uses the shared libm-floor tolerance —
-    same ``_STRICT``/``_LINUX_RTOL`` split as :func:`_assert_bit_exact`."""
+    """Rust ``tp_eval_*`` vs the numpy ``_tp_fast_eta_vec`` build."""
     if d % 2 == 0 and not _STRICT:
         np.testing.assert_allclose(
             got, want, rtol=_LINUX_RTOL, atol=1e-300, equal_nan=True
@@ -1216,12 +1119,6 @@ def test_coxlpl_kernel_parity(deriv):
         np.testing.assert_allclose(rust["d1H"], npy["d1H"], rtol=0, atol=1e-11)
 
 
-# ---------------------------------------------------------------------------
-# pls_fit1 — mgcv's penalized least-squares inner solve (rust TSQR + neg-weight
-# eigen correction) vs the numpy QR/eigh oracle (== hea gam._pls_qr's pure path).
-# Not 0-ulp (different QR — TSQR vs LAPACK), but every returned quantity (β, the
-# Cholesky factor of X'WX+Sλ, log|X'WX+Sλ|) is QR-convention-invariant so they
-# agree to the BLAS floor on well-conditioned problems.
 from scipy.linalg import solve_triangular
 
 
@@ -1400,7 +1297,6 @@ def test_pls_fit1_matches_r(n, p, nneg, tmp_path):
         assert not ok  # rust must decline too
         return
     assert ok
-    # β vs mgcv's actual pls_fit1; penalty β'Sλβ = ‖Eβ‖² vs its `penalty` out.
     np.testing.assert_allclose(beta, R["beta"], rtol=0, atol=1e-10)
     pen_rust = float(np.asarray(E) @ beta @ (np.asarray(E) @ beta))
     np.testing.assert_allclose(pen_rust, R["penalty"], rtol=1e-9, atol=1e-12)
@@ -1410,14 +1306,6 @@ def test_pls_fit1_matches_r(n, p, nneg, tmp_path):
         np.testing.assert_allclose(ld, R["logdet"], rtol=0, atol=1e-8)
 
 
-# ---------------------------------------------------------------------------
-# gamlss_xwx — gamlss.gH's Hessian-block crossprod `Σ_k X_i[k,r]·WX_j[k,c]`
-# (family.gamlss_gH under deterministic_xwx, gam.fit5's rank check). Not 0-ulp
-# to numpy `@`/einsum (a different, fixed reduction order) but agrees to the
-# BLAS floor. The property that matters — and that numpy `@` fails — is row/col
-# consistency: bit-identical input columns must give bit-identical output rows
-# AND cols, else gam.fit5's QR rank-check drops a duplicate column platform-
-# dependently (the arm64 gevlss bug this kernel fixes).
 @pytest.mark.parametrize("n,p", [(300, 14), (2000, 41), (5000, 23)])
 def test_gamlss_xwx_parity(n, p):
     rng = np.random.default_rng(n + p)
@@ -1426,15 +1314,11 @@ def test_gamlss_xwx_parity(n, p):
         rng.standard_normal(n)[:, None] * rng.standard_normal((n, p))
     )
     A = np.asarray(rs.gamlss_xwx(Xi, WXj))
-    # agrees with the einsum oracle to the summation-order floor
     np.testing.assert_allclose(A, np.einsum("kr,kc->rc", Xi, WXj), rtol=0, atol=1e-9)
-    # deterministic: identical across runs
     np.testing.assert_array_equal(A, np.asarray(rs.gamlss_xwx(Xi, WXj)))
 
 
 def test_gamlss_xwx_row_col_consistent():
-    # Duplicate an input column (rank-deficient design) → its two output
-    # rows/cols must be bit-identical, the construction property `@` lacks.
     rng = np.random.default_rng(7)
     n, p = 4000, 18
     Xi = np.ascontiguousarray(rng.standard_normal((n, p)))
@@ -1490,11 +1374,9 @@ def test_tweedious_work_rs_matches_py(p, phi):
     a, b = 1.001, 1.999
     dpth1 = eth * (b - a) / (1 + eth) ** 2
     dpth2 = ((a - b) * eth + (b - a) * eth * eth) / (1 + eth) ** 3
-    # scalar path
     sr = _fam._tweedious_work_scalar(y, rho, p, dpth1, dpth2)
     sp = _fam._tweedious_work_scalar_py(y, rho, p, dpth1, dpth2)
     np.testing.assert_array_equal(sr, sp)
-    # vector path: per-row θ/ρ derived from a jittered p/φ
     thv = rng.uniform(-1.0, 1.2, y.size)
     rhv = rng.uniform(-0.6, 0.5, y.size)
     ev = np.exp(-np.abs(thv))
@@ -1544,15 +1426,12 @@ def test_tweedie_ldwork_matches_r(theta, rho):
     R = np.array(
         [[float(v) for v in ln.split()] for ln in out.splitlines() if ln.strip()]
     )
-    # cols 0 (l), 1 (d/dρ), 3 (d/dθ), 6-9 (μ) — libm floor.
     for c in (0, 1, 3, 6, 7, 8, 9):
         np.testing.assert_allclose(ld[:, c], R[:, c], rtol=1e-9, atol=1e-10)
-    # cols 2/4/5 (2nd p-derivatives) — saddle+series cancellation floor.
     for c in (2, 4, 5):
         np.testing.assert_allclose(ld[:, c], R[:, c], rtol=1e-6, atol=1e-7)
 
 
-# --- psigamma (R dpsifn) — rust vs the pure-Python oracle --------------------
 from hea.R import nmath as _nmath
 
 
@@ -1601,7 +1480,6 @@ def test_psigamma_parity_reflection(deriv):
     np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-300, equal_nan=True)
 
 
-# --- discrete X'WX smooth×smooth block — rust vs the numpy oracle ------------
 def test_xwx_smooth_block_parity():
     """``hea._rs.xwx_smooth_block`` (the matrix-arg / tensor X'WX accumulation,
     mgcv XWXijs) must equal the numpy ``_smooth_smooth_block`` oracle. The two
@@ -1717,8 +1595,7 @@ def test_wbar_contract_indreduce_dense_branch():
 def test_xwx_smooth_block_ar1_tri_parity():
     """rust == numpy on the AR1 ``tri`` path (the rust kernel does the diagonal +
     super/sub tridiagonal scatters internally, mgcv XWXijs tri branches
-    discrete.c:1843-1880). Before this, general AR1 blocks were forced onto the
-    numpy per-(s,t) loop; now they take the rust pass. Covers both a plain tensor
+    discrete.c:1843-1880). Covers both a plain tensor
     ``te()`` (s_i=1, nd_i>1) and a signal-regression ``te(…, by=)`` (s_i·s_j=L²,
     the case the rust pass is meant to win)."""
     import importlib
@@ -1773,17 +1650,6 @@ def test_xwx_smooth_block_ar1_tri_parity():
             }
         ),
     )
-
-
-# ---------------------------------------------------------------------------
-# R-optimizer ports (uncmin / L-BFGS-B): rs == python differential.
-# Unlike the d/p/q kernels, the Python optimizers involve no numpy
-# transcendentals — pure arithmetic + libm sqrt/hypot/pow — so the pure-
-# Python modules ARE the bit-exact oracle here (they are pinned to live R
-# both by tests/test_r_optimize.py and by the ctypes trajectory oracles
-# against libR's compiled optif9/lbfgsb documented in hea/R/uncmin.py).
-# The Rust port must reproduce them bit-for-bit including the evaluation
-# trajectory.
 
 
 def test_optif9_rs_python_parity():
@@ -1957,16 +1823,9 @@ def test_lbfgsb_rs_python_parity():
                 assert py[4] == msg
 
 
-# ---------------------------------------------------------------------------
-# FEXACT — Fisher's exact test for r×c tables (network algorithm).
-# rs.fexact == the pure-Python _Fexact port, which tests/test_R.py pins
-# bit-exact to R's fisher.test(x)$p.value. Both sides do scalar-libm f64
-# arithmetic, so this is 0-ulp on the same machine (strict on macOS).
-# ---------------------------------------------------------------------------
 def test_fexact_rs_matches_python():
     from hea.R import _fexact
 
-    # (table, workspace, mult, expect, percnt, emin)
     cases = [
         ([[3, 5, 2], [7, 2, 8], [4, 6, 1]], 200000, 30, -1.0, 100.0, 0.0),
         ([[1, 9, 3], [8, 2, 4]], 200000, 30, -1.0, 100.0, 0.0),
@@ -1989,7 +1848,6 @@ def test_fexact_rs_matches_python():
             100.0,
             0.0,
         ),
-        # a mid-size table at two workspaces / mult — different ldkey, both agree
         (
             [[1, 3, 2, 1], [4, 3, 5, 4], [5, 3, 6, 6], [6, 7, 4, 6], [8, 0, 5, 6]],
             200000,
@@ -2007,7 +1865,6 @@ def test_fexact_rs_matches_python():
             0.0,
         ),
         ([[3, 5, 2], [7, 2, 8], [4, 6, 1]], 200000, 50, -1.0, 100.0, 0.0),
-        # hybrid asymptotic-χ² path (expect > 0)
         ([[3, 5, 2], [7, 2, 8], [4, 6, 1]], 200000, 30, 5.0, 80.0, 1.0),
         ([[12, 5, 3, 2], [1, 9, 4, 3], [0, 2, 8, 6]], 200000, 30, 5.0, 80.0, 1.0),
     ]

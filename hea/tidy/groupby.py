@@ -65,8 +65,6 @@ class GroupBy:
         """
         return self._df.ggplot(mapping, **aes_kwargs)
 
-    # ---- collapsing verbs --------------------------------------------
-
     def summarize(
         self,
         *args: pl.Expr,
@@ -95,8 +93,6 @@ class GroupBy:
         if sort:
             out = out.sort(name, descending=True)
         return self._df._wrap(out)
-
-    # ---- windowed verbs (preserve grouping like dplyr) ---------------
 
     def mutate(self, *args: pl.Expr, **kwargs: pl.Expr) -> GroupBy:
         """Add columns whose values are computed within each group.
@@ -166,7 +162,6 @@ class GroupBy:
         args, kwargs = _resolve_lazy_factors(self._df, args, kwargs)
         exprs = _kwargs_to_exprs(args, kwargs)
         windowed = [e.over(self._by) for e in exprs]
-        # Build the new frame: group cols + the new exprs.
         new_df = self._df._wrap(
             pl.DataFrame.select(
                 self._df,
@@ -190,7 +185,6 @@ class GroupBy:
     def rename(self, mapping: dict | None = None, /, **kwargs: str) -> GroupBy:
         """Rename columns; group vars follow the rename automatically."""
         new_df = self._df.rename(mapping, **kwargs)
-        # Build the old→new map to update self._by
         if mapping is not None:
             old_to_new = dict(mapping)
         else:
@@ -205,7 +199,6 @@ class GroupBy:
     def drop(self, *cols: Any, strict: bool = True) -> GroupBy:
         """Drop columns. Refuses to drop a grouping variable — call
         ``.ungroup().drop(...)`` if that's really what you want."""
-        # Resolve cols to names if possible
         bad = [c for c in cols if isinstance(c, str) and c in self._by]
         if bad:
             raise ValueError(
@@ -213,8 +206,6 @@ class GroupBy:
                 "Call .ungroup() first."
             )
         return GroupBy(self._df.drop(*cols, strict=strict), self._by, self._kwargs)
-
-    # ---- slice family per group (preserve grouping) ------------------
 
     def slice_head(self, n: int = 1) -> GroupBy:
         gb = pl.DataFrame.group_by(self._df, self._by, **self._kwargs)
@@ -250,27 +241,15 @@ class GroupBy:
         *,
         descending: bool,
     ) -> GroupBy:
-        """Per-group slice_min / slice_max with dplyr-faithful null handling.
-
-        Nulls sort to the end within each group; they're kept only when
-        a group has fewer than ``n`` non-null rows. With_ties extends
-        the cutoff via null-aware equality so all-NA groups don't get
-        silently dropped.
-        """
+        """Per-group slice_min / slice_max with dplyr-faithful null handling."""
         sort_cols = self._by + [col]
         sort_desc = [False] * len(self._by) + [descending]
-        # ``nulls_last`` accepts a per-column list. Set False for group
-        # keys (they have no nulls in the typical case, and we want the
-        # default ordering) and True for the value column.
         nulls_last = [False] * len(self._by) + [True]
         sorted_df = pl.DataFrame.sort(
             self._df, sort_cols, descending=sort_desc, nulls_last=nulls_last
         )
         if with_ties:
             pos = pl.int_range(0, pl.len()).over(self._by)
-            # n-th value within each group; ``.slice(n-1, 1).first()``
-            # yields null when the group has < n rows, which is what
-            # we want — eq_missing then matches NA-tied rows too.
             nth = pl.col(col).slice(n - 1, 1).first().over(self._by)
             out = pl.DataFrame.filter(
                 sorted_df,
@@ -292,9 +271,6 @@ class GroupBy:
         :meth:`hea.tidy.dataframe.DataFrame.slice_sample`."""
         if (n is None) == (prop is None):
             raise ValueError("slice_sample(): pass exactly one of n= or prop=.")
-        # No native per-group sample on polars GroupBy; approximate with
-        # `int_range over` + filter for n=, and per-group sampling via agg
-        # for prop=.
         if n is not None:
             shuffled = pl.int_range(0, pl.len()).shuffle(seed=seed).over(self._by)
             out = pl.DataFrame.filter(self._df, shuffled < n)
@@ -330,21 +306,9 @@ class GroupBy:
             pos = [int(positions)]
         wpos = pl.int_range(0, pl.len()).over(self._by)  # 0-based pos in group
         glen = pl.len().over(self._by)  # rows per group
-        # A non-negative request ``p`` matches wpos == p; a from-end
-        # request ``-k`` matches wpos == glen - k, i.e. wpos - glen == -k.
-        # ``is_in`` over the raw request set captures both directions;
-        # out-of-range requests match no row. ``drop`` keeps the complement.
         sel = wpos.is_in(pos) | (wpos - glen).is_in(pos)
         out = pl.DataFrame.filter(self._df, ~sel if drop_mode else sel)
         return GroupBy(self._df._wrap(out), self._by, self._kwargs)
-
-    # ---- DataFrame-passthrough ---------------------------------------
-    #
-    # GroupBy is a grouped *view* of a DataFrame. Read-only frame access
-    # (column subscript, ``.columns``, ``.height``, ``.dtypes``, …) goes
-    # straight through to the underlying frame — there's no per-group
-    # semantics to apply. Verbs that DO have per-group semantics
-    # (filter / arrange / select / …) are overridden above.
 
     def __getitem__(self, key):
         """Subscript the underlying frame. Returns a ``Series`` for
@@ -380,12 +344,6 @@ class GroupBy:
     def schema(self):
         return self._df.schema
 
-    # ---- representation ----------------------------------------------
-    #
-    # Match dplyr: a grouped tibble prints as a tibble plus a "Groups:"
-    # header. The data is the data — grouping is just metadata, not a
-    # different display.
-
     def _n_groups(self) -> int:
         return self._df.select(pl.struct(self._by).n_unique()).item()
 
@@ -400,7 +358,6 @@ class GroupBy:
         """Notebook / Jupyter display — frame's HTML plus a Groups: banner."""
         by_str = ", ".join(self._by)
         banner = f"<small>Groups: {by_str} [{self._n_groups()}]</small>"
-        # polars DataFrame exposes _repr_html_; delegate.
         inner = (
             self._df._repr_html_()
             if hasattr(self._df, "_repr_html_")

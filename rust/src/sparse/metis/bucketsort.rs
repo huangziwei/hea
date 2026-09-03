@@ -1,5 +1,3 @@
-//! `libmetis/bucketsort.c`.
-
 use super::gklib::makecsr;
 use super::wspace::iset_wspace;
 use super::Idx;

@@ -39,10 +39,8 @@ def test_data_ambiguous_name_raises_with_candidates():
         data("CO2")
     msg = str(exc.value)
     assert "ambiguous" in msg
-    # All candidates appear in the error.
     assert "'R'" in msg
     assert "'Stat2Data'" in msg
-    # And the suggested fix syntax.
     assert "package=" in msg
 
 
@@ -59,19 +57,16 @@ def test_data_explicit_package_mismatch_raises_before_download():
     attempting a GitHub round-trip. Pre-fix this 404'd silently with
     a confusing urllib stack trace.
     """
-    # iris is in R (and rdatasets/datasets), not in faraway in our index.
     with pytest.raises(ValueError) as exc:
         data("iris", package="faraway")
     msg = str(exc.value)
     assert "not in package 'faraway'" in msg
-    # And the error names the package(s) where it IS available.
     assert "'R'" in msg
 
 
 def test_data_explicit_package_match_still_works():
-    """Sanity: passing ``package=`` for a real (name, package) pair
-    still loads the dataset — explicit lookup wasn't broken by the
-    auto-resolve change."""
+    """Passing ``package=`` for a real (name, package) pair loads the
+    dataset — auto-resolution does not shadow an explicit lookup."""
     gala = data("gala", package="faraway")
     assert gala.height == 30
     assert "Species" in gala.columns
@@ -82,10 +77,8 @@ def test_dataset_index_merges_rdatasets_and_bundled():
     ``faraway`` is only in our bundled tree (faraway isn't in
     rdatasets), and ``MASS`` items are in rdatasets."""
     idx = _dataset_index()
-    # Bundled-only package surfaces.
     assert "gavote" in idx
     assert "faraway" in idx["gavote"]
-    # rdatasets package surfaces too.
     assert "Boston" in idx
     assert "MASS" in idx["Boston"]
 
@@ -104,26 +97,17 @@ def test_dataset_index_aliases_datasets_to_R():
 def test_missing_data_extra_says_what_to_install():
     """``rdatasets``/``pyarrow`` live behind ``hea[data]``, so every failure that
     a missing extra can cause has to name the extra.
-
-    They are 177 MB of the 205 a dependent package would inherit and they serve
-    one feature, which is why they moved out of the hard dependencies. The cost
-    is that ``data("iris")`` stops working on a bare install — acceptable only
-    if the error says so instead of surfacing a bare 404 or polars' pyarrow
-    message.
     """
     from hea import io
 
     assert "hea[data]" in io._DATA_EXTRA_HINT
 
-    # every branch of data() that a missing extra can reach appends the hint
     with mock.patch.object(io, "_have_rdatasets", return_value=False):
         with pytest.raises(ValueError, match=r"hea\[data\]"):
             io.data("definitely-not-a-dataset-name")
         with pytest.raises(ValueError, match=r"hea\[data\]"):
             io.data("iris", package="not-a-package-either")
 
-    # ... and it is silent when the extra is present, so the message does not
-    # become noise on a normal install
     with mock.patch.object(io, "_have_rdatasets", return_value=True):
         with pytest.raises(ValueError) as ei:
             io.data("definitely-not-a-dataset-name")

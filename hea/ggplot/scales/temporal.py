@@ -29,9 +29,7 @@ from .scale import _NAME_MISSING
 def _to_mpl_dates(values):
     """Coerce a polars Series / numpy array / iterable of date-like
     things into a list matplotlib's ``date2num`` can ingest.
-
-    Polars Date / Datetime columns yield Python ``date`` / ``datetime``
-    via ``.to_list()``, which ``date2num`` accepts directly."""
+    """
     try:
         import polars as pl
     except ImportError:
@@ -42,18 +40,7 @@ def _to_mpl_dates(values):
 
 
 def _apply_date_axis(scale, ax, axis: str, *, view_limits) -> None:
-    """Shared ``apply_to_axis`` body for date / datetime / time scales.
-
-    Honours explicit ``breaks=`` (list / Series of dates) by installing a
-    :class:`FixedLocator`; falls back to :class:`AutoDateLocator` (tuned
-    to ``minticks=4, maxticks=6`` to match ggplot2's
-    ``scales::breaks_pretty(n=5)``) for ``"default"``.
-
-    Default formatter is :class:`ConciseDateFormatter`, which mirrors
-    R's ``scales::label_date_short()``: year-aligned ticks render as
-    ``"1960"``, month-aligned as ``"Jan"`` plus a year tag at the
-    transition, etc. A user-supplied ``date_format``/``date_labels``
-    overrides with a fixed strftime pattern."""
+    """Shared ``apply_to_axis`` body for date / datetime / time scales."""
     import matplotlib.dates as mdates
     from matplotlib.ticker import FixedLocator
 
@@ -76,8 +63,6 @@ def _apply_date_axis(scale, ax, axis: str, *, view_limits) -> None:
         formatter = mdates.DateFormatter(scale.date_format)
     target_axis.set_major_formatter(formatter)
 
-    # Optional explicit ``labels=[...]`` overrides the formatter (used
-    # when the user wants completely custom strings, not strftime).
     if (
         not (isinstance(scale.labels, str) and scale.labels == "default")
         and scale.labels is not None

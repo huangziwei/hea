@@ -13,12 +13,6 @@ import pytest
 
 from hea.tidy import DataFrame, between, closest, col, join_by, overlaps, within
 
-# ---------------------------------------------------------------------------
-# Fixtures — small frames that mirror the chapter's shapes (carrier/airline,
-# tailnum/plane, day/weather, dest/airport, plus the parties/employees pair
-# used for non-equi / rolling / overlap joins).
-# ---------------------------------------------------------------------------
-
 
 @pytest.fixture
 def flights2():
@@ -121,17 +115,11 @@ def employees():
     )
 
 
-# ---------------------------------------------------------------------------
-# Natural joins — by= defaults to shared column names (dplyr behaviour).
-# ---------------------------------------------------------------------------
-
-
 def test_left_join_natural_uses_shared_columns(flights2, airlines):
     """``left_join(other)`` joins on every shared column name (here: ``carrier``)."""
     out = flights2.left_join(airlines)
     assert isinstance(out, DataFrame)
     assert "name" in out.columns
-    # all 5 left rows preserved + airline name attached
     assert out.height == flights2.height
     assert out["name"].to_list() == [
         "United Air Lines Inc.",
@@ -196,16 +184,10 @@ def test_non_numeric_mismatch_still_errors():
         left.left_join(right, "k")
 
 
-# ---------------------------------------------------------------------------
-# Explicit by= forms: str, list[str], dict, join_by().
-# ---------------------------------------------------------------------------
-
-
 def test_left_join_by_string(flights2, planes):
     """``by="tailnum"`` — explicit single-column equi join."""
     out = flights2.left_join(planes, "tailnum")
     assert "tailnum" in out.columns
-    # ``year`` collides → dplyr suffix .x/.y on both sides
     assert "year.x" in out.columns
     assert "year.y" in out.columns
     assert "year" not in out.columns
@@ -228,7 +210,6 @@ def test_left_join_by_dict_renames(flights2, airports):
     """``by={left: right}`` — dict form maps unequal column names."""
     out = flights2.left_join(airports, {"dest": "faa"})
     assert "name_airport" in out.columns
-    # right key dropped under keep=False default
     assert "faa" not in out.columns
 
 
@@ -246,11 +227,6 @@ def test_left_join_join_by_eq_rename(flights2, airports):
     assert out.height == flights2.height
 
 
-# ---------------------------------------------------------------------------
-# keep= toggle. dplyr default is False (right-side key dropped); True keeps it.
-# ---------------------------------------------------------------------------
-
-
 def test_keep_false_drops_right_key(flights2, airports):
     out = flights2.left_join(airports, {"dest": "faa"}, keep=False)
     assert "faa" not in out.columns
@@ -263,11 +239,6 @@ def test_keep_true_keeps_both_keys(flights2, airports):
     assert "dest" in out.columns
 
 
-# ---------------------------------------------------------------------------
-# Suffix on non-key collisions defaults to dplyr's (".x", ".y").
-# ---------------------------------------------------------------------------
-
-
 def test_suffix_default_is_dplyr_two_sided(flights2, planes):
     out = flights2.left_join(planes, "tailnum")
     assert "year.x" in out.columns
@@ -278,11 +249,6 @@ def test_suffix_custom(flights2, planes):
     out = flights2.left_join(planes, "tailnum", suffix=("_l", "_r"))
     assert "year_l" in out.columns
     assert "year_r" in out.columns
-
-
-# ---------------------------------------------------------------------------
-# inner / right / full mutating joins.
-# ---------------------------------------------------------------------------
 
 
 def test_inner_join_drops_unmatched():
@@ -307,12 +273,6 @@ def test_full_join_keeps_all_unmatched():
     assert sorted(out["k"].to_list()) == [1, 2, 3, 4]
 
 
-# ---------------------------------------------------------------------------
-# Filtering joins: semi_join keeps left rows with a match; anti_join keeps
-# rows with NO match.
-# ---------------------------------------------------------------------------
-
-
 def test_semi_join_keeps_left_columns_only(airports, flights2):
     """``semi_join`` filters left to rows matching right, no right cols added."""
     out = airports.semi_join(flights2, join_by(col("faa") == col("origin")))
@@ -322,14 +282,7 @@ def test_semi_join_keeps_left_columns_only(airports, flights2):
 
 def test_anti_join_returns_left_with_no_match(flights2, airports):
     out = flights2.anti_join(airports, join_by(col("dest") == col("faa")))
-    # MIA and BQN are in flights2.dest but not in airports.faa
     assert set(out["dest"].to_list()) == {"MIA", "BQN"}
-
-
-# ---------------------------------------------------------------------------
-# Cross join — Cartesian product. Both sides' columns get dplyr suffix if
-# they collide (here ``name`` is on both sides).
-# ---------------------------------------------------------------------------
 
 
 def test_cross_join_yields_cartesian_product():
@@ -339,15 +292,9 @@ def test_cross_join_yields_cartesian_product():
     assert "name.x" in out.columns and "name.y" in out.columns
 
 
-# ---------------------------------------------------------------------------
-# Non-equi self-join via ``join_by(col("id") < col("id"))``.
-# ---------------------------------------------------------------------------
-
-
 def test_non_equi_self_join_inequality():
     df = DataFrame({"id": [1, 2, 3, 4], "name": ["John", "Simon", "Tracy", "Max"]})
     out = df.inner_join(df, join_by(col("id") < col("id")))
-    # 4 choose 2 = 6 ordered pairs (i, j) with i < j
     assert out.height == 6
     assert "id.x" in out.columns and "id.y" in out.columns
     pairs = list(zip(out["id.x"].to_list(), out["id.y"].to_list()))
@@ -360,18 +307,12 @@ def test_non_equi_left_join_not_implemented():
         df.left_join(df, join_by(col("id") < col("id")))
 
 
-# ---------------------------------------------------------------------------
-# Rolling join via ``closest()``. dplyr ch19's parties/birthday example.
-# ---------------------------------------------------------------------------
-
-
 def test_closest_backward_rolling_join(employees, parties):
     """``closest(birthday >= party)`` → largest party date ≤ birthday."""
     out = employees.left_join(
         parties.select("q", "party"),
         join_by(closest(col("birthday") >= col("party"))),
     )
-    # Each employee should get the most recent past quarterly party.
     result = {name: q for name, q in zip(out["name"].to_list(), out["q"].to_list())}
     assert result == {"Alice": 1, "Bob": 1, "Carl": 3, "Dora": 4}
 
@@ -398,17 +339,11 @@ def test_closest_rejects_non_inequality():
         closest(pl.lit(True))
 
 
-# ---------------------------------------------------------------------------
-# Overlap join via ``between()``. dplyr ch19's parties/birthday range example.
-# ---------------------------------------------------------------------------
-
-
 def test_between_overlap_join(employees, parties):
     out = employees.inner_join(
         parties,
         join_by(between(col("birthday"), col("start"), col("end"))),
     )
-    # Each birthday falls in exactly one quarter window → 4 rows.
     assert out.height == 4
     result = {name: q for name, q in zip(out["name"].to_list(), out["q"].to_list())}
     assert result == {"Alice": 1, "Bob": 1, "Carl": 3, "Dora": 4}
@@ -439,8 +374,6 @@ def test_overlaps_helper_finds_overlapping_intervals():
 def test_within_helper_finds_contained_intervals():
     left = DataFrame({"a": ["A", "B"], "a_lo": [10, 20], "a_hi": [12, 50]})
     right = DataFrame({"b": ["x", "y"], "b_lo": [0, 0], "b_hi": [15, 100]})
-    # A's [10, 12] is within both [0, 15] and [0, 100]; B's [20, 50] is
-    # within [0, 100] but NOT [0, 15].
     out = left.inner_join(right, join_by(within("a_lo", "a_hi", "b_lo", "b_hi")))
     assert sorted(zip(out["a"].to_list(), out["b"].to_list())) == [
         ("A", "x"),
@@ -449,20 +382,10 @@ def test_within_helper_finds_contained_intervals():
     ]
 
 
-# ---------------------------------------------------------------------------
-# Sanity: result type is hea DataFrame, not pl.DataFrame.
-# ---------------------------------------------------------------------------
-
-
 def test_join_preserves_subclass(flights2, airlines):
     out = flights2.left_join(airlines)
     assert type(out) is DataFrame
     assert isinstance(out, pl.DataFrame)
-
-
-# ---------------------------------------------------------------------------
-# Argument validation.
-# ---------------------------------------------------------------------------
 
 
 def test_join_by_rejects_unsupported_arg():

@@ -94,8 +94,6 @@ class _Operator:
         self._A = A
         self._duck = duck
         self.shape = shape
-        # `np.result_type` reads this, which is how the working precision is
-        # derived from the operator rather than from a probe product.
         self.dtype = np.dtype(getattr(A, "dtype", np.float64))
 
     @property
@@ -112,11 +110,7 @@ class _Operator:
 
 
 def _sym_ortho(a, b):
-    """Stable Givens rotation, as ``SymOrtho`` in the originals.
-
-    Preferred to the direct formula because it removes the ``1/eps`` that
-    appears when one of the two is far smaller than the other.
-    """
+    """Stable Givens rotation, as ``SymOrtho`` in the originals."""
     if b == 0:
         return np.sign(a), 0, abs(a)
     elif a == 0:
@@ -226,8 +220,6 @@ def lsqr(
     cs2 = -1
     sn2 = 0
 
-    # The first vectors of the bidiagonalization, satisfying
-    # beta*u = b - A@x and alfa*v = A'@u.
     u = b
     bnorm = np.linalg.norm(b)
 
@@ -257,8 +249,6 @@ def lsqr(
     r1norm = rnorm
     r2norm = rnorm
 
-    # Ordered before the loop rather than after it, so arnorm == 0 returns
-    # rather than dividing by it.
     arnorm = alfa * beta
     if arnorm == 0:
         if show:
@@ -280,10 +270,6 @@ def lsqr(
 
     while itn < iter_lim:
         itn = itn + 1
-        # The next step of the bidiagonalization, giving the next beta, u,
-        # alfa, v, which satisfy
-        #     beta*u  =  A@v   -  alfa*u,
-        #     alfa*v  =  A'@u  -  beta*v.
         u = A.matvec(v) - alfa * u
         beta = np.linalg.norm(u)
 
@@ -295,8 +281,6 @@ def lsqr(
             if alfa > 0:
                 v = (1 / alfa) * v
 
-        # A plane rotation eliminates the damping parameter, altering the
-        # diagonal (rhobar) of the lower-bidiagonal matrix.
         if damp > 0:
             rhobar1 = sqrt(rhobar**2 + dampsq)
             cs1 = rhobar / rhobar1
@@ -304,12 +288,9 @@ def lsqr(
             psi = sn1 * phibar
             phibar = cs1 * phibar
         else:
-            # cs1 = 1 and sn1 = 0
             rhobar1 = rhobar
             psi = 0.0
 
-        # A second rotation eliminates the subdiagonal element (beta), taking
-        # the lower-bidiagonal matrix to an upper-bidiagonal one.
         cs, sn, rho = _sym_ortho(rhobar1, beta)
 
         theta = sn * alfa
@@ -329,8 +310,6 @@ def lsqr(
         if calc_var:
             var = var + dk**2
 
-        # A rotation on the right eliminates the super-diagonal element
-        # (theta), and the result estimates norm(x).
         delta = sn2 * rho
         gambar = -cs2 * rho
         rhs = phi - delta * z
@@ -342,16 +321,12 @@ def lsqr(
         z = rhs / gamma
         xxnorm = xxnorm + z**2
 
-        # Estimate the condition of Abar and the norms of rbar and Abar'rbar.
         acond = anorm * sqrt(ddnorm)
         res1 = phibar**2
         res2 = res2 + psi**2
         rnorm = sqrt(res1 + res2)
         arnorm = alfa * abs(tau)
 
-        # r1norm = ||b - Ax||, r2norm = sqrt(r1norm² + damp²||x - x0||²), so
-        # r1norm comes back from r2norm by subtraction. It cancels, but not
-        # enough to matter here.
         if damp > 0:
             r1sq = rnorm**2 - dampsq * xxnorm
             r1norm = sqrt(abs(r1sq))
@@ -367,9 +342,6 @@ def lsqr(
         t1 = test1 / (1 + anorm * xnorm / bnorm)
         rtol = btol + atol * anorm * xnorm / bnorm
 
-        # The tests in this block guard against extremely small atol, btol or
-        # ctol — a caller may have set any of them to 0 — and are equivalent to
-        # the tests below run at atol = btol = eps, conlim = 1/eps.
         if itn >= iter_lim:
             istop = 7
         if 1 + test3 <= 1:
@@ -379,7 +351,6 @@ def lsqr(
         if 1 + t1 <= 1:
             istop = 4
 
-        # The tolerances the caller did set.
         if test3 <= ctol:
             istop = 3
         if test2 <= atol:
@@ -539,7 +510,6 @@ def lsmr(
     h = v.copy()
     hbar = np.zeros(n, dtype)
 
-    # Variables for the estimate of ||r||.
     betadd = beta
     betad = 0
     rhodold = 1
@@ -548,7 +518,6 @@ def lsmr(
     zeta = 0
     d = 0
 
-    # Variables for the estimates of ||A|| and cond(A).
     normA2 = alpha * alpha
     maxrbar = 0
     minrbar = 1e100
@@ -567,8 +536,6 @@ def lsmr(
         ctol = 1 / conlim
     normr = beta
 
-    # Ordered before the loop rather than after it, so normar == 0 returns
-    # rather than dividing by it.
     normar = alpha * beta
     if normar == 0:
         if show:
@@ -592,10 +559,6 @@ def lsmr(
     while itn < maxiter:
         itn = itn + 1
 
-        # The next step of the bidiagonalization, giving the next beta, u,
-        # alpha, v, which satisfy
-        #      beta*u  =  A@v   -  alpha*u,
-        #     alpha*v  =  A'@u  -  beta*v.
         u *= -alpha
         u += A.matvec(v)
         beta = np.linalg.norm(u)
@@ -608,18 +571,13 @@ def lsmr(
             if alpha > 0:
                 v *= 1 / alpha
 
-        # Here beta = beta_{k+1} and alpha = alpha_{k+1}.
-
-        # Rotation Qhat_{k,2k+1}.
         chat, shat, alphahat = _sym_ortho(alphabar, damp)
 
-        # Rotation Q_i takes B_i to R_i.
         rhoold = rho
         c, s, rho = _sym_ortho(alphahat, beta)
         thetanew = s * alpha
         alphabar = c * alpha
 
-        # Rotation Qbar_i takes R_i^T to R_i^bar.
         rhobarold = rhobar
         zetaold = zeta
         thetabar = sbar * rho
@@ -628,40 +586,33 @@ def lsmr(
         zeta = cbar * zetabar
         zetabar = -sbar * zetabar
 
-        # Update h, hbar, x.
         hbar *= -(thetabar * rho / (rhoold * rhobarold))
         hbar += h
         x += (zeta / (rho * rhobar)) * hbar
         h *= -(thetanew / rho)
         h += v
 
-        # Estimate ||r||, by applying rotation Qhat_{k,2k+1} ...
         betaacute = chat * betadd
         betacheck = -shat * betadd
 
-        # ... then Q_{k,k+1} ...
         betahat = c * betaacute
         betadd = -s * betaacute
 
-        # ... then Qtilde_{k-1}, where betad is betad_{k-1} on entry.
         thetatildeold = thetatilde
         ctildeold, stildeold, rhotildeold = _sym_ortho(rhodold, thetabar)
         thetatilde = stildeold * rhobar
         rhodold = ctildeold * rhobar
         betad = -stildeold * betad + ctildeold * betahat
 
-        # Now betad is betad_k and rhodold is rhod_k.
         tautildeold = (zetaold - thetatildeold * tautildeold) / rhotildeold
         taud = (zeta - thetatilde * tautildeold) / rhodold
         d = d + betacheck * betacheck
         normr = sqrt(d + (betad - taud) ** 2 + betadd * betadd)
 
-        # Estimate ||A||.
         normA2 = normA2 + beta * beta
         normA = sqrt(normA2)
         normA2 = normA2 + alpha * alpha
 
-        # Estimate cond(A).
         maxrbar = max(maxrbar, rhobarold)
         if itn > 1:
             minrbar = min(minrbar, rhobarold)
@@ -679,9 +630,6 @@ def lsmr(
         t1 = test1 / (1 + normA * normx / normb)
         rtol = btol + atol * normA * normx / normb
 
-        # The tests in this block guard against extremely small atol, btol or
-        # ctol — a caller may have set any of them to 0 — and are equivalent to
-        # the tests below run at atol = btol = eps, conlim = 1/eps.
         if itn >= maxiter:
             istop = 7
         if 1 + test3 <= 1:
@@ -691,7 +639,6 @@ def lsmr(
         if 1 + t1 <= 1:
             istop = 4
 
-        # The tolerances the caller did set.
         if test3 <= ctol:
             istop = 3
         if test2 <= atol:

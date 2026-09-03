@@ -43,8 +43,6 @@ def _resolution(arr: np.ndarray) -> float:
 @dataclass
 class StatBoxplot(Stat):
     coef: float = 1.5
-    # ``None`` → auto: ``resolution(x) * 0.75`` per ggplot2's setup_params.
-    # A float passes through as the literal box width (in x-axis units).
     width: float | None = None
 
     def compute_panel(self, data, params):
@@ -56,17 +54,6 @@ class StatBoxplot(Stat):
         if not has_x and not has_y:
             return pl.DataFrame()
 
-        # ggplot2's auto-orient: pick the *continuous* axis as the
-        # distribution axis. The 5-number summary always runs on ``y``
-        # internally, so when the distribution lives on x we rename
-        # ``x``↔``y`` here and rename the output columns back below.
-        #
-        # Cases:
-        #   * ``aes(x=...)`` alone           → flip (single-distribution; x at 0).
-        #   * ``aes(y=...)`` alone           → no flip; pin x=0.
-        #   * ``aes(x=cont, y=discrete)``    → flip (horizontal boxes).
-        #   * ``aes(x=discrete, y=cont)``    → no flip (vertical boxes, default).
-        #   * both continuous / both discrete → no flip (ggplot2's default).
         x_discrete = has_x and data["x"].dtype in _DISCRETE_DTYPES
         y_discrete = has_y and data["y"].dtype in _DISCRETE_DTYPES
         flipped = False
@@ -78,9 +65,6 @@ class StatBoxplot(Stat):
         elif has_y and not has_x:
             data = data.with_columns(x=pl.lit(0.0).cast(pl.Float64))
         elif y_discrete and not x_discrete:
-            # Horizontal boxplot: y carries the categorical position,
-            # x carries the distribution. Swap so the rest of compute_panel
-            # (which assumes y == distribution) just works.
             flipped = True
             data = data.rename({"x": "_swap_y", "y": "_swap_x"}).rename(
                 {"_swap_y": "y", "_swap_x": "x"}
@@ -88,11 +72,6 @@ class StatBoxplot(Stat):
 
         x_is_discrete = data["x"].dtype in _DISCRETE_DTYPES
 
-        # ggplot2 groups continuous-x boxplots by the layer's ``group``
-        # aesthetic only — including ``x`` in groupby would over-split,
-        # producing one box per unique x value instead of one per group —
-        # ``aes(group=cut_width(carat, 0.1))`` would then collapse to many
-        # tiny boxes regardless of bin width.
         groupby_cols: list[str] = []
         if x_is_discrete:
             groupby_cols.append("x")
@@ -100,11 +79,6 @@ class StatBoxplot(Stat):
             if aes in data.columns and aes not in groupby_cols:
                 groupby_cols.append(aes)
 
-        # Capture source dtypes for the discrete grouping columns so
-        # ``_row``'s ``pl.DataFrame(cols)`` doesn't downgrade an
-        # ``Enum(['Fair','Good',...])`` x to plain Utf8 — which would
-        # then sort alphabetically downstream and undo a deliberate
-        # ``fct_reorder``. We cast back after concat below.
         preserve_dtypes = {
             col: data[col].dtype for col in groupby_cols if col in data.columns
         }
@@ -130,25 +104,12 @@ class StatBoxplot(Stat):
             if not rows:
                 return pl.DataFrame()
             out = pl.concat(rows)
-            # Restore Enum / Categorical dtypes on the grouping columns —
-            # ``pl.DataFrame(cols)`` in ``_row`` infers Utf8 from Python
-            # strings, which would undo any user-supplied factor order
-            # (``fct_reorder``, ``pl.Enum`` levels). Done here BEFORE the
-            # flipped-rename below so the swap of ``x``↔``y`` carries the
-            # restored dtype with it.
             for col, dtype in preserve_dtypes.items():
                 if col in out.columns and out[col].dtype != dtype:
                     out = out.with_columns(
                         out[col].cast(dtype, strict=False).alias(col)
                     )
 
-        # Auto width = ``resolution(box-centres) * 0.75``. ggplot2
-        # computes resolution on the *raw* layer x, which for binned
-        # continuous data (e.g. ``cut_width(carat, 0.1)``) returns the
-        # underlying carat tick (~0.01) and produces line-thin boxes.
-        # Using the box centres instead — i.e. the spacing between
-        # adjacent boxes after groupby — gives boxes scaled to the bin
-        # width, which is what users actually want.
         if self.width is not None:
             final_width = float(self.width)
         elif x_is_discrete:
@@ -161,11 +122,6 @@ class StatBoxplot(Stat):
         )
 
         if flipped:
-            # Mirror ggplot2's StatBoxplot: when the distribution axis is
-            # x, the per-box stats become x-prefixed and ``y`` carries the
-            # cross-axis position. Renaming (rather than passing a flag
-            # through) lets the X scale auto-train on ``xmin``/``xmax``/…
-            # via the existing ``_X_POSITIONAL_AES`` plumbing.
             out = out.rename(
                 {
                     "x": "y",
@@ -195,10 +151,6 @@ class StatBoxplot(Stat):
         ymin = float(non_out.min()) if len(non_out) else float(q[0])
         ymax = float(non_out.max()) if len(non_out) else float(q[4])
 
-        # x position: discrete x → take the group key directly so the box
-        # lines up with the categorical tick label; continuous x → mid of
-        # the x range within the group (matches ggplot2's
-        # ``mean(range(data$x))``).
         cols: dict = {}
         if x_is_discrete and "x" in groupby_cols:
             x_idx = groupby_cols.index("x")
@@ -227,8 +179,6 @@ class StatBoxplot(Stat):
             }
         )
         df = pl.DataFrame(cols)
-        # Polars list column needs explicit typing when the inner list is
-        # numeric and might be empty.
         df = df.with_columns(
             outliers=pl.Series(
                 "outliers", [outliers.tolist()], dtype=pl.List(pl.Float64)

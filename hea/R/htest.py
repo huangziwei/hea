@@ -21,14 +21,6 @@ from . import distributions as _dist
 from . import nmath as _nm
 from ._shared import _as_array, _fmt, _fmt_pval, _rfma
 
-# ``lm`` is imported inside the three functions that call it, not here.
-# Module level closes a cycle: ``hea.family`` imports ``hea.R.nmath``, which
-# runs ``hea/R/__init__.py``, which imports this module, which would import
-# ``hea.models`` -- whose ``bam`` imports ``hea.family`` straight back. The
-# An eager ``hea/__init__.py`` hides that by loading ``hea.R`` first; a lazy one
-# does not, and whichever of the two a caller touches first decides. It is also
-# weight: nothing in ``hea.R`` needs ``bam``/``gam``/``glm`` at import.
-
 
 def _avg_rank(a) -> np.ndarray:
     """R's ``rank(x)`` with ``ties.method = "average"`` on a numeric vector —
@@ -98,7 +90,6 @@ class HTest:
                     f"alternative hypothesis: true {null_str.split(' = ')[0]} is {tail} {null_str.split(' = ')[1]}"
                 )
             elif null is not None:
-                # name from estimate keys when possible
                 nm = next(iter(self.estimate.keys()), "value")
                 out.append(f"alternative hypothesis: true {nm} is {tail} {_fmt(null)}")
         if self.conf_int is not None:
@@ -143,9 +134,6 @@ class AnovaTable:
             f"{'Residuals':<12}{_fmt(self.residual_ss):>10}{self.residual_df:>4}"
         )
         return "\n".join(out)
-
-
-# ---- rank helpers (used by Wilcoxon/Spearman/Lindeløv constructions) -
 
 
 def rank(x):
@@ -265,14 +253,6 @@ def p_adjust(p, method: str = "holm", n: int | None = None):
     return p0
 
 
-# ---- hypothesis tests -----------------------------------------------
-#
-# Every function returns an :class:`HTest`. R parameter names are
-# preserved where possible: ``alternative`` ∈ {"two.sided", "greater",
-# "less"}, ``conf_level=0.95``, ``correct=`` (continuity correction)
-# where applicable. ``mu`` / ``p`` / ``ratio`` carry their R meanings.
-
-
 def t_test(
     x,
     y=None,
@@ -371,11 +351,6 @@ def t_test(
     )
 
 
-# --- Streitberg-Röhmel exact permutation densities (src/permdist.c) ----------
-# Used for the exact Wilcoxon p-value in the presence of ties/zeroes, where the
-# plain signrank/wilcox distributions no longer apply.
-
-
 def _rsum_ld(arr) -> float:
     """R's ``sum()`` over a double vector: strict left-to-right accumulation in
     ``LDOUBLE`` (80-bit x87 on x86-64), which ``np.sum`` (pairwise) does not
@@ -387,11 +362,7 @@ def _rsum_ld(arr) -> float:
 
 
 def _rmean(arr) -> float:
-    """R's ``mean.default`` / cov.c ``MEAN``: two-pass LDOUBLE mean.
-
-    First pass ``tmp = Σx / n`` (LDOUBLE); second pass adds the LDOUBLE
-    correction ``Σ(x − tmp) / n``; the result is truncated to ``double``.
-    ``np.mean`` (pairwise, no correction) does not reproduce this."""
+    """R's ``mean.default`` / cov.c ``MEAN``: two-pass LDOUBLE mean."""
     a = np.asarray(arr, dtype=float)
     n = a.size
     s = np.longdouble(0.0)
@@ -639,7 +610,6 @@ def wilcox_test(
             data_name=data_name,
         )
 
-    # two-sample: Wilcoxon rank-sum (Mann-Whitney)
     if len(y) < 1:
         raise ValueError("not enough 'y' observations")
     method = "Wilcoxon rank sum test"
@@ -747,7 +717,6 @@ def _two_sided_min(lo, hi) -> float:
     return float(min(2.0 * min(lo, hi), 1.0))
 
 
-# --- Exact Spearman (AS 89, src/prho.c) & Kendall (src/kendall.c) ------------
 _PRHO_C = (
     0.2274,
     0.2531,
@@ -794,11 +763,6 @@ def _prho(n, is_, lower_tail):
                 if is_ <= ise:
                     ifr += 1
         return (nfac - ifr if lower_tail else ifr) / nfac
-    # Edgeworth series expansion.  Every `a*b ± c` in prho.c's nested Horner is
-    # one fmadd in R's arm64 build (clang contracts the leading multiply, or the
-    # trailing one when the leading operand is not itself a product), so the
-    # nesting below is `_rfma` in exactly those places -- on x86 `_rfma` is the
-    # plain expression, keeping this 0-ulp to R on both arches.
     y = float(n)
     b = 1 / y
     x = (6.0 * (is_ - 1) * b / _rfma(y, y, -1.0) - 1) * math.sqrt(y - 1)
@@ -981,7 +945,6 @@ def cor_test(
         )
 
     if method == "kendall":
-        # Kendall score S = sum_{i<j} sign(xi-xj) sign(yi-yj)  (O(n^2)).
         sx = np.sign(np.subtract.outer(x, x))
         sy = np.sign(np.subtract.outer(y, y))
         S = float(np.sum(np.triu(sx * sy, 1)))
@@ -1013,7 +976,6 @@ def cor_test(
                 alternative=alternative,
                 data_name="x and y",
             )
-        # asymptotic normal with tie-corrected variance
         v0 = n * (n - 1) * (2 * n + 5)
         vt = float(np.sum(cx * (cx - 1) * (2 * cx + 5)))
         vu = float(np.sum(cy * (cy - 1) * (2 * cy + 5)))
@@ -1065,7 +1027,6 @@ def kruskal_test(formula: str, data: pl.DataFrame) -> HTest:
     r = _avg_rank(x)
     glabels = np.unique(g)
     k = len(glabels)
-    # STATISTIC = sum_j (sum of ranks in group j)^2 / n_j, then H with tie corr.
     stat = float(sum(r[g == gl].sum() ** 2 / (g == gl).sum() for gl in glabels))
     _, ties = np.unique(x, return_counts=True)
     ties = ties.astype(float)
@@ -1114,7 +1075,6 @@ def chisq_test(
         return _chisq_table(
             arr, correct=correct, name="x", simulate_p_value=simulate_p_value, B=B
         )
-    # goodness of fit
     counts = arr.astype(float)
     if p is None:
         p = np.full_like(counts, 1.0 / len(counts))
@@ -1128,8 +1088,6 @@ def chisq_test(
     expected = total * p
     stat = float(np.sum((counts - expected) ** 2 / expected))
     if simulate_p_value:
-        # R: sm <- matrix(sample.int(nx, B*n, TRUE, prob=p), nrow=n); per column
-        # ss <- sum((tabulate(col) - E)^2 / E); PVAL uses almost.1 * STATISTIC.
         nx = len(counts)
         nn = int(total)
         idx = _dist._r_rng().sample_prob(p, B * nn, replace=True)
@@ -1196,7 +1154,6 @@ def _chisq_table(
     sc = tbl.sum(axis=0)
     if simulate_p_value and np.all(sr > 0) and np.all(sc > 0):
         e = np.outer(sr, sc) / n
-        # STATISTIC: sorted-descending LDOUBLE sum (R's PR#3486 idiom).
         resid2 = ((tbl - e) ** 2 / e).ravel()
         stat = _rsum_ld(np.sort(resid2)[::-1])
         tmp = _chisq_sim(sr, sc, int(B), e, _dist._r_rng())
@@ -1224,12 +1181,7 @@ def _chisq_table(
 
 
 def _crosstab(x, y) -> np.ndarray:
-    """Build a 2-way contingency table from two 1-D vectors (utf8-cast).
-
-    Internal columns use ``__x__`` / ``__y__`` so user data containing
-    string values like ``"x"`` / ``"y"`` doesn't collide with the index
-    column name once ``pivot`` spreads the levels of ``y`` into columns.
-    """
+    """Build a 2-way contingency table from two 1-D vectors (utf8-cast)."""
     x_ser = pl.Series("__x__", x).cast(pl.Utf8)
     y_ser = pl.Series("__y__", y).cast(pl.Utf8)
     return (
@@ -1309,7 +1261,6 @@ def _fisher_test_simulate(tbl, name, B):
         raise ValueError("need 2 or more non-zero row marginals")
     if nc <= 1:
         raise ValueError("need 2 or more non-zero column marginals")
-    # STATISTIC = -sum(lfactorial(x)) = -sum(lgamma(x+1)); R sums in LDOUBLE.
     stat = -_rsum_ld(np.array([_nm._lgammafn(float(v) + 1.0) for v in x2.ravel()]))
     tmp = _fisher_sim(x2.sum(axis=1), x2.sum(axis=0), B, _dist._r_rng())
     almost_1 = 1.0 + 64.0 * _nm._DBL_EPSILON  # PR#10558: STATISTIC < 0
@@ -1432,9 +1383,6 @@ def fisher_test(
     logdc = np.array([_nm.dhyper(s, m, n, k, True) for s in support])
 
     def dnhyper(ncp):
-        # R's sum() is a sequential LDOUBLE accumulation; np.sum is pairwise —
-        # use _rsum_ld so the normalized density (and everything downstream:
-        # p-value, MLE, CI via uniroot) is bit-exact to R.
         d = logdc + math.log(ncp) * support
         d = np.exp(d - np.max(d))
         return d / _rsum_ld(d)
@@ -1586,9 +1534,6 @@ def prop_test(
             data_name="x and n",
         )
     if k >= 2 and p is None:
-        # k-sample equality of proportions: (k × 2) chi-squared. R applies
-        # Yates' continuity correction only for the 2×2 case; for k > 2
-        # the correction is silently dropped.
         tbl = np.array(
             [[int(x_arr[i]), int(n_arr[i] - x_arr[i])] for i in range(k)], dtype=float
         )
@@ -1641,7 +1586,6 @@ def binom_test(
         n = int(n)
     p = float(p)
 
-    # p-value — faithful stats:::binom.test (exact, nmath dbinom/pbinom).
     if alternative == "less":
         pval = float(_dist.pbinom(x_succ, n, p))
     elif alternative == "greater":
@@ -1671,7 +1615,6 @@ def binom_test(
                 + _dist.pbinom(x_succ - 1, n, p, lower_tail=False)
             )
 
-    # Clopper-Pearson CI via qbeta.
     def p_L(a):
         return 0.0 if x_succ == 0 else float(_dist.qbeta(a, x_succ, n - x_succ + 1))
 
@@ -1777,7 +1720,6 @@ def bartlett_test(x, g) -> HTest:
     vi = np.array([np.var(gr, ddof=1) for gr in groups], dtype=float)
     n_total = float(ni.sum())
     v_total = float(np.sum(ni * vi) / n_total)
-    # stats:::bartlett.test.default
     stat = (n_total * math.log(v_total) - np.sum(ni * np.log(vi))) / (
         1.0 + (np.sum(1.0 / ni) - 1.0 / n_total) / (3.0 * (k - 1))
     )
@@ -1804,15 +1746,7 @@ def _swilk_poly(cc, nord: int, x: float) -> float:
 
 
 def _swilk(x: np.ndarray):
-    """Royston (1995) AS R94 — Shapiro-Wilk W and its p-value.
-
-    Line-by-line port of ``swilk()`` in R's ``src/library/stats/src/swilk.c``.
-    ``x`` must be **sorted ascending** (the R wrapper sorts). Returns
-    ``(W, pw, ifault)``;
-    ``ifault == 7`` is R's benign "sort order" flag and is ignored by the caller.
-    Uses the bit-exact ported ``qnorm5`` / ``pnorm5`` (nmath) for the normal
-    scores and the tail probability, so W and p are 0-ulp to R's ``.Call(C_SWilk)``.
-    """
+    """Royston (1995) AS R94 — Shapiro-Wilk W and its p-value."""
     n = int(x.size)
     nn2 = n // 2
     a = [0.0] * (nn2 + 1)  # 1-based, as in the Fortran/C original
@@ -1845,7 +1779,6 @@ def _swilk(x: np.ndarray):
         rsn = 1.0 / math.sqrt(an)
         a1 = _swilk_poly(c1, 6, rsn) - a[1] / ssumm2
 
-        # Normalize a[]
         if n > 5:
             i1 = 3
             a2 = -a[2] / ssumm2 + _swilk_poly(c2, 6, rsn)
@@ -1861,12 +1794,10 @@ def _swilk(x: np.ndarray):
         for i in range(i1, nn2 + 1):
             a[i] /= -fac
 
-    # Check for zero range
     rng = x[n - 1] - x[0]
     if rng < small:
         return 0.0, pw, 6
 
-    # Check for correct sort order on range - scaled X
     ifault = 0
     xx = x[0] / rng
     sx = xx
@@ -1886,7 +1817,6 @@ def _swilk(x: np.ndarray):
     if n > 5000:
         ifault = 2
 
-    # W statistic as squared correlation between data and coefficients
     sa /= n
     sx /= n
     ssa = ssx = sax = 0.0
@@ -1901,12 +1831,10 @@ def _swilk(x: np.ndarray):
         ssx += xsx * xsx
         sax += asa * xsx
 
-    # W1 = 1-W, computed this way to avoid rounding error for W very near 1
     ssassx = math.sqrt(ssa * ssx)
     w1 = (ssassx - sax) * (ssassx + sax) / (ssa * ssx)
     w = 1.0 - w1
 
-    # Significance level for W
     if n == 3:  # exact P value
         pi6 = 1.90985931710274  # = 6/pi
         stqr = 1.04719755119660  # = asin(sqrt(3/4))
@@ -1958,7 +1886,6 @@ def shapiro_test(x) -> HTest:
     )
 
 
-# --- Kolmogorov-Smirnov exact / asymptotic distributions (src/ks.c) ----------
 _KS_M_PI_2 = math.pi / 2.0
 _KS_M_PI_4 = math.pi / 4.0
 
@@ -2113,7 +2040,6 @@ def _pkolmogorov(q, size, two_sided=True, exact=True, lower_tail=True):
         return _pkolmogorov_one_exact(q, size, lower_tail)
     if two_sided:
         return _ks_K2l(math.sqrt(size) * q, lower_tail, 1e-6)
-    # R: exp(- 2 * n * q^2); q^2 == q*q, unary- binds above * → (-2*n)*(q*q)
     p = math.exp((-2 * size) * (q * q))
     return (1 - p) if lower_tail else p
 
@@ -2123,12 +2049,7 @@ def _ks_test_two(q, r, s, two):
 
 
 def _psmirnov_exact_uniq(q, m, n, two, lower):
-    """Two-sample exact Smirnov, distinct values (ks.c uniq_lower/upper).
-
-    The recursion steps use ``_rfma`` because clang contracts ks.c's
-    ``w*u[j] + u[j-1]`` / ``v*u[j] + w*u[j-1]`` into one fmadd on arm64; on x86
-    ``_rfma`` is the plain expression, so this is 0-ulp to R on both arches.
-    """
+    """Two-sample exact Smirnov, distinct values (ks.c uniq_lower/upper)."""
     md = float(m)
     nd = float(n)
     if lower:
@@ -2148,7 +2069,6 @@ def _psmirnov_exact_uniq(q, m, n, two, lower):
                 else:
                     u[j] = _rfma(w, u[j], u[j - 1])
         return u[n]
-    # upper
     u = [0.0] * (n + 1)
     u[0] = 0.0
     for j in range(1, n + 1):
@@ -2192,7 +2112,6 @@ def _psmirnov_exact_ties(q, m, n, z, two, lower):
                 else:
                     u[j] = _rfma(w, u[j], u[j - 1])
         return u[n]
-    # upper
     u[0] = 0.0
     for j in range(1, n + 1):
         if _ks_test_two(q, 0.0, j / nd, two) and z[j]:
@@ -2213,9 +2132,7 @@ def _psmirnov_exact_ties(q, m, n, z, two, lower):
 
 
 def _psmirnov(q, n_x, n_y, w_combined, alternative, exact, lower_tail=True):
-    """R's ``psmirnov`` (ks.test.R) — two-sample Smirnov CDF P(D < q).
-
-    ``w_combined`` is the concatenated sample (for the ties path) or ``None``."""
+    """R's ``psmirnov`` (ks.test.R) — two-sample Smirnov CDF P(D < q)."""
     if q <= 0:
         return 1 - lower_tail
     if q > 1:
@@ -2227,7 +2144,6 @@ def _psmirnov(q, n_x, n_y, w_combined, alternative, exact, lower_tail=True):
             return _ks_K2l(math.sqrt(n) * q, lower_tail, 1e-6)
         ret = -math.expm1((-2 * n) * (q * q))  # R: -expm1(- 2 * n * q^2)
         return ret if lower_tail else 1 - ret
-    # exact
     m_, nn = int(n_x), int(n_y)
     if alternative == "less":
         m_, nn = nn, m_
@@ -2248,7 +2164,6 @@ def _psmirnov(q, n_x, n_y, w_combined, alternative, exact, lower_tail=True):
     return _psmirnov_exact_uniq(qa, m_, nn, two, False)
 
 
-# --- public Smirnov distribution surface (R: psmirnov/qsmirnov/rsmirnov) -----
 _DBL_EPS = 2.220446049250313e-16
 
 
@@ -2543,8 +2458,6 @@ def ks_test(
         w = np.concatenate([x_arr, y_arr])
         order = np.argsort(w, kind="stable")
         vals = np.where(order < n_x, 1.0 / n_x, -1.0 / n_y)
-        # R's cumsum() accumulates in LDOUBLE (src/main/cum.c), storing each
-        # partial as a double; np.cumsum is plain double — replicate for parity.
         acc = np.longdouble(0.0)
         z = np.empty(len(vals))
         for _i, _v in enumerate(vals):
@@ -2630,9 +2543,6 @@ def friedman_test(y, groups, blocks) -> HTest:
     b_arr = np.asarray(blocks)
     if not (y_arr.shape == g_arr.shape == b_arr.shape):
         raise ValueError("friedman_test(): y, groups, blocks must have the same length")
-    # Internal column names use ``__y__`` / ``__g__`` / ``__b__`` so user
-    # group/block labels equal to "y" or "g" or "b" don't collide with
-    # the temp column names after pivot.
     df = pl.DataFrame(
         {
             "__y__": y_arr,
@@ -2642,11 +2552,9 @@ def friedman_test(y, groups, blocks) -> HTest:
     )
     wide = df.pivot(values="__y__", index="__b__", on="__g__")
     cols = [c for c in wide.columns if c != "__b__"]
-    # (blocks × groups) matrix; rank within each block-row (R: t(apply(y,1,rank))).
     mat = np.column_stack([wide[c].to_numpy().astype(float) for c in cols])
     n, k = mat.shape
     r = np.vstack([_avg_rank(row) for row in mat])
-    # tie correction: sum over rows of sum(t^3 - t) for tied rank groups.
     tie_sum = 0.0
     for row in mat:
         _, cnt = np.unique(row, return_counts=True)
@@ -2751,7 +2659,6 @@ def fligner_test(x, g) -> HTest:
     n = len(x)
     if n < 2:
         raise ValueError("not enough observations")
-    # x <- x - tapply(x, g, median)[g]  (centre each group by its median)
     med = {gl: _rmedian(x[g == gl]) for gl in glabels}
     xc = x - np.array([med[gi] for gi in g])
     a = _dist.qnorm((1 + _avg_rank(np.abs(xc)) / (n + 1)) / 2)
@@ -3159,10 +3066,7 @@ def _d2x2xk(K: int, m, n, t):
     ``K`` strata of the central product-hypergeometric — port of ``d2x2xk.c``
     ``int_d2x2xk`` (uses nmath ``dhyper``). ``m``/``n``/``t`` are the per-stratum
     column-1, column-2, and row-1 totals.
-
-    The convolution step is ``_rfma`` because clang contracts d2x2xk.c's
-    ``c[i+1][w+j] += c[i][w] * u`` into one fmadd on arm64; on x86 ``_rfma`` is
-    the plain expression, so the density is 0-ulp to R on both arches."""
+    """
     c = [[1.0]]
     length = 0
     for i in range(K):
@@ -3395,7 +3299,6 @@ def mantelhaen_test(
             data_name="x",
         )
 
-    # Generalized Cochran-Mantel-Haenszel I x J x K test.
     df = (nr - 1) * (nc - 1)
     nvec = np.zeros(df)
     mvec = np.zeros(df)

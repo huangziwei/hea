@@ -262,12 +262,6 @@ def pairs(
     fig, axes = plt.subplots(n, n, figsize=figsize or (2 * n, 2 * n), squeeze=False)
     arrs = {c: data[c].cast(pl.Float64).to_numpy() for c in cols}
 
-    # Pin per-variable axis limits (with a small matplotlib-style pad) and
-    # apply them to every cell — without this, the diagonal sets tight
-    # limits while off-diagonals auto-scale with margin, so two cells in
-    # the same column end up with mismatched tick intervals. Can't use
-    # sharex='col'/sharey='row' instead because diag="hist" needs its own
-    # count y-axis, which sharing would clobber.
     def _padded(a, frac=0.04):
         lo, hi = float(np.nanmin(a)), float(np.nanmax(a))
         if not np.isfinite(lo) or not np.isfinite(hi) or hi == lo:
@@ -302,13 +296,10 @@ def pairs(
             if not (i == j and diag == "hist"):
                 ax.set_ylim(*ranges[cols[i]])
 
-            # R's pairs.default perimeter tick rule (0-indexed):
             top_lab = i == 0 and j % 2 == 1
             bot_lab = i == n - 1 and j % 2 == 0
             left_lab = j == 0 and i % 2 == 1
             right_lab = j == n - 1 and i % 2 == 0
-            # diag="hist" puts counts on y, so a perimeter y-label here
-            # would mislead — strip it for diagonal hist cells only.
             if i == j and diag == "hist":
                 left_lab = right_lab = False
 
@@ -402,9 +393,6 @@ def interaction_plot(
             if ys.size:
                 cells[ti, xi] = float(fun(ys))
 
-    # Honor a caller-specified figsize, even if it means stepping
-    # outside an active par() context (figsize wouldn't apply to a
-    # pre-allocated par cell — resolve_ax handles that switch).
     ax = resolve_ax(ax, figsize=figsize)
 
     x_pos = np.arange(len(x_levels))

@@ -50,11 +50,6 @@ MUS = np.array([0.05, 0.2, 0.5, 0.8, 0.95])
 ETAS = np.array([-2.5, -0.5, 0.0, 0.7, 2.0])
 
 
-# ---------------------------------------------------------------------------
-# Links — values pinned to R::stats::make.link + mgcv:::fix.family.link.
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "cls,link_oracle,linkinv_oracle,mu_eta_oracle,d2_oracle,d3_oracle,d4_oracle",
     [
@@ -274,7 +269,6 @@ ETAS = np.array([-2.5, -0.5, 0.0, 0.7, 2.0])
         (
             InverseSquareLink,
             [400.0, 25.0, 4.0, 1.5624999999999998, 1.10803324099723],
-            # linkinv at η<0 is NaN in R; we only check the η>0 entries.
             [np.nan, np.nan, np.nan, 1.1952286093343936, 0.70710678118654746],
             [np.nan, np.nan, np.nan, -0.8537347209531384, -0.17677669529663687],
             [
@@ -323,7 +317,6 @@ def test_link_values_match_mgcv(
     np.testing.assert_allclose(
         lk.d4link(MUS), d4_oracle, rtol=1e-12, atol=0, err_msg=f"{lk.name}.d4link"
     )
-    # InverseSquare's linkinv/mu_eta are only defined for η>0; mask the rest.
     linkinv_oracle = np.asarray(linkinv_oracle, dtype=float)
     mu_eta_oracle = np.asarray(mu_eta_oracle, dtype=float)
     mask = ~np.isnan(linkinv_oracle)
@@ -360,18 +353,11 @@ def test_inverse_square_round_trip():
 
 
 def test_link_valideta():
-    # sqrt and 1/μ²  reject η ≤ 0 (matches R make.link).
     assert SqrtLink().valideta(np.array([0.1, 1.0])) is True
     assert SqrtLink().valideta(np.array([0.1, 0.0])) is False
     assert InverseSquareLink().valideta(np.array([0.1, 1.0])) is True
     assert InverseSquareLink().valideta(np.array([0.1, -1.0])) is False
-    # Bernoulli-type links accept any finite η.
     assert LogitLink().valideta(np.array([-1e3, 0.0, 1e3])) is True
-
-
-# ---------------------------------------------------------------------------
-# Poisson family — pinned against R::stats::poisson + mgcv::fix.family.{var,ls}.
-# ---------------------------------------------------------------------------
 
 
 def test_poisson_static_fields():
@@ -380,7 +366,6 @@ def test_poisson_static_fields():
     assert f.canonical_link_name == "log"
     assert f.scale_known is True
     assert f.is_canonical
-    # variance/dvar/d2var
     mu = np.array([0.5, 1.2, 2.1])
     np.testing.assert_array_equal(f.variance(mu), mu)
     np.testing.assert_array_equal(f.dvar(mu), np.ones_like(mu))
@@ -426,11 +411,6 @@ def test_poisson_validmu():
     assert not Poisson().validmu(np.array([np.inf, 1.0]))
 
 
-# ---------------------------------------------------------------------------
-# Binomial family — pinned against R::stats::binomial + mgcv.
-# ---------------------------------------------------------------------------
-
-
 def test_binomial_static_fields():
     f = Binomial()
     assert f.name == "binomial"
@@ -462,7 +442,6 @@ def test_binomial_bernoulli_oracle():
     np.testing.assert_allclose(
         f.aic(y, mu, None, wt, len(y)), 3.79504012981444, rtol=1e-12, atol=0
     )
-    # mgcv ls is identically zero in the Bernoulli case (saturated dbinom = 1).
     np.testing.assert_array_equal(f.ls(y, wt, 1.0), np.zeros(3))
 
 
@@ -491,17 +470,12 @@ def test_binomial_initialize_and_validmu():
     y = np.array([0.0, 0.5, 1.0])
     wt = np.array([1.0, 3.0, 1.0])
     expected = (wt * y + 0.5) / (wt + 1.0)
-    # m = wt·y = [0, 1.5, 1] isn't integral → R's NCOL=1 branch warns
-    # "non-integer #successes in a binomial glm!" (family-review B6).
     with pytest.warns(UserWarning, match="non-integer #successes"):
         out = f.initialize(y, wt)
     np.testing.assert_allclose(out, expected, rtol=1e-12)
-    # integral counts (0/1 at unit weights) stay silent...
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         f.initialize(np.array([0.0, 1.0]), np.ones(2))
-    # ...and quasibinomial never warns (R's template guard
-    # "quasibinomial" == "binomial" is false).
     from hea.family import QuasiBinomial
 
     with warnings.catch_warnings():
@@ -524,11 +498,6 @@ def test_binomial_dev_resids_no_warning_on_boundary():
             np.ones(3),
         )
     assert np.all(np.isfinite(d))
-
-
-# ---------------------------------------------------------------------------
-# InverseGaussian family — pinned against R::stats::inverse.gaussian + mgcv.
-# ---------------------------------------------------------------------------
 
 
 def test_inverse_gaussian_static_fields():
@@ -563,8 +532,6 @@ def test_inverse_gaussian_oracle():
     np.testing.assert_allclose(
         f.aic(y, mu, dev, wt, len(y)), -0.546674508250539, rtol=1e-12, atol=0
     )
-    # log-scale derivatives: d1 = -nobs/2 = -2; d2 = 0 (algebraic
-    # cancellation since the log(2π φ y³) term is linear in log φ).
     np.testing.assert_allclose(
         f.ls(y, wt, 0.5), [-3.59080461442099, -2.0, 0.0], rtol=1e-12, atol=0
     )
@@ -581,14 +548,7 @@ def test_inverse_gaussian_initialize():
         f.initialize(np.array([0.0, 1.0]), np.ones(2))
 
 
-# ---------------------------------------------------------------------------
-# Existing families should not regress.  Gamma.ls is now log-scale; pin the
-# converted values so a future refactor doesn't silently drift back.
-# ---------------------------------------------------------------------------
-
-
 def test_gaussian_unchanged_oracle():
-    # ls(y=μ=[1..4], wt=1, scale): log-scale convention (d1 = -n/2, d2 = 0).
     f = Gaussian()
     y = np.array([1.0, 2.0, 3.0, 4.0])
     out = f.ls(y, np.ones(4), 1.0)
@@ -607,7 +567,6 @@ def test_gaussian_ls_with_weights_oracle():
     wt = np.array([0.0, 1.5, 2.0, 0.5])  # one zero-weight row
     nobs = 3
     log_w_sum = float(np.sum(np.log(wt[wt > 0])))  # log(1.5)+log(2)+log(0.5)
-    # scale=0.5
     expected_ls0 = -0.5 * nobs * np.log(2.0 * np.pi * 0.5) + 0.5 * log_w_sum
     np.testing.assert_allclose(
         f.ls(y, wt, 0.5),
@@ -615,7 +574,6 @@ def test_gaussian_ls_with_weights_oracle():
         rtol=1e-12,
         atol=0,
     )
-    # scale=2.0
     expected_ls0 = -0.5 * nobs * np.log(2.0 * np.pi * 2.0) + 0.5 * log_w_sum
     np.testing.assert_allclose(
         f.ls(y, wt, 2.0),
@@ -630,19 +588,12 @@ def test_gamma_ls_log_scale_conversion():
     f = Gamma()
     y = np.array([1.0, 2.0, 3.0, 4.0])
     wt = np.ones(4)
-    # mgcv raw form at scale=0.5: [-5.63287638586838, -4.32580552738365, 8.02744183124810]
-    # convert: d1_log = 0.5·(-4.32580552738365) = -2.162902763691825
-    #          d2_log = 0.5·(-4.32580552738365) + 0.25·(8.02744183124810)
-    #                 = -0.156042305879800
     np.testing.assert_allclose(
         f.ls(y, wt, 0.5),
         [-5.63287638586838, -2.162902763691825, -0.156042305879800],
         rtol=1e-10,
         atol=0,
     )
-    # mgcv raw at scale=2: [-8.853807963166636, -1.270362845461478, 0.536662295325308]
-    # d1_log = 2·(-1.270362845461478) = -2.540725690922956
-    # d2_log = 2·(-1.270362845461478) + 4·(0.536662295325308) = -0.394076509621724
     np.testing.assert_allclose(
         f.ls(y, wt, 2.0),
         [-8.853807963166636, -2.540725690922956, -0.394076509621724],
@@ -651,20 +602,12 @@ def test_gamma_ls_log_scale_conversion():
     )
 
 
-# ---------------------------------------------------------------------------
-# Family/link composition behaviour
-# ---------------------------------------------------------------------------
-
-
 def test_family_link_resolution():
-    # default link = canonical
     assert Poisson().link.name == "log"
     assert Binomial().link.name == "logit"
     assert InverseGaussian().link.name == "1/mu^2"
-    # explicit string
     assert Poisson(link="sqrt").link.name == "sqrt"
     assert Binomial(link="probit").link.name == "probit"
-    # is_canonical reports correctly
     assert Poisson().is_canonical
     assert not Poisson(link="sqrt").is_canonical
     assert Binomial().is_canonical
@@ -674,17 +617,6 @@ def test_family_link_resolution():
 def test_family_link_unknown_raises():
     with pytest.raises(ValueError, match="unknown link"):
         Poisson(link="banana")
-
-
-# ---------------------------------------------------------------------------
-# Tweedie / tw — oracles pinned to mgcv 1.9-4.
-#
-# All numeric oracles in this section are produced by R/mgcv:
-#   Tweedie(p, link='log')$variance / dev.resids / dvar / d2var / d3var
-#   ldTweedie(y, mu, rho=log(phi), theta, a, b)              # log f + derivs
-# The (rho, theta) parametrisation matches hea's tw() exactly:
-#   p(theta) = (a + b·exp(theta))/(1 + exp(theta));  rho = log(phi).
-# ---------------------------------------------------------------------------
 
 
 def test_tweedie_static_fields():
@@ -1022,18 +954,6 @@ def test_tw_invalid_a_b_raises():
         tw(a=1.5, b=2.5)
 
 
-# =============================================================================
-# 2. Scat family unit tests
-# =============================================================================
-#
-# Pins ``Scat.Dd`` levels 0/1/2, ``Scat.ls_extended``, ``Scat.dev_resids``,
-# ``Scat.aic``, and ``Scat.preinitialize`` against a frozen mgcv oracle
-# generated by ``tests/r_oracle/dump_scat_unit.R``.
-#
-# The pin is per-element to ≤ 5e-13 — well inside double-precision
-# roundoff for the cumulative formulas in ``Dd`` level 2, which exercises
-# products of up to four ν-, σ- and (y-μ)-dependent quantities.
-
 _SCAT_UNIT = Path(__file__).parent / "fixtures" / "scat_unit"
 
 
@@ -1202,24 +1122,10 @@ def test_scat_link_validation():
 
 
 def test_tw_ls_extended_lsth2_matches_mgcv():
-    """tw's analytic ``lsth2`` (family-review B4 — previously
-    NaN-poisoned): the (θ,θ)/(θ,logφ) saturated-likelihood second
+    """tw's analytic ``lsth2``: the (θ,θ)/(θ,logφ) saturated-likelihood second
     derivatives via ldTweedie's column-5/6 forms (density closed forms
     gam.fit3.r:2802-2806 + Dunn-Smyth series moments) chained through
     p(θ).
-
-    Oracle: R 4.6.0 / mgcv 1.9-4, y = the _mixed_sp_fixture ytw2
-    column, w = 1, theta = log(0.49/0.49) for p = 1.5 (a=1.01, b=1.99):
-        fam <- tw(); fam$ls(y, w, theta, scale)
-        scale=0.8: ls -133.8139693830
-                   lsth1 (-4.6929474731, -66.9089188162)
-                   lsth2 [-0.7111684232, 2.4000778201;
-                          2.4000778201, -13.8069254790]
-        scale=1.3: ls -168.3807909970
-                   lsth1 (-2.3840557958, -76.5635517288)
-                   lsth2 [-3.3107988091, 8.0792314245;
-                          8.0792314245, -27.1024409298]
-    hea matches all printed digits; pinned at 1e-8.
     """
     import sys
 
@@ -1269,7 +1175,6 @@ def test_rtweedie_moments_and_rd_hook():
     assert abs(y.mean() - mu[0]) < 0.02
     assert abs(y.var() - phi * mu[0] ** p) < 0.06
     assert abs(np.mean(y == 0) - np.exp(-lam)) < 0.005
-    # hooks present and shape-correct; wt unread (mgcv signature quirk).
     f = Tweedie(p=1.5)
     d = f.rd(np.random.default_rng(1), mu[:100], None, 1.0)
     assert d.shape == (100,) and np.all(d >= 0)
@@ -1299,7 +1204,6 @@ def test_link_validation_matches_r_acceptance():
     tw(link="log"), tw(link="identity"), tw(link="sqrt"), tw(link="inverse")
     with pytest.raises(ValueError, match='link "logit" not available for tw family'):
         tw(link="logit")
-    # R-permissive standard constructors — construction must succeed.
     Poisson(link="logit")
     Binomial(link="inverse")
     Gaussian(link="logit")
@@ -1334,26 +1238,6 @@ def test_scat_estimate_theta(init_name: str):
     err = float(np.max(np.abs(th_h - th_oracle)))
     assert err < 1e-12, f"{init_name}-init: hea={th_h}, mgcv={th_oracle}, err={err:.3e}"
 
-
-# =============================================================================
-# 3. Scat × bam end-to-end parity
-# =============================================================================
-#
-# Two oracles from ``tests/r_oracle/dump_bam_scat.R``:
-#
-# * ``simple`` — ``y ~ s(x, k=10)`` on heavy-tailed data; baseline scat
-#   PIRLS path.
-# * ``factor`` — ``y ~ g + s(x, by=g, k=10)`` on factor-level-shifted
-#   heavy-tailed data; exercises the by=factor discrete-path fix
-#   together with the extended-family θ-Newton.
-#
-# Each oracle is checked at two operating points:
-#
-# * **force-θ-and-sp** — feed mgcv's converged ``(ν, σ)`` and ``sp`` to
-#   hea, refit; assert fitted matches mgcv to ≤ 1e-9 (predictive
-#   equivalence; gauge-invariant).
-# * **auto-fit** — let hea estimate θ and sp from scratch; assert
-#   fitted ≤ 1e-9 / ≤ 1e-7 with θ and sp matching to 1e-6.
 
 _SCAT_BAM = Path(__file__).parent / "fixtures" / "scat_bam"
 
@@ -1400,8 +1284,6 @@ def test_scat_bam_simple_force_theta_sp():
     assert fam.n_theta == 0  # both θ supplied positive ⇒ locked
     m = hea.models.bam("y ~ s(x, k=10)", dat, family=fam, discrete=True, sp=sp_mgcv)
     fit_h = np.asarray(m.fitted_values)
-    # Pin to mgcv's OWN force-fit (same penalised-deviance convergence), NOT
-    # the auto fit — see :func:`_scat_bam_force_fitted`.
     rel = float(np.linalg.norm(fit_h - fit_force) / np.linalg.norm(fit_force))
     assert rel < 1e-9, f"force-(θ,sp) fitted rel diff {rel:.3e}"
 
@@ -1422,7 +1304,6 @@ def test_scat_bam_simple_auto_fit():
     assert rel < 1e-9, f"auto-fit fitted rel diff {rel:.3e}"
 
     theta_h = np.asarray(m.family.get_theta(trans=True))
-    # ν and σ are on different absolute scales; rel tol handles both.
     assert np.allclose(theta_h, theta_mgcv, rtol=1e-6, atol=0), (
         f"auto-fit θ mismatch: hea={theta_h} mgcv={theta_mgcv}"
     )
@@ -1451,10 +1332,6 @@ def test_scat_bam_factor_force_theta_sp():
         "y ~ g + s(x, by=g, k=10)", dat, family=fam, discrete=True, sp=sp_mgcv
     )
     fit_h = np.asarray(m.fitted_values)
-    # Pin to mgcv's OWN force-fit, NOT the auto fit: mgcv's force-vs-auto gap is
-    # ~3.6e-8 here (the penalised-deviance convergence stops it early), and hea
-    # reproduces mgcv's force fit to ~7e-14. Pinning to the auto fit would
-    # require hea to over-converge past where mgcv itself stops.
     rel = float(np.linalg.norm(fit_h - fit_force) / np.linalg.norm(fit_force))
     assert rel < 1e-9, f"factor force-(θ,sp) fitted rel diff {rel:.3e}"
 
@@ -1540,18 +1417,10 @@ def test_scat_bam_nondiscrete_matches_mgcv(sub, formula, has_g):
     np.testing.assert_allclose(float(m.edf_total), edf_mgcv, rtol=1e-7, atol=0)
 
 
-# ---------------------------------------------------------------------------
-# General-family seam (mgcv gamlss.r authoring kit) + gaulss
-# prerequisite 5. mgcv 1.9-4 oracle references: gaulss()$ll evaluated in R
-# at identical (y, X, lpi, coef, d1b, d2b, fh, D) for every deriv level.
-# ---------------------------------------------------------------------------
-
-
 def test_trind_generator_matches_mgcv():
     from hea.family import trind_generator
 
     tri = trind_generator(3)
-    # R's 1-based packed indices, flattened column-major (mgcv K=3).
     np.testing.assert_array_equal(
         (tri["i2"] + 1).flatten(order="F"), [1, 2, 3, 2, 4, 5, 3, 5, 6]
     )
@@ -1561,7 +1430,6 @@ def test_trind_generator_matches_mgcv():
     assert tri["i4"][0, 1, 2, 2] + 1 == 9
     assert tri["i4"][2, 2, 2, 2] + 1 == 15
     assert tri["i4"][1, 0, 2, 0] + 1 == 5
-    # symmetry: any permutation hits the same packed column
     assert tri["i4"][0, 2, 1, 2] == tri["i4"][2, 2, 1, 0]
 
 
@@ -1619,11 +1487,9 @@ def test_trind_generator_ifunc_reverse_match_mgcv():
             256,
         ],
     )
-    # 0-based hea args ≡ mgcv's 1-based spot pins
     assert tf["i4"](2, 0, 3, 1) + 1 == 15
     assert tf["i3"](1, 3, 0) + 1 == 7
     assert tf["i2"](3, 1) + 1 == 7
-    # closures ≡ arrays over every index tuple, K = 2..5
     for K in range(2, 6):
         a = trind_generator(K)
         f = trind_generator(K, ifunc=True, reverse=True)
@@ -1635,9 +1501,6 @@ def test_trind_generator_ifunc_reverse_match_mgcv():
                     assert f["i3"](i, j, k) == a["i3"][i, j, k]
                     for l_ in range(K):
                         assert f["i4"](i, j, k, l_) == a["i4"][i, j, k, l_]
-        # reverse extraction: ravel()[ixr] recovers packing order from a
-        # symmetric array (same cells R reads column-major — digit sum
-        # of the reversed tuple commutes).
         packed = np.arange(a["i4"].max() + 1, dtype=float)
         np.testing.assert_array_equal(packed[a["i4"]].ravel()[a["i4r"]], packed)
         packed3 = np.arange(a["i3"].max() + 1, dtype=float)
@@ -1663,10 +1526,6 @@ def _gaulss_oracle_inputs():
 
 
 def test_gaulss_ll_matches_mgcv_oracle():
-    # Every output of gaulss()$ll at deriv 1/2/3/4, pinned to all printed
-    # digits: l, lb, lbb, the tr(Hp⁻¹∂H/∂ρ) vector (fh = Hp⁻¹), the full
-    # ∂H/∂ρ list, and trHid2H through the preconditioned-Cholesky fh/D
-    # convention gam.fit5 uses.
     from scipy.linalg import cholesky
 
     from hea.family import gaulss
@@ -1711,7 +1570,6 @@ def test_gaulss_ll_matches_mgcv_oracle():
     np.testing.assert_allclose(
         r4["trHid2H"], [-12.8681383050, 0.3818310880, 2.5707114050], rtol=0, atol=1e-9
     )
-    # The eigendecomposition fh variant must agree with the Cholesky one.
     w, V = np.linalg.eigh(D[:, None] * Hp * D[None, :])
     r4e = fam.ll(
         y,
@@ -1751,7 +1609,6 @@ def test_gaulss_ll_derivatives_match_fd():
         ) / (2 * h)
     np.testing.assert_allclose(r1["lb"], fd_lb, rtol=0, atol=1e-6)
     np.testing.assert_allclose(r1["lbb"], fd_lbb, rtol=0, atol=1e-6)
-    # d1H along the d1b directions: H(β + h·d1b_j) FD.
     r3 = fam.ll(y, X, coef, lpi=lpi, deriv=3, d1b=d1b)
     for j in range(d1b.shape[1]):
         fdH = (
@@ -1768,7 +1625,6 @@ def test_gaulss_initialize_and_residuals():
     fam = gaulss()
     start = fam.initialize_coef(y, X, lpi)
     assert start.shape == (5,) and np.all(np.isfinite(start))
-    # identity μ-link: LP1 start is the plain LS fit of y on X₁.
     b1, *_ = np.linalg.lstsq(X[:, :3], y, rcond=None)
     np.testing.assert_allclose(start[:3], b1, atol=1e-10)
     mu = X[:, :3] @ coef[:3]
@@ -1778,7 +1634,6 @@ def test_gaulss_initialize_and_residuals():
         fam.residuals(y, fitted, type="response"), y - mu, atol=0
     )
     np.testing.assert_allclose(fam.residuals(y, fitted), (y - mu) * tau, atol=0)
-    # logb link: μ = 1/(e^η + b) round-trips and stays below 1/b.
     lk = fam.links[1]
     eta = np.linspace(-3, 3, 9)
     np.testing.assert_allclose(lk.link(lk.linkinv(eta)), eta, atol=1e-10)
@@ -1811,8 +1666,6 @@ def _gammals_oracle_inputs():
 
 
 def test_gammals_ll_matches_mgcv_oracle():
-    # Every gammals()$ll output at deriv 1/2/3/4, pinned to the live
-    # R values (Rscript: gammals()$ll on the set.seed(21) inputs above).
     from scipy.linalg import cholesky
 
     from hea.family import gammals
@@ -1862,7 +1715,6 @@ def test_gammals_ll_matches_mgcv_oracle():
         rtol=0,
         atol=1e-8,
     )
-    # eigen fh variant agrees with the Cholesky one.
     w, V = np.linalg.eigh(D[:, None] * Hp * D[None, :])
     r4e = fam.ll(
         y,
@@ -1902,7 +1754,6 @@ def test_gammals_ll_derivatives_match_fd():
         ) / (2 * h)
     np.testing.assert_allclose(r1["lb"], fd_lb, rtol=0, atol=1e-6)
     np.testing.assert_allclose(r1["lbb"], fd_lbb, rtol=0, atol=1e-5)
-    # d1H along d1b directions: H(β + h·d1b_j) FD.
     r3 = fam.ll(y, X, coef, lpi=lpi, deriv=3, d1b=d1b)
     for j in range(d1b.shape[1]):
         fdH = (
@@ -1937,12 +1788,10 @@ def test_gammals_initialize_residuals_and_link():
         np.maximum(0.0, 2.0 * ((yy - mu) / mu - np.log(yy / mu)) * np.exp(-rho))
     ) * np.sign(yy - mu)
     np.testing.assert_allclose(fam.residuals(yy, fitted), dexp, atol=0)
-    # BoundedLogLink round-trips and floors at b.
     lk = BoundedLogLink(b=-7.0)
     eta = np.linspace(-4, 6, 11)
     np.testing.assert_allclose(lk.link(lk.linkinv(eta)), eta, atol=1e-9)
     assert np.all(lk.linkinv(np.array([-50.0, 0.0, 50.0])) >= -7.0)
-    # identity is the only allowed mean link; scale link must be valid.
     with pytest.raises(ValueError, match="mean parameter of gammals"):
         gammals(link=("log", "log"))
     with pytest.raises(ValueError, match="scale"):
@@ -2062,7 +1911,6 @@ def test_gumbls_residuals_and_validation():
 
     fam = gumbls()
     euler = 0.5772156649015328606065121
-    # fitted matrix is (mean, log β); location = mean − β·γ.
     mean = np.array([1.0, 2.0, 0.5])
     lb = np.array([-0.3, 0.1, -0.6])
     yy = np.array([1.2, 1.7, 0.8])
@@ -2110,8 +1958,6 @@ def _gevlss_oracle_inputs():
 
 
 def test_gevlss_ll_matches_mgcv_oracle():
-    # gevlss()$ll at deriv 1/2/3/4 vs live R (set.seed(31) inputs;
-    # Hp = −lbb + 5·I keeps the off-optimum penalized Hessian PD).
     from scipy.linalg import cholesky
 
     from hea.family import gevlss
@@ -2205,16 +2051,13 @@ def test_gevlss_ll_derivatives_match_fd():
 def test_gevlss_link_residuals_and_validation():
     from hea.family import ShiftedLogitLink, gevlss
 
-    # shifted-logit confines ξ to (−1, 0.5) and round-trips.
     lk = ShiftedLogitLink()
     eta = np.linspace(-6, 6, 13)
     xi = lk.linkinv(eta)
     assert np.all(xi > -1.0) and np.all(xi < 0.5)
     np.testing.assert_allclose(lk.link(xi), eta, atol=1e-7)
-    # mu.eta finite-diff
     fd = (lk.linkinv(eta + 1e-6) - lk.linkinv(eta - 1e-6)) / 2e-6
     np.testing.assert_allclose(lk.mu_eta(eta), fd, atol=1e-7)
-    # response residual = y − GEV mean (μ + e^ρ(Γ(1−ξ)−1)/ξ).
     from scipy.special import gamma as _g
 
     fam = gevlss()
@@ -2233,18 +2076,7 @@ def test_gevlss_link_residuals_and_validation():
         gevlss(link=("identity", "log", "logit"))
 
 
-# ---------------------------------------------------------------------------
-# cox_ph (Cox proportional hazards, coxph.r + src/coxph.c) — mgcv 1.9-4
-# oracle references generated live (R --vanilla): cox.ph()$ll / $hazard at
-# fixed inputs (set.seed(5), n=12 with tied integer times so Peto's tie
-# correction is exercised; the synthetic d1b/d2b/Hp from set.seed(99)).
-# ---------------------------------------------------------------------------
-
-
 def _cox_oracle_inputs():
-    # 12 obs in descending-time order (cox.ph's internal sort handles any
-    # order; pinned here as R produced them). Two covariates, integer times
-    # WITH TIES, censoring indicator d (1 = event).
     time = np.array([11, 10, 10, 9, 7, 7, 5, 5, 4, 4, 3, 2], float)
     d = np.array([0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0], int)
     X = (
@@ -2310,7 +2142,6 @@ def _cox_oracle_inputs():
 
 
 def test_cox_ph_ll_matches_mgcv_oracle():
-    # cox.ph()$ll at every engine deriv level (= C deriv 0..3) vs live R.
     from scipy.linalg import cholesky
 
     from hea.family import cox_ph
@@ -2333,12 +2164,10 @@ def test_cox_ph_ll_matches_mgcv_oracle():
     )
 
     Hp = -r1["lbb"] + 0.5 * np.eye(p)
-    # deriv 2 → d1H as the trace vector tr(Hp⁻¹ ∂H/∂ρ) (fh = Hp⁻¹)
     r2 = fam.ll(time, X, beta, d, lpi=lpi, deriv=2, d1b=d1b, fh=np.linalg.inv(Hp))
     np.testing.assert_allclose(
         r2["d1H"], [0.0149517979284, 0.0110099642008], rtol=0, atol=1e-9
     )
-    # deriv 3 → d1H as the per-ρ matrix list
     r3 = fam.ll(time, X, beta, d, lpi=lpi, deriv=3, d1b=d1b, fh=np.linalg.inv(Hp))
     np.testing.assert_allclose(
         r3["d1H"][0],
@@ -2352,8 +2181,6 @@ def test_cox_ph_ll_matches_mgcv_oracle():
         rtol=0,
         atol=1e-9,
     )
-    # deriv 4 → trHid2H; cox rebuilds eigen(Hp) from the preconditioned
-    # Cholesky pieces (D = ones, L = chol(Hp)) the engine passes
     L = cholesky(Hp, lower=False)
     r4 = fam.ll(
         time,
@@ -2376,8 +2203,6 @@ def test_cox_ph_ll_matches_mgcv_oracle():
 
 
 def test_cox_ph_ll_derivatives_match_fd():
-    # internal self-consistency: lb vs FD of l, lbb vs FD of lb, and the
-    # ∂H/∂ρ matrices vs FD of lbb along the d1b directions.
     from hea.family import cox_ph
 
     time, d, X, beta, d1b, _ = _cox_oracle_inputs()
@@ -2422,9 +2247,6 @@ def test_cox_ph_ll_derivatives_match_fd():
 
 
 def test_cox_ph_hazard_matches_mgcv_oracle():
-    # cox.ph()$hazard (the coxpp kernel): baseline cumulative hazard h,
-    # its variance q, Kaplan-Meier hazard km, and the `a` vectors — and
-    # the internal sort handles arbitrary row order.
     from hea.family import _coxpp
 
     time, d, X, beta, _, _ = _cox_oracle_inputs()
@@ -2571,8 +2393,6 @@ def _ziplss_oracle_inputs():
 
 
 def test_ziplss_ll_matches_mgcv_oracle():
-    # Every ziplss()$ll output at deriv 1/2/3/4, pinned to the live R
-    # values (Rscript: ziplss()$ll on the set.seed(27) inputs above).
     from scipy.linalg import cholesky
 
     from hea.family import ziplss
@@ -2593,8 +2413,6 @@ def test_ziplss_ll_matches_mgcv_oracle():
     np.testing.assert_allclose(
         float(np.sum(np.abs(r1["lbb"]))), 163.3090407273, rtol=0, atol=1e-7
     )
-    # gamma and eta never share a term (the log-lik is separable in the two
-    # LPs), so the whole cross-block of the Hessian is exactly zero.
     np.testing.assert_allclose(r1["lbb"][0, 2], 0.0, rtol=0, atol=0)
     np.testing.assert_array_equal(r1["lbb"][lpi[0]][:, lpi[1]], 0.0)
     np.testing.assert_allclose(r1["lbb"][2, 2], -32.8245236943, rtol=0, atol=1e-8)
@@ -2623,7 +2441,6 @@ def test_ziplss_ll_matches_mgcv_oracle():
     np.testing.assert_allclose(
         r4["trHid2H"], [-0.6446428047, -0.5142583615, -0.7976950165], rtol=0, atol=1e-8
     )
-    # eigen fh variant agrees with the Cholesky one.
     w, V = np.linalg.eigh(D[:, None] * Hp * D[None, :])
     r4e = fam.ll(
         y,
@@ -2663,7 +2480,6 @@ def test_ziplss_ll_derivatives_match_fd():
         ) / (2 * h)
     np.testing.assert_allclose(r1["lb"], fd_lb, rtol=0, atol=1e-6)
     np.testing.assert_allclose(r1["lbb"], fd_lbb, rtol=0, atol=1e-5)
-    # d1H along d1b directions: H(β + h·d1b_j) FD.
     r3 = fam.ll(y, X, coef, lpi=lpi, deriv=3, d1b=d1b)
     for j in range(d1b.shape[1]):
         fdH = (
@@ -2676,8 +2492,6 @@ def test_ziplss_ll_derivatives_match_fd():
 def test_ziplss_helpers_initialize_and_validation():
     from hea.family import _l1ee, _lde, _ldg, _lee1, _zipll, _ziplss_ls, ziplss
 
-    # robustified scalar helpers, incl. the tail branches the moderate-eta
-    # oracle never reaches (R: mgcv:::l1ee/lee1/ldg/lde).
     np.testing.assert_allclose(
         _l1ee(np.array([-30.0, -1, 0.5, 3, 8])),
         [-30, -1.17830709642, -0.213559185373, -1.89217874881e-09, 0],
@@ -2722,8 +2536,6 @@ def test_ziplss_helpers_initialize_and_validation():
     start = fam.initialize_coef(y, X, lpi)
     assert start.shape == (4,) and np.all(np.isfinite(start))
 
-    # residuals: response = y − E(y), E(y) = p·λ/(1−e^{−λ}). fitted is
-    # (gamma, presence-eta) — ziplss leaves it unrewritten.
     gamma = np.array([0.5, -3.0, 1.0])  # log Poisson mean
     eta = np.array([0.3, 1.2, -0.5])  # presence LP
     yy = np.array([2.0, 0.0, 3.0])
@@ -2743,8 +2555,6 @@ def test_ziplss_helpers_initialize_and_validation():
     with pytest.raises(ValueError, match="deviance"):
         fam.residuals(yy, fitted, type="pearson")
 
-    # rd: structural absence → exact zeros; present rows are zero-truncated
-    # Poisson (never 0), so P(y=0) == 1−p; draws are integer-valued.
     rng = np.random.default_rng(0)
     big = 200000
     mu = np.column_stack([np.full(big, np.log(3.0)), np.full(big, 0.4)])
@@ -2755,7 +2565,6 @@ def test_ziplss_helpers_initialize_and_validation():
     ey3 = p04 * 3.0 / (1.0 - np.exp(-3.0))
     np.testing.assert_allclose(draws.mean(), ey3, rtol=0, atol=2e-2)
 
-    # count intake: non-integer and binary responses are rejected.
     with pytest.raises(ValueError, match="non-integer"):
         fam.initialize_coef(y + 0.5, X, lpi)
     with pytest.raises(ValueError, match="binary"):
@@ -2800,7 +2609,6 @@ def _multinom_oracle_inputs(K, seed):
     return X, y, coef, d1b, d2b, lpi
 
 
-# live multinom(K)$ll references (Rscript, mgcv 1.9-4) at the inputs above.
 _MULTINOM_ORACLE = {
     (2, 41): {
         "l": -38.0695935472,
@@ -2848,8 +2656,6 @@ def test_multinom_ll_matches_mgcv_oracle(K, seed):
     np.testing.assert_allclose(r1["lbb"][0, 0], ref["lbb00"], rtol=0, atol=1e-8)
     if "lb" in ref:
         np.testing.assert_allclose(r1["lb"], ref["lb"], rtol=0, atol=1e-8)
-        # the two LPs are coupled — the cross-block is nonzero (unlike
-        # ziplss, whose log-lik is separable in its two LPs).
         np.testing.assert_allclose(r1["lbb"][0, 2], ref["lbb02"], rtol=0, atol=1e-8)
         np.testing.assert_allclose(r1["lbb"][2, 2], ref["lbb22"], rtol=0, atol=1e-8)
 
@@ -2874,8 +2680,6 @@ def test_multinom_ll_matches_mgcv_oracle(K, seed):
 
 @pytest.mark.parametrize("K,seed", [(2, 41), (4, 43)])
 def test_multinom_ll_derivatives_match_fd(K, seed):
-    # FD self-checks at K=2 and K=4 — the K=4 d1H validates the l4
-    # all-unique branch against the (R-pinned) lower-order derivatives.
     from hea.family import multinom
 
     X, y, coef, d1b, _, lpi = _multinom_oracle_inputs(K, seed)
@@ -2917,8 +2721,6 @@ def test_multinom_components_and_validation():
     start = fam.initialize_coef(y, X, lpi)
     assert start.shape == (4,) and np.all(np.isfinite(start))
 
-    # residuals: sign +ve when the most-probable category equals y, mag
-    # √(−2 log P̂(y)); fitted is the (n, 2) η matrix.
     eta = np.array([[2.0, -1.0], [-0.5, 1.5], [0.2, 0.3]])
     yy = np.array([1.0, 0.0, 2.0])
     p = fam.predict(eta=eta)["fit"]
@@ -2932,8 +2734,6 @@ def test_multinom_components_and_validation():
     with pytest.raises(ValueError, match="deviance"):
         fam.residuals(yy, eta, type="response")
 
-    # rd: categories land in 0..K with frequencies tracking the softmax
-    # probabilities at a fixed η.
     rng = np.random.default_rng(0)
     big = 200000
     mu = np.tile(np.array([0.5, -0.3]), (big, 1))
@@ -2944,7 +2744,6 @@ def test_multinom_components_and_validation():
     for c in range(3):
         np.testing.assert_allclose((draws == c).mean(), probs[c], rtol=0, atol=5e-3)
 
-    # variable-K validation: K<1 rejected; response outside 0..K rejected.
     with pytest.raises(ValueError, match="at least 2"):
         multinom(0)
     with pytest.raises(ValueError, match="0\\.\\.2"):
@@ -2961,12 +2760,6 @@ def test_multinom_components_and_validation():
 
 
 def test_ld_tweedie_work_matches_mgcv():
-    # R: ldTweedie(y, mu, p=NA, phi=NA, rho=rho, theta=theta, a=, b=,
-    # all.derivs=TRUE) — columns [l, ρ, ρρ, θ, θθ, θρ, μ, μμ, μθ, μρ].
-    # First block: vector θ/ρ (mgcv's C_tweedious2 path), a=1.01/b=1.99,
-    # y including zeros; second block: constant θ/ρ (the buffered
-    # C_tweedious path), a=1.001/b=1.999. hea runs one vectorized series
-    # (same Dunn-Smyth eps gate) for both.
     from hea.family import _ld_tweedie_work
 
     y = np.array(
@@ -3345,16 +3138,7 @@ def test_tweedious_work_census_matches_mgcv():
     mgcv ldTweedie(all.derivs=TRUE). Block A: constant θ/ρ (buffer=TRUE scalar
     C_tweedious). Block B: per-row θ/ρ (vector C_tweedious2 with the lgamma(j+1)
     recursion). ``y[0]=0`` exercises the closed-form point mass.
-
-    Pins: 1e-13 on the density + FIRST-derivative columns (l, ρ, θ — LSTH1's
-    columns — and the μ columns, which are exact closed forms) and 1e-12 on the
-    SECOND derivatives (ρρ, θθ, θρ). The 2nd-derivative floor is intrinsic: the
     ``w2i/wi − (w1i/wi)²`` cancellation (mgcv misc.c:499-500) amplifies the
-    ~1-ulp exp/accumulation floor ~150×; an FMA audit (accumulation- and
-    base-site fusion) and R-oracle special functions were both shown NOT to
-    reduce it, so the residual is the reference's own last-ulp imprecision, not
-    a porting gap. 17-digit refs from mgcv 1.9-4; the pins carry cross-platform
-    headroom over the measured drift (≤2.1e-14 / ≤1.5e-13).
     """
     from hea.family import _ld_tweedie_work
 
@@ -3397,12 +3181,10 @@ def test_tweedious_work_census_matches_mgcv():
             2.981747,
         ]
     )
-    # column tolerances: 1st derivs + μ closed forms 1e-13; 2nd derivs 1e-12
     tol = np.array(
         [1e-13, 1e-13, 1e-12, 1e-13, 1e-12, 1e-12, 1e-13, 1e-13, 1e-13, 1e-13]
     )
 
-    # ---- Block A: constant theta=0.42, rho=-0.18 (buffer path) ----
     ref_a = np.array(
         [
             [
@@ -3596,7 +3378,6 @@ def test_tweedious_work_census_matches_mgcv():
         f"{np.where((da > tol).any(axis=0))[0]}, max/col {da.max(axis=0)}"
     )
 
-    # ---- Block B: per-row theta/rho (tweedious2 path) ----
     th_b = np.array(
         [
             -0.619448,
@@ -3828,8 +3609,6 @@ def test_tweedious_work_census_matches_mgcv():
 
 
 def _twlss_oracle_y():
-    # R: set.seed(42); mu <- exp(0.3 + 0.8*runif(60));
-    #    yt <- rTweedie(mu, p=1.6, phi=0.9)
     return np.array(
         [
             4.04832308895089,
@@ -3897,8 +3676,6 @@ def _twlss_oracle_y():
 
 
 def test_tw_null_fit_matches_mgcv():
-    # mgcv:::tw.null.fit(yt) — stabilized Newton on (log mu, theta,
-    # rho); deterministic, so the stop point reproduces to ~1e-12.
     from hea.family import _tw_null_fit
 
     mu0, p0, phi0 = _tw_null_fit(_twlss_oracle_y())
@@ -3911,9 +3688,6 @@ def test_tw_null_fit_matches_mgcv():
 
 
 def test_twlss_ll_oracle_matches_mgcv():
-    # twlss()$ll evaluated in R at identical (y, X, lpi, coef, wt) with
-    # deriv=1 — l/lb/lbb to all printed digits. The family has no
-    # l3/l4 (available.derivs=0), so deriv=1 is the whole surface.
     from hea.family import twlss
 
     yt = _twlss_oracle_y()
@@ -4014,7 +3788,6 @@ def test_twlss_ll_oracle_matches_mgcv():
     )
     np.testing.assert_allclose(ll["lbb"], lbb_ref, rtol=0, atol=1e-8)
 
-    # FD self-check of lb (the family's whole derivative surface)
     h = 1e-6
     fd = np.empty(7)
     for k in range(7):
@@ -4028,7 +3801,6 @@ def test_twlss_ll_oracle_matches_mgcv():
         ) / (2 * h)
     np.testing.assert_allclose(ll["lb"], fd, rtol=5e-6, atol=1e-6)
 
-    # constructor surface: okLinks + the (a, b) bounds
     with pytest.raises(ValueError, match="not available for the mu"):
         twlss(link=("inverse", "identity", "identity"))
     with pytest.raises(ValueError, match='only the "identity"'):
@@ -4067,19 +3839,12 @@ def _shash_oracle_inputs():
     )
     lpi = [np.arange(0, 3), np.arange(3, 5), np.arange(5, 7), np.arange(7, 9)]
     coef = np.array([0.5, 0.4, -0.3, -0.8, 0.2, 0.15, -0.25, 0.1, 0.05])
-    # R: matrix(sin(1:18)/5, 9, 2) / matrix(cos(1:27)/5, 9, 3) —
-    # column-major fill
     d1b = (np.sin(np.arange(1, 19)) / 5).reshape(2, 9).T
     d2b = (np.cos(np.arange(1, 28)) / 5).reshape(3, 9).T
     return y, X, lpi, coef, d1b, d2b
 
 
 def test_shash_ll_matches_mgcv_oracle():
-    # Every output of shash()$ll at deriv 1/2/3/4 — l, lb, lbb, the
-    # tr(Hp⁻¹∂H/∂ρ) vector, the full ∂H/∂ρ list, trHid2H — pinned to
-    # all printed digits. This is the K=4 stress pin: the packed L1
-    # (4), L2 (10), L3 (20) and L4 (35 auto-generated columns) all
-    # flow through gamlss_etamu/gamlss_gH's highest-order branches.
     from hea.family import shash
 
     y, X, lpi, coef, d1b, d2b = _shash_oracle_inputs()
@@ -4150,7 +3915,6 @@ def test_shash_ll_matches_mgcv_oracle():
         r4["trHid2H"], [-4.8268188590, 5.1230900806, -5.4504659452], rtol=0, atol=1e-8
     )
 
-    # FD self-checks: lb against FD of l, lbb against FD of lb
     h = 1e-6
     fd_lb = np.empty(9)
     fd_lbb = np.empty((9, 9))
@@ -4172,7 +3936,6 @@ def test_shash_ll_matches_mgcv_oracle():
         r1["lbb"], 0.5 * (fd_lbb + fd_lbb.T), rtol=1e-4, atol=1e-3
     )
 
-    # constructor surface
     with pytest.raises(ValueError, match='only the "identity"'):
         shash(link=("log", "logeb", "identity", "identity"))
     with pytest.raises(ValueError, match='only the "logeb"'):
@@ -4182,7 +3945,6 @@ def test_shash_ll_matches_mgcv_oracle():
         "'identity', 'identity'), b=0.01, "
         "phiPen=0.001)"
     )
-    # logeb link round-trip: τ = log(e^η + b) keeps σ = e^τ > b
     lk = shash().links[1]
     eta = np.linspace(-3.0, 3.0, 9)
     np.testing.assert_allclose(lk.link(lk.linkinv(eta)), eta, rtol=0, atol=1e-12)
@@ -4190,9 +3952,6 @@ def test_shash_ll_matches_mgcv_oracle():
 
 
 def test_shash_hooks_match_mgcv():
-    # residuals (deviance vs the ls=0 reference; raw mean via Bessel
-    # K), rd-shape, qf and cdf (incl. log.p) — R values at the fitted
-    # parameter matrix implied by the oracle coefficients.
     from hea.family import shash
 
     y, X, _lpi, coef, _, _ = _shash_oracle_inputs()
@@ -4239,24 +3998,12 @@ def test_shash_hooks_match_mgcv():
         rtol=0,
         atol=1e-8,
     )
-    # rd: the quantile transform of uniforms — cdf(draws) must be
-    # uniform at Monte-Carlo level
     rng = np.random.default_rng(4)
     Fc = np.broadcast_to([0.5, np.log(np.exp(0.2) + 0.01), 0.3, 0.0], (200000, 4))
     draws = fam.rd(rng, Fc, None, None)
     u = fam.cdf(draws, Fc, None, None, False)
     np.testing.assert_allclose(u.mean(), 0.5, rtol=0, atol=5e-3)
     np.testing.assert_allclose(u.var(), 1.0 / 12.0, rtol=0, atol=5e-3)
-
-
-# ---------------------------------------------------------------------------
-# mvn (multivariate normal, mvam.r) — the matrix-response general family and
-# the only available_derivs=1 family (fit by the bfgs outer optimizer). The
-# ll is a numpy port of mgcv's C kernel mvn_ll (src/mvn.c). Inputs reproduce
-# R's set.seed stream via hea.R.rng; the dH derivative blocks are exercised
-# at m=2 AND m=3 (m=3 lights the off-diagonal × off-diagonal theta cross
-# terms a 2-D covariance never reaches).
-# ---------------------------------------------------------------------------
 
 
 def _mvn_oracle_inputs(m, n, pv, seed, beta):
@@ -4282,7 +4029,6 @@ def _mvn_oracle_inputs(m, n, pv, seed, beta):
     return X, Y, np.asarray(beta, dtype=float), lpi, d1b
 
 
-# live mvn(d)$ll references (Rscript, mgcv 1.9-4) at the inputs above.
 _MVN_ORACLE = {
     (2, 101): {
         "beta": [0.4, -0.3, 0.2, 0.5, 0.15, 0.1, -0.2, -0.05],
@@ -4385,7 +4131,6 @@ def test_mvn_ll_matches_mgcv_oracle(m, seed):
     X, Y, beta, lpi, d1b = _mvn_oracle_inputs(m, ref["n"], ref["pv"], seed, ref["beta"])
     nb = beta.size
 
-    # the family ll dispatches to _mvn_ll with mgcv's deriv codes intact.
     fam = mvn(d=m)
     r1 = fam.ll(Y, X, beta, lpi=lpi, deriv=1)
     np.testing.assert_allclose(r1["l"], ref["l"], rtol=0, atol=1e-8)
@@ -4397,16 +4142,12 @@ def test_mvn_ll_matches_mgcv_oracle(m, seed):
         float(np.sqrt(np.sum(r1["lbb"] ** 2))), ref["lbb_fro"], rtol=0, atol=1e-7
     )
     np.testing.assert_allclose(np.diag(r1["lbb"]), ref["lbb_diag"], rtol=0, atol=1e-8)
-    # the precision factor couples the dimensions: the off-diagonal
-    # mean×mean blocks are nonzero (full d×d precision, not block-diagonal).
     assert abs(r1["lbb"][0, lpi[1][0]]) > 1e-6
 
-    # deriv 2 — the per-rho traces tr(fh·dH/drho), fh = Hp^{-1}.
     fh = np.linalg.inv(-r1["lbb"] + np.eye(nb))
     r2 = fam.ll(Y, X, beta, lpi=lpi, deriv=2, d1b=d1b, fh=fh)
     np.testing.assert_allclose(r2["d1H"], ref["d1Htr"], rtol=0, atol=1e-7)
 
-    # deriv 3 — the dH/drho matrices themselves.
     r3 = fam.ll(Y, X, beta, lpi=lpi, deriv=3, d1b=d1b)
     np.testing.assert_allclose(
         float(np.sqrt(np.sum(r3["d1H"][0] ** 2))), ref["d1H0_fro"], rtol=0, atol=1e-7
@@ -4420,11 +4161,9 @@ def test_mvn_ll_matches_mgcv_oracle(m, seed):
     np.testing.assert_allclose(
         float(np.sum(r3["d1H"][1])), ref["d1H1_sum"], rtol=0, atol=1e-6
     )
-    # the trace at deriv 2 must equal sum(fh * dH) from the deriv-3 matrices.
     np.testing.assert_allclose(
         [float(np.sum(fh * dH)) for dH in r3["d1H"]], r2["d1H"], rtol=0, atol=1e-10
     )
-    # deriv 4 is genuinely unavailable (available_derivs=1 ⇒ bfgs path).
     with pytest.raises(NotImplementedError, match="deriv 3"):
         fam.ll(Y, X, beta, lpi=lpi, deriv=4, d1b=d1b)
 
@@ -4466,7 +4205,6 @@ def test_mvn_components_and_validation():
     assert fam.n_lp == 2 and fam.n_extra_coef == 3
     assert fam.available_derivs == 1 and fam.matrix_response is True
 
-    # R-factor rebuild from theta: diag = exp(theta), off-diag = theta.
     coef = np.array([1.0, 2.0, 3.0, 0.05, -0.3, -0.52])  # 3 mean + 3 theta
     R = fam._R_from_coef(coef)
     np.testing.assert_allclose(
@@ -4474,7 +4212,6 @@ def test_mvn_components_and_validation():
     )
     np.testing.assert_allclose([R[0, 1], R[1, 0]], [-0.3, 0.0], rtol=0, atol=1e-12)
 
-    # postproc deviance ≡ Σ‖R(y−μ̂)‖²; residuals deviance ≡ (y−μ̂)·Rᵀ.
     y = np.array([[1.0, 2.0], [0.5, -1.0], [2.0, 0.5]])
     fitted = np.array([[0.9, 1.8], [0.6, -0.8], [1.7, 0.7]])
     fam.set_fit_context(coef=coef)
@@ -4494,8 +4231,6 @@ def test_mvn_components_and_validation():
         fam.residuals(y, fitted, type="response"), y - fitted, rtol=0, atol=1e-12
     )
 
-    # initialize_coef returns the full (mean + theta) vector; the diagonal
-    # theta seeds are −½ log(residual scale), off-diagonals zero.
     X, Y, beta, lpi, _ = _mvn_oracle_inputs(
         2, 12, (3, 2), 101, _MVN_ORACLE[(2, 101)]["beta"]
     )
@@ -4504,26 +4239,11 @@ def test_mvn_components_and_validation():
     assert start.shape == (8,) and np.all(np.isfinite(start))
     assert start[6] == 0.0  # the single off-diagonal theta
 
-    # validation: d<2 rejected; offsets rejected.
     with pytest.raises(ValueError, match="2 or more"):
         mvn(d=1)
     with pytest.raises(NotImplementedError, match="offset"):
         fam.ll(Y, X, beta, lpi=lpi, deriv=1, offset=[np.ones(12), None])
 
-
-# ---------------------------------------------------------------------------
-# Prior weights in general-family ll() — the weighted-likelihood contract.
-#
-# hea's general families honour gam(weights=) as a weighted log-likelihood:
-# l = Σ wᵢ·l0ᵢ and every per-observation derivative row scales by wᵢ. This is
-# a defined extension beyond mgcv, whose gamlss families drop prior weights.
-# The gate is the *duplication identity* — weighting row i by integer wᵢ is
-# exactly the unweighted fit on the design with row i repeated wᵢ times — which
-# holds to machine precision for l/lb/lbb because gamlss_etamu/gamlss_gH are
-# linear, row by row, in (l1..l4). At unit weights the scaling is the identity,
-# so every oracle pin above is bit-for-bit unchanged (cox_ph, whose prior
-# weights ARE the censoring indicator, and mvn, fit by bfgs, are excluded).
-# ---------------------------------------------------------------------------
 
 _WEIGHTED_LL_FAMILIES = [
     "gaulss",
@@ -4601,7 +4321,6 @@ def _weighted_ll_build(name):
 
 @pytest.mark.parametrize("name", _WEIGHTED_LL_FAMILIES)
 def test_general_family_weighted_ll_duplication_identity(name):
-    # The hard gate: integer weights ≡ row duplication, exact for l/lb/lbb.
     fam, X, y, coef, lpi = _weighted_ll_build(name)
     y = np.asarray(y, dtype=float)
     n = y.shape[0]
@@ -4622,13 +4341,10 @@ def test_general_family_weighted_ll_duplication_identity(name):
             err_msg=f"{name}: {k} breaks the weight=duplication identity",
         )
 
-    # l0 is the raw per-observation log-density — never scaled by wt.
     l0_w = fam.ll(y, X, coef, w, lpi=lpi, deriv=0)["l0"]
     l0_1 = np.asarray(fam.ll(y, X, coef, lpi=lpi, deriv=0)["l0"])
     np.testing.assert_array_equal(np.asarray(l0_w), l0_1)
-    # the weighted objective is exactly Σ wt·l0.
     np.testing.assert_allclose(rw["l"], float(np.sum(w * l0_1)), rtol=0, atol=1e-9)
-    # wt=None is the unit-weight path, bit-for-bit (so the oracle pins hold).
     r_none = fam.ll(y, X, coef, lpi=lpi, deriv=1)
     r_ones = fam.ll(y, X, coef, np.ones(n), lpi=lpi, deriv=1)
     for k in ("l", "lb", "lbb"):
@@ -4636,8 +4352,6 @@ def test_general_family_weighted_ll_duplication_identity(name):
 
 
 def test_gaulss_weighted_ll_matches_fd():
-    # Non-integer precision weights: lb/lbb are the gradient/Hessian of the
-    # weighted objective Σ wt·l0, and the sp-derivative blocks inherit it.
     from hea.family import gaulss
 
     X, y, coef, d1b, d2b, lpi = _gaulss_oracle_inputs()
@@ -4664,7 +4378,6 @@ def test_gaulss_weighted_ll_matches_fd():
         ) / (2 * h)
     np.testing.assert_allclose(r1["lb"], fd_lb, rtol=0, atol=1e-6)
     np.testing.assert_allclose(r1["lbb"], fd_lbb, rtol=0, atol=1e-6)
-    # deriv=3: each ∂H/∂ρ matrix is the FD of the weighted Hessian along d1b.
     r3 = fam.ll(y, X, coef, w, lpi=lpi, deriv=3, d1b=d1b)
     for j in range(d1b.shape[1]):
         fdH = (
@@ -4672,8 +4385,6 @@ def test_gaulss_weighted_ll_matches_fd():
             - fam.ll(y, X, coef - h * d1b[:, j], w, lpi=lpi, deriv=1)["lbb"]
         ) / (2 * h)
         np.testing.assert_allclose(r3["d1H"][j], fdH, rtol=0, atol=1e-5)
-    # deriv=4: trHid2H stays finite under non-unit weights (the gam.fit5
-    # preconditioned-Cholesky fh/D convention).
     from scipy.linalg import cholesky
 
     Hp = -r1["lbb"] + np.eye(p) * 0.5
@@ -4711,7 +4422,6 @@ def test_betar_components_match_mgcv():
     th = fam.get_theta()  # log φ
     y, mu, wt = _betar_dd_inputs()
     D = fam.Dd(y, mu, th, wt, level=2)
-    # live betar(theta=8)$Dd references (Rscript, mgcv 1.9-4).
     ref = {
         "Dmu": [
             34.2887061086,
@@ -4782,11 +4492,9 @@ def test_betar_components_match_mgcv():
     }
     for nm, val in ref.items():
         np.testing.assert_allclose(D[nm], val, rtol=0, atol=1e-8)
-    # EDmu2 ≡ Dmu2 (observed = expected here); Dmu2th ≡ EDmu2th.
     np.testing.assert_allclose(D["EDmu2"], D["Dmu2"], rtol=0, atol=1e-12)
     np.testing.assert_allclose(D["Dmu2th"], D["EDmu2th"], rtol=0, atol=1e-12)
 
-    # dev_resids (the −2logLik), variance, aic.
     np.testing.assert_allclose(
         fam.dev_resids(y, mu, wt),
         [
@@ -4823,7 +4531,6 @@ def test_betar_components_match_mgcv():
         fam.aic(y, mu, 0, wt, 9), 23.8203715876, rtol=0, atol=1e-7
     )
 
-    # saturated_ll: the per-datum Newton matches mgcv's saturated.ll.
     sl = fam.saturated_ll(y, wt, np.exp(th[0]))
     np.testing.assert_allclose(sl["f"], 8.1716871009, rtol=0, atol=1e-7)
     np.testing.assert_allclose(
@@ -4843,13 +4550,11 @@ def test_betar_components_match_mgcv():
         atol=1e-8,
     )
 
-    # ls ≡ 0 (the saturated reference lives in saturated_ll, not ls).
     le = fam.ls_extended(y, wt)
     assert le["ls"] == 0.0 and float(np.sum(np.abs(le["LSTH1"]))) == 0.0
 
 
 def test_betar_Dd_matches_fd():
-    # FD-check the μ/θ derivatives of dev_resids (the −2logLik).
     from hea.family import betar
 
     fam = betar(theta=5, link="logit")
@@ -4875,17 +4580,14 @@ def test_betar_Dd_matches_fd():
 def test_betar_construction_and_validation():
     from hea.family import betar
 
-    # theta sign convention: fixed (>0, n_theta=0) vs free start (<0).
     assert betar(theta=4).n_theta == 0
     assert betar(theta=-4).n_theta == 1
     assert betar().n_theta == 1
     np.testing.assert_allclose(betar(theta=4).get_theta(trans=True)[0], 4.0)
-    # okLinks
     for lk in ("logit", "probit", "cloglog", "cauchit"):
         betar(link=lk)
     with pytest.raises(ValueError, match="not available"):
         betar(link="log")
-    # preinitialize clamps y into (eps, 1-eps).
     fam = betar()
     pre = fam.preinitialize(np.array([0.0, 0.5, 1.0]))
     assert pre["y"][0] > 0 and pre["y"][2] < 1
@@ -4902,7 +4604,6 @@ def test_betar_construction_and_validation():
 
 
 def _ocat_dd_inputs():
-    # Fixed probe table; y0 0-based classes spanning 0..3 (mgcv 1..4).
     y0 = np.array([0, 1, 2, 3, 1, 2, 0, 3])
     mu = np.array([-1.5, -0.5, 0.5, 1.5, -0.3, 0.8, -2.0, 2.0])
     th = np.array([-0.3, 0.4])
@@ -4917,7 +4618,6 @@ def test_ocat_components_match_mgcv():
     fam = ocat(R=4)
     fam.set_theta(th)  # so residuals_extended uses the same θ as Dd
     D = fam.Dd(y0, mu, th, wt, level=2)
-    # live ocat(R=4)$Dd(y, mu, theta, wt, level=2) references.
     np.testing.assert_allclose(
         D["D"],
         [
@@ -4993,7 +4693,6 @@ def test_ocat_components_match_mgcv():
         rtol=0,
         atol=1e-9,
     )
-    # vector-θ blocks (n_theta = 2): Dth/Dmuth/Dmu2th (n×2), Dmu3th (n×2).
     np.testing.assert_allclose(
         D["Dth"],
         np.array(
@@ -5062,7 +4761,6 @@ def test_ocat_components_match_mgcv():
         rtol=0,
         atol=1e-9,
     )
-    # second-θ-deriv blocks (n×3, packed (j,k≥j)): Dth2/Dmuth2/Dmu2th2.
     np.testing.assert_allclose(
         D["Dth2"],
         np.array(
@@ -5114,29 +4812,24 @@ def test_ocat_components_match_mgcv():
         rtol=0,
         atol=1e-9,
     )
-    # EDmu2 ≡ Dmu2, EDmu2th ≡ Dmu2th (observed = expected, mgcv ocat).
     np.testing.assert_allclose(D["EDmu2"], D["Dmu2"], rtol=0, atol=1e-12)
     np.testing.assert_allclose(D["EDmu2th"], D["Dmu2th"], rtol=0, atol=1e-12)
 
-    # dev_resids(theta=th) ≡ Dd$D; the latent-midpoint sign; aic ≡ Σ Dd$D.
     np.testing.assert_allclose(
         fam.dev_resids(y0, mu, wt, theta=th), D["D"], rtol=0, atol=1e-12
     )
     res = fam.residuals_extended(y0, mu, wt, "deviance")
-    # sign(res) reproduces mgcv's attr(.,"sign"); |res| = √(Dd$D).
     np.testing.assert_array_equal(np.sign(res), [-1, -1, -1, 1, -1, -1, -1, 1])
     np.testing.assert_allclose(np.abs(res), np.sqrt(D["D"]), rtol=0, atol=1e-9)
     np.testing.assert_allclose(
         fam.aic(y0, mu, 0, wt, 0, theta=th), 16.392112039343242, rtol=0, atol=1e-9
     )
 
-    # ls ≡ 0 (vector θ); lsth1/LSTH1/lsth2 all zero.
     le = fam.ls_extended(y0, wt)
     assert le["ls"] == 0.0
     assert float(np.sum(np.abs(le["lsth1"]))) == 0.0
     assert le["lsth2"].shape == (2, 2) and float(np.sum(np.abs(le["lsth2"]))) == 0.0
 
-    # preinitialize seeds θ from empirical cumulative class proportions.
     yc = np.array([0, 0, 0, 1, 1, 2, 2, 2, 3, 3, 3, 3, 1, 2, 0, 3, 1, 2, 3, 0])
     pre = ocat(R=4).preinitialize(yc)
     np.testing.assert_allclose(
@@ -5145,7 +4838,6 @@ def test_ocat_components_match_mgcv():
 
 
 def test_ocat_Dd_matches_fd():
-    # FD-check the μ/θ derivatives of the ocat deviance.
     from hea.family import ocat
 
     fam = ocat(R=4)
@@ -5164,7 +4856,6 @@ def test_ocat_Dd_matches_fd():
     ) / h2**2
     np.testing.assert_allclose(D["Dmu"], fd_mu, rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(D["Dmu2"], fd_mu2, rtol=1e-4, atol=1e-4)
-    # θ-gradient column k via central diff in θ_k.
     for k in range(2):
         thp = th.copy()
         thp[k] += h
@@ -5180,35 +4871,27 @@ def test_ocat_Dd_matches_fd():
 def test_ocat_construction_and_validation():
     from hea.family import ocat
 
-    # R derived from theta length; n_theta = R−2; sign convention.
     assert ocat(R=4).n_theta == 2
     assert ocat(theta=[0.5, 0.5]).n_theta == 0  # fixed (all >0)
     assert ocat(theta=[-0.5, -0.5]).n_theta == 2  # free start (<0)
     assert ocat(theta=[0.2, 0.3, 0.4])._R == 5
-    # negative theta = "initial supplied" → ini = log|θ| ([−1,−1] → [0,0]).
     np.testing.assert_allclose(ocat(theta=[-1.0, -1.0]).get_theta(), [0.0, 0.0])
-    # get_theta(trans) = finite cut points [−1, −1+cumsum(e^θ)]; the default
-    # ocat(R=4) seeds θ = [−1,−1].
     np.testing.assert_allclose(
         ocat(R=4).get_theta(trans=True),
         [-1.0, -0.6321205588, -0.2642411177],
         rtol=0,
         atol=1e-9,
     )
-    # set_theta requires the right length.
     fam = ocat(R=4)
     fam.set_theta([0.1, -0.2])
     np.testing.assert_allclose(fam.get_theta(), [0.1, -0.2])
     with pytest.raises(ValueError, match="log-step"):
         fam.set_theta([0.1])
-    # okLinks: identity only.
     ocat(R=3, link="identity")
     with pytest.raises(ValueError, match="not available"):
         ocat(R=3, link="logit")
-    # must supply theta or R.
     with pytest.raises(ValueError, match="theta or R"):
         ocat()
-    # initialize rejects out-of-range classes (0..R−1).
     with pytest.raises(ValueError, match="out of range"):
         ocat(R=4).initialize(np.array([0, 1, 4]), np.ones(3))
 
@@ -5316,7 +4999,6 @@ def test_ziP_components_match_mgcv():
         rtol=0,
         atol=1e-8,
     )
-    # θ-blocks (n×2): Dth, Dmuth, Dmu2th, Dmu3th.
     np.testing.assert_allclose(
         D["Dth"],
         np.column_stack(
@@ -5433,8 +5115,6 @@ def test_ziP_components_match_mgcv():
         rtol=0,
         atol=1e-8,
     )
-    # θ²-blocks (n×3, ordered th1th1, th1th2, th2th2) — third col pins the
-    # th2th2 term (the only nonzero p.th2 entry).
     np.testing.assert_allclose(
         D["Dth2"][:, 2],
         [
@@ -5481,7 +5161,6 @@ def test_ziP_components_match_mgcv():
         atol=1e-8,
     )
 
-    # dev_resids (the −2logLik), aic (≡ Σ dev), saturated_ll (−2 sat ll).
     np.testing.assert_allclose(
         fam.dev_resids(y, mu, wt, theta=th),
         [
@@ -5518,7 +5197,6 @@ def test_ziP_components_match_mgcv():
     np.testing.assert_allclose(
         fam.get_theta(trans=True), [-0.3, 1.6487212707001282], rtol=0, atol=1e-12
     )
-    # ls ≡ 0.
     le = fam.ls_extended(y, wt)
     assert le["ls"] == 0.0 and float(np.sum(np.abs(le["LSTH1"]))) == 0.0
 
@@ -5734,7 +5412,6 @@ def test_ziP_b_nonzero_components_match_mgcv():
     np.testing.assert_allclose(
         fam.aic(y, mu, 0, wt, 0, theta=th), 20.447932192135838, rtol=0, atol=1e-9
     )
-    # getTheta(trans): θ₂ ↦ b + e^θ₂ (the slope floor).
     np.testing.assert_allclose(
         fam.get_theta(trans=True), [-0.3, 1.94872127070012824], rtol=0, atol=1e-12
     )
@@ -5748,8 +5425,6 @@ def test_ziP_Dd_matches_fd():
     fam.set_theta(th)
     D = fam.Dd(y, mu, th, wt, level=1)
     h = 1e-6
-    # ziP.dev_resids does NOT carry wt (mgcv: −2·zipll$l), but Dd does
-    # (−2·wt·…), so Dd = wt · FD(dev_resids).
     fd_mu = (
         fam.dev_resids(y, mu + h, wt, theta=th)
         - fam.dev_resids(y, mu - h, wt, theta=th)
@@ -5772,7 +5447,6 @@ def test_ziP_construction_and_validation():
     assert ziP().n_theta == 2
     assert ziP(theta=[-1.0, 0.5]).n_theta == 0  # fixed θ supplied
     np.testing.assert_allclose(ziP().get_theta(), [0.0, 0.0])  # start Poisson
-    # getTheta(trans): θ₂ → b + e^θ₂ (the presence slope).
     np.testing.assert_allclose(
         ziP(theta=[-1.0, 0.5], b=0.2).get_theta(True),
         [-1.0, 0.2 + np.exp(0.5)],
@@ -5783,14 +5457,12 @@ def test_ziP_construction_and_validation():
         ziP().set_theta([0.1])
     with pytest.raises(ValueError, match="not available"):
         ziP(link="log")
-    # initialize validation: negatives, non-integer, binary-only all rejected.
     with pytest.raises(ValueError, match="negative"):
         ziP().initialize(np.array([0.0, 1, -1]), np.ones(3))
     with pytest.raises(ValueError, match="Non-integer"):
         ziP().initialize(np.array([0.0, 1.5, 2]), np.ones(3))
     with pytest.raises(ValueError, match="binary"):
         ziP().initialize(np.array([0.0, 1, 0, 1]), np.ones(4))
-    # mustart = log(y + (y==0)/5).
     np.testing.assert_allclose(
         ziP().initialize(np.array([0.0, 2, 5]), np.ones(3)),
         np.log(np.array([0.2, 2.0, 5.0])),
@@ -5819,8 +5491,6 @@ def test_cnorm_components_match_mgcv():
     fam.set_theta(th)
     fam.set_censor(yat)
     D = fam.Dd(y, mu, th, wt, level=2)
-    # cnorm has a single log-scale θ, so every θ-block is a length-n vector
-    # (no n×2 packing like ziP). Full level-2 table vs mgcv 1.9-4.
     np.testing.assert_allclose(
         D["Dmu"],
         [
@@ -5940,8 +5610,6 @@ def test_cnorm_components_match_mgcv():
         atol=1e-10,
     )
 
-    # dev_resids is the PROPER deviance (≥ 0; uncensored → z²), distinct
-    # from the −2logLik that Dd differentiates.
     dr = fam.dev_resids(y, mu, wt)
     np.testing.assert_allclose(
         dr,
@@ -5956,8 +5624,6 @@ def test_cnorm_components_match_mgcv():
         atol=1e-12,
     )
     assert np.all(dr >= 0.0)
-    # aic = Σ(−2logLik); ls is a genuinely NONZERO saturated log-lik whose
-    # θ-derivatives are forced to zero (Dd already carries them).
     np.testing.assert_allclose(
         fam.aic(y, mu, 0, wt, 0), 7.60432360893484, rtol=0, atol=1e-11
     )
@@ -5984,9 +5650,6 @@ def test_cnorm_Dd_matches_fd():
     log2pi = float(np.log(2.0 * np.pi))
 
     def m2ll(mu_, th_):
-        # per-datum −2logLik — what cnorm's Dd differentiates (NOT the
-        # proper deviance dev_resids, which folds in the θ-dependent
-        # saturated reference).
         thw = th_ - np.log(wt) / 2.0
         eth = np.exp(-thw)
         out = np.zeros(y.shape[0])
@@ -6030,8 +5693,6 @@ def test_cnorm_construction_and_validation():
         cnorm(link="logit")
     with pytest.raises(ValueError, match="1 param"):
         cnorm().set_theta([0.1, 0.2])
-    # No censor set ⇒ all uncensored: dev_resids reduces to z² (= the
-    # Gaussian deviance with σ = e^θ).
     fam = cnorm()
     fam.set_theta([0.0])
     y = np.array([1.0, 2.0, 3.0])
@@ -6039,7 +5700,6 @@ def test_cnorm_construction_and_validation():
     np.testing.assert_allclose(
         fam.dev_resids(y, mu, np.ones(3)), (y - mu) ** 2, rtol=0, atol=1e-12
     )
-    # identity link mustart = y; non-identity validmu requires μ > 0.
     np.testing.assert_array_equal(fam.initialize(y, np.ones(3)), y)
     assert cnorm(link="log").validmu(np.array([0.1, 1.0]))
     assert not cnorm(link="log").validmu(np.array([-0.1, 1.0]))
@@ -6063,9 +5723,6 @@ def test_cnorm_construction_and_validation():
 
 
 def _cpois_dd_inputs():
-    # 6 obs covering all cases: i0 uncensored, i1 interval [2,6], i2 left
-    # (−∞), i3 right (+∞), i4 uncensored ZERO count (the mustart quirk
-    # row), i5 interval given as yat < y (pmin/pmax swap).
     y = np.array([3.0, 2.0, 4.0, 1.0, 0.0, 5.0])
     yat = np.array([3.0, 6.0, -np.inf, np.inf, 0.0, 2.0])
     mu = np.array([2.5, 3.1, 1.7, 2.2, 0.9, 4.4])
@@ -6080,8 +5737,6 @@ def test_cpois_components_match_mgcv():
     fam = cpois()
     fam.set_censor(yat)
 
-    # dev.resids: the PROPER deviance (≥ 0), saturated reference included
-    # (interval rows maximize over μ via the analytic lgamma mean).
     dr = fam.dev_resids(y, mu, wt)
     np.testing.assert_allclose(
         dr,
@@ -6098,8 +5753,6 @@ def test_cpois_components_match_mgcv():
     )
     assert np.all(dr >= 0.0)
 
-    # Dd level 2: μ-derivatives ONLY — no θ keys at any level (mgcv's
-    # returned names are exactly these five; getTheta() is NULL).
     D = fam.Dd(y, mu, np.zeros(0), wt, level=2)
     assert set(D.keys()) == {"Dmu", "Dmu2", "EDmu2", "Dmu3", "Dmu4"}
     np.testing.assert_allclose(
@@ -6156,15 +5809,11 @@ def test_cpois_components_match_mgcv():
         atol=1e-300,
     )
 
-    # dDeta must survive the θ-free Dd (R's NULL list reads): θ entries
-    # come back as None, the μ-chain as usual.
     dd = fam.dDeta(y, mu, wt, np.zeros(0), level=2, dd=D)
     assert dd["Dth"] is None and dd["Detath"] is None
     assert dd["Dth2"] is None and dd["Deta3th"] is None
     assert np.all(np.isfinite(dd["Deta3"])) and np.all(np.isfinite(dd["Deta4"]))
 
-    # aic = −2·Σ logLik; ls the genuinely NONZERO saturated log-lik with
-    # all derivatives zero (left/right rows contribute exactly 0).
     np.testing.assert_allclose(
         fam.aic(y, mu, 0.0, wt, 0), 8.2329365948746229, rtol=1e-14
     )
@@ -6176,8 +5825,6 @@ def test_cpois_components_match_mgcv():
         fam.ls(y, wt, 1.0), [-2.5160365863162668, 0.0, 0.0], rtol=1e-14
     )
 
-    # dppois on probe triples: negative bounds (the Dd shift probes),
-    # y1 < 0 (both probs 0 → −Inf), opposite tails, and a far tail.
     from hea.family import _dppois
 
     y0p = np.array([1.0, -1.0, 0.0, -2.0, 3.0, 40.0])
@@ -6208,8 +5855,6 @@ def test_cpois_components_match_mgcv():
         rtol=1e-14,
     )
 
-    # mustart (log link): pmax(y, min(y>0)) with a zero present keeps the
-    # exact zero (mgcv-verified: mustart = 3 2 4 1 0 5).
     np.testing.assert_array_equal(fam.initialize(y, wt), y)
 
 
@@ -6222,8 +5867,6 @@ def test_cpois_Dd_matches_fd():
     D = fam.Dd(y, mu, np.zeros(0), wt, level=2)
 
     def m2ll(mu_):
-        # Dd differentiates −2logLik; dev_resids = −2logLik + 2·l_sat and
-        # the saturated part is μ-free, so FD in μ sees the same thing.
         return _cpois_dev_resids(y, mu_, yat)
 
     h = 1e-5
@@ -6232,7 +5875,6 @@ def test_cpois_Dd_matches_fd():
     fd_mu2 = (m2ll(mu + h) - 2 * m2ll(mu) + m2ll(mu - h)) / h**2
     np.testing.assert_allclose(D["Dmu2"], fd_mu2, rtol=1e-4, atol=1e-4)
 
-    # Dmu3/Dmu4 via FD of Dmu (analytic first derivative — steadier).
     def dmu_at(mu_):
         return fam.Dd(y, mu_, np.zeros(0), wt, level=0)["Dmu"]
 
@@ -6266,8 +5908,6 @@ def test_cpois_construction_and_validation():
     np.testing.assert_array_equal(
         cpois(link="log").initialize(y, np.ones(2)), [1.0, 2.0]
     )
-    # No censor ⇒ all uncensored: dev reduces to the plain Poisson
-    # deviance 2·(dpois(y,y) − dpois(y,μ)).
     fam = cpois()
     y = np.array([2.0, 0.0, 5.0])
     mu = np.array([1.5, 0.8, 4.0])
@@ -6286,10 +5926,6 @@ def test_cpois_construction_and_validation():
 
 
 def _clog_dd_inputs():
-    # 6 obs: i0/i2 uncensored, i1 interval [-0.5, 0.8], i3 left (−∞, wt 2),
-    # i4 right (+∞), i5 an uncensored row placed in log1pexp's QUIRK band
-    # (−(y−μ)/s = 34.5 ∈ (33.3, 37] → mgcv's exp(x) branch — dev blows up
-    # to 3.8e15, faithfully).
     y = np.array([1.2, -0.5, 2.0, 0.7, -1.0, float.fromhex("-0x1.6c8f9fb870caap+5")])
     yat = np.array(
         [1.2, 0.8, 2.0, -np.inf, np.inf, float.fromhex("-0x1.6c8f9fb870caap+5")]
@@ -6307,12 +5943,6 @@ def test_clog_components_match_mgcv():
     fam.set_theta([0.3])
     fam.set_censor(yat)
 
-    # rtol 1e-13, not 1e-14: the pins are arm64 R values, and the
-    # uncensored deviance 2·(z + 2·log1pexp(−z) − 2log2) cancels
-    # ~1.4-magnitude terms down to 0.025 (row 2), amplifying the 1-2 ulp
-    # glibc↔Apple libm exp/log scatter ~57× (measured 1.8e-14 rel on
-    # linux CI, where hea ≡ linux R holds separately via the live-R
-    # oracle gates). Same-platform parity stays bit-level (census).
     np.testing.assert_allclose(
         fam.dev_resids(y, mu, wt),
         [
@@ -6420,8 +6050,6 @@ def test_clog_components_match_mgcv():
     }
     for k, v in exp.items():
         np.testing.assert_allclose(D[k], v, rtol=1e-13, atol=0, err_msg=k)
-    # EDmu2 zeroes NEGATIVE Dmu2 rows (none here — all Dmu2 ≥ 0); EDmu2th
-    # is Dmu2th itself (mgcv aliases them).
     np.testing.assert_array_equal(D["EDmu2"], D["Dmu2"])
     assert D["EDmu2th"] is D["Dmu2th"]
 
@@ -6488,10 +6116,6 @@ def test_clog_construction_and_validation():
 
 
 def _bcg_dd_inputs():
-    # 6 obs: i0 uncensored, i1 interval [1.5, 2.6], i2 LEFT censored
-    # (bcg: yat ≤ 0, wt 2), i3 right (+∞), i4 left at y=1 (bc λ-deriv
-    # bly = 0 → sign(0) rows), i5 uncensored ZERO (in iu AND il — the
-    # later left block overwrites, and ls → +Inf via (λ−1)·log 0).
     y = np.array([3.0, 1.5, 0.9, 2.2, 1.0, 0.0])
     yat = np.array([3.0, 2.6, 0.0, np.inf, 0.0, 0.0])
     mu = np.array([1.1, 0.4, 0.8, 1.9, 0.2, 0.5])
@@ -6522,7 +6146,6 @@ def test_bcg_components_match_mgcv():
         rtol=1e-14,
         atol=0,
     )
-    # mgcv's attr(d,"sign") = sign(bc(y,λ) − μ), stashed for residuals.
     np.testing.assert_array_equal(fam._dev_sign, [1, 1, -1, -1, -1, -1])
 
     D = fam.Dd(y, mu, th, wt, level=2)
@@ -6553,8 +6176,6 @@ def test_bcg_components_match_mgcv():
         atol=0,
     )
     assert D["EDmu2"] is D["Dmu2"] and D["EDmu2th"] is D["Dmu2th"]
-    # θ blocks: (n,2) matrices, columns [λ, log σ]; θ² blocks (n,3)
-    # [λλ, λt, tt] — mgcv's own packing.
     np.testing.assert_allclose(
         D["Dth"].ravel(order="F"),
         [
@@ -6736,8 +6357,6 @@ def test_bcg_components_match_mgcv():
     np.testing.assert_allclose(
         fam.aic(y, mu, 0.0, wt, 0), 35.895971253414217, rtol=1e-14
     )
-    # ls: the uncensored y=0 row's (λ−1)·log(0) term makes it +Inf —
-    # exactly mgcv's value on this frame.
     assert fam.ls(y, wt, 1.0)[0] == np.inf
     le = fam.ls_extended(y, wt)
     assert float(np.sum(np.abs(le["lsth1"]))) == 0.0
@@ -6771,7 +6390,6 @@ def test_bcg_construction_and_validation():
     # non-negative response required (efam.r:2132).
     with pytest.raises(ValueError, match="non-negative"):
         bcg().initialize(np.array([-0.1, 1.0]), np.ones(2))
-    # identity validmu = finite; log/sqrt μ>0 (2-way).
     assert bcg(link="identity").validmu(np.array([-1.0, 0.0]))
     assert not bcg(link="log").validmu(np.array([0.0, 1.0]))
 
@@ -6791,8 +6409,6 @@ def test_bcg_construction_and_validation():
 
 
 def _gfam_slot_inputs():
-    # 8 obs over binomial (rows 0,1,7), tw (2,3,4), gaussian (5,6);
-    # θ = (twθ, tw log φ, gauss log σ²) = (0.1, −0.2, 0.3).
     y = np.array([1.0, 0.0, 2.2, 0.4, 1.5, -0.2, 0.7, 1.0])
     fi = np.array([1.0, 1, 2, 2, 2, 3, 3, 1])
     mu = np.array([0.6, 0.3, 1.8, 0.5, 1.2, 0.1, 0.4, 0.7])
@@ -7086,7 +6702,6 @@ def test_gfam_components_match_mgcv():
         g.aic(y, mu, 0.0, wt, None, theta=th), 7.319208537355566, rtol=1e-11
     )
 
-    # per-row link dispatch (logit rows 0,1,7 now stats-C exact).
     np.testing.assert_allclose(
         g.link.link(mu),
         [
@@ -7180,20 +6795,9 @@ def test_gfam_construction_and_validation():
         g.preinitialize(np.array([1.0, 2.0, 3.0]))
     with pytest.raises(ValueError, match="expects 1 params"):
         g.set_theta([0.1, 0.2])
-    # no fi set → any consumer refuses (the two-column response is the
-    # only intake).
     g2 = gfam([Poisson(), Gaussian()])
     with pytest.raises(ValueError, match="two-column response"):
         g2.initialize(np.array([1.0, 2.0]), np.ones(2))
-
-
-# ---------------------------------------------------------------------------
-# SoftplusLink (Thread A) — the genuine softplus *mean* link μ = log(1+e^η)
-# for Poisson RF/point-process GLMs (comp-neuro soft-rectifier; Paninski 2004).
-# NOT an mgcv built-in, so the link math is checked against closed forms +
-# finite differences; the fit is R-pinned via a custom-link glm (exact). Must
-# stay distinct from BoundedLogLink (mgcv's bounded "log" gamlss-scale link).
-# ---------------------------------------------------------------------------
 
 
 def test_softplus_link_math():
@@ -7202,23 +6806,19 @@ def test_softplus_link_math():
     L = SoftplusLink()
     assert L.name == "softplus"
     assert isinstance(_resolve_link("softplus", "log"), SoftplusLink)
-    # distinct from the bounded-log gamlss link (which displays as "log")
     assert BoundedLogLink().name == "log"
     assert not isinstance(BoundedLogLink(), SoftplusLink)
 
-    # round-trips both ways
     eta = np.linspace(-9, 9, 19)
     np.testing.assert_allclose(L.link(L.linkinv(eta)), eta, atol=1e-9)
     mu = np.linspace(0.05, 7, 25)
     np.testing.assert_allclose(L.linkinv(L.link(mu)), mu, atol=1e-9)
 
-    # μ = softplus(η), dμ/dη = σ(η) (vs finite diff of linkinv)
     np.testing.assert_allclose(L.linkinv(eta), np.logaddexp(0.0, eta), atol=1e-12)
     h = 1e-6
     fd = (L.linkinv(eta + h) - L.linkinv(eta - h)) / (2 * h)
     np.testing.assert_allclose(L.mu_eta(eta), fd, atol=1e-7)
 
-    # link derivatives vs closed forms (u = e^{-μ}, s = 1-u)
     u = np.exp(-mu)
     s = 1.0 - u
     np.testing.assert_allclose(L.d2link(mu), -u / s**2, rtol=1e-12)
@@ -7226,17 +6826,14 @@ def test_softplus_link_math():
     np.testing.assert_allclose(
         L.d4link(mu), -u * (1 + 4 * u + u * u) / s**4, rtol=1e-12
     )
-    # extended-family ratios g_kg = d^k link / g'^k, g'(μ)=1/s
     np.testing.assert_allclose(L.g2g(mu), -u, rtol=1e-12)
     np.testing.assert_allclose(L.g3g(mu), u * (1 + u), rtol=1e-12)
     np.testing.assert_allclose(L.g4g(mu), -u * (1 + 4 * u + u * u), rtol=1e-12)
-    # the ratio identity itself: d2link == g2g * g'^2
     gp = 1.0 / s
     np.testing.assert_allclose(L.d2link(mu), L.g2g(mu) * gp**2, rtol=1e-12)
     np.testing.assert_allclose(L.d3link(mu), L.g3g(mu) * gp**3, rtol=1e-12)
     np.testing.assert_allclose(L.d4link(mu), L.g4g(mu) * gp**4, rtol=1e-12)
 
-    # numerically safe at extreme η (no overflow; μ>0, μ_η finite)
     big = np.array([-700.0, -50.0, 0.0, 50.0, 700.0])
     assert np.all(np.isfinite(L.linkinv(big))) and np.all(L.linkinv(big) > 0)
     assert np.all(np.isfinite(L.mu_eta(big)))
@@ -7265,7 +6862,6 @@ def test_softplus_poisson_glm_matches_mgcv():
         atol=1e-6,
     )
     assert float(m.deviance) == pytest.approx(328.072958, abs=1e-4)
-    # string form resolves to the same link
     m2 = glm("y ~ x + z", d, family=Poisson(link="softplus"))
     np.testing.assert_allclose(
         np.asarray(m2.bhat.to_numpy()).ravel(),
@@ -7290,7 +6886,6 @@ def test_negbin_components_match_mgcv():
     y = np.array([0.0, 1.0, 3.0, 7.0])
     mu = np.array([1.5, 2.0, 2.5, 6.0])
     w = np.ones(4)
-    # mgcv: fam$dev.resids(y, mu, w) — bit-identical.
     np.testing.assert_array_equal(
         f.dev_resids(y, mu, w),
         [
@@ -7300,27 +6895,21 @@ def test_negbin_components_match_mgcv():
             0.038014875766715139,
         ],
     )
-    # mgcv: fam$aic(y, 1, mu, w, 0) (dev unused — Θ-form direct).
     assert f.aic(y, mu, None, w, None) == 14.422747381464536
-    # mgcv: fam$ls(y, w, 4, 1) = c(-sum(term·w), 0, 0).
     np.testing.assert_array_equal(f.ls(y, w, 1.0), [-5.8830735480899392, 0.0, 0.0])
     np.testing.assert_array_equal(f.variance(mu), [2.625, 4.0, 5.625, 24.0])
     np.testing.assert_array_equal(f.dvar(mu), [2.5, 3.0, 3.5, 7.0])
     np.testing.assert_array_equal(f.d2var(mu), [1.0, 1.0, 1.0, 1.0])
     np.testing.assert_array_equal(f.d3var(mu), [0.0, 0.0, 0.0, 0.0])
-    # initialize: mustart <- y + (y == 0)/6.
     np.testing.assert_allclose(f.initialize(y, w), [1.0 / 6.0, 1.0, 3.0, 7.0], rtol=0)
     with pytest.raises(ValueError, match="negative values not allowed"):
         f.initialize(np.array([-1.0, 2.0]), np.ones(2))
-    # qf = qnbinom(p, size=Θ, mu) — R oracle.
     np.testing.assert_array_equal(
         f.qf(np.array([0.1, 0.5, 0.9]), np.full(3, 7.3), None, None), [1.0, 6.0, 15.0]
     )
-    # famname: paste("Negative Binomial(", format(round(theta, 3)), ")").
     assert f.name == "Negative Binomial(2)"
     assert negbin(2.3456).name == "Negative Binomial(2.346)"
     assert negbin(3.7).name == "Negative Binomial(3.7)"
-    # getTheta: the θ vector on the NATURAL scale (mgcv negbin$getTheta()).
     np.testing.assert_array_equal(negbin([2, 9]).get_theta(), [2.0, 9.0])
     # canonical="" (gam.fit3.r:2641) → never the Fisher shortcut.
     assert not f.is_canonical
@@ -7332,8 +6921,6 @@ def test_negbin_components_match_mgcv():
     assert negbin(2, link="sqrt").link.name == "sqrt"
     with pytest.raises(ValueError, match="banana"):
         negbin(2, link="banana")
-    # theta = stop("'theta' must be specified") — the lazy default fires
-    # on first access; hea validates eagerly with the same message.
     with pytest.raises(ValueError, match="'theta' must be specified"):
         negbin()
     with pytest.raises(ValueError, match="positive and finite"):
@@ -7356,7 +6943,6 @@ def test_qnbinom_pnbinom_mu_match_r():
     for (size, mu), expect in grids.items():
         got = [nm.qnbinom_mu(p, size, mu) for p in ps]
         np.testing.assert_array_equal(got, expect, err_msg=f"{size},{mu}")
-    # upper tail + log scale (size=2.5, mu=7.3).
     np.testing.assert_array_equal(
         [nm.qnbinom_mu(p, 2.5, 7.3, False) for p in ps],
         [42, 34, 24, 14, 9, 6, 3, 2, 0, 0],
@@ -7365,7 +6951,6 @@ def test_qnbinom_pnbinom_mu_match_r():
         [nm.qnbinom_mu(np.log(p), 2.5, 7.3, True, True) for p in ps],
         [0, 0, 0, 2, 4, 6, 10, 14, 24, 42],
     )
-    # boundaries: R_Q_P01_boundaries + the size/mu special cases.
     assert nm.qnbinom_mu(0.0, 2.5, 7.3) == 0.0
     assert nm.qnbinom_mu(1.0, 2.5, 7.3) == np.inf
     assert nm.qnbinom_mu(0.5, 0.0, 3.0) == 0.0
@@ -7411,10 +6996,7 @@ def test_qnbinom_pnbinom_mu_match_r():
         [nm.pnbinom_mu(x, np.inf, 7.3) for x in [0, 3, 7]],
         [0.00067553877519384439, 0.067406047117412868, 0.55410661183907739],
     )
-    # x + 1e-7 left-fuzz (pnbinom.c floor(x + 1e-7)).
     assert nm.pnbinom_mu(2.9999999, 2.5, 7.3) == 0.26302499000982504
-    # rust kernels 0-ulp vs the Python port (skips cleanly if the
-    # extension is absent — _disp then runs the Python scalars anyway).
     rs_q = nm.rs_fn("qnbinom_mu")
     rs_p = nm.rs_fn("pnbinom_mu")
     if rs_q is not None:
@@ -7432,19 +7014,6 @@ def test_qnbinom_pnbinom_mu_match_r():
                     got_rs = rs_p(xs, np.full(6, size), np.full(6, mu), lt, lg)
                     got_py = [nm.pnbinom_mu(x, size, mu, lt, lg) for x in xs]
                     np.testing.assert_array_equal(got_rs, got_py)
-
-
-# ===========================================================================
-# tw/nb θ-chain + R_pow/lgamma/digamma parity census pins (audit-2 B14
-# follow-up closure). Values: live mgcv 1.9-4 hex-float census on the
-# default_rng(42) frame below (bit-exact on arm64; rel tolerances carry
-# ~100x headroom for glibc↔Apple libm exp/log last-ulp scatter, the
-# 2026-07-06(f) CI lesson). The fixes these pin: p(θ) as mgcv's literal
-# branch expressions (not expit algebra), R_pow sequential ^2/^3
-# scalars + mgcv's Dth2 parenthesization in tw$Dd, _rpow_int for nb's
-# mu^3/mu^4, nmath lgammafn/dpsifn (not scipy) + _rsum in nb$ls/aic,
-# and tw$ls as the mechanical colSums(w·ldTweedie(y,y,…)) port.
-# ===========================================================================
 
 
 def _census_frame_42():

@@ -33,10 +33,6 @@ from . import gaps as _gaps
 from .gaps import Gap
 from .r_to_py import translate as _r_to_py
 
-# ---------------------------------------------------------------------------
-# Result containers
-# ---------------------------------------------------------------------------
-
 
 @dataclass(slots=True)
 class RunResult:
@@ -75,14 +71,6 @@ class ParityResult:
         return self.r_run.ok and self.py_run.ok and not self.gaps
 
 
-# ---------------------------------------------------------------------------
-# R driver (inline string template)
-# ---------------------------------------------------------------------------
-
-
-# The driver source()s the user script with print.eval=FALSE so we don't
-# pollute stdout, then pulls the last expression's value off the source()
-# return list. Serialization is via readr (CSV) + jsonlite (schema JSON).
 _R_DRIVER_TEMPLATE = r"""
 suppressPackageStartupMessages({
   library(dplyr)
@@ -106,7 +94,6 @@ suppressPackageStartupMessages({
   error = .handler
 )
 
-# Capture factor levels and dtypes per column.
 .capture_schema <- function(df) {
   factors <- list()
   dtypes  <- list()
@@ -121,7 +108,6 @@ suppressPackageStartupMessages({
 }
 
 .write_capture <- function(df) {
-  # CSV (NA values mark missing — R's default).
   readr::write_csv(df, .out_csv, na = "")
   schema <- .capture_schema(df)
   jsonlite::write_json(schema, .out_schema, auto_unbox = TRUE, null = "null")
@@ -130,10 +116,8 @@ suppressPackageStartupMessages({
 if (inherits(.result, "data.frame")) {
   .write_capture(as.data.frame(.result))
 } else if (is.atomic(.result)) {
-  # Scalar / vector — wrap in a one-column df so the diff path stays uniform.
   .write_capture(data.frame(value = .result, stringsAsFactors = FALSE))
 } else if (inherits(.result, "ggplot")) {
-  # Plot output — for now, just capture the data slot if present.
   if (!is.null(.result$data) && inherits(.result$data, "data.frame")) {
     .write_capture(.result$data)
   } else {
@@ -141,34 +125,21 @@ if (inherits(.result, "data.frame")) {
     quit(status = 3)
   }
 } else if (is.null(.result)) {
-  # No last value — write empty.
   writeLines(character(0), .out_csv)
   jsonlite::write_json(
     list(dtypes = list(), factors = list(), shape = c(0L, 0L)),
     .out_schema, auto_unbox = TRUE, null = "null"
   )
 } else {
-  # Non-frame result (summary.lm / aov / lm / list / environment / …):
-  # print to stdout so callers see R's REPL-style formatted output. Don't
-  # write CSV/schema — that's the signal to the parity runner that there
-  # is no comparable frame for diffing; the inline to_R(execute=True)
-  # path surfaces the captured stdout as ``.value`` instead.
   print(.result)
 }
 """
 
 
 def _build_r_driver(user_script: Path, out_csv: Path, out_schema: Path) -> str:
-    """Render the R driver template with the user-supplied paths.
-
-    Uses literal-marker substitution rather than ``str.format`` — the R
-    driver contains many ``{`` / ``}`` (function bodies, ``tryCatch``)
-    that would confuse ``format``-style placeholders.
-    """
+    """Render the R driver template with the user-supplied paths."""
 
     def _r_escape(p: Path) -> str:
-        # R double-quoted strings need ``\\`` and ``"`` escaped. Paths
-        # under macOS / Linux won't contain either; defend regardless.
         return str(p).replace("\\", "\\\\").replace('"', '\\"')
 
     return (
@@ -176,11 +147,6 @@ def _build_r_driver(user_script: Path, out_csv: Path, out_schema: Path) -> str:
         .replace("@@OUT_CSV@@", _r_escape(out_csv))
         .replace("@@OUT_SCHEMA@@", _r_escape(out_schema))
     )
-
-
-# ---------------------------------------------------------------------------
-# Subprocess runners
-# ---------------------------------------------------------------------------
 
 
 class RNotFoundError(RuntimeError):
@@ -268,14 +234,6 @@ def run_py(script_path: Path, out_dir: Path, *, timeout: float = 60.0) -> RunRes
     )
 
 
-# ---------------------------------------------------------------------------
-# Diff
-# ---------------------------------------------------------------------------
-
-
-# R dtype names (class()[1]) → broad polars/Python categories. We don't
-# enforce exact dtype equality (Int64 vs Float64 round-trip noise is real);
-# instead, we group both sides and compare the group.
 _R_DTYPE_GROUP = {
     "integer": "numeric",
     "numeric": "numeric",
@@ -334,7 +292,6 @@ def diff_frames(
     r_df = pl.read_csv(r_csv) if r_csv.stat().st_size > 0 else pl.DataFrame()
     py_df = pl.read_csv(py_csv) if py_csv.stat().st_size > 0 else pl.DataFrame()
 
-    # --- Schema: columns ---
     if list(r_df.columns) != list(py_df.columns):
         out.append(
             Gap(
@@ -346,7 +303,6 @@ def diff_frames(
         )
         return out  # can't compare further if columns disagree
 
-    # --- Schema: dtype groups ---
     for col in r_df.columns:
         r_grp = _R_DTYPE_GROUP.get(r_meta["dtypes"].get(col, ""), "?")
         py_grp = _pl_dtype_group(py_meta["dtypes"].get(col, ""))
@@ -361,7 +317,6 @@ def diff_frames(
                 )
             )
 
-    # --- Row count ---
     if r_df.height != py_df.height:
         out.append(
             Gap(
@@ -373,7 +328,6 @@ def diff_frames(
         )
         return out  # value diff requires aligned shapes
 
-    # --- Factor levels ---
     r_factors = r_meta.get("factors", {})
     py_factors = py_meta.get("factors", {})
     for col in set(r_factors) | set(py_factors):
@@ -389,11 +343,9 @@ def diff_frames(
                 )
             )
 
-    # --- Values ---
     for col in r_df.columns:
         r_col = r_df[col]
         py_col = py_df[col]
-        # Compatible dtypes (already grouped above; coerce for compare).
         r_grp = _R_DTYPE_GROUP.get(r_meta["dtypes"].get(col, ""), "?")
         if r_grp == "numeric":
             diff = _numeric_diff(r_col, py_col, rel_tol=rel_tol, abs_tol=abs_tol)
@@ -407,12 +359,9 @@ def diff_frames(
                     )
                 )
         else:
-            # Cast both to string for exact compare. CSV round-trip
-            # normalizes most representational quirks.
             r_str = r_col.cast(pl.Utf8, strict=False)
             py_str = py_col.cast(pl.Utf8, strict=False)
             mismatches = (r_str != py_str).sum()
-            # Treat both-null as match.
             both_null = r_str.is_null() & py_str.is_null()
             mismatches = mismatches - int(both_null.sum())
             if mismatches:
@@ -433,10 +382,8 @@ def _numeric_diff(r_col, py_col, *, rel_tol: float, abs_tol: float) -> str:
     of how many cells exceed the tolerance and the worst absolute diff."""
     import polars as pl
 
-    # Cast both to Float64 for comparison.
     a = r_col.cast(pl.Float64, strict=False)
     b = py_col.cast(pl.Float64, strict=False)
-    # Both null → match. One null → mismatch.
     a_null = a.is_null()
     b_null = b.is_null()
     one_null = (a_null & ~b_null) | (~a_null & b_null)
@@ -458,11 +405,6 @@ def _numeric_diff(r_col, py_col, *, rel_tol: float, abs_tol: float) -> str:
     if n_one_null:
         parts.append(f"{n_one_null} cells null on one side only")
     return "; ".join(parts)
-
-
-# ---------------------------------------------------------------------------
-# Top-level entry
-# ---------------------------------------------------------------------------
 
 
 def parity(

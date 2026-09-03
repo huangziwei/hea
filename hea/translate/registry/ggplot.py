@@ -19,8 +19,6 @@ This module is **purely declarative** — no AST handling lives here.
 
 from __future__ import annotations
 
-# Chain-extension function names with explicit listing. Open-set names are
-# matched by prefix (see :func:`is_chain_extension`).
 _NON_PREFIXED_EXTENSIONS: frozenset[str] = frozenset(
     {
         "labs",
@@ -61,14 +59,6 @@ def is_chain_extension(func_name: str) -> bool:
     return any(func_name.startswith(p) for p in _EXTENSION_PREFIXES)
 
 
-# Functions whose first positional arg may be an ``aes(...)`` call to
-# unwrap. Effectively the same as chain extensions plus ``ggplot`` itself.
-# We use the same prefix logic; ``aes`` unwrapping is attempted on every
-# chain extension call regardless.
-
-
-# ``theme`` is a chain extension (theme_*) but ``theme()`` itself (no
-# suffix) is also valid. Cover it explicitly.
 def is_theme_call(func_name: str) -> bool:
     return func_name == "theme"
 

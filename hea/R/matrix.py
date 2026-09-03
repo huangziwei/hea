@@ -112,7 +112,6 @@ def cbind(*args):
         if arr.ndim == 1:
             arr = arr.reshape(-1, 1)
         arrs.append(arr)
-    # Broadcast scalars to longest column
     max_rows = max(a.shape[0] for a in arrs)
     arrs = [
         np.broadcast_to(a, (max_rows, a.shape[1])) if a.shape[0] == 1 else a
@@ -130,7 +129,6 @@ def sweep(x, MARGIN, STATS, FUN="-"):
     arr = _to_2d(x).astype(float)
     stats = np.asarray(STATS, dtype=float).ravel()
     if MARGIN == 2:
-        # broadcast along axis 0 (rows broadcast, columns aligned)
         op_arr = stats[np.newaxis, :]
     else:
         op_arr = stats[:, np.newaxis]
@@ -154,8 +152,6 @@ def expand_grid(**kwargs):
             values.append([v])
         else:
             values.append(list(v))
-    # R's expand.grid: first variable varies fastest. itertools.product
-    # varies the *last* fastest, so reverse, product, reverse again.
     rev_values = list(reversed(values))
     rows = list(itertools.product(*rev_values))
     rows = [tuple(reversed(r)) for r in rows]
@@ -177,14 +173,7 @@ def R_range(x, na_rm=False):
 
 
 def _flatten_to_values(x) -> np.ndarray:
-    """Flatten an R-shaped argument to a 1-D numpy array.
-
-    Accepts a scalar, list/tuple (possibly with nested vectors), numpy
-    array, ``pl.Series``, or :class:`hea.NamedVector`. The list case is
-    what the translator emits for R's ``c(scalar, vec, vec2)`` — a
-    Python list with mixed scalar + vector entries that R would have
-    flattened via ``c()``.
-    """
+    """Flatten an R-shaped argument to a 1-D numpy array."""
 
     if isinstance(x, NamedVector):
         return x.values
@@ -274,7 +263,6 @@ def matrix(data, nrow=None, ncol=None, byrow=False):
     else:
         arr = np.asarray(data).ravel()
         if arr.dtype == object:
-            # Mixed / None entries — coerce to float with NaN for None.
             try:
                 arr = np.asarray(
                     [np.nan if v is None else v for v in arr.tolist()],
@@ -289,7 +277,6 @@ def matrix(data, nrow=None, ncol=None, byrow=False):
     if ncol is None:
         ncol = -(-arr.size // nrow)
     if arr.size < nrow * ncol:
-        # R recycles values; numpy reshape doesn't — tile to fill.
         reps = -(-(nrow * ncol) // arr.size)
         arr = np.tile(arr, reps)[: nrow * ncol]
     elif arr.size > nrow * ncol:

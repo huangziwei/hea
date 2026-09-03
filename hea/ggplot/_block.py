@@ -28,42 +28,18 @@ import polars as pl
 
 from . import _measure as M
 
-# ---- Spacing system (all inches) -----------------------------------------
-#
-# Three tiers: (a) intra-decoration pads that match matplotlib's actual
-# rendering so reserved cell sizes equal what gets drawn; (b) the
-# generic ``ELEMENT_GAP`` between any two decoration elements (e.g.
-# colorbar to panel, plot to legend); (c) ``BLOCK_GAP`` between sibling
-# plot blocks in a compose. Define once, reference everywhere — no
-# more inline 0.04 / 0.05 / 0.10 magic numbers scattered through the
-# render path.
-
-# (a) Pads matplotlib actually uses internally (so our reservations
-# match what gets rendered):
 _TICK_MARK_LEN_IN = 0.05  # rcParams['xtick.major.size'] = 3.5pt ≈ 0.05"
 _TICK_TO_LABEL_PAD_IN = 0.05  # rcParams['xtick.major.pad']  = 3.5pt ≈ 0.05"
 _LABEL_PAD_IN = 0.06  # rcParams['axes.labelpad']    = 4pt   ≈ 0.06"
 
-# (b) Generic separation between any two adjacent decoration elements
-# (e.g. between an axis label and the figure edge, between a legend and
-# a colorbar in stacked guides). Uniform 0.10" — ggplot2's default
-# ``theme(plot.margin)`` would correspond to about this.
 ELEMENT_GAP_IN = 0.10
 
-# (c) Whitespace between sibling plot blocks in a patchwork compose
-# (panel-to-panel gap, also between a plot's panel and an adjacent
-# plot's decorations).
 BLOCK_GAP_IN = 0.20
 
-# (Existing names kept for backwards reference but redefined in terms
-# of the system above.)
 _PANEL_MARGIN_PAD_IN = _TICK_TO_LABEL_PAD_IN
 _AXIS_LABELPAD_IN = _LABEL_PAD_IN
 _TICK_MARK_PAD_IN = _TICK_MARK_LEN_IN + _TICK_TO_LABEL_PAD_IN + 0.02
 
-# Tick-label reserve when we can't measure actual labels. ggplot2's
-# font is 11pt; ~5 char labels (e.g. "0.500") give the width / height
-# seed below; pad covers tick mark + tick-to-label gap + safety.
 _DEFAULT_YTICK_RESERVE_IN = (
     M.text_size_in("00000", fontsize=M.AXIS_TEXT_SIZE_PT)[0] + _TICK_MARK_PAD_IN
 )
@@ -91,36 +67,21 @@ class PlotBlock:
     margin_top_in: float = 0.0
     margin_bottom_in: float = 0.0
 
-    # Inch dimensions reserved for the discrete-legend block, broken out
-    # from the margin total so ``_allocate_legend_host_axes`` can carve
-    # the correct slice. The full margin = decoration reserve + legend
-    # reserve (when legend.position pushes the legend onto that side).
     legend_w_in: float = 0.0  # nonzero when legend.position in ("left", "right", None)
     legend_h_in: float = 0.0  # nonzero when legend.position in ("top", "bottom")
     colorbar_w_in: float = 0.0  # right/left side colorbar dims
     colorbar_h_in: float = 0.0  # top/bottom side colorbar dims
 
-    # For faceted plots, the panel cell hosts a nrow×ncol sub-grid of
-    # facet panels (each has its own strip / data area). For non-faceted
-    # plots, both are 1.
     panel_grid_rows: int = 1
     panel_grid_cols: int = 1
 
-    # After ``render_block``, the realized matplotlib axes for each panel
-    # (length == panel_grid_rows * panel_grid_cols, row-major).
     panel_axes: list = field(default_factory=list)
 
-    # Filled in during render to support legend/colorbar placement.
     figure: object | None = None
-
-    # ------------------------------------------------------------------
 
     @property
     def n_panels(self) -> int:
         return self.panel_grid_rows * self.panel_grid_cols
-
-    # ---- Outer-margin protocol shared with SuperBlock ----------------
-    # Composition takes max of these across siblings sharing a row/col.
 
     @property
     def outer_margin_top_in(self) -> float:
@@ -139,9 +100,6 @@ class PlotBlock:
         return self.margin_right_in
 
 
-# ---- Measurement ----------------------------------------------------------
-
-
 def measure_block(plot, build_output) -> PlotBlock:
     """Compute per-side margin sizes (inches) for ``plot``.
 
@@ -153,10 +111,6 @@ def measure_block(plot, build_output) -> PlotBlock:
 
     labels = plot.labels or {}
 
-    # --- TOP margin: title + subtitle (matplotlib default sizing).
-    # Reserve room separately for each so sibling plots in compose mode
-    # share a baseline. Faceted plots also need room for strip labels
-    # (added after the facet check below).
     import matplotlib as mpl
 
     title = labels.get("title")
@@ -176,33 +130,17 @@ def measure_block(plot, build_output) -> PlotBlock:
     if subtitle_h > 0:
         margin_top += subtitle_h + M.ROW_GAP_IN
 
-    # --- LEFT margin: ylab (rotated 90) + ytick reserve.
-    # ylab gap uses ``axes.labelpad`` (matplotlib's actual rendering)
-    # — same rationale as the xlab side.
     xlabel, ylabel = _default_labels(plot, build_output)
     ylab_w = M.text_size_in(
         ylabel,
         fontsize=M.AXIS_TITLE_SIZE_PT,
         rotation=90.0,
     )[0]
-    # Size the ytick reserve from the actual tick labels the trained
-    # y-scale will draw, not a fixed ``"00000"`` sample. Without this,
-    # narrow ticks (``"0.06"`` on a density scale) leave the budgeted
-    # ``"00000"`` slack as visible whitespace at the figure left edge —
-    # and in patchwork composes the inter-plot gap looks "inconsistent"
-    # because plots with wider ticks (``"15000"``) collapse it to zero
-    # while plots with narrower ticks pad it out.
     ytick_reserve = _predict_axis_tick_reserve_in(build_output, "y")
     margin_left = ylab_w + ytick_reserve + _PANEL_MARGIN_PAD_IN
     if ylab_w > 0:
         margin_left += _AXIS_LABELPAD_IN
 
-    # --- BOTTOM margin: xtick reserve + xlab + caption.
-    # The xlab pad uses matplotlib's ``axes.labelpad`` (4pt ≈ 0.06")
-    # rather than our generic ROW_GAP_IN — otherwise the reserved
-    # space falls short of what matplotlib actually renders, leaving
-    # the xlab to encroach on the next plot's panel in vertical
-    # compose (e.g. ``p1 / p2``).
     xlab_h = M.text_size_in(xlabel, fontsize=M.AXIS_TITLE_SIZE_PT)[1]
     caption = labels.get("caption")
     caption_h = M.text_size_in(caption, fontsize=M.CAPTION_SIZE_PT)[1]
@@ -212,17 +150,10 @@ def measure_block(plot, build_output) -> PlotBlock:
     if caption_h > 0:
         margin_bottom += caption_h + M.ROW_GAP_IN
 
-    # --- Legend / colorbar margin contribution. ``legend.position``
-    # controls which side the discrete legend goes on; the colorbar
-    # follows the same position. Default ("right"/None) puts both on the
-    # right edge; "bottom"/"top" pushes them under/over the panel;
-    # "left" mirrors right.
     legend_pos = plot.theme.get("legend.position") if plot.theme else None
     cbar_w = _measure_colorbar_width(plot, build_output)
     legend_w_raw, legend_h_raw = _measure_legend_size(plot, build_output)
 
-    # Track separate legend / colorbar dims per side so the renderer can
-    # subdivide the correct margin cell into [decoration | legend].
     legend_w_field = 0.0
     legend_h_field = 0.0
     colorbar_w_field = 0.0
@@ -250,21 +181,12 @@ def measure_block(plot, build_output) -> PlotBlock:
         colorbar_h_field = cbar_w
         margin_bottom += legend_h_raw + (M.ROW_GAP_IN if legend_h_raw > 0 else 0.0)
         margin_bottom += cbar_w + (M.ROW_GAP_IN if cbar_w > 0 else 0.0)
-    # other / unknown values fall through with no extra margin
 
-    # --- Facet grid dims
     layout = build_output.layout
     n_panels = 1 if layout is None else len(layout)
     if n_panels > 1:
         nrow, ncol = plot.facet.grid_dims(n_panels)
-        # Strip labels paint ``ax.set_title`` above each facet panel —
-        # they overflow into the leaf's top-margin cell otherwise.
-        # Reserve their height in margin_top so the title stays above.
         margin_top += M.strip_cell_height_in("Sample")
-        # facet_grid right strips: a vertical strip on the rightmost panel
-        # of each row. Same thickness as a top strip (font + padding).
-        # Without this, the rotated label and grey rect get clipped past
-        # the figure edge.
         if getattr(plot.facet, "rows", None):
             margin_right += M.strip_cell_height_in("Sample")
     else:
@@ -287,16 +209,7 @@ def measure_block(plot, build_output) -> PlotBlock:
 
 
 def _measure_legend_size(plot, build_output) -> tuple[float, float]:
-    """Approximate the legend's (w, h) in inches.
-
-    Layout depends on ``legend.position``:
-      * ``"right"`` / ``"left"`` (and ``None``): groups stacked
-        vertically; entries within each group also stacked vertically.
-      * ``"top"`` / ``"bottom"``: groups laid out side-by-side; entries
-        within each group laid out horizontally (a single row by default,
-        wrapped into ``nrow`` rows when ``guides(... = guide_legend(
-        nrow=N))`` is supplied).
-    """
+    """Approximate the legend's (w, h) in inches."""
     pos = plot.theme.get("legend.position") if plot.theme else None
     if pos == "none":
         return (0.0, 0.0)
@@ -317,9 +230,6 @@ def _measure_legend_size(plot, build_output) -> tuple[float, float]:
         return 1
 
     if pos in ("top", "bottom"):
-        # Horizontal layout: each group sized by horizontal cell formula,
-        # honouring the user-requested ``nrow`` so wrapping increases
-        # the reserved height proportionally.
         cell_sizes = [
             M.legend_cell_size_horizontal_in(
                 g.title,
@@ -332,7 +242,6 @@ def _measure_legend_size(plot, build_output) -> tuple[float, float]:
         heights = [h for _, h in cell_sizes]
         return (sum(widths) + (len(widths) - 1) * M.COL_GAP_IN, max(heights))
 
-    # Vertical layout (right/left/None): keep existing behaviour.
     cell_sizes = [M.legend_cell_size_in(g.title, g.labels) for g in groups]
     widths = [w for w, _ in cell_sizes]
     heights = [h for _, h in cell_sizes]
@@ -340,19 +249,7 @@ def _measure_legend_size(plot, build_output) -> tuple[float, float]:
 
 
 def _predict_axis_tick_reserve_in(build_output, axis: str) -> float:
-    """Inch reserve for tick LABEL text on ``axis`` plus tick-mark pad.
-
-    Returns the same number as the legacy ``"00000"``-based default
-    when the scale isn't trained or isn't predictable from here (e.g.
-    log scales that defer to matplotlib's own locator). Otherwise reads
-    the trained scale's breaks/labels and sizes for the widest one,
-    matching what ``apply_to_axis`` will actually draw.
-
-    For ``axis = "y"`` we measure label WIDTH; for ``axis = "x"`` we
-    return the legacy height-based reserve unchanged because horizontal
-    tick text height doesn't depend on label content (rotation isn't
-    wired up yet).
-    """
+    """Inch reserve for tick LABEL text on ``axis`` plus tick-mark pad."""
     if axis == "x":
         return _DEFAULT_XTICK_RESERVE_IN
 
@@ -365,15 +262,7 @@ def _predict_axis_tick_reserve_in(build_output, axis: str) -> float:
 
 
 def _predict_axis_tick_labels(build_output, axis: str) -> list[str] | None:
-    """Predict the tick-label strings the ``axis`` will draw at render time.
-
-    Mirrors :meth:`ScaleContinuous.apply_to_axis` and
-    :meth:`ScaleOrdinal.apply_to_axis` so the measurement matches the
-    rendered ticks exactly. Returns ``None`` when prediction can't be
-    done locally (untrained scale, log/transformed scale that hands
-    off to matplotlib's own locator, custom callable breaks that would
-    require an axes object to evaluate).
-    """
+    """Predict the tick-label strings the ``axis`` will draw at render time."""
     from .scales.continuous import ScaleContinuous
     from .scales.ordinal import ScaleOrdinal
     from .scales.transformed import IdentityTrans
@@ -405,8 +294,6 @@ def _predict_axis_tick_labels(build_output, axis: str) -> list[str] | None:
     if isinstance(scale, ScaleContinuous):
         if scale.range_ is None:
             return None
-        # Log/log-like scales delegate to matplotlib's locator at render
-        # time — we don't have an axes here to query, so bail.
         if scale.breaks == "default" and not isinstance(scale.transform, IdentityTrans):
             return None
         if scale.breaks is None:
@@ -436,12 +323,6 @@ def _measure_colorbar_width(plot, build_output) -> float:
     if not specs:
         return 0.0
 
-    # Predict each colorbar's tick labels from its (vmin, vmax) instead
-    # of using a fixed sample. Without this, a count-scale colorbar
-    # (e.g. geom_bin2d on diamonds, ticks ``"0".."10000"``) gets sized
-    # for ``"0.0".."1.0"`` and the wider tick text spills past the
-    # right-margin cell — visible as the colorbar overlapping the next
-    # plot's ylabel in side-by-side patchwork composes.
     return max(
         M.colorbar_cell_width_in(_predict_colorbar_tick_labels(s.vmin, s.vmax))
         for s in specs
@@ -451,18 +332,6 @@ def _measure_colorbar_width(plot, build_output) -> float:
 def _predict_colorbar_tick_labels(vmin: float, vmax: float) -> list[str]:
     """Plausible tick-label strings for a vertical colorbar over
     ``[vmin, vmax]``.
-
-    matplotlib's colorbar uses :class:`AutoLocator`, whose tick density
-    depends on the cax's rendered height — but we need labels at MEASURE
-    time, before the figure is sized. Probe ``MaxNLocator`` at several
-    nbins and union the results so we cover the cax-height range and
-    catch the longest label matplotlib might pick (fewer bins → wider
-    intervals → larger numbers, e.g. ``"10000"`` instead of ``"8000"``).
-
-    Tick values BEYOND ``[vmin, vmax]`` are kept (matplotlib draws e.g.
-    a ``"10000"`` tick when ``vmax = 9213``). Formatting is ``"%g"``,
-    matching :class:`ScalarFormatter`'s short form for the ranges
-    typical of ggplot scales.
     """
     import matplotlib.ticker as mticker
 
@@ -492,9 +361,6 @@ def _format_tick_g(t: float) -> str:
     return f"{t:g}"
 
 
-# ---- Render ---------------------------------------------------------------
-
-
 def render_block(
     plot,
     build_output,
@@ -515,10 +381,6 @@ def render_block(
     """
     from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 
-    # We need a positive panel size (the residual after margins). Sum of
-    # all three width ratios is whatever — matplotlib normalizes — but we
-    # need the panel ratio to be nonzero. Use a baseline that keeps the
-    # panel a sensible size relative to its margins.
     panel_w = max(
         fig.get_figwidth() - block.margin_left_in - block.margin_right_in,
         0.5,
@@ -530,9 +392,6 @@ def render_block(
 
     width_ratios = [block.margin_left_in, panel_w, block.margin_right_in]
     height_ratios = [block.margin_top_in, panel_h, block.margin_bottom_in]
-    # GridSpec requires strictly positive ratios. A 0 margin (e.g. no
-    # title, no caption) gets a tiny floor so matplotlib doesn't choke;
-    # the visual effect is negligible.
     width_ratios = [max(r, 1e-6) for r in width_ratios]
     height_ratios = [max(r, 1e-6) for r in height_ratios]
 
@@ -572,9 +431,6 @@ def render_block(
     if block.n_panels == 1:
         ax = fig.add_subplot(panel_cell, **polar_kw)
         block.panel_axes = [ax]
-        # Pre-allocate cax/legend host in the right-margin cell so
-        # fig.colorbar doesn't shrink the panel and the legend stays
-        # bounded by its host (no overflow into adjacent figure space).
         cb_caxes = _allocate_colorbar_caxes(fig, gs, 1, 2, plot, build_output)
         leg_hosts = _allocate_legend_host_axes(
             fig, gs, 1, 2, plot, build_output, block=block
@@ -598,9 +454,6 @@ def render_block(
             for c in range(ncol):
                 share_x_with = _share_anchor(sharex, r, c, axes, row_axes, axis="x")
                 share_y_with = _share_anchor(sharey, r, c, axes, row_axes, axis="y")
-                # Polar projection forced shared-axes off (matplotlib
-                # ignores sharex/sharey for non-Cartesian projections
-                # anyway, and passing them produces warnings).
                 share_kw = (
                     {} if is_polar else {"sharex": share_x_with, "sharey": share_y_with}
                 )
@@ -624,15 +477,9 @@ def render_block(
             legend_host_axes=leg_hosts,
         )
 
-    # Title/subtitle/caption text rides on the panel ``Axes`` (title via
-    # ``ax.set_title(loc='left')``, caption via ``fig.text``). Margin
-    # sizes already reserve the room; the existing renderer's
-    # ``_apply_plot_titles`` does the actual placement so we don't add
-    # extra Axes that would break tests counting ``fig.axes``.
     from .render import _apply_plot_titles
 
     if subplotspec is None:
-        # Standalone — owns the figure, can use fig.suptitle / fig.text.
         _apply_plot_titles(plot, fig, ax_list=block.panel_axes)
 
 
@@ -644,12 +491,7 @@ def _render_single_into(
     colorbar_caxes: list | None = None,
     legend_host_axes: list | None = None,
 ) -> None:
-    """Run the single-panel rendering pipeline against ``ax``.
-
-    ``colorbar_caxes``: pre-allocated dedicated axes for any colorbars
-    in this plot, so ``fig.colorbar`` doesn't shrink the panel. Block-
-    engine composition allocates these in the right-margin column.
-    """
+    """Run the single-panel rendering pipeline against ``ax``."""
     from .render import (
         _apply_theme,
         _coord_view_limits,
@@ -667,12 +509,6 @@ def _render_single_into(
 
     from .render import _panel_scale
 
-    # Pre-axis hook: discrete scales register their category order with
-    # matplotlib's category unit BEFORE geoms draw, so the data lands at
-    # the levels' positions (not row-encounter positions). Skip on polar
-    # — the polar pre-pass below converts ordinal x to numeric positions
-    # before drawing, and matplotlib's category converter wouldn't
-    # interpret strings as theta anyway.
     if not is_polar:
         for axis in ("x", "y"):
             scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
@@ -752,13 +588,7 @@ def _render_facets_into(
     colorbar_caxes: list | None = None,
     legend_host_axes: list | None = None,
 ) -> None:
-    """Render each facet panel into its allocated axes.
-
-    ``composing=True`` skips ``fig.supxlabel``/``supylabel`` — those paint
-    across the whole figure, which is wrong when the figure also hosts
-    sibling plots. In that case we set the axis label on the bottom-row
-    centre panel and left-column middle panel so it lives inside this
-    leaf's panel column area."""
+    """Render each facet panel into its allocated axes."""
     from .render import (
         _apply_theme,
         _coord_view_limits,
@@ -779,7 +609,6 @@ def _render_facets_into(
         panel_ax = flat_axes[idx]
         panel_ax._hea_coord_flipped = is_flipped
 
-        # Pre-axis hook: see _render_single_into for rationale.
         for axis in ("x", "y"):
             scale_aes = ("y" if axis == "x" else "x") if is_flipped else axis
             sc = _panel_scale(build_output, panel_row["PANEL"], scale_aes)
@@ -810,10 +639,6 @@ def _render_facets_into(
 
         labels = facet.panel_labels(panel_row, layout)
         if labels.get("top"):
-            # ``y=1.0`` disables matplotlib's auto-title-positioning so
-            # ``_apply_strip_background`` can re-center the title.
-            # ``pad=0`` strips matplotlib's default 6-pt offset, otherwise
-            # the title's transform gets shifted ~8 px above the strip.
             panel_ax.set_title(labels["top"], y=1.0, pad=0)
         if labels.get("right"):
             from .render import _draw_right_strip
@@ -823,11 +648,6 @@ def _render_facets_into(
     for unused_ax in flat_axes[n_panels:]:
         unused_ax.set_visible(False)
 
-    # Hide redundant tick labels on inner panels when scales are shared.
-    # ``sharex`` shares limits across columns/all → tick labels on the
-    # non-bottom rows are redundant; same for ``sharey`` and non-left
-    # columns. matplotlib's ``add_subplot(sharex=other)`` links the axes
-    # but doesn't auto-hide the labels (only ``plt.subplots()`` does).
     sharex, sharey = facet.share_axes()
     _hide_redundant_facet_ticks(axes_grid, sharex, sharey, n_panels)
 
@@ -835,11 +655,6 @@ def _render_facets_into(
     xlabel, ylabel = _default_labels(plot, build_output)
     if is_flipped:
         xlabel, ylabel = ylabel, xlabel
-    # Always use the bbox-aware placement — even for standalone faceted
-    # plots. ``fig.supxlabel`` / ``supylabel`` use matplotlib's default
-    # fig-rel x position which doesn't reserve room for our wider tick
-    # labels, leading to the ylabel kissing or overlapping the leftmost
-    # panel's yticks.
     _set_facet_axis_labels(fig, flat_axes[:n_panels], xlabel, ylabel)
 
     _apply_theme(
@@ -872,12 +687,6 @@ def _set_facet_axis_labels(fig, panel_axes: list, xlabel, ylabel) -> None:
     """Place ``xlabel`` / ``ylabel`` via ``fig.text`` at the union bbox of
     ``panel_axes`` — so the label spans the whole panel area of one facet
     leaf, not just a single panel.
-
-    Offsets from the panel area use the SAME inch-based reserves that
-    :func:`measure_block` allocated for tick labels and label-pad,
-    converted to figure-relative units. This keeps the label cleanly
-    outside the tick text — without it the ylabel can overlap with a
-    wide leftmost ytick label like ``"6000"``.
     """
     if not panel_axes:
         return
@@ -905,9 +714,6 @@ def _set_facet_axis_labels(fig, panel_axes: list, xlabel, ylabel) -> None:
     fig_h = fig.get_figheight()
 
     if xlabel is not None:
-        # Reserve room for xtick labels first, then a labelpad gap, then
-        # the xlabel itself. ``y_offset`` measures from panel.y0 down to
-        # the xlabel's TOP edge.
         y_offset_in = _DEFAULT_XTICK_RESERVE_IN + _AXIS_LABELPAD_IN
         fig.text(
             cx,
@@ -918,7 +724,6 @@ def _set_facet_axis_labels(fig, panel_axes: list, xlabel, ylabel) -> None:
             fontsize="medium",
         )
     if ylabel is not None:
-        # Same on the left: ytick reserve + labelpad before the ylabel.
         x_offset_in = _DEFAULT_YTICK_RESERVE_IN + _AXIS_LABELPAD_IN
         fig.text(
             x0 - x_offset_in / fig_w,
@@ -935,29 +740,15 @@ def _hide_redundant_facet_ticks(axes_grid, sharex, sharey, n_panels: int) -> Non
     """When facet panels share scales, only the bottom row's xtick labels
     and the leftmost column's ytick labels are informative — the rest are
     redundant and visually cluttering when panels pack tightly.
-
-    For ``sharex=True`` / ``'col'``: hide ``labelbottom`` on every row
-    except the lowest row that contains a *visible* panel in that column.
-    Empty trailing cells in :func:`facet_wrap` (e.g. n=5 in a 2×3 grid)
-    expose the panel above them, so we walk each column from the bottom
-    looking for the first visible panel.
-
-    Same logic for ``sharey=True`` / ``'row'`` and the leftmost-visible
-    column per row. ``sharex='row'`` and ``sharey='col'`` are unusual
-    and left untouched."""
+    """
     nrow = len(axes_grid)
     ncol = len(axes_grid[0]) if nrow else 0
     if nrow == 0 or ncol == 0:
         return
 
-    # Visibility map — facet_wrap may hide trailing cells; we treat
-    # those as "not present" for tick-bookkeeping.
     visible = [[ax.get_visible() for ax in row] for row in axes_grid]
 
     if sharex in (True, "col"):
-        # For each column, find the lowest visible panel — that's the one
-        # that keeps labelbottom; everything above it loses both the
-        # tick marks and labels (R hides both on inner panels).
         for c in range(ncol):
             bottom_visible_r = None
             for r in range(nrow - 1, -1, -1):
@@ -993,39 +784,23 @@ def _hide_redundant_facet_ticks(axes_grid, sharex, sharey, n_panels: int) -> Non
 
 
 def _share_anchor(spec, r: int, c: int, axes_grid, row_axes, *, axis: str):
-    """Pick the anchor axes for matplotlib ``sharex=`` / ``sharey=``.
-
-    ``spec`` mirrors :meth:`Facet.share_axes` return values:
-    ``True`` (share with (0,0)), ``False`` (no share), ``'col'`` (share
-    within column — pick column's first row), ``'row'`` (share within
-    row — pick row's first column). ``axes_grid`` only contains
-    completed rows; the current row in progress is in ``row_axes``.
-    """
+    """Pick the anchor axes for matplotlib ``sharex=`` / ``sharey=``."""
     if not spec:
         return None
     if r == 0 and c == 0:
         return None
     if spec is True:
-        # Anchor on (0, 0). On row 0 it lives in ``row_axes`` (current
-        # row hasn't been appended to ``axes_grid`` yet); on later rows
-        # it's in ``axes_grid[0][0]``.
         return row_axes[0] if r == 0 else axes_grid[0][0]
     if spec == "col":
-        # Share within a column — anchor is row 0 of this column.
         if r == 0:
             return None
         return axes_grid[0][c]
     if spec == "row":
-        # Share within a row — anchor is column 0 of this row.
         if c == 0:
             return None
         return row_axes[0]
     return None
 
-
-# =====================================================================
-# Composition primitives — used by PlotGrid for nested rendering.
-# =====================================================================
 
 DEFAULT_PANEL_W_IN = 3.5
 DEFAULT_PANEL_H_IN = 3.0
@@ -1048,7 +823,6 @@ def _has_right_guide(blk) -> bool:
             return True
         return bool(build_legend_groups(plot, bo))
     if isinstance(blk, SuperBlock):
-        # Walk children in the rightmost col.
         for r in range(blk.nrow):
             cell = blk.cells[r][blk.ncol - 1]
             if cell is None:
@@ -1061,12 +835,7 @@ def _has_right_guide(blk) -> bool:
 
 
 def _has_left_guide(blk) -> bool:
-    """Whether the block hosts a colorbar/legend on its LEFT side.
-
-    Triggers on ``theme(legend.position="left")``. When True, the
-    parent must NOT lift this block's left margin into its own super
-    margin — collapsing that cell would zero the legend host.
-    """
+    """Whether the block hosts a colorbar/legend on its LEFT side."""
     if isinstance(blk, PlotBlock):
         plot = blk.plot
         bo = blk.build_output
@@ -1157,7 +926,6 @@ class GuideAreaBlock:
     legend_h_in: float = 0.0
     merged_groups: list = field(default_factory=list)
     legend_theme: object | None = None
-    # Filled in during render.
     panel_axes: list = field(default_factory=list)
     figure: object | None = None
 
@@ -1195,27 +963,18 @@ class SuperBlock:
     grid: object  # PlotGrid
     nrow: int
     ncol: int
-    # Cells row-major; each is either (child, child_block) or None.
     cells: list  # list[list[tuple | None]]
-    # Per-row top/bottom and per-col left/right — max across siblings.
     row_super_top_in: list
     row_super_bottom_in: list
     col_super_left_in: list
     col_super_right_in: list
-    # Per-row panel height and per-col panel width (defaults or user-overridden).
     panel_h_in: list
     panel_w_in: list
-    # Annotation row heights (top/bottom) — 0 when absent.
     annot_title_h_in: float = 0.0
     annot_caption_h_in: float = 0.0
 
-    # ---- Outer-margin protocol ----
-    # Composition takes max of these across siblings sharing a row/col.
-
     @property
     def outer_margin_top_in(self) -> float:
-        # Top decoration above ALL panels = first row's super_top + any
-        # plot_annotation title row.
         if self.nrow == 0:
             return 0.0
         return self.row_super_top_in[0] + self.annot_title_h_in
@@ -1238,8 +997,6 @@ class SuperBlock:
             return 0.0
         return self.col_super_right_in[-1]
 
-    # ---- Total inner extents (panel + INNER margins between cells). ----
-
     @property
     def total_inner_w_in(self) -> float:
         """Width of the ``panel area`` of this super-block (between outer_left
@@ -1248,7 +1005,6 @@ class SuperBlock:
         w = 0.0
         for c in range(self.ncol):
             w += self.panel_w_in[c]
-            # Add inner-margin contributions for non-edge columns.
             if c > 0:
                 w += self.col_super_left_in[c]
             if c < self.ncol - 1:
@@ -1298,16 +1054,12 @@ def compute_block(thing, *, collect_state=None):
 
     if isinstance(thing, GuideArea):
         if collect_state is None:
-            # No collect mode: empty placeholder consuming a cell but no
-            # ink (matches patchwork: the slot exists but draws nothing).
             return GuideAreaBlock()
         merged_groups, legend_theme = collect_state
         return _measure_guide_area_block(merged_groups, legend_theme)
     if isinstance(thing, ggplot):
         bo = build(thing)
         blk = measure_block(thing, bo)
-        # Cache the build output on the block so the renderer doesn't
-        # re-run build later.
         return blk
     if isinstance(thing, PlotGrid):
         return compose_super_block(thing, collect_state=collect_state)
@@ -1351,7 +1103,6 @@ def compose_super_block(grid, *, collect_state=None) -> SuperBlock:
         r, c = grid._cell_for(i)
         cells[r][c] = (child, compute_block(child, collect_state=collect_state))
 
-    # Per-row top/bottom: max across this row's children.
     row_super_top = [0.0] * nrow
     row_super_bottom = [0.0] * nrow
     col_super_left = [0.0] * ncol
@@ -1367,16 +1118,6 @@ def compose_super_block(grid, *, collect_state=None) -> SuperBlock:
             col_super_left[c] = max(col_super_left[c], blk.outer_margin_left_in)
             col_super_right[c] = max(col_super_right[c], blk.outer_margin_right_in)
 
-    # Add a constant BLOCK_GAP_IN of breathing room at every INNER junction
-    # between adjacent cells, independent of whatever decorations
-    # (yticks/xticks/colorbar) the children put there. Without this the
-    # inter-plot gap depends entirely on the per-child decoration sizes,
-    # so two side-by-side composes can render with very different
-    # whitespace just because one plot's tick text happens to be wider
-    # — the visible gap then collapses to zero. Outer edges (col 0
-    # left, last col right; row 0 top, last row bottom) are NOT padded
-    # — they flow through to ``outer_margin_*`` so the parent grid
-    # composes them cleanly against its own siblings.
     for c in range(ncol):
         if c < ncol - 1:
             col_super_right[c] += BLOCK_GAP_IN
@@ -1384,15 +1125,8 @@ def compose_super_block(grid, *, collect_state=None) -> SuperBlock:
         if r < nrow - 1:
             row_super_bottom[r] += BLOCK_GAP_IN
 
-    # Panel size per row/col. For nested SuperBlocks, the panel cell must
-    # accommodate the nested's full inner extent — otherwise the nested's
-    # panels would scale up to fill a too-large allocation.
     panel_h = [DEFAULT_PANEL_H_IN] * nrow
     panel_w = [DEFAULT_PANEL_W_IN] * ncol
-    # Track which rows/cols are "ink-bearing" — populated by a real plot or
-    # a sized guide_area. A GuideArea sets a *minimum* row height equal to
-    # its legend extent so the cell can't collapse below the legend's
-    # natural size when no explicit ``heights=`` is given.
     guide_area_natural_h = [0.0] * nrow
     for r in range(nrow):
         for c in range(ncol):
@@ -1401,15 +1135,6 @@ def compose_super_block(grid, *, collect_state=None) -> SuperBlock:
                 continue
             _, blk = cell
             if isinstance(blk, SuperBlock):
-                # Nested grid — panel cell must be ≥ nested's inner extent.
-                # When the nested has an edge LEGEND (top/bottom/left/right
-                # via ``theme(legend.position=...)``), the lift logic
-                # disables hoisting that decoration into our super_top/
-                # super_bottom — so the nested keeps its full extent
-                # (panel + legend reserve) and our panel cell must grow
-                # to accommodate it. Without this, matplotlib normalises
-                # the nested's height_ratios down to fit our cell, which
-                # squashes the nested's panel below the default size.
                 inner_h = blk.total_inner_h_in
                 inner_w = blk.total_inner_w_in
                 if _has_top_guide(blk):
@@ -1423,9 +1148,6 @@ def compose_super_block(grid, *, collect_state=None) -> SuperBlock:
                 panel_h[r] = max(panel_h[r], inner_h)
                 panel_w[c] = max(panel_w[c], inner_w)
             elif isinstance(blk, GuideAreaBlock):
-                # The default panel height is 2", but a single-row legend is
-                # usually ~0.5–1". Track the legend's natural height; we'll
-                # apply it as a floor below if the user didn't pin heights.
                 guide_area_natural_h[r] = max(
                     guide_area_natural_h[r],
                     blk.legend_h_in,
@@ -1440,8 +1162,6 @@ def compose_super_block(grid, *, collect_state=None) -> SuperBlock:
         avg = DEFAULT_PANEL_H_IN * nrow / total if total > 0 else DEFAULT_PANEL_H_IN
         panel_h = [h * avg for h in grid.heights]
     else:
-        # No explicit heights: use the merged-legend natural height for any
-        # guide_area-only row instead of the much-larger default plot panel.
         for r in range(nrow):
             row_has_only_guide_area = guide_area_natural_h[r] > 0 and all(
                 cells[r][c] is None or isinstance(cells[r][c][1], GuideAreaBlock)
@@ -1487,33 +1207,8 @@ def _annotation_extents(grid) -> tuple[float, float]:
     return (title_h, caption_h)
 
 
-# ---------------------------------------------------------------------------
-# guides="collect" — cross-leaf legend collection + GuideArea render
-# ---------------------------------------------------------------------------
-
-
 def _prepare_collect(grid):
-    """Implement ``plot_layout(guides="collect")``.
-
-    Walks the leaf plots, builds them once to harvest their
-    :class:`~hea.ggplot.guides.LegendGroup` lists, deduplicates by
-    ``(title, levels, labels, key_glyph)``, and returns a fresh tree
-    with ``theme(legend_position="none")`` broadcast onto every leaf so
-    per-plot legends don't render. The merged groups travel back via
-    ``collect_state`` and are drawn into the first ``guide_area()`` cell
-    by :func:`_render_guide_area_cell`.
-
-    When the tree contains no explicit :func:`guide_area`, a new outer
-    grid is synthesised with a :func:`guide_area` placed at the side
-    indicated by the first leaf's ``theme(legend.position)`` (default
-    ``"right"``). Matches patchwork's auto-placement.
-
-    Returns ``(new_grid, (merged_groups, legend_theme))``. ``legend_theme``
-    is the first leaf's theme (used to style the merged legend); the
-    grid-level ``theme(legend.position=...)`` set via ``& theme(...)`` —
-    which has already been propagated to every leaf — drives the merged
-    legend's orientation.
-    """
+    """Implement ``plot_layout(guides="collect")``."""
     from .core import ggplot
     from .patchwork import GuideArea, PlotGrid
     from .theme import theme as theme_fn
@@ -1522,9 +1217,6 @@ def _prepare_collect(grid):
     if not leaves:
         return grid, ([], None)
 
-    # Collect+merge BEFORE we override themes — what build_legend_groups
-    # reads (scales) is unaffected by theme changes, but ordering makes
-    # the intent obvious.
     merged_groups = _collect_legend_groups(leaves)
     legend_theme = leaves[0].theme
 
@@ -1558,7 +1250,6 @@ def _prepare_collect(grid):
 
     new_grid = _broadcast(grid)
 
-    # Auto-place a guide_area when one isn't already in the tree.
     if merged_groups and new_grid.find_guide_area() is None:
         pos = legend_theme.get("legend.position") if legend_theme else "right"
         new_grid = _wrap_with_guide_area(new_grid, pos or "right")
@@ -1574,9 +1265,6 @@ def _wrap_with_guide_area(grid, pos: str):
     from .patchwork import _DIRECTION_H, _DIRECTION_V, PlotGrid, guide_area
 
     ga = guide_area()
-    # Promote the inner grid's annotation onto the outer wrapper so the
-    # plot_annotation title still spans the whole figure (it would be
-    # awkward floating only above the panels).
     inner_annotation = grid.annotation
     inner = PlotGrid(
         children=list(grid.children),
@@ -1612,12 +1300,6 @@ def _wrap_with_guide_area(grid, pos: str):
 def _collect_legend_groups(leaves) -> list:
     """Return one :class:`LegendGroup` per distinct
     ``(title, levels, labels, key_glyph)`` across all leaves.
-
-    Same-key groups are merged: ``aes_values`` gets the union (first plot
-    wins per aesthetic), and ``layer_aes_params`` / ``layer_default_aes``
-    fill in via ``setdefault``. So if p1 maps ``colour=drv`` and p3 maps
-    ``colour=drv, fill=drv`` to the same scale, the merged guide carries
-    both colour AND fill values for each level.
     """
     from .build import build
     from .guides import LegendGroup, build_legend_groups
@@ -1654,12 +1336,7 @@ def _collect_legend_groups(leaves) -> list:
 
 
 def _measure_guide_area_block(merged_groups, legend_theme) -> GuideAreaBlock:
-    """Compute the natural size of the merged legend.
-
-    The collection orientation tracks the legend's theme: vertical for
-    ``"right"``/``"left"``, horizontal for ``"top"``/``"bottom"``. Vertical
-    stacks group-by-group; horizontal lays groups side by side.
-    """
+    """Compute the natural size of the merged legend."""
     if not merged_groups:
         return GuideAreaBlock()
 
@@ -1755,20 +1432,6 @@ def _render_guide_area_cell(blk: GuideAreaBlock, fig, panel_cell) -> None:
 def _redistribute_to_leftover(ratios, panel_idx, panel_weights, total_in):
     """Make absolute (decoration) entries keep their inch values when the
     figure dimension is smaller than ``sum(ratios)``.
-
-    Patchwork models panel rows as ``unit("null")`` (relative weights) and
-    decoration rows as ``unit(x, "mm")`` (absolute). matplotlib's
-    ``GridSpec(height_ratios=…)`` normalizes everything proportionally
-    instead, so absolute decorations shrink along with panels.
-    Pre-scaling fixes that: keep decoration inch values, and reapportion
-    the remaining ``total_in`` across the panel entries by their relative
-    weights. After this, ``sum(ratios) == total_in`` so matplotlib's
-    normalization is a no-op and each cell ends up at exactly its
-    intended inch size.
-
-    Mutates ``ratios`` in place. No-op when there are no panels, when the
-    panel weights sum to 0, or when the leftover is non-positive (figure
-    too small even for decorations alone — let matplotlib clip).
     """
     if not panel_idx or not panel_weights:
         return
@@ -1821,24 +1484,12 @@ def render_super_block(
 
     grid = sb.grid
 
-    # Build height/width ratios as inch values. Track which entries are
-    # "absolute" (decorations: titles, axis labels, annotation rows — must
-    # keep their inch height regardless of figure size) vs which are
-    # "panel" (split leftover space, weighted by their nominal inch
-    # size). Patchwork's null-vs-mm distinction; we synthesize it on top
-    # of matplotlib's homogeneous height_ratios by pre-scaling panel
-    # entries before the gridspec normalizes everything.
     height_ratios: list[float] = []
     panel_h_idx: list[int] = []  # indices into height_ratios
     panel_h_weights: list[float] = []  # parallel; nominal inch (= weight)
     if sb.annot_title_h_in > 0:
         height_ratios.append(sb.annot_title_h_in)
     for r in range(sb.nrow):
-        # When the parent has lifted our top decoration into its own
-        # top-margin (lift_top), zero out our first super-top row so
-        # the panel sits flush at the cell top — matching the parent
-        # leaf siblings whose panels live at the cell top edge.
-        # Same for lift_bottom on the last row.
         super_top = sb.row_super_top_in[r]
         super_bottom = sb.row_super_bottom_in[r]
         if r == 0 and lift_top:
@@ -1857,11 +1508,6 @@ def render_super_block(
     panel_w_idx: list[int] = []
     panel_w_weights: list[float] = []
     for c in range(sb.ncol):
-        # Symmetric to the row lift: collapse our outermost super-left /
-        # super-right when the parent has reserved that space — keeps
-        # the leftmost / rightmost child's panel flush with the cell
-        # edges so it aligns with the parent's leaf siblings (e.g.
-        # ``p1 / (p2 | p3)`` — p2.panel.left == p1.panel.left).
         super_left = sb.col_super_left_in[c]
         super_right = sb.col_super_right_in[c]
         if c == 0 and lift_left:
@@ -1874,16 +1520,6 @@ def render_super_block(
         width_ratios.append(sb.panel_w_in[c])
         width_ratios.append(super_right)
 
-    # Make absolute decorations stay absolute when the figure dimension
-    # is smaller than ``sum(ratios)``: split the leftover across panel
-    # rows by their relative weights so decorations keep their measured
-    # inch values. At the outermost gridspec the available size IS the
-    # figure size; for nested gridspecs we read the parent_subspec's
-    # allocated bbox (which may be smaller than ``sb.total_h_in`` when
-    # the parent's normalisation shrunk this cell). Without this nested
-    # call, matplotlib proportionally shrinks every nested cell to fit
-    # — collapsing decoration reserves below the size needed by the
-    # actual artists (xlabel/xticks bleed into legend, etc.).
     if parent_subspec is None:
         avail_h_in = fig.get_figheight()
         avail_w_in = fig.get_figwidth()
@@ -1933,13 +1569,11 @@ def render_super_block(
             hspace=0.0,
         )
 
-    # plot_annotation title/caption (only at the outermost SuperBlock).
     if grid.annotation is not None:
         _apply_block_annotation(
             grid, fig, gs, title_row_offset, sb.ncol, sb.annot_caption_h_in > 0
         )
 
-    # Render each cell.
     for r in range(sb.nrow):
         for c in range(sb.ncol):
             cell = sb.cells[r][c]
@@ -1952,11 +1586,6 @@ def render_super_block(
 
             top_cell_row = title_row_offset + 3 * r
             panel_col = 3 * c + 1
-            # The title cell for ANY child at this row is the OUTER's
-            # super_top cell at this row. Forward its y1 to a nested
-            # child so the nested's leaves anchor their titles there
-            # instead of inside the panel cell. ``outer_top_y`` overrides
-            # at r==0 when our own super_top was lifted into a parent.
             if r == 0 and outer_top_y is not None:
                 child_top_y = outer_top_y
             else:
@@ -1966,26 +1595,6 @@ def render_super_block(
                 _render_guide_area_cell(blk, fig, panel_cell)
                 continue
             if isinstance(blk, SuperBlock):
-                # Nested SuperBlocks lift their first/last super-margins
-                # into THIS grid's super_top / super_bottom cells. Without
-                # this, the nested's titles + axis labels would render
-                # inside the panel cell and double-count against the
-                # parent's panel allocation — so ``plot_layout(heights=…)``
-                # weights would apply to (panel + nested decorations)
-                # rather than just panels, drifting panel ratios away
-                # from the user's spec on nested rows. Patchwork
-                # sidesteps this by emitting every plot's 18-row gtable
-                # into the *outer* gtable; we approximate it by lifting
-                # nested edges and forwarding ``outer_top_y``.
-                #
-                # Caveat: matplotlib's gridspec normalises ALL ratios to
-                # fit the figure, so absolute decorations shrink along
-                # with panels when the user forces a small figsize. At
-                # auto-size the outer reserves enough space for clean
-                # rendering; at user-forced small sizes labels can crowd.
-                # patchwork dodges this with grid-native ``unit("null")``
-                # for panel rows and absolute mm for decorations, which
-                # matplotlib doesn't natively support.
                 outermost = parent_subspec is None
                 child_lift_top = not _has_top_guide(blk)
                 child_lift_bottom = not _has_bottom_guide(blk)
@@ -2039,16 +1648,6 @@ def _render_leaf_title_in_top_cell(
 ) -> None:
     """Render the leaf's title and subtitle as ``fig.text`` artists
     anchored to the TOP of the top-margin cell.
-
-    Matches matplotlib's default ``axes.titlesize`` ("large") /
-    ``axes.titleweight`` ("normal") so the styling stays consistent
-    with our pre-block-engine ``ax.set_title(loc='left')`` rendering.
-    Subtitle uses a smaller font (matches ggplot2's relative sizing).
-
-    Anchoring at the cell top (rather than above the panel) keeps
-    sibling titles aligned even when one sibling has a subtitle and
-    the other doesn't — the super-grid reserves the same top margin
-    for both via :func:`measure_block`.
     """
     import matplotlib as mpl
 
@@ -2061,15 +1660,10 @@ def _render_leaf_title_in_top_cell(
     if fontsize_title is None:
         fontsize_title = mpl.rcParams["axes.titlesize"]
     if fontsize_subtitle is None:
-        # Subtitle smaller than title; matplotlib calls this "medium".
         fontsize_subtitle = "medium"
 
     cell = gs[top_cell_row, panel_col]
     bbox = cell.get_position(fig)
-    # x always comes from this leaf's own panel column (so titles
-    # of side-by-side leaves get distinct x positions). y can be
-    # overridden by a parent compose to lift the title up to the
-    # outer top-margin row.
     cell_top_y = y_override if y_override is not None else bbox.y1
     y_cursor = cell_top_y - 0.005
     if title:
@@ -2114,10 +1708,6 @@ def _render_leaf_cell(
 ) -> None:
     """Render a single ggplot leaf into its assigned cell, with cax for
     colorbars allocated in the right-margin column.
-
-    ``top_cell_row`` and ``panel_col``: the gridspec row/col of the leaf's
-    top-margin cell — used to place ``tag_levels`` text above the title
-    instead of overlapping it.
     """
     from matplotlib.gridspec import GridSpecFromSubplotSpec
 
@@ -2204,9 +1794,6 @@ def _render_leaf_cell(
             legend_host_axes=leg_hosts,
         )
 
-    # Title/subtitle: render as fig.text. ``title_y_override`` lifts the
-    # anchor up to a parent's top-margin (used by nested compositions
-    # so that p1's and p2's titles align in ``p1 | (p2 / p3)``).
     _render_leaf_title_in_top_cell(
         leaf, fig, gs, top_cell_row, panel_col, y_override=title_y_override
     )
@@ -2214,10 +1801,6 @@ def _render_leaf_cell(
     if tag_iter is not None:
         tag = next(tag_iter, None)
         if tag is not None:
-            # Place the tag at the upper-left CORNER of the leaf — in
-            # the (top-margin, left-margin) cell, where the ylab column
-            # meets the title row. The title lives in the panel column
-            # so the two don't overlap.
             corner_cell = gs[top_cell_row, panel_col - 1]
             bbox = corner_cell.get_position(fig)
             fig.text(
@@ -2236,19 +1819,6 @@ def _allocate_legend_host_axes(
 ) -> list:
     """Carve a host ``Axes`` per discrete legend group inside the
     margin cell on the side dictated by ``legend.position``.
-
-    The legend renders inside the host (via :func:`apply_legends` host
-    path), so it stays bounded by the host's bbox — preventing the
-    legend from extending into the next plot's panel area in a
-    patchwork composition. Returns ``[]`` for ``legend.position="none"``
-    or when the leaf has no discrete legend.
-
-    For top/bottom/left positions the margin cell is shared with axis
-    decorations (xlabel/xticks for bottom, title/strip for top, ylabel/
-    yticks for left). The cell is subdivided so the legend gets its own
-    slice on the OUTSIDE edge, with the decorations on the INSIDE next
-    to the panel. ``block`` carries the inch sizes from ``measure_block``
-    so the split happens at the correct ratio.
     """
     from matplotlib.gridspec import GridSpecFromSubplotSpec
 
@@ -2256,7 +1826,6 @@ def _allocate_legend_host_axes(
     if pos == "none":
         return []
     if pos not in (None, "right", "left", "top", "bottom"):
-        # Numeric positions etc. — fall back to the legacy bbox path.
         return []
 
     from .guides import build_legend_groups
@@ -2265,14 +1834,6 @@ def _allocate_legend_host_axes(
     if not groups:
         return []
 
-    # Pick the outer margin cell for this position. ``panel_row_idx``
-    # and ``right_col_idx`` locate the leaf's right-margin cell; the
-    # leaf occupies the surrounding 3×3 (panel + 4 margins). Other
-    # margin cells sit at fixed offsets from these:
-    #   left   = (panel_row_idx,     right_col_idx - 2)
-    #   right  = (panel_row_idx,     right_col_idx)
-    #   top    = (panel_row_idx - 1, right_col_idx - 1)
-    #   bottom = (panel_row_idx + 1, right_col_idx - 1)
     panel_col_idx = right_col_idx - 1
     left_col_idx = right_col_idx - 2
     top_row_idx = panel_row_idx - 1
@@ -2286,11 +1847,6 @@ def _allocate_legend_host_axes(
     else:  # "bottom"
         cell = gs[bottom_row_idx, panel_col_idx]
 
-    # Decoration size = total margin minus legend-and-colorbar reserve.
-    # For top/bottom that's the height; for left/right the width. The
-    # legend slice goes on the OUTSIDE edge (away from the panel) so the
-    # decoration slice (axis labels, ticks, title, etc.) stays adjacent
-    # to the panel where matplotlib expects to render it.
     if block is not None:
         if pos in ("top", "bottom"):
             total = block.margin_top_in if pos == "top" else block.margin_bottom_in
@@ -2306,18 +1862,11 @@ def _allocate_legend_host_axes(
             cbar_size = block.colorbar_w_in
         decoration_size = max(total - legend_size - cbar_size, 0.0)
     else:
-        # Legacy callers (no block info): split evenly. Won't happen on
-        # the standard render path.
         decoration_size = 0.0
         legend_size = 1.0
         cbar_size = 0.0
 
-    # Build the sub-gridspec inside the margin cell.
     if pos in ("top", "bottom"):
-        # Vertical stack inside the margin cell. For BOTTOM:
-        #   [decoration | legend]   (decoration on top = closer to panel)
-        # For TOP:
-        #   [legend | decoration]   (decoration on bottom = closer to panel)
         if pos == "bottom":
             outer_ratios = [
                 max(decoration_size, 1e-6),
@@ -2337,7 +1886,6 @@ def _allocate_legend_host_axes(
             height_ratios=outer_ratios,
             hspace=0.0,
         )
-        # Within the legend slice, lay out groups horizontally.
         inner = GridSpecFromSubplotSpec(
             1,
             len(groups),
@@ -2351,16 +1899,11 @@ def _allocate_legend_host_axes(
             hosts.append(host)
         return hosts
 
-    # Right / left positions: vertical stack of groups inside the
-    # margin cell. For RIGHT, the right-margin cell typically has no
-    # axis decorations (only colorbar+legend), so we use the full cell
-    # — preserving the existing behaviour.
     if pos == "left":
         outer_ratios = [
             max(decoration_size, 1e-6),  # ylabel/yticks closer to panel = right
             max(legend_size, 1e-6),  # legend on outer = left
         ]
-        # legend slice is column 0 (leftmost = outer)
         outer = GridSpecFromSubplotSpec(
             1,
             2,
@@ -2370,7 +1913,6 @@ def _allocate_legend_host_axes(
         )
         legend_subspec = outer[0, 0]
     else:
-        # Right legend: full cell as before.
         legend_subspec = cell
 
     sub = GridSpecFromSubplotSpec(
@@ -2391,12 +1933,6 @@ def _allocate_legend_host_axes(
 def _allocate_colorbar_caxes(fig, gs, panel_row_idx, right_col_idx, leaf, bo) -> list:
     """Carve a tight cax (or stack of caxes) inside the right-margin
     cell for each colorbar in ``leaf``.
-
-    Only allocates for the default right-side colorbar placement. When
-    the theme requests ``legend.position`` of ``"top"``/``"bottom"``/
-    ``"left"``/``"none"``, we return ``[]`` and let the legacy
-    auto-shrink path handle it — those placements need a cell on a
-    different side which the block engine doesn't reserve yet.
     """
     from matplotlib.gridspec import GridSpecFromSubplotSpec
 
@@ -2411,11 +1947,6 @@ def _allocate_colorbar_caxes(fig, gs, panel_row_idx, right_col_idx, leaf, bo) ->
         return []
 
     right_cell = gs[panel_row_idx, right_col_idx]
-    # Inch-absolute width ratios: panel-side pad, the bar, bar-to-tick pad,
-    # tick text reserve. matplotlib normalizes these against the cell's
-    # actual width — but since `_measure_colorbar_width` already sums to
-    # exactly these inches, the cax lands at its measured size with the
-    # panel-side pad acting as breathing room.
     tick_reserve = max(
         0.0,
         right_cell_width_in_estimate(fig, right_cell)
@@ -2438,8 +1969,6 @@ def _allocate_colorbar_caxes(fig, gs, panel_row_idx, right_col_idx, leaf, bo) ->
     )
     caxes = []
     for i in range(len(specs)):
-        # cax = the bar column only (col 1). Tick labels render in col 3
-        # because matplotlib renders tick text outside the cax.
         cax = fig.add_subplot(sub[i * 2 + 1, 1])
         cax.set_label("<colorbar>")
         caxes.append(cax)
@@ -2464,10 +1993,6 @@ def _apply_block_annotation(
     if a.title is not None or a.subtitle is not None:
         title_lines = [s for s in (a.title, a.subtitle) if s]
         bbox = gs[0, 0 : 3 * ncol].get_position(fig)
-        # ggplot2's ``plot.title`` (= patchwork's annotation title)
-        # default is rel(1.2) with face NULL, which inherits the text
-        # element's face = "plain" — NOT bold. (Older hea hardcoded
-        # bold; switching to ``axes.titleweight`` mirrors ggplot2 4.x.)
         import matplotlib as mpl
 
         fig.text(

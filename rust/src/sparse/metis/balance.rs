@@ -1,8 +1,3 @@
-//! `libmetis/balance.c` — moving vertices across an edge bisection purely to
-//! meet the balance constraint, before FM optimises the cut.
-//!
-//! `McGeneral2WayBalance` is the `ncon > 1` arm and is unreachable here.
-
 use super::super::ws::Ws;
 use super::ctrl::Ctrl;
 use super::graph::{bnd_delete, bnd_insert, Graph};
@@ -17,8 +12,6 @@ pub fn balance_2way(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2]) {
         return;
     }
 
-    // `iabs (ntpwgts[0]*graph->tvwgt[0] - graph->pwgts[0])`: the argument is a
-    // `real_t` expression and `iabs` takes an `int64_t`, so it truncates first.
     let diff = (graph.tvwgt[0] as Real * ntpwgts[0]) - graph.pwgts[0] as Real;
     if iabs(diff as Idx) < 3 * graph.tvwgt[0] / graph.nvtxs {
         return;
@@ -34,9 +27,6 @@ pub fn balance_2way(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2]) {
 /// `Bnd2WayBalance` (`balance.c:44-...`) — only boundary vertices are
 /// candidates, which is the common case.
 pub fn bnd_2way_balance(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2]) {
-    // The C's prologue, taken through `Ws` — `xadj = graph->xadj; ...`. Every
-    // subscript below is one the algorithm produced itself, so the bound is
-    // walked in `cargo test` and elided here (`sparse::ws`, `metis::tests`).
     let Graph {
         xadj,
         adjncy,
@@ -109,7 +99,6 @@ pub fn bnd_2way_balance(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2])
         r#where[higain] = to as Idx;
         moved[higain] = nswaps;
 
-        // SWAP (id[higain], ed[higain], tmp)
         std::mem::swap(&mut id[higain], &mut ed[higain]);
         if ed[higain] == 0 && xadj[higain] < xadj[higain + 1] {
             bnd_delete(&mut nbnd, bndind, bndptr, higain);
@@ -148,12 +137,7 @@ pub fn bnd_2way_balance(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2])
     *g_nbnd = nbnd;
 }
 
-/// `General2WayBalance` (`balance.c:...`) — every vertex of the heavy side is a
-/// candidate. Reached only when the bisection has no boundary at all.
 pub fn general_2way_balance(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2]) {
-    // The C's prologue, taken through `Ws` — `xadj = graph->xadj; ...`. Every
-    // subscript below is one the algorithm produced itself, so the bound is
-    // walked in `cargo test` and elided here (`sparse::ws`, `metis::tests`).
     let Graph {
         xadj,
         adjncy,
@@ -225,7 +209,6 @@ pub fn general_2way_balance(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real;
         r#where[higain] = to as Idx;
         moved[higain] = nswaps;
 
-        // SWAP (id[higain], ed[higain], tmp)
         std::mem::swap(&mut id[higain], &mut ed[higain]);
         if ed[higain] == 0 && bndptr[higain] != -1 && xadj[higain] < xadj[higain + 1] {
             bnd_delete(&mut nbnd, bndind, bndptr, higain);

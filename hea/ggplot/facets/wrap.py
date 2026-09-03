@@ -35,9 +35,6 @@ class FacetWrap(Facet):
         if nrow is not None and ncol is not None:
             return (nrow, ncol)
         if ncol is None and nrow is None:
-            # Match ggplot2's ``wrap_dims`` default — calls R's
-            # ``grDevices::n2mfrow`` and transposes. Special cases for
-            # small n preferred in R: n=3 → 1 row × 3 cols (not 2×2).
             if n_panels <= 3:
                 return (1, n_panels)
             if n_panels <= 6:
@@ -54,7 +51,6 @@ class FacetWrap(Facet):
         if not self.facets:
             return pl.DataFrame({"PANEL": [1], "ROW": [1], "COL": [1]})
 
-        # Unique combinations across facet variables, in row-major order.
         unique = data.select(self.facets).unique(maintain_order=True).sort(self.facets)
         n = len(unique)
         nrow, ncol = self.grid_dims(n)
@@ -70,11 +66,6 @@ class FacetWrap(Facet):
         else:
             row_list = [nrow - i // ncol for i in range(n)]
         col_list = [i % ncol + 1 for i in range(n)]
-        # ``PANEL`` is the flat-axes index the renderer uses to drop each
-        # panel into its grid cell (``flat_axes[PANEL - 1]``). Derive it
-        # from (ROW, COL) so ``as_table=False`` actually relocates panels
-        # — without this, the sequential 1..n numbering would silently
-        # cancel the row flip and the plot would look unchanged.
         panel_list = [(r - 1) * ncol + c for r, c in zip(row_list, col_list)]
         return unique.with_columns(
             PANEL=pl.Series(values=panel_list, dtype=pl.Int64),
@@ -90,7 +81,6 @@ class FacetWrap(Facet):
 
         keys = [c for c in self.facets if c in data.columns]
         if not keys:
-            # Layer doesn't carry the facet vars — assign all to panel 1.
             return data.with_columns(PANEL=pl.lit(1, dtype=pl.Int64))
         lookup = layout.select(["PANEL", *keys])
         return data.join(lookup, on=keys, how="left")

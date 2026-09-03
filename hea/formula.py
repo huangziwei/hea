@@ -55,18 +55,6 @@ __all__ = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Tokens
-# ---------------------------------------------------------------------------
-
-# Token kinds:
-#   TILDE PLUS MINUS STAR SLASH CARET COLON BAR DOUBLE_BAR PERCENT_OP
-#   DOLLAR LBRACKET RBRACKET
-#   GT LT GE LE EQEQ NEQ BANG
-#   LPAREN RPAREN COMMA EQUALS
-#   IDENT NUMBER STRING DOT EOF
-
-
 @dataclass(frozen=True, slots=True)
 class Token:
     kind: str
@@ -117,26 +105,22 @@ def tokenize(src: str) -> list[Token]:
             i += 1
             continue
 
-        # Double-bar (lme4)
         if c == "|" and i + 1 < n and src[i + 1] == "|":
             out.append(Token("DOUBLE_BAR", "||", i))
             i += 2
             continue
 
-        # Single-char bar (lme4 RE)
         if c == "|":
             out.append(Token("BAR", "|", i))
             i += 1
             continue
 
-        # Two-char comparisons: ==, !=, <=, >=. Check before single-char ops.
         if i + 1 < n and src[i : i + 2] in ("==", "!=", "<=", ">="):
             kind = {"==": "EQEQ", "!=": "NEQ", "<=": "LE", ">=": "GE"}[src[i : i + 2]]
             out.append(Token(kind, src[i : i + 2], i))
             i += 2
             continue
 
-        # %op% infix (e.g. %in%)
         if c == "%":
             j = src.find("%", i + 1)
             if j == -1:
@@ -145,14 +129,11 @@ def tokenize(src: str) -> list[Token]:
             i = j + 1
             continue
 
-        # Single-char operators / punct
         if c in _SINGLE_OPS:
             out.append(Token(_SINGLE_OPS[c], c, i))
             i += 1
             continue
 
-        # Numbers — int, float, with optional exponent. `.5` counts; bare `.`
-        # is handled later as a sentinel.
         if c.isdigit() or (c == "." and i + 1 < n and src[i + 1].isdigit()):
             j = i
             while j < n and src[j].isdigit():
@@ -171,7 +152,6 @@ def tokenize(src: str) -> list[Token]:
             i = j
             continue
 
-        # Strings (double or single quoted, with simple backslash escape)
         if c == '"' or c == "'":
             quote = c
             j = i + 1
@@ -183,7 +163,6 @@ def tokenize(src: str) -> list[Token]:
             i = j + 1
             continue
 
-        # Backticked identifier: `some name`
         if c == "`":
             j = i + 1
             while j < n and src[j] != "`":
@@ -194,10 +173,6 @@ def tokenize(src: str) -> list[Token]:
             i = j + 1
             continue
 
-        # Identifier — [A-Za-z_.][A-Za-z0-9_.]*
-        #   A greedy consume; if the resulting string is exactly ".", emit as
-        #   the DOT sentinel (WR all-vars). Dotted names like `stack.loss` are
-        #   single IDENT tokens.
         if c.isalpha() or c == "_" or c == ".":
             j = i
             while j < n and (src[j].isalnum() or src[j] in "_."):
@@ -213,11 +188,6 @@ def tokenize(src: str) -> list[Token]:
 
     out.append(Token("EOF", "", n))
     return out
-
-
-# ---------------------------------------------------------------------------
-# AST nodes
-# ---------------------------------------------------------------------------
 
 
 @dataclass(slots=True)
@@ -283,16 +253,6 @@ class Formula:
 Node = Name | Literal | Dot | Empty | UnaryOp | BinOp | Call | Paren | Subscript
 
 
-# ---------------------------------------------------------------------------
-# Parser
-# ---------------------------------------------------------------------------
-
-# (precedence, right-associative?). Higher binds tighter.
-#
-# `$` and `[...]` are handled postfix in `_parse_postfix`, not here: they bind
-# tighter than anything listed and need special shape (RHS is IDENT for `$`,
-# bracketed arg list for `[`), so keeping them out of the generic BinOp loop
-# also gives us the correct left-to-right chaining for `a$b[1]`.
 _BINOPS: dict[str, tuple[int, bool]] = {
     "TILDE": (1, False),
     "BAR": (2, False),
@@ -392,18 +352,6 @@ class _Parser:
     def _parse_atom(self) -> Node:
         t = self.peek()
         if t.kind == "LBRACKET":
-            # hea-dialect sugar: `[y1, y2, ...]` lowers to `cbind(y1, ...)`
-            # right here at parse time, so nothing downstream ever sees a
-            # bracket-list. It inherits cbind's semantics exactly (mlm under
-            # lm, the two-column `[succ, fail]` binomial under glm/gam), and
-            # deparse re-emits `cbind(...)` — brackets are input-only; cbind
-            # stays canonical. Args parse via the same `parse_expr(0)` as
-            # `_parse_call_tail`, so `[a, b]` is byte-identical to
-            # `cbind(a, b)`. Stricter than a call-arg list though: responses
-            # are never empty, so no Empty() slots, no trailing comma, no
-            # `[]`. A postfix `a[i]` (Subscript) never reaches here — it needs
-            # a preceding operand and is handled in `_parse_postfix`; this
-            # branch fires only when `[` opens an atom.
             self.advance()
             items: list[Node] = []
             while True:
@@ -436,10 +384,8 @@ class _Parser:
             return Dot()
         if t.kind == "IDENT":
             self.advance()
-            # Function call?
             if self.peek().kind == "LPAREN":
                 return self._parse_call_tail(t.value)
-            # R keywords that become literals
             if t.value in ("TRUE", "T"):
                 return Literal(True, "bool")
             if t.value in ("FALSE", "F"):
@@ -455,12 +401,10 @@ class _Parser:
         kwargs: dict[str, Node] = {}
 
         while self.peek().kind != "RPAREN":
-            # empty positional (e.g. middle of `C(f, , 1)`)
             if self.peek().kind == "COMMA":
                 args.append(Empty())
                 self.advance()
                 continue
-            # named arg?
             if self.peek().kind == "IDENT" and self.peek(1).kind == "EQUALS":
                 name = self.advance().value
                 self.advance()  # consume '='
@@ -516,18 +460,6 @@ def parse(src: str) -> Formula:
     return Formula(lhs=None, rhs=expr)
 
 
-# ---------------------------------------------------------------------------
-# Deparse — canonical R-style string for an AST node.
-# ---------------------------------------------------------------------------
-#
-# Matches R's deparse() for the operators that show up in formula term labels.
-# The rules came from inspecting fixture X_meta.json term_labels:
-#   tight (no spaces):  :  ^  $  /  [
-#   spaced (padded):    +  -  *  ==  !=  <  >  <=  >=  |  ||  ~  %op%
-#   kwargs '=':         spaced
-#
-# Parens are emitted as typed, unary ops as prefix.
-
 _TIGHT_BINOPS = frozenset({":", "^", "$", "/"})
 
 
@@ -569,25 +501,9 @@ def deparse(node) -> str:
     return _deparse(node)
 
 
-# ---------------------------------------------------------------------------
-# Term algebra — WR formula-operator expansion.
-# ---------------------------------------------------------------------------
-#
-# A Term is an interaction: an unordered set of atoms (Nodes that survive
-# expansion — Names, Calls, Subscripts, I(…) wrappers, and other leaves). The
-# empty term = intercept.
-#
-# Two terms are equal iff they contain the same atoms (by canonical deparse
-# key); ordering within a term is preserved as first seen, because R's
-# `:`-joined term label retains source order (`Insul:Temp`, not `Temp:Insul`).
-
-
 @dataclass(frozen=True, slots=True)
 class Term:
     atoms: tuple  # tuple[Node, ...] — empty tuple = intercept
-    # Cached identity key: deparsed-atom frozenset. Excluded from init/repr/
-    # compare/hash so the dataclass machinery treats it as a pure cache. We
-    # still override __hash__/__eq__ below to use it explicitly.
     _key: frozenset = field(
         init=False,
         repr=False,
@@ -597,7 +513,6 @@ class Term:
     )
 
     def __post_init__(self) -> None:
-        # Frozen + slots: bypass __setattr__ to populate the cache once.
         object.__setattr__(self, "_key", frozenset(_deparse(a) for a in self.atoms))
 
     def __hash__(self) -> int:
@@ -671,11 +586,7 @@ def _bar_node(node) -> BinOp:
 
 
 def _split_additive(node) -> list[tuple[int, object]]:
-    """Flatten top-level + / - into a list of signed subexpressions.
-
-    Walks only through `+`, `-`, and unary `+`/`-` at the surface — does not
-    descend into `*`, `:`, parens, or calls. Paren(bar) stops there too.
-    """
+    """Flatten top-level + / - into a list of signed subexpressions."""
     out: list[tuple[int, object]] = []
 
     def walk(n, sign):
@@ -697,16 +608,10 @@ def _split_additive(node) -> list[tuple[int, object]]:
 
 
 def _expand_non_additive(node) -> list[Term]:
-    """Expand a subexpression that has no top-level + or -.
-
-    Returns an unsigned list of Terms. Handles `*`, `:`, `%in%`, `/`, `^`,
-    parens (transparent unless bar), and leaf atoms.
-    """
+    """Expand a subexpression that has no top-level + or -."""
     if _is_bar(node):
-        # Bars never contribute to fixed-effect terms.
         return []
     if isinstance(node, Paren):
-        # Paren is transparent to term expansion.
         return _expand_toplevel(node.expr)
     if isinstance(node, BinOp):
         if node.op == "*":
@@ -718,10 +623,6 @@ def _expand_non_additive(node) -> list[Term]:
         if node.op == "/":
             L = _expand_toplevel(node.left)
             R = _expand_toplevel(node.right)
-            # R semantics (per `terms.formula`): a/b = a + a:b; compound LHS
-            # collapses to one "parent" interaction before nesting RHS:
-            #   (a+b)/c   -> a + b + a:b:c
-            #   a/b/c     -> a + a:b + a:b:c
             parent = _EMPTY_TERM
             for t in L:
                 parent = parent.union(t)
@@ -729,43 +630,31 @@ def _expand_non_additive(node) -> list[Term]:
             return _dedup(L + nested)
         if node.op == "^":
             if not (isinstance(node.right, Literal) and node.right.kind == "num"):
-                # `^` with non-literal exponent — treat whole node as atom.
                 return [Term((node,))]
             L = _expand_toplevel(node.left)
             return _power_expand(L, int(node.right.value))
-    # Leaf: Name, Call, Subscript, UnaryOp, BinOp in non-formula ops, Literal.
     return [Term((node,))]
 
 
 def _expand_toplevel(node) -> list[Term]:
-    """Expand at a level where + and - still count as formula operators.
-
-    Splits top-level additive structure, then expands each piece via the
-    non-additive pass. Signed list collapses via `_finalize` (here we just
-    aggregate into a deduped positive-only list, matching R semantics).
-    """
+    """Expand at a level where + and - still count as formula operators."""
     pieces = _split_additive(node)
-    # Aggregate by sign. In R, terms are a set — repeated + is idempotent; -
-    # removes from the running set regardless of multiplicity.
     added: list[Term] = []
     removed: list[Term] = []
     for sign, sub in pieces:
         if _is_bar(sub):
             continue
-        # Special literals for intercept toggling.
         if isinstance(sub, Literal) and sub.kind == "num":
             if sub.value == 1:
                 (added if sign > 0 else removed).append(_EMPTY_TERM)
                 continue
             if sub.value == 0:
-                # `+0` removes intercept, `-0` adds it back.
                 (removed if sign > 0 else added).append(_EMPTY_TERM)
                 continue
         sub_terms = _expand_non_additive(sub)
         for t in sub_terms:
             (added if sign > 0 else removed).append(t)
 
-    # Dedupe additions preserving insertion order; then strip removals.
     result: list[Term] = []
     seen: set[Term] = set()
     for t in added:
@@ -822,18 +711,11 @@ def _collect_bars(node) -> list[BinOp]:
 def _expand_dot(node, data_columns: list[str], response_names: set[str]):
     """Substitute every `Dot()` in the tree with `col1 + col2 + ...` over the
     non-response data columns. Returns a new node.
-
-    Excludes the ``rowname`` column — hea's documented sentinel for R's
-    ``row.names`` (see ``hea.data._normalize_rownames``). In R, rownames
-    aren't a column and ``y ~ .`` skips them; we mirror that so users who
-    load e.g. ``faraway::gala`` (island names preserved as ``rowname``)
-    don't have to manually drop the column before fitting.
     """
     skip = response_names | {"rowname"}
     cols = [c for c in data_columns if c not in skip]
     if not cols:
         raise ValueError("dot expansion: no non-response columns available")
-    # Build `c1 + c2 + ... + cn` as a left-folded BinOp('+').
     expansion: object = Name(cols[0])
     for c in cols[1:]:
         expansion = BinOp("+", expansion, Name(c))
@@ -847,18 +729,13 @@ def _expand_dot(node, data_columns: list[str], response_names: set[str]):
             return UnaryOp(n.op, rewrite(n.operand))
         if isinstance(n, Paren):
             return Paren(rewrite(n.expr))
-        # Calls, Subscripts: Don't expand `.` inside function args — R doesn't.
         return n
 
     return rewrite(node)
 
 
 def _response_names(lhs) -> set[str]:
-    """Collect bare names on the LHS so `.` expansion can skip them.
-
-    For `y ~ .` the response is `y`; for `cbind(s, f) ~ .` it's {s, f}; for
-    `100/mpg ~ .` it's {mpg} (all Names reachable through arithmetic).
-    """
+    """Collect bare names on the LHS so `.` expansion can skip them."""
     out: set[str] = set()
 
     def walk(n):
@@ -884,17 +761,7 @@ def _response_names(lhs) -> set[str]:
 
 
 def _source_var_order(node) -> dict[str, int]:
-    """First-appearance order of atom leaves scanning the RHS left-to-right.
-
-    Mirrors R's ``terms()`` ``variables`` attribute, and must mirror the leaf
-    vs descend decisions of ``_expand_non_additive``: descend through the
-    formula operators (``+ - * : / %in%`` and ``^`` with a literal exponent),
-    treat everything else (``Name``, ``Call``, ``Subscript``, comparison
-    ``BinOp``, ``a^b`` with non-literal ``b``) as an atom leaf. Used to order
-    each interaction term's atoms by *source* appearance — so ``(x1+x2):f2``
-    renders ``x2:f2`` (R), not ``f2:x2``. Keys are ``_deparse`` of each leaf,
-    matching ``Term`` atom keys.
-    """
+    """First-appearance order of atom leaves scanning the RHS left-to-right."""
     order: dict[str, int] = {}
 
     def walk(n):
@@ -914,7 +781,6 @@ def _source_var_order(node) -> dict[str, int]:
             if n.op == "^" and isinstance(n.right, Literal) and n.right.kind == "num":
                 walk(n.left)  # power expansion: only base vars appear
                 return
-            # non-literal exponent: whole node is one atom (see expansion)
         order.setdefault(_deparse(n), len(order))
 
     walk(node)
@@ -931,27 +797,17 @@ def expand(
     LHS-response names are automatically excluded from the expansion.
     """
     rhs = formula.rhs
-    # Dot expansion happens before term algebra.
     if _contains_dot(rhs):
         if data_columns is None:
             raise ValueError("formula contains '.' but no data_columns supplied")
         rhs = _expand_dot(rhs, data_columns, _response_names(formula.lhs))
 
     bars = _collect_bars(rhs)
-    # Implicit intercept: prepend `1 +`.
     augmented = BinOp("+", Literal(1, "num"), rhs)
     all_terms = _expand_toplevel(augmented)
     intercept = _EMPTY_TERM in all_terms
     fixed_terms = [t for t in all_terms if t != _EMPTY_TERM]
 
-    # Extract offsets: a term whose single atom is `offset(...)`. R's terms()
-    # filters these out of term.labels and stores them under the "offset"
-    # attribute. If an offset shows up mixed into an interaction (e.g.
-    # `offset(x):y`), that's not meaningful R; we leave it in terms.
-    #
-    # Same treatment for mgcv smooth constructors s/te/ti/t2: they don't
-    # contribute to the parametric X; they become per-smooth (X_block, S_blocks)
-    # pairs in `materialize_smooths`.
     offsets: list = []
     smooths: list[Call] = []
     kept: list[Term] = []
@@ -967,13 +823,6 @@ def expand(
                 continue
         kept.append(t)
 
-    # R renders every term's variables in `variables`-attribute order — the
-    # global first-appearance order scanning the *source* RHS left-to-right —
-    # not the order written inside the term. So `a + b:a` → `a:b`, `z + x:z` →
-    # `z:x`, `(x1+x2):f2` → `x2:f2`. The order MUST come from the source AST
-    # (`_source_var_order`), not from iterating the already-expanded terms: for
-    # `(x1+x2):f2` expansion emits `x1:f2` first, which would wrongly rank `f2`
-    # before `x2`. Affects column labels/order only — the column set is unchanged.
     var_order = _source_var_order(rhs)
     kept = [
         t
@@ -982,8 +831,6 @@ def expand(
         for t in kept
     ]
 
-    # R's terms() sorts by interaction order (main effects → pairwise → …),
-    # with ties broken by first-appearance. Python's sort is stable.
     kept.sort(key=lambda t: len(t.atoms))
 
     return ExpandedFormula(
@@ -1004,27 +851,7 @@ def _contains_dot(node) -> bool:
         return _contains_dot(node.operand)
     if isinstance(node, Paren):
         return _contains_dot(node.expr)
-    # Intentionally don't recurse into Call args — R doesn't expand `.` there.
     return False
-
-
-# ---------------------------------------------------------------------------
-# Materialization — turn a parsed + expanded formula into a design matrix X.
-# ---------------------------------------------------------------------------
-#
-# Layered pipeline:
-#   1. Per-atom evaluation (`_eval_atom`) returns either a numeric column block
-#      or a factor record (codes + levels + optional forced contrast).
-#   2. Per-term encoding (`_encode_term`) applies contrast matrices to factors
-#      using R's promote1 rule (walk atoms; the first factor whose "hole" isn't
-#      already covered by an earlier term gets FULL coding, others REDUCED).
-#   3. Row-wise Khatri-Rao product across atom blocks produces the term's
-#      columns; column names follow R's convention (atom labels joined by `:`).
-#
-# Current scope: identity/log/exp/sqrt/abs/scale, I(…), arithmetic,
-# factor()/as.factor()/ordered()/C() with treatment/sum/helmert/SAS/poly,
-# raw-mode poly() (for matching R's `poly(x, n, raw = TRUE)` columns).
-# Unhandled: bs(), ns(), orthogonal poly(), cut(), pmin/pmax.
 
 
 import contextlib
@@ -1040,50 +867,20 @@ from hea._dispatch import rs_fn
 from hea._polars_compat import cat_pool
 from hea._rfma import _rfma_vec
 
-# Rust tp kernel-eval: rayon-parallel build of b=[E|T] (XBuild) and the knot
-# matrix E (tpsE); byte-exact to the numpy builds (tests/test_rs_parity.py),
-# None when _rs is absent/HEA_NO_RS.
 _tp_eval_b_rs = rs_fn("tp_eval_b")
 _tp_eval_E_rs = rs_fn("tp_eval_E")
 
 
-# pl.Categorical's string pool is process-global (shared across DataFrames),
-# so only pl.Enum preserves a per-column level order — which rules out
-# Enum-vs-Categorical as the ordered-vs-unordered factor signal.
-# Callers declare ordered columns via `with_ordered_cols(...)`
-# (or the helper `set_ordered_cols`) before materializing. `_factor_from_series`
-# consults this context to decide whether a factor should use poly contrasts.
 _ORDERED_COLS_CV: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
     "_hea_ordered_cols", default=frozenset()
 )
 
 
-# mgcv's ``smoothCon`` takes a ``sparse.cons`` argument deciding how the
-# smooth's identifiability constraint is absorbed:
-#   *  0 → ``sm$C = colSums(sm$X)`` followed by Householder QR (default, used
-#         by ``gam`` and by ``bam(discrete=TRUE)``).
-#   * -1 → ``sm$C = colMeans(sm$X)`` followed by sweep-drop: drop the
-#         smallest-variance column and de-mean the rest (used by
-#         ``bam(discrete=FALSE)``).
-# The two paths span different parameterisations of the same fit space, so
-# basis-level (coef-level) parity with mgcv requires picking the same one.
-# `materialize_smooths` sets this context-var before walking the smooths;
-# `_apply_by_and_absorb` and `_summation_apply_blocks` consult it to dispatch
-# between ``_absorb_sumzero`` and ``_absorb_sweep_drop``.
 _SPARSE_CONS_CV: contextvars.ContextVar[int] = contextvars.ContextVar(
     "_hea_sparse_cons", default=0
 )
 
 
-# mgcv's summation convention (smoothCon with a matrix argument): when set,
-# the per-bs builders return the RAW long-form (n*m, p_raw) block — no
-# scale.penalty, no by-multiply, no absorb.cons — and defer all of that to
-# ``_summation_apply_blocks``, which runs mgcv's smoothCon pipeline on the
-# correct shapes (scale.penalty on the long-form X, then by-multiply, then
-# row-summation, then the centering constraint and check.rank on the summed
-# X). Set by ``materialize_smooths`` around the matrix-arg ``_dispatch`` call;
-# consulted in ``_apply_by_and_absorb`` (s-family / t2) and honoured inline by
-# ``_build_te_smooth`` (te/ti). Default ``False`` ⇒ ordinary (scalar-arg) path.
 _MATRIX_ARG_CV: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "_hea_matrix_arg", default=False
 )
@@ -1104,28 +901,13 @@ _TERO_CV: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
-# R's "safe prediction" (`predvars` / `makepredictcall`): data-dependent RHS
-# transforms — `poly` (centering + orthogonal basis), `bs`/`ns` (knots +
-# boundary), `scale` (center + sd) — must reuse their *training* parameters at
-# predict time, not recompute from the new data. When this context-var holds a
-# dict, `_eval_call` captures each such call's parameters under its deparse key
-# on the first (fit) pass and replays them when the key is already present
-# (predict pass). `None` (default) = recompute every time (the model-frame /
-# one-shot path). `cut` is intentionally absent — R doesn't capture it either.
 _BASIS_STATE_CV: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "_hea_basis_state", default=None
 )
 
 
 def _basis_capture_replay(label: str):
-    """Return ``(store, state)`` for predvars capture/replay on a transform call.
-
-    ``store`` is the active capture dict (or ``None`` if disabled); ``state`` is
-    the previously-captured params for ``label`` (or ``None`` on the fit pass /
-    when disabled). On the fit pass ``store`` is non-None and ``state`` is None —
-    the caller computes params and assigns ``store[label]``. On predict ``state``
-    is the stored params to replay.
-    """
+    """Return ``(store, state)`` for predvars capture/replay on a transform call."""
     cv = _BASIS_STATE_CV.get()
     if cv is None:
         return None, None
@@ -1188,13 +970,7 @@ def with_xlevels(xlev):
         _XLEV_CV.reset(token)
 
 
-# Reserved ``basis_state`` key. xlevels rides alongside predvars because it is
-# the same kind of thing — fit-time state the predict pass must replay — and
-# ``basis_state`` is already threaded through every fit and predict design build
-# with exactly the right lifetime (empty dict at fit, same dict at predict).
 _XLEV_KEY = "__xlevels__"
-# ``attr(terms, "dataClasses")`` — the fit's per-variable ``.MFclass``, checked
-# by ``.checkMFClasses`` on every later design build.
 _MFCLASS_KEY = "__dataclasses__"
 
 
@@ -1202,11 +978,6 @@ _MFCLASS_KEY = "__dataclasses__"
 def _xlevels_scope(basis_state):
     """Bind the xlevels map carried in ``basis_state`` as BOTH the source and
     the sink for this design build.
-
-    One dict serving both roles gives first-write-wins: the fit pass finds it
-    empty and each factor records its levels; every later pass finds them and
-    re-levels against them. ``basis_state=None`` (callers that opted out of
-    predvars replay) keeps the pre-xlevels behaviour.
     """
     if basis_state is None:
         yield
@@ -1233,12 +1004,6 @@ def capture_xlevels():
         _XLEV_SINK_CV.reset(token)
 
 
-# R's ``contrasts.arg`` (model.matrix): a named-list mapping factor-column
-# name → contrast name (one of ``contr.treatment``, ``contr.sum``,
-# ``contr.helmert``, ``contr.poly``, ``contr.SAS``). When a factor block is
-# built from a bare-name reference whose label is in this mapping AND no
-# ``C(...)`` wrapping has already set ``forced_contrast``, the mapped contrast
-# is applied. R semantics: in-formula ``C(...)`` wins over the argument.
 _CONTRASTS_CV: contextvars.ContextVar[Mapping] = contextvars.ContextVar(
     "_hea_contrasts",
     default=MappingProxyType({}),
@@ -1261,10 +1026,6 @@ def with_contrasts(mapping):
         _CONTRASTS_CV.reset(token)
 
 
-# R's ``options(contrasts = c(unordered, ordered))`` — the process-wide default
-# contrast pair used when a factor has no ``C(...)`` wrap and no per-factor
-# ``contrasts.arg`` override. Defaults match R: treatment for unordered, poly
-# for ordered.
 _DEFAULT_CONTRASTS_CV: contextvars.ContextVar[tuple[str, str]] = contextvars.ContextVar(
     "_hea_default_contrasts",
     default=("contr.treatment", "contr.poly"),
@@ -1293,10 +1054,6 @@ def with_default_contrasts(
         _DEFAULT_CONTRASTS_CV.reset(token)
 
 
-# R's factor() sorts levels via locale-aware `sort(unique(x))`. On macOS the
-# default is en_US.UTF-8, under which e.g. "<1l" sorts before "1-1.5l" and
-# "-" sorts before "+". Pure ASCII sort diverges on punctuation. We try to
-# match by using the same locale for our level-ordering key.
 def _factor_sort_key(x):
     return _locale.strxfrm(str(x))
 
@@ -1307,8 +1064,6 @@ except _locale.Error:
     pass  # fall back to whatever collation was already set
 
 
-# R constants that are not data columns. When a Name matches one of these, it
-# resolves to the value here rather than a df lookup.
 _R_CONSTANTS = {
     "pi": math.pi,
 }
@@ -1358,8 +1113,6 @@ def _is_categorical(series: pl.Series) -> bool:
         return True
     if dt in (pl.String, pl.Utf8, pl.Object):
         return True
-    # R treats a logical column as a 2-level factor FALSE < TRUE (so `~ l`
-    # gives `lTRUE`, `~ 0 + l` gives `lFALSE`, `lTRUE`), not a 0/1 numeric.
     return dt == pl.Boolean
 
 
@@ -1367,18 +1120,8 @@ def _factor_from_series(
     series: pl.Series, label: str, ordered_hint: bool = False
 ) -> _FactorBlock:
     """Build a factor block, honouring R's ``xlevels`` when one is in scope.
-
-    Wraps :func:`_factor_from_series_impl` with the two halves of R's
-    fit→predict factor contract:
-
-    * **apply** — inside :func:`with_xlevels`, a variable whose label is in
-      the stored map is re-levelled to the FIT's levels instead of the ones
-      present here (``model.frame(..., xlev=object$xlevels)``, models.R:568-593).
-    * **record** — inside :func:`capture_xlevels`, the levels this block was
-      built with are written to the sink, which is ``.getXlevels(mt, mf)``
-      (models.R:753-763): every factor/character variable in the model frame,
-      keyed by its deparsed name (hea's labels already match — ``g``,
-      ``factor(g)``, ``ordered(g)``).
+    present here (``model.frame(..., xlev=object$xlevels)``, models.R:568-593).
+    (models.R:753-763): every factor/character variable in the model frame,
     """
     xl = _XLEV_CV.get().get(label)
     blk = (
@@ -1395,14 +1138,7 @@ def _factor_from_series(
 def _relevel_to_xlevels(
     series: pl.Series, xl: list, label: str, ordered_hint: bool
 ) -> _FactorBlock:
-    """R's ``model.frame`` xlev fix-up (models.R:568-593).
-
-    Checks the levels actually present against the fit's (``xi[, drop=TRUE]``
-    then ``match(nxl, xl)``) and rejects any that are new, then rebuilds as
-    ``factor(xi, levels=xl)`` — so the contrast is coded on the FIT's full
-    level set, unused levels included, and a dropped level no longer shifts
-    the baseline.
-    """
+    """R's ``model.frame`` xlev fix-up (models.R:568-593)."""
     present = _factor_levels(series)
     known = set(xl)
     new = [v for v in present if v not in known]
@@ -1429,9 +1165,6 @@ def _factor_from_series_impl(
 ) -> _FactorBlock:
     dt = series.dtype
     if dt == pl.Boolean:
-        # R's factor(logical): fixed levels "FALSE" < "TRUE" (uppercase, the
-        # character coercion of the logical), False→0 / True→1, NA→-1. Unordered
-        # by default (treatment contrast, FALSE as reference).
         null_mask = series.is_null().to_numpy() if series.null_count() > 0 else None
         codes = series.fill_null(False).to_numpy().astype(int)
         if null_mask is not None:
@@ -1446,16 +1179,6 @@ def _factor_from_series_impl(
             forced_contrast=forced,
         )
     if dt in (pl.Categorical, pl.Enum):
-        # A pl.Categorical's string pool is process-global: it holds every
-        # category any Categorical column has interned, and to_physical()
-        # indexes into that shared pool. Drop levels absent from this column
-        # (matches R's droplevels semantics lme4 and mgcv use when building
-        # Z / model matrices) and remap codes densely.
-        #
-        # Enum declares its own per-column level pool, so its dtype gives the
-        # levels directly (~10× faster than materializing a global pool) and
-        # the remap is skipped when every declared level appears — the common
-        # case for schema-cast fixtures.
         if dt == pl.Enum:
             full = dt.categories.to_list()
         else:
@@ -1469,8 +1192,6 @@ def _factor_from_series_impl(
             codes = np.empty(0, dtype=np.int64)
         else:
             present_max = int(valid.max())
-            # Fast path: all declared levels are present. np.bincount with
-            # minlength=k_full is O(n) and avoids the np.unique sort.
             if (
                 present_max < k_full
                 and valid.size >= k_full
@@ -1490,11 +1211,6 @@ def _factor_from_series_impl(
         if null_mask is not None:
             codes = np.where(null_mask, -1, codes)
         codes = codes.astype(int, copy=False)
-        # Ordered-factor signal: polars has no native ordered-factor dtype, and
-        # polars 1.40+ made pl.Categorical process-global (so we can't use the
-        # Enum/Categorical split anymore either). Callers declare ordered cols
-        # via `with_ordered_cols(...)`; the explicit `ordered_hint` wins when
-        # the call site already knows (e.g. `ordered(x)` in a formula).
         ordered = ordered_hint or (label in _ORDERED_COLS_CV.get())
         forced = _CONTRASTS_CV.get().get(label)
         return _FactorBlock(
@@ -1504,9 +1220,6 @@ def _factor_from_series_impl(
             label=label,
             forced_contrast=forced,
         )
-    # R's factor() uses locale-aware sort(unique(x)) on strings, but numeric
-    # columns sort numerically (factor() first coerces to character and R's
-    # sort on numerics is numeric when the input was numeric).
     values = series.to_numpy()
     null_mask = series.is_null().to_numpy() if series.null_count() > 0 else None
     if null_mask is not None:
@@ -1546,16 +1259,11 @@ def _eval_maybe_string(node, data: pl.DataFrame) -> np.ndarray:
         if s.dtype in (pl.Categorical, pl.Enum, pl.String, pl.Utf8, pl.Object):
             return s.to_numpy()
         return _as_float(s.to_numpy())
-    # Fallback to numeric; comparison ops on numeric are fine.
     return _eval_numeric(node, data)
 
 
 def _eval_numeric(node, data: pl.DataFrame) -> np.ndarray:
-    """Evaluate a node to a 1-D float array, assuming it's strictly numeric.
-
-    Used inside `I(...)` and as argument evaluation for numeric-only builtins.
-    Does NOT handle factor atoms — those go through `_eval_atom` instead.
-    """
+    """Evaluate a node to a 1-D float array, assuming it's strictly numeric."""
     if isinstance(node, Paren):
         return _eval_numeric(node.expr, data)
     if isinstance(node, Name):
@@ -1569,10 +1277,6 @@ def _eval_numeric(node, data: pl.DataFrame) -> np.ndarray:
         if node.kind == "bool":
             return np.full(len(data), 1.0 if node.value else 0.0)
         if node.kind == "str":
-            # Strings don't have a numeric value, but in comparison contexts
-            # (`I(f == "Ctl")`) they need to flow through BinOp. Carry the
-            # value via an object array so BinOp's comparison branch can
-            # compare elementwise with the other side.
             return np.full(len(data), node.value, dtype=object)
         raise TypeError(f"non-numeric literal in numeric context: {node!r}")
     if isinstance(node, UnaryOp):
@@ -1587,13 +1291,9 @@ def _eval_numeric(node, data: pl.DataFrame) -> np.ndarray:
     if isinstance(node, BinOp):
         op = node.op
         if op == "$":
-            # DataFrame column accessor: data$col  => data[col]
             if isinstance(node.left, Name) and isinstance(node.right, Name):
                 return _as_float(_series(data, node.right.ident).to_numpy())
             raise TypeError("`$` only supported as `data$col`")
-        # Comparisons may operate on strings (e.g. `I(f == "Ctl")`). Evaluate
-        # sides with type preserved, then do the comparison, then convert to
-        # float.
         if op in ("==", "!=", "<", ">", "<=", ">="):
             lhs = _eval_maybe_string(node.left, data)
             r = _eval_maybe_string(node.right, data)
@@ -1633,7 +1333,6 @@ def _eval_numeric(node, data: pl.DataFrame) -> np.ndarray:
         return block.values[:, 0]
     if isinstance(node, Subscript):
         base = _eval_numeric(node.obj, data)
-        # Only single integer-literal index supported for now (e.g. `b.d[1]`).
         if (
             len(node.idx) == 1
             and isinstance(node.idx[0], Literal)
@@ -1668,11 +1367,6 @@ def _apply_factor_levels_labels(
 ) -> _FactorBlock:
     """Apply R's factor()/ordered() ``levels=`` (recode order) and ``labels=``
     (rename) kwargs to an already-built factor block.
-
-    ``levels=`` recodes against the given key order (values not in it → NA).
-    ``labels=`` renames the levels (drives column suffixes); R accepts a vector
-    matching the levels, or a single string used as a ``<label><1..k>`` prefix.
-    Neither present → ``blk`` unchanged.
     """
     has_levels = "levels" in call.kwargs
     has_labels = "labels" in call.kwargs
@@ -1696,27 +1390,17 @@ def _apply_factor_levels_labels(
 
 
 def _logical_factor_block(node, data: pl.DataFrame, label: str) -> _FactorBlock:
-    """Materialize a logical-valued atom as R's `FALSE < TRUE` 2-level factor.
-
-    Routes through the same `pl.Boolean` path `_factor_from_series` uses for a
-    real logical column (levels ``["FALSE","TRUE"]``, treatment coding, FALSE as
-    reference), so naming (`…TRUE`) and no-intercept full coding (`…FALSE`,
-    `…TRUE`) match R for free.
-    """
+    """Materialize a logical-valued atom as R's `FALSE < TRUE` 2-level factor."""
     v = _eval_numeric(node, data)  # 0.0 / 1.0 for comparisons and `!`
     s = pl.Series(np.asarray(v).astype(bool))
     return _factor_from_series(s, label=label)
 
 
-# Function-call atom evaluator: returns _NumBlock or _FactorBlock.
 def _eval_call(call: Call, data: pl.DataFrame):
     fn = call.fn
     label = _deparse(call)
 
     if fn == "I":
-        # `I(e)` protects e from formula algebra. A logical-valued e becomes a
-        # 2-level factor (R coerces logical model-frame columns to factors);
-        # otherwise it's a numeric column.
         if _is_logical_node(call.args[0]):
             return _logical_factor_block(call.args[0], data, label)
         v = _eval_numeric(call.args[0], data)
@@ -1737,8 +1421,6 @@ def _eval_call(call: Call, data: pl.DataFrame):
     ):
         v = _eval_numeric(call.args[0], data)
         if fn == "log":
-            # R's log(x, base): base is the 2nd positional arg OR base= kwarg
-            # (kwarg wins). log(x) alone is natural log.
             base_node = call.kwargs.get("base")
             if base_node is None and len(call.args) >= 2:
                 base_node = call.args[1]
@@ -1790,10 +1472,6 @@ def _eval_call(call: Call, data: pl.DataFrame):
             center_val = out.mean()
             out = out - center_val
         if s:
-            # R's scale() divides by the root-mean-square of the
-            # (already-centered-if-requested) column: sqrt(sum(v^2)/max(1,n-1)).
-            # With center=TRUE this equals the sd; with center=FALSE it's the
-            # RMS about zero, NOT the sd about the mean (the divergence fixed).
             n = out.shape[0]
             rms = float(np.sqrt(np.sum(out**2) / max(1, n - 1)))
             if rms != 0:
@@ -1804,7 +1482,6 @@ def _eval_call(call: Call, data: pl.DataFrame):
         return _NumBlock(values=out.reshape(-1, 1), suffixes=[""], label=label)
 
     if fn in ("factor", "as.factor"):
-        # First arg = variable; kwargs may include levels, labels, ordered.
         src = call.args[0]
         if isinstance(src, Name):
             s = _series(data, src.ident)
@@ -1820,7 +1497,6 @@ def _eval_call(call: Call, data: pl.DataFrame):
         return _apply_factor_levels_labels(blk, call, s, label)
 
     if fn == "ordered":
-        # Same as factor() but ordered=TRUE, and default contrast becomes poly.
         src = call.args[0]
         s = (
             _series(data, src.ident)
@@ -1831,7 +1507,6 @@ def _eval_call(call: Call, data: pl.DataFrame):
         return _apply_factor_levels_labels(blk, call, s, label)
 
     if fn == "dummy":
-        # lme4's dummy(f, level) → 0/1 indicator for `f == level`.
         src = call.args[0]
         s = (
             _series(data, src.ident)
@@ -1849,7 +1524,6 @@ def _eval_call(call: Call, data: pl.DataFrame):
         return _NumBlock(values=values, suffixes=[""], label=label)
 
     if fn == "relevel":
-        # relevel(f, ref) — move `ref` to position 0.
         inner = _eval_atom(call.args[0], data)
         if not isinstance(inner, _FactorBlock):
             if isinstance(call.args[0], Name):
@@ -1884,8 +1558,6 @@ def _eval_call(call: Call, data: pl.DataFrame):
         )
 
     if fn == "cut":
-        # cut(x, breaks, labels=NULL, include.lowest=FALSE, right=TRUE,
-        # dig.lab=3, ordered_result=FALSE) — bin numeric into factor.
         x = _eval_numeric(call.args[0], data)
         breaks_node = call.args[1] if len(call.args) >= 2 else call.kwargs.get("breaks")
         if isinstance(breaks_node, Call) and breaks_node.fn == "c":
@@ -1899,10 +1571,6 @@ def _eval_call(call: Call, data: pl.DataFrame):
                 dtype=float,
             )
         elif isinstance(breaks_node, Literal) and breaks_node.kind == "num":
-            # cut(x, n): n equal-width intervals. R seeds the breaks evenly
-            # between the *original* min and max, then widens only the two
-            # outer endpoints by dx/1000 (cut.default) — so the interior knots
-            # sit at seq(min, max), NOT at seq(widened_min, widened_max).
             nb = int(breaks_node.value)
             if nb < 2:
                 raise ValueError("invalid number of intervals")
@@ -1924,10 +1592,6 @@ def _eval_call(call: Call, data: pl.DataFrame):
         ord_kw = call.kwargs.get("ordered_result")
         ordered_result = bool(ord_kw.value) if ord_kw is not None else False
 
-        # Level labels: explicit labels= win; labels=FALSE is integer codes
-        # (unsupported in a model term). Otherwise R's formatC(breaks,
-        # digits=dig, width=1, format="g") with dig increasing from dig.lab
-        # until adjacent breakpoint labels are distinct (matches Python ".g").
         labels_node = call.kwargs.get("labels")
         if (
             isinstance(labels_node, Literal)
@@ -1951,25 +1615,20 @@ def _eval_call(call: Call, data: pl.DataFrame):
                     f"({ch[i]},{ch[i + 1]}]" for i in range(len(breaks) - 1)
                 ]
                 if include_lowest and level_labels:
-                    # close the first interval's open left bracket: (a,b] → [a,b]
                     level_labels[0] = "[" + level_labels[0][1:]
             else:
                 level_labels = [
                     f"[{ch[i]},{ch[i + 1]})" for i in range(len(breaks) - 1)
                 ]
                 if include_lowest and level_labels:
-                    # close the last interval's open right bracket: [a,b) → [a,b]
                     level_labels[-1] = level_labels[-1][:-1] + "]"
 
-        # np.digitize(x, bins, right=True): index i with bins[i-1] < x <= bins[i].
         idx = np.digitize(x, breaks, right=right) - 1
         if include_lowest:
-            # close the otherwise-open outer endpoint of the first/last interval
             if right:
                 idx = np.where(x == breaks[0], 0, idx)
             else:
                 idx = np.where(x == breaks[-1], len(level_labels) - 1, idx)
-        # Values outside breaks become NA (code -1)
         mask = (idx < 0) | (idx >= len(level_labels))
         idx = np.where(mask, -1, idx)
         return _FactorBlock(
@@ -1980,7 +1639,6 @@ def _eval_call(call: Call, data: pl.DataFrame):
         )
 
     if fn == "C":
-        # C(f, contrast, how.many) — wrap factor with explicit contrast choice.
         inner = _eval_atom(call.args[0], data)
         if not isinstance(inner, _FactorBlock):
             if isinstance(call.args[0], Name):
@@ -2002,7 +1660,6 @@ def _eval_call(call: Call, data: pl.DataFrame):
             and isinstance(base_kw, Literal)
             and base_kw.kind == "num"
         ):
-            # C(f, base=2) chooses the 2nd level as reference (1-indexed in R).
             forced = f"contr.treatment:base={int(base_kw.value)}"
         how_many = None
         hm_kw = call.kwargs.get("how.many")
@@ -2024,7 +1681,6 @@ def _eval_call(call: Call, data: pl.DataFrame):
         )
 
     if fn == "poly":
-        # Raw polynomials only for now — matches `poly(x, n, raw = TRUE)`.
         v = _eval_numeric(call.args[0], data)
         degree = (
             int(call.args[1].value)
@@ -2071,8 +1727,6 @@ def _eval_call(call: Call, data: pl.DataFrame):
                     interior = np.quantile(v, np.linspace(0, 1, n_interior + 2)[1:-1])
             if store is not None:
                 store[label] = {"interior": interior, "bnd": bnd}
-        # df=None: the final interior knots are passed explicitly (already
-        # resolved above), so no data-dependent quantile placement re-runs.
         cols = _bs_basis(v, degree, bnd, interior, None, intercept)
         suffixes = [str(i + 1) for i in range(cols.shape[1])]
         return _NumBlock(values=cols, suffixes=suffixes, label=label)
@@ -2089,7 +1743,6 @@ def _eval_call(call: Call, data: pl.DataFrame):
         if st is not None:  # replay training knots/boundary
             interior, bnd = st["interior"], st["bnd"]
         else:
-            # ns(x, df=k): interior knots at evenly-spaced quantiles of x.
             interior = _parse_knots(knots_node, data)
             bnd = _parse_boundary(call.kwargs.get("Boundary.knots"), data, v)
             if df is not None and len(interior) == 0:
@@ -2098,19 +1751,11 @@ def _eval_call(call: Call, data: pl.DataFrame):
                     interior = np.quantile(v, np.linspace(0, 1, n_interior + 2)[1:-1])
             if store is not None:
                 store[label] = {"interior": interior, "bnd": bnd}
-        # df=None: pass the resolved interior knots so no quantile re-placement runs.
         cols = _ns_basis(v, bnd, interior, None, intercept)
         suffixes = [str(i + 1) for i in range(cols.shape[1])]
         return _NumBlock(values=cols, suffixes=suffixes, label=label)
 
     if fn == "harmonic":
-        # hea-native periodic basis: k cos/sin harmonic pairs at an explicit
-        # period (the trig sibling of poly/bs/ns; see _harmonic_basis). The
-        # count and period take positional — harmonic(x, k, period) — or
-        # keyword forms. The count keyword is `k` (canonical) or `K`
-        # (forecast spelling); `k` wins if both are given.
-        # period must be a positive scalar (e.g. 12 or 2*pi); hea has no ts
-        # frequency to infer it from, so it has no default.
         v = _eval_numeric(call.args[0], data)
         k_node = (
             call.args[1]
@@ -2141,7 +1786,6 @@ def _eval_call(call: Call, data: pl.DataFrame):
         cols, suffixes = _harmonic_basis(v, K, period)
         return _NumBlock(values=cols, suffixes=suffixes, label=label)
 
-    # Fallback: try to treat as numeric single-argument elementwise function.
     raise NotImplementedError(f"unsupported call: {fn}(…)")
 
 
@@ -2194,7 +1838,6 @@ def _bs_basis(x, degree, boundary, interior_knots, df, intercept):
     from scipy.interpolate import BSpline as _BSpline
 
     ord = degree + 1
-    # If df given and no explicit knots, place interior knots at quantiles.
     if df is not None and len(interior_knots) == 0:
         n_interior = df - degree - (1 if intercept else 0)
         if n_interior > 0:
@@ -2209,19 +1852,12 @@ def _bs_basis(x, degree, boundary, interior_knots, df, intercept):
     )
     n_basis = len(Aknots) - ord
     out = np.zeros((len(x), n_basis))
-    # R's bs() extrapolates the boundary polynomial piece for x beyond
-    # Boundary.knots (predict.bs — it warns the basis is ill-conditioned there).
-    # scipy's extrapolate=True reproduces that polynomial extrapolation exactly,
-    # so evaluate without clamping: out-of-range predict rows then match R
-    # instead of collapsing to the (wrong) clamped boundary value.
     x = np.asarray(x, dtype=float)
     for i in range(n_basis):
         c = np.zeros(n_basis)
         c[i] = 1.0
         spl = _BSpline(Aknots, c, degree, extrapolate=True)
         out[:, i] = np.nan_to_num(spl(x), nan=0.0)
-    # At exact right boundary, scipy's half-open interval gives 0 for all
-    # basis functions; R gives 1 for the last. Patch points == boundary[1].
     right_mask = x == boundary[1]
     if right_mask.any():
         out[right_mask, :] = 0
@@ -2232,13 +1868,7 @@ def _bs_basis(x, degree, boundary, interior_knots, df, intercept):
 
 
 def _ns_basis(x, boundary, interior_knots, df, intercept):
-    """Natural cubic spline basis matching R's ns().
-
-    ns() starts from bs(x, degree=3, knots=..., Boundary.knots=...,
-    intercept=TRUE) and postmultiplies by a matrix H that enforces zero
-    second derivative at each boundary knot. Returns (n, df) matrix with
-    first column dropped if intercept=FALSE.
-    """
+    """Natural cubic spline basis matching R's ns()."""
     from scipy.interpolate import BSpline as _BSpline
 
     if df is not None and len(interior_knots) == 0:
@@ -2258,7 +1888,6 @@ def _ns_basis(x, boundary, interior_knots, df, intercept):
     )
     n_basis = len(Aknots) - ord
 
-    # Evaluate basis at x and at boundaries for 2nd derivative constraint.
     def _B(xe):
         xc = np.clip(xe, boundary[0], boundary[1])
         out = np.zeros((len(xe), n_basis))
@@ -2283,8 +1912,6 @@ def _ns_basis(x, boundary, interior_knots, df, intercept):
         return np.nan_to_num(out, nan=0.0)
 
     def _Bd(xe):
-        # First derivative of the B-spline basis. At a boundary knot (multiplicity
-        # 4) scipy returns NaN, so evaluate the one-sided derivative a hair inside.
         eps = (boundary[1] - boundary[0]) * 1e-7
         xc = np.clip(xe, boundary[0] + eps, boundary[1] - eps)
         out = np.zeros((len(xe), n_basis))
@@ -2303,9 +1930,6 @@ def _ns_basis(x, boundary, interior_knots, df, intercept):
     Bd_bnd = _Bd(np.array([lo, hi], dtype=float))  # boundary slopes
     Blo = _B(np.array([lo], dtype=float))
     Bhi = _B(np.array([hi], dtype=float))
-    # R's ns drops the first (intercept) column of basis & const BEFORE the
-    # QR-based null-space projection; the order matters because it changes
-    # which Q we compute.
     if not intercept:
         B = B[:, 1:]
         const = const[:, 1:]
@@ -2316,9 +1940,6 @@ def _ns_basis(x, boundary, interior_knots, df, intercept):
     H = Q[:, 2:]
     N = B @ H
 
-    # A natural spline is LINEAR beyond its boundary knots (R extrapolates it,
-    # rather than clamping like `_B` does). Patch out-of-range rows with the
-    # boundary value + (x − boundary)·slope so predict on new data matches R.
     xv = np.asarray(x, dtype=float)
     below = xv < lo
     above = xv > hi
@@ -2330,18 +1951,7 @@ def _ns_basis(x, boundary, interior_knots, df, intercept):
 
 
 def _harmonic_basis(x, K: int, period: float):
-    """Raw Fourier/harmonic basis: ``K`` cos/sin pairs at ``period``.
-
-    Columns are cos-first interleaved — ``[cos1, sin1, cos2, sin2, …]`` with
-    matching suffixes — i.e. ``cos(2π j x / period)``, ``sin(2π j x / period)``
-    for ``j = 1..K``. A pure function of ``(x, K, period)`` with no
-    data-derived state, so it reproduces exactly on fresh data at predict time
-    (unlike ``bs``/``ns``, which capture knots).
-
-    hea-native term, name aligned with ``TSA::harmonic`` — NOT a port of
-    ``forecast::fourier`` / ``TSA::harmonic``: always emits ``2K`` columns (no
-    integer-``ts`` Nyquist drop) and takes an explicit ``period``.
-    """
+    """Raw Fourier/harmonic basis: ``K`` cos/sin pairs at ``period``."""
     x = np.asarray(x, dtype=float)
     cols, suffixes = [], []
     for j in range(1, K + 1):
@@ -2373,17 +1983,7 @@ def _eval_level_list(node) -> list:
 def _poly_orthogonal(
     x: np.ndarray, degree: int, state: dict | None = None
 ) -> np.ndarray:
-    """Orthogonal polynomials matching R's `poly(x, degree)` (non-raw).
-
-    R's algorithm: QR on outer(x - mean(x), 0:degree, "^"). The returned
-    columns are Q with signs flipped to match R's diagonal, drop constant.
-
-    ``state`` drives R's safe-prediction (`predvars`): if it holds captured
-    params (``mean``/``Rinv``/``signs``) the basis is *replayed* on ``x`` using
-    the training transform (`Q = X·R⁻¹`, so new data maps through the same
-    `R⁻¹`); if it's an empty dict the params are *captured* into it; if ``None``
-    the basis is computed fresh with no capture (the one-shot path).
-    """
+    """Orthogonal polynomials matching R's `poly(x, degree)` (non-raw)."""
     x = np.asarray(x, dtype=float)
     if state and "Rinv" in state:  # replay (predict)
         xc = x - state["mean"]
@@ -2402,12 +2002,7 @@ def _poly_orthogonal(
 
 
 def _eval_atom(node, data: pl.DataFrame, cache: dict | None = None):
-    """Per-atom entry point: returns _NumBlock or _FactorBlock.
-
-    `cache`, if provided, memoizes Name/`df$col` atoms within a single
-    materialize call so interaction-heavy formulas (e.g. `A*B*C*D`) don't
-    re-encode the same factor column once per term.
-    """
+    """Per-atom entry point: returns _NumBlock or _FactorBlock."""
     if isinstance(node, Name):
         if cache is not None:
             hit = cache.get(node.ident)
@@ -2460,18 +2055,11 @@ def _eval_atom(node, data: pl.DataFrame, cache: dict | None = None):
             return blk
         raise TypeError("`$` only supported as `df$col`")
     if isinstance(node, (UnaryOp, BinOp, Subscript)):
-        # A bare logical-valued expression (`x > 0`, `!flag`) is a 2-level
-        # factor in R, same as `I(x > 0)`.
         if _is_logical_node(node):
             return _logical_factor_block(node, data, _deparse(node))
         v = _eval_numeric(node, data)
         return _NumBlock(values=v.reshape(-1, 1), suffixes=[""], label=_deparse(node))
     raise TypeError(f"cannot evaluate atom {type(node).__name__}")
-
-
-# ---------------------------------------------------------------------------
-# Contrast matrices — map k levels onto either k columns (full) or k-1 (reduced).
-# ---------------------------------------------------------------------------
 
 
 def _contrast_full(k: int) -> np.ndarray:
@@ -2485,7 +2073,6 @@ def _contrast_treatment(k: int, base: int = 0) -> np.ndarray:
 
 
 def _contrast_SAS(k: int) -> np.ndarray:
-    # R's contr.SAS drops the LAST level.
     return _contrast_treatment(k, base=k - 1)
 
 
@@ -2530,20 +2117,10 @@ _CONTRAST_FNS = {
 
 
 def _contrast_matrix(fb: _FactorBlock, reduced: bool) -> tuple[np.ndarray, list[str]]:
-    """Return (contrast_matrix, column_suffixes) for a factor.
-
-    When `reduced=True` we give k-1 columns using the chosen (or default)
-    contrast function. When `reduced=False` we give the k-column identity
-    coding (full level membership) — used for the first factor in an
-    intercept-less model, or when the "hole" left by this atom isn't covered
-    by any earlier term.
-    """
+    """Return (contrast_matrix, column_suffixes) for a factor."""
     k = len(fb.levels)
     if reduced:
         name = fb.forced_contrast
-        # Custom contrast matrix (R's contrasts.arg = list(f = matrix)): an
-        # (k, m) ndarray used verbatim, or a (matrix, column_names) tuple.
-        # Unnamed columns get R's 1..m suffixes; named columns use the names.
         if isinstance(name, np.ndarray) or (
             isinstance(name, tuple)
             and len(name) == 2
@@ -2570,7 +2147,6 @@ def _contrast_matrix(fb: _FactorBlock, reduced: bool) -> tuple[np.ndarray, list[
         if name is None:
             unordered_default, ordered_default = _DEFAULT_CONTRASTS_CV.get()
             name = ordered_default if fb.ordered else unordered_default
-        # C(f, base=N) is encoded as a pseudo-name.
         if isinstance(name, str) and name.startswith("contr.treatment:base="):
             base = int(name.split("=")[1]) - 1  # R is 1-indexed
             M = _contrast_treatment(k, base=base)
@@ -2592,7 +2168,6 @@ def _contrast_matrix(fb: _FactorBlock, reduced: bool) -> tuple[np.ndarray, list[
         else:
             suffs = [str(lv) for lv in fb.levels[1:]]
         return _truncate_contrast(M, suffs, fb.how_many)
-    # Full coding: k identity columns named by level.
     return _contrast_full(k), [str(lv) for lv in fb.levels]
 
 
@@ -2602,26 +2177,14 @@ def _truncate_contrast(M: np.ndarray, suffs: list[str], how_many):
     return M[:, :how_many], suffs[:how_many]
 
 
-# ---------------------------------------------------------------------------
-# Term encoding + interaction product
-# ---------------------------------------------------------------------------
-
-
 def _encode_factor(fb: _FactorBlock, reduced: bool) -> _NumBlock:
     M, suffs = _contrast_matrix(fb, reduced=reduced)
-    # `eye(k)[codes] @ M` is a dressed-up row gather; `M[codes]` is the same
-    # result without allocating the k×k identity or running a GEMM.
     values = np.ascontiguousarray(M[fb.codes])
     return _NumBlock(values=values, suffixes=suffs, label=fb.label)
 
 
 def _khatri_rao(blocks: list[_NumBlock]) -> _NumBlock:
-    """Row-wise tensor product across atom blocks.
-
-    R convention: within an interaction, the FIRST atom's levels vary fastest
-    and the last atom's vary slowest. Column names are atom labels joined by
-    `:`, with each atom's own column suffix glued to its label.
-    """
+    """Row-wise tensor product across atom blocks."""
     if len(blocks) == 1:
         blk = blocks[0]
         names = [blk.label + s for s in blk.suffixes]
@@ -2635,9 +2198,6 @@ def _khatri_rao(blocks: list[_NumBlock]) -> _NumBlock:
         new_v = np.empty((n, cur_values.shape[1] * b.values.shape[1]))
         new_names: list[str] = []
         col = 0
-        # Outer loop over the new (rightmost-so-far) block makes it the
-        # "slowest varying" axis; inner loop keeps existing accumulator's
-        # fast-slow order intact.
         for j, rn in enumerate(bn):
             for i, ln in enumerate(cur_names):
                 new_v[:, col] = cur_values[:, i] * b.values[:, j]
@@ -2655,18 +2215,9 @@ def _encode_term_marginals(
     cache: dict | None = None,
 ) -> list[_NumBlock]:
     """The term's per-atom column blocks, before the row-tensor product.
-
-    :func:`_encode_term` is exactly ``_khatri_rao`` of this list; the factors
-    are exposed separately because ``bam(discrete=True)`` stores a parametric
-    term as its sequence of marginal model matrices rather than their product
     (mgcv ``terms2tensor``, bam.r:2091-2174). Blocks come back in atom order,
-    which ``_khatri_rao`` treats as fastest-varying first.
-
-    See :func:`_encode_term` for the factor-coding (marginality) rule; this is
-    where it is applied, and ``covered`` is mutated here.
     """
     if not term.atoms:
-        # Intercept
         return [
             _NumBlock(
                 values=np.ones((len(data), 1)), suffixes=["(Intercept)"], label=""
@@ -2683,17 +2234,7 @@ def _encode_term_marginals(
             hole = Term(tuple(a for j, a in enumerate(term.atoms) if j != i))
             reduced = hole in covered
             if not reduced:
-                # Full-coding this factor spans the hole's margin, so any later
-                # term (or sibling factor) whose hole equals it now reduces.
                 covered.add(hole)
-            # Cache encoded factor blocks: in a full crossing like `A*B*C*D`
-            # each factor is always REDUCED in every term it appears in, so
-            # one _encode_factor call suffices per (factor, reduced) pair
-            # instead of once per term. Safe to share the same _NumBlock
-            # reference — _khatri_rao and downstream only read `values`.
-            # Key by label rather than id(blk): Call-node atoms aren't in
-            # atom_cache so their _FactorBlock refs can be GC'd between
-            # terms, causing id() reuse to collide across different factors.
             if cache is not None:
                 enc_key = ("enc", blk.label, reduced)
                 enc = cache.get(enc_key)
@@ -2714,39 +2255,12 @@ def _encode_term(
     covered: set[Term],
     cache: dict | None = None,
 ) -> _NumBlock:
-    """Encode a single term to its numeric column block.
-
-    Factor coding follows R's ``model.matrix`` marginality rule, driven by a
-    running set of **covered margins** (``covered``). For each factor atom, its
-    "hole" (this term minus that atom) is checked: if the hole is already
-    covered the factor is REDUCED (k-1 contrast columns); otherwise it is FULL
-    (k dummy columns) and the hole *becomes* covered. The caller seeds
-    ``covered`` with the empty term iff the model has an intercept, and adds the
-    whole term to ``covered`` after this returns. Consequences:
-
-      * intercept models: `~ a` reduces `a` (hole ∅ covered by the intercept);
-        `~ a:b` promotes both factors (neither {a} nor {b} covered) → full 2×3.
-      * no-intercept models: `~ a + b - 1` codes `a` FULL (covering ∅), then
-        `b` REDUCED (∅ now covered) — a full-rank X matching R, not the
-        rank-deficient both-full coding. Likewise `~ a:b + b:c - 1` reduces `c`
-        because a:b's full `a` already covered {b}.
-
-    Holes within one term are distinct (one per factor), so mutating ``covered``
-    mid-loop is order-independent.
-
-    `cache` is forwarded to `_eval_atom` so an outer loop (e.g. `materialize`)
-    can memoize per-atom encoding across sibling terms in interaction-heavy
-    formulas like `A*B*C*D`.
-    """
+    """Encode a single term to its numeric column block."""
     return _khatri_rao(_encode_term_marginals(term, data, covered, cache))
 
 
 def _collect_names(node, names: set[str]) -> None:
-    """Gather every data-column Name referenced in a term AST.
-
-    Used to figure out which columns to na.omit-filter before materialization,
-    matching R's default `na.action = na.omit` on the model.frame.
-    """
+    """Gather every data-column Name referenced in a term AST."""
     if node is None:
         return
     if isinstance(node, Name):
@@ -2754,7 +2268,6 @@ def _collect_names(node, names: set[str]) -> None:
             names.add(node.ident)
     elif isinstance(node, BinOp):
         if node.op == "$":
-            # `data$col` — only the right-hand side is a column.
             if isinstance(node.right, Name):
                 names.add(node.right.ident)
             return
@@ -2832,14 +2345,7 @@ def materialize(
         expanded, data, drop_na=drop_na, basis_state=basis_state
     )
     if values is None:
-        # Polars can't represent (n, 0); return an empty frame and let
-        # callers use ``len(input_data)`` if they need the row count.
         return (pl.DataFrame(), []) if return_assign else pl.DataFrame()
-    # ``orient="row"`` is REQUIRED: ``_build_design`` returns a column-major
-    # (F-contiguous) array, and ``pl.from_numpy``'s orientation inference is
-    # inconclusive for a *square* (n == p) design — it then defaults to column
-    # orientation and silently transposes it. Pinning row orientation is correct
-    # for every shape and keeps the F-order fast path (no transpose copy).
     X = pl.from_numpy(values, schema=all_names, orient="row")
     return (X, assign) if return_assign else X
 
@@ -2853,8 +2359,6 @@ def _mf_class(col: pl.Series) -> str:
     if dt in (pl.Categorical, pl.Enum):
         return "factor"
     if dt == pl.Utf8:
-        # R keeps character separate from factor here; model.matrix
-        # auto-converts, and .checkMFClasses forgives factor-for-character.
         return "character"
     if is_matrix_col(col):
         return f"nmatrix.{matrix_to_2d(col).shape[1]}"
@@ -2866,26 +2370,10 @@ def _mf_class(col: pl.Series) -> str:
 def _check_mf_classes(expanded: ExpandedFormula, data: pl.DataFrame, basis_state):
     """R's ``.checkMFClasses`` (models.R:401-434), invoked by ``predict.lm``
     between the model frame and the model matrix (lm.R:697).
-
-    The fit pass records each referenced column's :func:`_mf_class`; later
-    passes compare against it and refuse a variable whose type changed. R's two
-    forgiving substitutions are kept: ``ordered`` counts as ``factor`` (the
-    ``ordNotOK=FALSE`` default — and hea carries orderedness out of band
-    anyway), and ``factor`` supplied for a ``character`` fit is fine, since
-    that is exactly what a fit-time auto-conversion produces.
-
-    Messages are R's verbatim, except that the multi-variable one quotes with
-    ASCII ``'`` where R's ``sQuote`` emits typographic quotes under the default
-    ``useFancyQuotes=TRUE`` (R itself falls back to ASCII when that is off).
     """
     if basis_state is None:
         return
     stored = basis_state.setdefault(_MFCLASS_KEY, {})
-    # Only what this design build actually encodes: the parametric terms and
-    # offsets. Smooth covariates belong to the smooth's own PredictMat (mgcv
-    # accepts a vector where the fit used a matrix column, so classing them
-    # here would reject a call mgcv allows), and bars go through
-    # ``materialize_bars``.
     referenced: set[str] = set()
     for t in expanded.terms:
         for a in t.atoms:
@@ -2948,19 +2436,7 @@ def _build_design_impl(
     drop_na: bool = True,
     basis_state: dict | None = None,
 ) -> tuple[np.ndarray | None, list[str], list[int]]:
-    """Core design assembly shared by ``materialize`` and ``prepare_design``.
-
-    Returns ``(values, names, assign)`` where ``values`` is an **F-contiguous**
-    (column-major) ``(n, p)`` float array, or ``None`` for the empty ``(n, 0)``
-    design. Column-major is deliberate: each per-term block lands in a
-    *contiguous* slice, so the assembly is a sequence of cheap column memcpys
-    (≈5× faster than ``np.hstack``'s strided row-major copy at n=10k); the same
-    layout lets ``pl.from_numpy`` adopt the columns without a transpose copy and
-    keeps the downstream weighted-QR fit column-major (no LAPACK transpose).
-    The values are bit-identical to the former ``np.hstack`` result.
-
-    ``drop_na`` / ``basis_state`` behave exactly as in :func:`materialize`.
-    """
+    """Core design assembly shared by ``materialize`` and ``prepare_design``."""
     token = _BASIS_STATE_CV.set(basis_state)
     try:
         if drop_na:
@@ -2971,9 +2447,6 @@ def _build_design_impl(
 
         blocks: list[_NumBlock] = []
         block_term_idx: list[int] = []  # R assign value per block
-        # Covered margins for R's marginality coding (see `_encode_term`). Seeded
-        # with the empty term iff there's an intercept; each term joins after it
-        # is encoded so later terms reduce against it.
         covered: set[Term] = {_EMPTY_TERM} if expanded.intercept else set()
         atom_cache: dict = {}
 
@@ -3007,11 +2480,6 @@ def _build_design_impl(
         _BASIS_STATE_CV.reset(token)
 
 
-# ---------------------------------------------------------------------------
-# lme4 random-effect bars → Z, Λᵀ template, θ
-# ---------------------------------------------------------------------------
-
-
 @dataclass(slots=True)
 class ReTerms:
     """Materialized random-effect side of a mixed-effects formula.
@@ -3043,11 +2511,7 @@ def _bar_lhs_to_ef(lhs_node) -> ExpandedFormula:
 def _materialize_re_lhs(
     lhs_ef: ExpandedFormula, data: pl.DataFrame
 ) -> tuple[np.ndarray, list[str]]:
-    """Materialize a bar's LHS as a dense (n, c) matrix + component names.
-
-    Uses the same code path as the fixed-effect materializer: contrast-coded
-    factors, Khatri–Rao for interactions, promote1 for hole-filling.
-    """
+    """Materialize a bar's LHS as a dense (n, c) matrix + component names."""
     blocks: list[_NumBlock] = []
     covered: set[Term] = {_EMPTY_TERM} if lhs_ef.intercept else set()
     atom_cache: dict = {}
@@ -3075,7 +2539,6 @@ def _flatten_nested_group(node) -> list:
         left = _flatten_nested_group(node.left)
         right = _flatten_nested_group(node.right)
         out = list(left)
-        # Every level on the right nests under the deepest existing level.
         for r in right:
             out.append(BinOp(op=":", left=r, right=out[-1]))
         return out
@@ -3095,8 +2558,6 @@ def _eval_group(node, data: pl.DataFrame) -> tuple[np.ndarray, list, str]:
         rc, rv, rn = _eval_group(node.right, data)
         label = f"{ln}:{rn}"
         n = len(lc)
-        # Sort pairs by (l_code, r_code) — since lv and rv are already in
-        # canonical order, this gives lex order on level identities.
         seen: set[tuple[int, int]] = set()
         for i in range(n):
             if lc[i] >= 0 and rc[i] >= 0:
@@ -3118,7 +2579,6 @@ def _eval_group(node, data: pl.DataFrame) -> tuple[np.ndarray, list, str]:
         blk = _eval_atom(node, data)
         if isinstance(blk, _FactorBlock):
             return blk.codes, blk.levels, _deparse(node)
-    # Fallback: evaluate as numeric then factor-ize.
     try:
         v = _eval_numeric(node, data)
         s = pl.Series(v)
@@ -3142,9 +2602,6 @@ def materialize_bars(expanded: ExpandedFormula, data: pl.DataFrame) -> ReTerms:
         data = data.drop_nulls(subset=ref_list)
     n = len(data)
 
-    # Normalize each parsed bar into (lhs_matrix, cnames, group_codes,
-    # group_levels, group_label). For `||` split LHS into scalar bars; for
-    # nested `a/b` split group into [a, b:a].
     @dataclass
     class _SimpleBar:
         Z_lhs: np.ndarray  # (n, c)
@@ -3162,8 +2619,6 @@ def materialize_bars(expanded: ExpandedFormula, data: pl.DataFrame) -> ReTerms:
         is_double = bar.op == "||"
         lhs_ef = _bar_lhs_to_ef(lhs_node)
         if is_double:
-            # Split LHS: intercept (if any) as one scalar bar, each term as
-            # another (with intercept=False so it stays a single component).
             lhs_parts: list[ExpandedFormula] = []
             if lhs_ef.intercept:
                 lhs_parts.append(
@@ -3201,10 +2656,8 @@ def materialize_bars(expanded: ExpandedFormula, data: pl.DataFrame) -> ReTerms:
                     )
                 )
 
-    # Sort by descending #levels of the grouping factor (stable).
     simple.sort(key=lambda sb: -len(sb.g_levels))
 
-    # Build Z, Lambdat, theta per-bar.
     Z_blocks: list[np.ndarray] = []
     Lt_sizes: list[int] = []  # per-bar q contribution
     Lt_templates: list[np.ndarray] = []  # per-bar full (k*c, k*c) template
@@ -3221,7 +2674,6 @@ def materialize_bars(expanded: ExpandedFormula, data: pl.DataFrame) -> ReTerms:
         k = len(sb.g_levels)
         n_theta_block = c * (c + 1) // 2
 
-        # Z: column = level * c + component
         Zb = np.zeros((n, k * c))
         valid = sb.g_codes >= 0
         lvl = sb.g_codes[valid]
@@ -3230,10 +2682,6 @@ def materialize_bars(expanded: ExpandedFormula, data: pl.DataFrame) -> ReTerms:
             Zb[rows, lvl * c + comp] = sb.Z_lhs[rows, comp]
         Z_blocks.append(Zb)
 
-        # Per-level c×c upper-triangular template. lme4 stores Λ (lower) in
-        # column-major, so Λᵀ's upper triangle is filled row-by-row: θ[0] at
-        # (0,0), θ[1] at (0,1), θ[2] at (0,2), θ[3] at (1,1), θ[4] at (1,2),
-        # θ[5] at (2,2), ...
         tmpl = np.zeros((c, c), dtype=int)
         idx = 0
         for i in range(c):
@@ -3246,7 +2694,6 @@ def materialize_bars(expanded: ExpandedFormula, data: pl.DataFrame) -> ReTerms:
         Lt_templates.append(Ltb)
         Lt_sizes.append(k * c)
 
-        # Initial theta: identity Cholesky (1 on diag of Λ, 0 elsewhere).
         theta_block = np.zeros(n_theta_block)
         idx = 0
         for i in range(c):
@@ -3259,13 +2706,11 @@ def materialize_bars(expanded: ExpandedFormula, data: pl.DataFrame) -> ReTerms:
         theta_offset += n_theta_block
         Gp.append(Gp[-1] + k * c)
 
-        # flist / cnms bookkeeping.
         gname = sb.g_label
         if gname not in flist_names:
             flist_names.append(gname)
             flist_levels[gname] = list(sb.g_levels)
         cnms_key = gname
-        # If this group appears in multiple bars, lme4 suffixes .1, .2, ...
         suffix = 0
         while cnms_key in cnms:
             suffix += 1
@@ -3298,23 +2743,6 @@ def materialize_bars(expanded: ExpandedFormula, data: pl.DataFrame) -> ReTerms:
     )
 
 
-# ---------------------------------------------------------------------------
-# mgcv smooth constructors → per-smooth (X, S_list)
-# ---------------------------------------------------------------------------
-#
-# mgcv's `smoothCon(sp, data, absorb.cons=TRUE, scale.penalty=TRUE)` does:
-#   1. Dispatch on class(sp) → smooth.construct.<bs>.smooth.spec
-#      - re:  X = model.matrix(~ term1:term2:...-1, data);  S = [I]
-#      - cr:  cubic regression spline basis with 2nd-derivative penalty
-#      - tp:  thin-plate regression spline (eigen-reduced from n basis)
-#      - tensor (te/ti/t2): tensor product of marginal bases
-#      - ...
-#   2. Absorb sum-to-zero constraint (drops 1 col from X, reparameterizes S).
-#   3. Rescale each S[i] so `norm(S[i],"O")/ncol(S[i])` matches
-#      `norm(X,"I")^2/ncol(X)` — makes penalty magnitudes comparable to X'X
-#      for numerical conditioning.
-
-
 @dataclass(slots=True)
 class SmoothBlock:
     """One per-smooth basis + penalty set.
@@ -3336,28 +2764,7 @@ class SmoothBlock:
     X: np.ndarray  # basis matrix, (n, k)
     S: list[np.ndarray]  # penalty matrices, each (k, k)
     spec: BasisSpec | None = None  # predict-time replay state
-    # mgcv ``sm$S.scale``, parallel to ``S``: the ``maS`` factor
-    # ``_scale_penalty`` divided each penalty by (1.0 where the rescale
-    # didn't apply). ``gam.vcomp(rescale=TRUE)`` divides sp by it.
     S_scale: list[float] | None = None
-
-
-# ---------------------------------------------------------------------------
-# Predict.matrix machinery
-#
-# Each smooth block carries a `BasisSpec` that fully captures the state needed
-# to re-evaluate its design rows on new data. mgcv's `Predict.matrix.<class>`
-# dispatch is replicated here as a small class hierarchy: a `_RawBasis`
-# subclass per bs evaluates the raw (pre-by, pre-absorb) basis at new x; a
-# `_ByMask` (optional) replays factor / numeric `by=` masking; an
-# `_AbsorbTransform` (optional) replays the sum-to-zero rotation that
-# `_absorb_sumzero` applied during fitting.
-#
-# Each `_build_*_smooth` constructs the appropriate `_RawBasis`, hands it
-# to `_apply_by_and_absorb`, and the resulting block's `spec` field carries
-# the complete chain. `block.spec.predict_mat(self.data) ≈ block.X` is a
-# strong sanity invariant — checked by `tests/test_smooths_predict.py`.
-# ---------------------------------------------------------------------------
 
 
 class _RawBasis:
@@ -3459,7 +2866,6 @@ class _ByMask:
             arr = col.to_numpy() if isinstance(col, pl.Series) else col
             mask = (arr == self.level).astype(float)
             return X * mask[:, None]
-        # numeric
         if isinstance(col, pl.Series):
             arr = col.to_numpy().astype(float)
         else:
@@ -3497,15 +2903,6 @@ class BasisSpec:
     keep_cols: np.ndarray | None = None
     predict_raw: _RawBasis | None = None
     coef_remap: tuple[np.ndarray, np.ndarray] | None = None
-    # mgcv summation-convention support. When ``summation_dim`` is set
-    # (non-None), the smooth's variables ``matrix_vars`` are matrix-typed
-    # (``Array(Float64, m)``) and the basis is evaluated on a long-form
-    # view (n*m rows), then row-summed in blocks of m to give (n, p).
-    # mgcv's ``bam(..., discrete=FALSE)`` path uses ``sparse.cons = -1``,
-    # whose sweep-drop absorb is non-linear (it subtracts a constant), so
-    # for matrix-arg te the row-sum runs FIRST, then absorb. The QR
-    # Householder absorb is linear and commutes with row-summation, so the
-    # same predict order works for both transform types.
     summation_dim: int | None = None
     matrix_vars: tuple[str, ...] | None = None
 
@@ -3541,9 +2938,6 @@ class BasisSpec:
             X = raw.eval(long_data)
             if self.by is not None and apply_by:
                 X = self.by.apply(X, long_data)
-            # Row-block sum FIRST, then absorb. Sweep-drop's de-mean is
-            # non-linear, and mgcv computes both the drop column and the
-            # mean from the row-summed (n, p_raw) matrix.
             X = X.reshape(n, m, X.shape[1]).sum(axis=1)
             if self.absorb is not None:
                 X = self.absorb.apply(X)
@@ -3559,15 +2953,6 @@ class BasisSpec:
         if self.keep_cols is not None:
             X = X[:, self.keep_cols]
         return X
-
-
-# ---- Concrete _RawBasis subclasses (one per bs) -----------------------------
-#
-# Each class stores exactly the state mgcv's smooth.construct.<bs>.smooth.spec
-# stashes in `object` for predict-time evaluation. Method `eval(data)` mirrors
-# `Predict.matrix.<class>(object, data)` — returns the (n, k_pre) raw basis on
-# new rows, before by-masking and absorb.cons replays (which BasisSpec layers
-# on top).
 
 
 @dataclass(slots=True)
@@ -3682,8 +3067,6 @@ class _TPRawBasis(_RawBasis):
         x_full = np.column_stack([data[v].to_numpy().astype(float) for v in self.term])
         x_c = x_full - self.shift
         eta0 = _tp_eta_const(self.m, self.d)
-        # X_raw = [η(||x_i - Xu_j||) | T(x_i)] @ UZ, built row-chunked (mgcv's
-        # XBuild), then rescale by the column-norm w.
         X_raw = _tp_eval_X_raw(x_c, self.Xu, self.m, self.d, self.UZ, eta0)
         return X_raw / self.w
 
@@ -3727,7 +3110,6 @@ class _ADRawBasis(_RawBasis):
         ]
         if len(bases) == 1:
             return bases[0]
-        # 2D: row-wise Kronecker, term[0] inner (matches _build_ad_smooth).
         Xi, Xj = bases
         n = Xi.shape[0]
         ki, kj = self.k_per_term
@@ -3967,11 +3349,7 @@ class _SZRawBasis(_RawBasis):
 def _smooth_bs(call: Call) -> str:
     """Pick the bs string for an s()/te()/ti()/t2() call."""
     if call.fn in ("te", "ti", "t2"):
-        # Tensor constructors default to cr marginals but the class is
-        # `tensor.smooth.spec` / `t2.smooth.spec` regardless. The bs kwarg
-        # there controls marginal bs.
         return "tensor"
-    # s(): default bs is "tp"
     bs = call.kwargs.get("bs")
     if bs is None:
         return "tp"
@@ -3983,15 +3361,6 @@ def _smooth_bs(call: Call) -> str:
 def _smooth_term_vars(call: Call) -> list[str]:
     """Pluck variable names (or deparsed expressions) from an s(...)'s
     positional args.
-
-    mgcv treats the non-keyword args of s() as the term variables. e.g.
-    ``s(Machine, Worker, bs="re")`` → ``["Machine", "Worker"]``. Expression
-    args (``s(I(b.depth^.5))``, ``s(log(x))``, ``s(x*2)``) are deparsed to
-    their formula text — the same string mgcv prints in summaries — and
-    are materialised into a synthesised column of that name by
-    :func:`_smooth_arg_expr_map` / :func:`_apply_smooth_arg_exprs` before
-    each smooth basis is built. Predict-time replay re-evaluates the AST
-    against the new data using the same machinery.
     """
     names: list[str] = []
     for a in call.args:
@@ -4031,16 +3400,11 @@ def _collect_name_idents(node, out: set[str]) -> None:
         for v in node.kwargs.values():
             _collect_name_idents(v, out)
         return
-    # Subscript, Dot, Empty: no Name references we care about for this path.
 
 
 def _smooth_id_value(call: Call) -> str | None:
     """The smooth's ``id=`` linkage key as a canonical string, or None.
-
     mgcv keys its id machinery by ``as.character(id)`` (mgcv.r:1202), so
-    ``id=1`` and ``id="1"`` link with each other. Mirror R's coercions:
-    whole-number doubles print without a decimal part, logicals print
-    TRUE/FALSE.
     """
     node = call.kwargs.get("id")
     if node is None:
@@ -4150,8 +3514,6 @@ def _smooth_arg_expr_map(expanded: ExpandedFormula) -> dict[str, Node]:
             if isinstance(a, Name):
                 continue
             key = _deparse(a)
-            # First sighting wins — multiple smooths writing identical
-            # expressions deparse identically and reuse the same column.
             out.setdefault(key, a)
     return out
 
@@ -4160,13 +3522,7 @@ def _apply_smooth_arg_exprs(
     data: pl.DataFrame,
     expr_map: dict[str, Node],
 ) -> pl.DataFrame:
-    """Materialise smooth-arg expressions into columns of ``data``.
-
-    For each ``(synth_name, ast_node)`` in ``expr_map``, evaluate the AST
-    via :func:`_eval_numeric` and append a column under ``synth_name``.
-    Idempotent: if ``synth_name`` already exists in ``data``, it's left
-    alone. Used both at fit time (in :func:`materialize_smooths`) and at
-    predict time (from :meth:`hea.gam.gam.predict`)."""
+    """Materialise smooth-arg expressions into columns of ``data``."""
     if not expr_map:
         return data
     additions: dict[str, np.ndarray] = {}
@@ -4206,21 +3562,10 @@ def _smooth_by_expr(call: Call) -> str | None:
 def _smooth_pc_value(call: Call) -> tuple[float, ...] | None:
     """The smooth's ``pc=`` argument (s/te/ti/t2): a **point constraint**
     forcing the smooth through zero at the given covariate value(s).
-
     mgcv (s/te/ti/t2, smooth.r:480-486/600-606/656-662) stores ``pc`` as
     ``ret$point.con``; ``smooth.construct3`` (smooth.r:3655-3679) then makes
-    the identifiability constraint ``C = Predict.matrix(object, pc)`` — the
-    smooth's basis row evaluated AT the point — with ``always.apply=TRUE``,
-    REPLACING the default sum-to-zero ``C = colMeans(X)``. So the smooth
-    passes through zero at the point and the intercept absorbs the shift
-    (the fitted values are identifiability-invariant; the parameterization,
-    REML, and per-term values differ — see the S1a tests).
-
-    Returns a tuple of floats (one coordinate per smooth covariate, in term
-    order — mgcv's ``names(pc) <- vars``), or None when absent/NULL. Scalar
-    ``pc=0.5`` and vector ``pc=c(0.5, 0.3)`` both parse. The general
-    list-of-lists form (``C beta = d`` plus inequality constraints,
-    smooth.r:3656-3675) is not supported — honest raise."""
+    smooth.r:3656-3675) is not supported — honest raise.
+    """
     node = call.kwargs.get("pc")
     if node is None:
         return None
@@ -4254,16 +3599,7 @@ def _smooth_pc_value(call: Call) -> tuple[float, ...] | None:
 
 
 def _eval_by_col(by_expr: str, data: pl.DataFrame) -> pl.Series | np.ndarray:
-    """Evaluate a smooth's ``by=`` expression against ``data``.
-
-    We support the four forms that R/mgcv users actually write — anything
-    more exotic would need full Python-expression evaluation machinery that
-    polars does not ship. Supported:
-      * plain column name → the column (as a ``pl.Series``)
-      * ``as.numeric(<name>)`` → float ndarray
-      * ``<name> == <lit>`` / ``<name> != <lit>`` → bool ndarray
-      * ``as.numeric(<name> == <lit>)`` → float ndarray (0/1 indicator)
-    """
+    """Evaluate a smooth's ``by=`` expression against ``data``."""
     expr = by_expr.strip()
     if expr in data.columns:
         return data[expr]
@@ -4277,7 +3613,6 @@ def _eval_by_col(by_expr: str, data: pl.DataFrame) -> pl.Series | np.ndarray:
             inner = inner.to_numpy()
         return np.asarray(inner).astype(float)
 
-    # Binary comparisons: <col> (==|!=) <literal>
     m = _re.fullmatch(
         r'(\w+(?:\.\w+)*)\s*(==|!=)\s*(?:"([^"]*)"|\'([^\']*)\'|([-+]?\d+(?:\.\d+)?))',
         expr,
@@ -4294,9 +3629,6 @@ def _eval_by_col(by_expr: str, data: pl.DataFrame) -> pl.Series | np.ndarray:
             raise KeyError(f"by=: column {col_name!r} not in data")
         col = data[col_name]
         if num is not None:
-            # R's `factor == 1` coerces the factor levels to match the integer
-            # literal (numeric levels round-trip as strings on our polars side,
-            # so compare as strings; Polars categoricals carry string levels).
             if col.dtype in (pl.Categorical, pl.Enum, pl.String, pl.Utf8):
                 n_num = float(num)
                 n_int = int(n_num)
@@ -4323,13 +3655,7 @@ def _is_factor_like(col: pl.Series | np.ndarray) -> bool:
 
 
 def _is_ordered_by(col: pl.Series) -> bool:
-    """Whether a smooth's `by=` column is an R-style ordered factor.
-
-    mgcv's `smooth.construct` drops the first level for ordered `by` factors
-    (so the baseline level is absorbed into the main effect). Detection here
-    matches `_factor_from_series`'s ordered signal: look up the column name
-    in the `_ORDERED_COLS_CV` context declared by the caller.
-    """
+    """Whether a smooth's `by=` column is an R-style ordered factor."""
     name = getattr(col, "name", None)
     return bool(name) and name in _ORDERED_COLS_CV.get()
 
@@ -4338,9 +3664,6 @@ def _factor_levels(col: pl.Series) -> list:
     """R-style factor levels: sorted unique values (alphabetic for strings,
     numeric for numerics)."""
     if col.dtype in (pl.Categorical, pl.Enum):
-        # See `_factor_from_series`: a Categorical's pool is process-global, so
-        # it may include levels interned by other columns. Restrict to levels
-        # actually present in this column, keeping their schema order.
         full = cat_pool(col).to_list()
         codes = col.drop_nulls().to_physical().to_numpy().astype(np.int64)
         present = np.unique(codes) if codes.size else np.empty(0, dtype=np.int64)
@@ -4361,19 +3684,10 @@ def _defer_matrix_block(
     raw_basis: _RawBasis | None,
 ) -> list[SmoothBlock]:
     """Matrix-argument (summation-convention) deferral.
-
-    Returns the single RAW long-form block: ``X`` is the (n*m, p_raw) basis,
-    ``S_list`` the symmetrised (but *un-scaled*) penalties, and the spec
-    records the numeric ``by=`` (if any). ``_summation_apply_blocks`` then runs
-    mgcv's ``smoothCon`` pipeline in order — scale.penalty on this long-form X
     (smooth.r:3879, *before* the by-multiply), by-multiply + summation
     (smooth.r:3997-4008), the centering constraint (dropped when the by-matrix
     row-sums vary, smooth.r:3925-3943) and check.rank (smooth.r:4035) on the
-    row-summed (n, p) design.
-
-    Factor ``by`` and ``pc=`` are rejected: mgcv itself stops on a factor by
     with matrix arguments (smooth.r:3970), and the point-constraint path has no
-    summation-convention analogue.
     """
     base_label = _smooth_label(call)
     if _smooth_pc_value(call) is not None:
@@ -4416,45 +3730,15 @@ def _apply_by_and_absorb(
 ) -> list[SmoothBlock]:
     """Apply mgcv's smoothCon post-processing:
     scale.penalty → by-handling → absorb.cons → SmoothBlock(s).
-
-    For numeric `by` with variance: multiply X by by; skip absorb.cons.
-    For factor `by`: produce one block per level with (by==lev)*X; each
-    gets absorb.cons applied.
-    For no `by`: one block with absorb.cons applied.
-
-    ``raw_basis`` (when provided) gets attached to each block as the predict
-    half of mgcv's ``Predict.matrix.<class>``. Per-bs constructors thread their
-    `_RawBasis` subclass here so `block.spec.predict_mat(new_data)` reproduces
-    the same scale.penalty-free design rows the fit used (the by-mask and
-    absorb-rotation steps are layered on automatically).
-
-    ``pre_scaled=True`` skips ``_scale_penalty`` — used by the id-linkage
-    path, where mgcv rescales S against the POOLED basis-setup X *before*
     replacing X with the own-data evaluation (smooth.r:3870-3877: doing it
-    per-smooth would give linked terms "the same basis, but different
-    penalties"). ``S_scale`` then carries the pooled-rescale ``maS``
-    factors (mgcv clones ``S.scale`` with the smooth); ignored unless
-    ``pre_scaled``.
-
-    ``C_source`` overrides the matrix whose column sums define the
-    sum-to-zero constraint. mgcv computes ``sm$C`` from the constructor's
     X (smooth.r:3848-3851) *before* the dataX replacement, so id-linked
-    smooths are all constrained against the pooled-construction X — the
-    id path passes that pooled X here. Default: the (per-level pre-by) X
-    itself, the non-id behavior.
     """
     S_list = [(S + S.T) / 2.0 for S in S_list]
     _id_cap = _ID_RAW_CAPTURE.get()
     if _id_cap is not None:
-        # id-linked construction pass (mgcv smoothCon's n=/dataX= path):
-        # hand the constructor output back just before scale.penalty/by/
-        # absorb — the caller re-enters per linked smooth.
         _id_cap.update(X=X, S=S_list, raw=raw_basis, cls=cls)
         return []
     if _MATRIX_ARG_CV.get():
-        # Matrix-argument (summation convention): defer scale.penalty / by /
-        # absorb to _summation_apply_blocks, which has the long-vs-summed
-        # shapes mgcv's smoothCon needs. S is already symmetrised above.
         return _defer_matrix_block(call, data, X, S_list, cls, term, raw_basis)
     if not pre_scaled:
         S_list, S_scale = _scale_penalty(X, S_list)
@@ -4520,9 +3804,6 @@ def _apply_by_and_absorb(
 
     by_col = _eval_by_col(by_expr, data)
     if _is_factor_like(by_col):
-        # by_col is a pl.Series (the _is_factor_like(np.ndarray) branch only
-        # fires for object/unicode arrays, which don't appear on the current
-        # _eval_by_col paths).
         levels = _factor_levels(by_col)
         if _is_ordered_by(by_col) and len(levels) > 1:
             levels = levels[1:]
@@ -4556,8 +3837,6 @@ def _apply_by_and_absorb(
                 X2 = X2_sh * mask[:, None]  # by.dum * constrained shared X
             else:
                 X_lev = X * mask[:, None]
-                # pc= shares one always-applied constraint across by-levels
-                # (smooth.r: point.con's C is on the unmasked basis).
                 X2, S2, T = _absorb_sumzero(
                     X_lev,
                     S_list,
@@ -4590,7 +3869,6 @@ def _apply_by_and_absorb(
             )
         return blocks
 
-    # Numeric by: multiply X by by-column, skip absorb.cons.
     if pc_C is not None:
         raise NotImplementedError(
             f"pc= point constraint with a numeric by= on {base_label} is not "
@@ -4628,16 +3906,8 @@ def _scale_penalty(
     S_list: list[np.ndarray],
 ) -> tuple[list[np.ndarray], list[float]]:
     """Match mgcv's `scale.penalty=TRUE` rescaling.
-
-    mgcv applies this on the raw (pre-absorb.cons) X and S:
-        maXX = norm(X, "I")^2      # max abs row sum, squared
-        maS  = norm(S, "O") / maXX # default R norm() = one-norm
-        S   := S / maS = S * maXX / norm(S, "O")
-
-    Also returns the per-S ``maS`` factors — mgcv's ``sm$S.scale``
     ("multiply S[[i]] by this to get original S[[i]]", smooth.r:3884),
     initialised to 1 wherever the rescale doesn't apply (smooth.r:3877).
-    ``gam.vcomp``'s default ``rescale=TRUE`` divides each sp by it.
     """
     if X.size == 0 or not S_list:
         return ([np.asarray(s, dtype=float) for s in S_list], [1.0] * len(S_list))
@@ -4661,16 +3931,8 @@ def _scale_penalty(
 
 
 def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
-    """`bs="re"` → `model.matrix(~ term1:term2:...-1, data)`.
-
-    Penalty is `diag(ncol(X))`. re sets `no.rescale=TRUE` in mgcv, so
-    scale.penalty is skipped — but then smoothCon's default sum-to-zero
-    constraint is also typically disabled for re... actually, empirically
-    the fixtures show S has been rescaled. mgcv's re.smooth.spec produces
-    X = model.matrix(...), S = [I], and scale.penalty runs normally.
-    """
+    """`bs="re"` → `model.matrix(~ term1:term2:...-1, data)`."""
     term_vars = _smooth_term_vars(call)
-    # Build the formula `~ term1:term2:...-1` using our existing machinery.
     rhs = None
     for v in term_vars:
         node = Name(v)
@@ -4682,20 +3944,14 @@ def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     X = X_df.to_numpy().astype(float)
     S_list = [np.eye(X.shape[1])]
     S_list, S_scale = _scale_penalty(X, S_list)
-    # re.smooth.spec sets C = empty (no absorb.cons). `by` is still honored:
-    # factor by → one block per level; numeric by → multiply X by by.
     base_label = _smooth_label(call)
     by_expr = _smooth_by_expr(call)
 
-    # Derive the (term-value tuple) per X column so predict reconstructs the
-    # same column set on new data — first row where X[:,j]==1 names the combo.
     fac_arrs = [data[t].to_numpy() for t in term_vars]
     combos: list[tuple] = []
     for j in range(X.shape[1]):
         nz = np.where(X[:, j] > 0)[0]
         if len(nz) == 0:
-            # No row matches this column — happens only for pathological
-            # designs; record an unmatchable sentinel so predict yields zeros.
             combos.append((object(),) * len(term_vars))
         else:
             r = int(nz[0])
@@ -4761,16 +4017,7 @@ def _pol2nb(polys: Mapping) -> dict[str, list[str]]:
     from boundary polygons. ``polys`` maps each region label to a 2-column
     vertex matrix (rows of NA separate disjoint sub-polygons of one region).
     Two regions are neighbours iff they share at least one vertex.
-
-    A bounding-box overlap test pre-filters candidate pairs (mgcv's spdep
-    speed-up); the shared-vertex count is ``nrow(co) - nrow(uniquecombs(co))``
-    on the stacked, de-duplicated vertex sets — here via ``_mgcv_ordered_unique``
-    (the same %.15g text-label row de-dup mgcv's ``uniquecombs`` uses).
-
-    WARNING (mgcv's own): neighbours are defined by *shared vertices* — a region
-    whose vertex merely lies on another's line segment (no shared vertex) is not
-    detected. Returns a dict keyed by region label whose values are the lists of
-    neighbour labels (ready for ``_mrf_penalty_from_nb``)."""
+    """
     names = [str(name) for name in polys]
     n_poly = len(names)
     lo1 = np.empty(n_poly)
@@ -4814,12 +4061,7 @@ def _pol2nb(polys: Mapping) -> dict[str, list[str]]:
 
 
 def _mrf_penalty_from_nb(nb: Mapping, levels: list) -> np.ndarray:
-    """Graph-Laplacian penalty from a neighbour list (smooth.r:2807-2816).
-
-    ``S[i,i]`` = #neighbours of region i; ``S[i,j] = -1`` for each neighbour
-    j≠i. ``nb`` is keyed by region label (matched to ``levels`` by string), and
-    ``levels`` fixes the column order. The neighbour relation must be symmetric
-    (mgcv's "Something wrong with auto-penalty construction" check)."""
+    """Graph-Laplacian penalty from a neighbour list (smooth.r:2807-2816)."""
     k = len(levels)
     pos = {str(lev): i for i, lev in enumerate(levels)}
     if {str(key) for key in nb} != set(pos):
@@ -4850,13 +4092,6 @@ def _build_mrf_smooth(
 ) -> list[SmoothBlock]:
     """`bs="mrf"` — Markov random field smooth (smooth.construct.mrf.smooth.spec,
     smooth.r:2726-2866).
-
-    The covariate is a factor of region labels; the basis is the region
-    indicator and the penalty is supplied via ``xt`` — a penalty matrix
-    (``penalty``), a neighbour list (``nb``, → graph Laplacian), or boundary
-    polygons (``polys``, → neighbour list via pol2nb → graph Laplacian). hea
-    threads ``xt`` from
-    ``gam(..., xt={region: {...}})`` (the object-arg channel, like ``knots=``).
     """
     term_vars = _smooth_term_vars(call)
     if len(term_vars) != 1:
@@ -4899,7 +4134,6 @@ def _build_mrf_smooth(
     elif spec.get("nb") is not None:
         S = _mrf_penalty_from_nb(spec["nb"], k_levels)
     elif spec.get("polys") is not None:
-        # Boundary polygons → neighbour list (mgcv pol2nb) → graph Laplacian.
         S = _mrf_penalty_from_nb(_pol2nb(spec["polys"]), k_levels)
     else:
         raise ValueError("mrf xt must contain 'penalty', 'nb', or 'polys'")
@@ -4951,27 +4185,7 @@ def _absorb_sumzero(
     S_list: list[np.ndarray],
     C_source: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], _AbsorbTransform]:
-    """Apply mgcv's default `absorb.cons=TRUE` sum-to-zero constraint.
-
-    Mirrors mgcv `smoothCon`: C = colMeans(X) (1×k). If every entry of C is
-    nonzero (the usual case), apply a single Householder reflector Q from
-    qr(t(C)) and return X Q[:,1:], Z' S Z. If any entry of C is exactly zero
-    (happens when a covariate is mean-centered integers → exact-zero column
-    sums), mgcv takes a different branch: it QRs only the nonzero subset and
-    drops the *last* nonzero column, leaving the exact-zero columns in place.
-    Without this branch, floating-point noise on the near-zero columns causes
-    a rotation that swaps columns in the output (fixtures mgcv_0066, _0182).
-
-    `C_source`: optional matrix whose column means define the constraint.
-    For by=factor, mgcv sets `sm$C = colSums(sm$X)` once from the pre-by X,
-    then applies the same Householder Q to every `by.dum * X` block. Callers
-    that want that behaviour pass the pre-by X as C_source so each per-level
-    absorb uses the shared constraint instead of each block's own colSums.
-
-    Returns ``(X_new, S_new, transform)`` where ``transform.apply(X_raw_new)``
-    replays the same rotation on new-data rows — the predict-time half of
-    mgcv's ``Predict.matrix`` dispatch.
-    """
+    """Apply mgcv's default `absorb.cons=TRUE` sum-to-zero constraint."""
     _n, k = X.shape
     if k == 0:
         return X, list(S_list), _AbsorbTransform()
@@ -4979,16 +4193,12 @@ def _absorb_sumzero(
     indi = np.flatnonzero(C != 0)  # exact inequality, matching mgcv
     nx = len(indi)
     if nx == k:
-        # Normal path: single Householder reflector on full C.
         Q, _ = np.linalg.qr(C.reshape(k, 1), mode="complete")
         Z = Q[:, 1:]
         X_new = X @ Z
         S_new = [Z.T @ S @ Z for S in S_list]
         return X_new, S_new, _AbsorbTransform(full_Z=Z)
 
-    # Sparse-like path: some cols of C are exactly 0; QR only the nonzero
-    # subset, place the (nx-1) null-space cols back at indi[:nx-1], and drop
-    # the col at indi[-1]. Cols not in indi stay put, unrotated.
     nc = 1  # single constraint (one row)
     nz = nx - nc
     Q_sub, _ = np.linalg.qr(C[indi].reshape(nx, 1), mode="complete")  # nx × nx
@@ -5027,27 +4237,7 @@ def _absorb_sweep_drop(
     X: np.ndarray,
     S_list: list[np.ndarray],
 ) -> tuple[np.ndarray, list[np.ndarray], _SweepDropTransform]:
-    """Apply mgcv's ``sparse.cons = -1`` constraint absorption (sweep-drop).
-
-    Mirrors smoothCon's branch (mgcv source ``smooth.r`` ~lines 38-43 +
-    158-175): with ``sparse.cons = -1``, ``sm$C`` is set to colMeans of the
-    smooth's design and the constraint is absorbed by dropping the smallest-
-    variance column and de-meaning the rest::
-
-        C    = colMeans(X)               # 1 × p, the linear constraint
-        vcol = apply(X, 2, var)
-        drop = min((1:p)[vcol == min(vcol)])   # ties → first
-        X'   = X[, -drop] - C[-drop]     # de-mean broadcast
-        S'   = S[-drop, -drop]
-
-    R's ``var`` uses ``ddof = 1``; ``np.argmin`` on a 1-D array returns the
-    first occurrence of the minimum, matching R's ``min(...)`` tie-break.
-
-    This is what ``bam(..., discrete = FALSE)`` runs (``bam`` sets
-    ``sparse.cons <- -1``); ``bam(..., discrete = TRUE)`` and ``gam`` use
-    ``sparse.cons = 0`` instead, which routes through ``_absorb_sumzero``
-    (Householder QR of colSums).
-    """
+    """Apply mgcv's ``sparse.cons = -1`` constraint absorption (sweep-drop)."""
     n, p = X.shape
     if p == 0:
         return (
@@ -5070,11 +4260,7 @@ def _absorb_sweep_drop(
 
 
 def _cr_F_matrix(knots: np.ndarray) -> np.ndarray:
-    """Natural-cubic-spline 'F' matrix: y'' at knots = F @ y.
-
-    F[0,:] = F[-1,:] = 0 (natural boundary). Interior rows solve the
-    standard tridiagonal y'' system.
-    """
+    """Natural-cubic-spline 'F' matrix: y'' at knots = F @ y."""
     nk = len(knots)
     h = np.diff(knots)
     B = np.zeros((nk - 2, nk - 2))
@@ -5095,14 +4281,11 @@ def _cr_F_matrix(knots: np.ndarray) -> np.ndarray:
 
 def _cr_basis(x: np.ndarray, knots: np.ndarray) -> np.ndarray:
     """Evaluate the natural cubic regression spline basis at points `x`.
-
     Returns (n, nk) matrix. Based on Wood (2017) §5.3.2. Each column acts
-    like a Lagrange indicator (column j is 1 at knot j, 0 at other knots).
     """
     nk = len(knots)
     h = np.diff(knots)
     F = _cr_F_matrix(knots)
-    # Bracket each x: j s.t. knots[j] <= x < knots[j+1]; clamp at both ends.
     j = np.searchsorted(knots, x, side="right") - 1
     j = np.clip(j, 0, nk - 2)
     hj = h[j]
@@ -5115,17 +4298,12 @@ def _cr_basis(x: np.ndarray, knots: np.ndarray) -> np.ndarray:
     idx_n = np.arange(nx)
     X[idx_n, j] += a_l
     X[idx_n, j + 1] += a_r
-    # Add contributions via F for the second-derivative part.
     X += c_l[:, None] * F[j, :] + c_r[:, None] * F[j + 1, :]
     return X
 
 
 def _cr_penalty(knots: np.ndarray) -> np.ndarray:
-    """Natural-cubic-spline integrated-squared-second-derivative penalty.
-
-    S = F' T F where T is banded: T[j,j] picks up h[j-1]/3 + h[j]/3 at
-    interior, T[j,j+1] = h[j]/6.
-    """
+    """Natural-cubic-spline integrated-squared-second-derivative penalty."""
     nk = len(knots)
     h = np.diff(knots)
     F = _cr_F_matrix(knots)
@@ -5165,15 +4343,7 @@ def _cr_raw(
     term: list[str] | None = None,
     knots_vec: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray]:
-    """Bare cr output (X, S_list, knots) — no scale.penalty, no absorb.cons.
-
-    Used by te/ti/t2 which build their own reparameterization/absorb on top
-    of the marginal bases.
-
-    ``knots_vec`` (mgcv ``knots=list(term=...)``) overrides the default
-    quantile placement; cr has no length-2 form, so a supplied vector is used
-    verbatim and must have length k.
-    """
+    """Bare cr output (X, S_list, knots) — no scale.penalty, no absorb.cons."""
     if term is None:
         term = _smooth_term_vars(call)
     if len(term) != 1:
@@ -5184,8 +4354,6 @@ def _cr_raw(
         xu = np.unique(x[~np.isnan(x)])
         if len(xu) < nk:
             raise ValueError(f"cr smooth: fewer unique x than knots ({len(xu)} < {nk})")
-        # R's default knots: quantile(unique(x), seq(0, 1, length=nk)), type 7.
-        # numpy.quantile default matches R's type 7.
         knots = np.quantile(xu, np.linspace(0.0, 1.0, nk))
     else:
         knots = np.asarray(knots_vec, dtype=float).ravel()
@@ -5204,12 +4372,7 @@ def _build_cr_smooth(
     data: pl.DataFrame,
     knots: dict | None = None,
 ) -> list[SmoothBlock]:
-    """Build cubic regression spline (`bs="cr"`) smooth block.
-
-    Follows mgcv's smooth.construct.cr.smooth.spec: knots at quantiles of
-    unique(x), natural cubic basis, 2nd-deriv penalty, then absorb.cons
-    (sum-to-zero) and scale.penalty.
-    """
+    """Build cubic regression spline (`bs="cr"`) smooth block."""
     term = _smooth_term_vars(call)
     kv = None if knots is None else knots.get(term[0])
     X, S_list, knots_vec = _cr_raw(call, data, term, knots_vec=kv)
@@ -5233,17 +4396,10 @@ def _shrink_null_penalty(
 ) -> np.ndarray:
     """mgcv shrinkage (``attr(object,'shrink')=0.1``): lift S's null-space
     eigenvalues so the whole smooth is penalised/shrinkable — the cs/ts bases.
-
-    R's ``eigen`` is descending, numpy's ``eigh`` ascending, so the null space
-    is the ``null_dim`` SMALLEST eigenvalues (``w[:null_dim]``) and the smallest
-    positive is ``w[null_dim]``. ``cascade`` (cr/cs rule, null_dim=2) sets the
-    two null eigenvalues to λ·shrink and λ·shrink²; otherwise (tp/ts rule) all
-    ``null_dim`` null eigenvalues are set to λ·shrink.
     """
     w, V = np.linalg.eigh(0.5 * (S + S.T))  # ascending
     lam = float(w[null_dim])  # smallest positive eigenvalue
     if cascade:
-        # mgcv cr: es$values[nk-1]<-es$values[nk-2]*s; es$values[nk]<-es$values[nk-1]*s
         w[1] = lam * shrink
         w[0] = w[1] * shrink
     else:
@@ -5275,14 +4431,6 @@ def _build_cs_smooth(
     )
 
 
-# ---- cc (cyclic cubic regression spline) -----------------------------------
-#
-# Periodic variant of `cr`: knot 1 and knot nk are identified, so at the seam
-# the value and the 2nd derivative match. Ported from mgcv's R code:
-# smooth.construct.cc.smooth.spec + Predict.matrix.cyclic.smooth + place.knots.
-# Basis has nk-1 columns pre-absorb.cons (cyclic identification removes one).
-
-
 def _cc_place_knots(x: np.ndarray, nk: int) -> np.ndarray:
     """mgcv's `place.knots` for cc: evenly-spaced knots over range of unique x."""
     xs = np.sort(np.unique(x))
@@ -5297,7 +4445,6 @@ def _cc_place_knots(x: np.ndarray, nk: int) -> np.ndarray:
     i = np.arange(1, nk - 1)
     lbi = np.floor(delta * i).astype(int) + 1  # 1-based into xs
     frac = delta * i + 1 - lbi
-    # R uses xs[lbi] and x.shift[lbi] = xs[lbi+1] (0-based: xs[lbi-1] and xs[lbi]).
     interior = xs[lbi - 1] * (1 - frac) + xs[lbi] * frac
     knots = np.empty(nk, dtype=float)
     knots[0] = xs[0]
@@ -5313,7 +4460,6 @@ def _cc_getBD(knots: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     n = nk - 1
     B = np.zeros((n, n))
     D = np.zeros((n, n))
-    # Row 1 (0-indexed 0): wraps to row n-1 on the left.
     B[0, 0] = (h[n - 1] + h[0]) / 3.0
     B[0, 1] = h[0] / 6.0
     B[0, n - 1] = h[n - 1] / 6.0
@@ -5327,7 +4473,6 @@ def _cc_getBD(knots: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         D[i, i - 1] = 1.0 / h[i - 1]
         D[i, i] = -(1.0 / h[i - 1] + 1.0 / h[i])
         D[i, i + 1] = 1.0 / h[i]
-    # Row n (0-indexed n-1): wraps to row 0 on the right.
     B[n - 1, n - 2] = h[n - 2] / 6.0
     B[n - 1, n - 1] = (h[n - 2] + h[n - 1]) / 3.0
     B[n - 1, 0] = h[n - 1] / 6.0
@@ -5355,21 +4500,14 @@ def _cc_basis(x: np.ndarray, knots: np.ndarray, BD: np.ndarray) -> np.ndarray:
     nk = len(knots)
     h = np.diff(knots)
     x = _cc_cwrap(float(knots[0]), float(knots[-1]), x)
-    # Find j such that knot[j] is the smallest knot ≥ x (1-based; MIN j is 2).
-    # For x == knots[0], the loop leaves j=2 (since knots[2-1]==knots[1] >= x only if...).
-    # Use the same semantics as R's loop: start j=x (numeric copy), then overwrite.
     j = np.full(x.shape, nk, dtype=int)  # 1-based
     for i in range(nk, 1, -1):
         mask = x <= knots[i - 1]
         j[mask] = i
-    # For x strictly below knots[0] (shouldn't happen after cwrap), j stays nk
-    # but then j1 = nk-1 and wrap j=nk→1 handles it.
     j1 = j - 1  # left bracket index, 1-based in [1, nk-1]
     hj = j1 - 1  # 0-based index into h (length nk-1)
-    # Wrap j: j == nk → j = 1 (cyclic).
     j_wrap = j.copy()
     j_wrap[j_wrap == nk] = 1
-    # 0-based indices
     j1_0 = j1 - 1
     j_0 = j_wrap - 1
     eye = np.eye(nk - 1)
@@ -5416,10 +4554,6 @@ def _cc_raw(
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, np.ndarray]:
     """Bare cc basis — returns ``(X, S_list, knots, BD)``, pre-absorb/by.
     Shared by ``_build_cc_smooth`` and the te/ti/t2 cc-margin path.
-
-    ``knots_vec`` (mgcv ``knots=list(term=...)``): length-2 pins the endpoints
-    and places the interior ADAPTIVELY via place.knots(c(lo,hi,x), nk) — NOT
-    evenly (that is the cp rule); a length-nk entry is verbatim (not sorted).
     """
     if term is None:
         term = _smooth_term_vars(call)
@@ -5466,15 +4600,6 @@ def _build_cc_smooth(
         term,
         raw_basis=raw,
     )
-
-
-# ---- ps (P-spline, Eilers & Marx) ------------------------------------------
-#
-# Port of mgcv's smooth.construct.ps.smooth.spec:
-#   m = (basis_order, penalty_order), default (2, 2). Basis is B-spline of
-#   order m[0]+2 (= degree m[0]+1) on `k` evenly-spaced knots covering the
-#   data range, with m[0]+1 extension knots on each side. Penalty is
-#   D_{m[1]}^T D_{m[1]} where D is the m[1]-th-order finite-difference matrix.
 
 
 def _eval_c_vec_ints(node) -> list[int] | None:
@@ -5545,10 +4670,6 @@ def _ps_knots(
 ) -> np.ndarray:
     """mgcv's evenly-spaced P-spline knot vector.
     nk interior knots + m0+1 extension on each side → nk + 2*m0 + 2 knots total.
-
-    ``xrange=(xl, xu)`` (mgcv ``knots=list(term=c(lo,hi))``) replaces the
-    data-derived range; the 0.1% pad is still applied to it — mgcv pads the
-    supplied range exactly as it pads the data range.
     """
     nk = k - m0
     if nk <= 0:
@@ -5588,9 +4709,6 @@ def _ps_raw(
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, int]:
     """Bare ps basis — returns ``(X, S_list, knots, m0)``, pre-absorb/by.
     Shared by ``_build_ps_smooth`` and the te/ti/t2 ps-margin path.
-
-    ``knots_vec``: length-2 sets the [lo,hi] range (must cover data) fed into
-    the padded even-knot build; the full extended vector (k + m0 + 2) verbatim.
     """
     if term is None:
         term = _smooth_term_vars(call)
@@ -5643,18 +4761,6 @@ def _build_ps_smooth(
     )
 
 
-# ---- cp (cyclic P-spline) --------------------------------------------------
-#
-# Port of mgcv's smooth.construct.cp.smooth.spec. Same (basis order, penalty
-# order) parsing as ps, but:
-#   - knots are evenly spaced on [min x, max x] with nk = bs.dim + 1 points,
-#     no boundary padding — the left-extension for evaluation is built inside
-#     `_cp_basis` (cSplineDes equivalent).
-#   - basis has `bs.dim` columns (nk - 1) after the cyclic wrap.
-#   - penalty is the mth-order difference of diag(np + m) with the first m
-#     columns added back onto the last m (closing the loop).
-
-
 def _cp_default_k(call: Call, m0: int) -> int:
     k = call.kwargs.get("k")
     if isinstance(k, Literal) and k.kind == "num":
@@ -5677,7 +4783,6 @@ def _cp_basis(x: np.ndarray, knots: np.ndarray, ord_: int) -> np.ndarray:
         raise ValueError("too few knots")
     k1 = float(knots[0])
     kn = float(knots[-1])
-    # Left-pad by (ord-1) knots that mirror the last (ord-1) interior gaps.
     pad_src = knots[nk - ord_ : nk - 1]
     t = np.concatenate([k1 - (kn - pad_src), knots])
     nb = len(t) - ord_
@@ -5716,28 +4821,6 @@ def _cp_penalty(np_cols: int, p_ord: int) -> np.ndarray:
     return D.T @ D
 
 
-# ---- bs (mgcv's B-spline wrapper, derivative-based penalty) ----------------
-#
-# Port of mgcv's smooth.construct.bs.smooth.spec. Cubic-by-default B-spline
-# basis with an integrated-squared-mth-derivative penalty ∫ (f^(m_j))² dx,
-# where f is the spline and m can specify MULTIPLE penalty orders
-# (m = c(basis_order, m2_1, m2_2, ...)). Each m2 produces one penalty.
-#
-# Note on naming: `s(x, bs="bs")` in mgcv is UNRELATED to R's top-level
-# `splines::bs()` (the parametric basis used in `y ~ bs(x, df=...)`, handled
-# elsewhere by `_bs_basis`). mgcv just happens to use "bs" as its spec key.
-# The two paths share nothing — different knots, different purpose, different
-# class. Helpers in this section (`_bs_design`, `_bs_penalty`, etc.) are all
-# the mgcv-smoother variant.
-#
-# Penalty assembly (per m2): f^(m2) is a piecewise polynomial of degree
-# pord = m[0] - m2 on each interval of the interior knots k0. Evaluate the
-# basis derivative at pord+1 evenly-spaced points per interval (sharing
-# endpoints across neighbors) and use the Vandermonde/monomial-integral
-# trick to get a local quadrature weight matrix W1; sum over intervals,
-# scaled by h[i]/2. Then S = D^T W D.
-
-
 def _bs_order_m(call: Call) -> list[int]:
     """Resolve p.order for bs: returns [basis_order, m2_1, m2_2, ...].
     Defaults per mgcv: scalar m → (m, max(0, m-1)); NA-handling → (3, 2)."""
@@ -5765,9 +4848,6 @@ def _bs_knots_eval(
 ) -> np.ndarray:
     """mgcv's default bs knot vector: nk = k - m0 + 1 interior + m0 extension
     on each side. Evenly spaced.
-
-    ``xrange=(xl, xu)`` (mgcv ``knots=list(term=c(lo,hi))``) replaces the
-    data-derived range; the 0.1% pad still applies, matching mgcv.
     """
     nk = k - m0 + 1
     if nk <= 0:
@@ -5820,7 +4900,6 @@ def _bs_penalty_W1(pord: int) -> np.ndarray:
 def _bs_penalty(knots: np.ndarray, m0: int, m2: int) -> np.ndarray:
     """Integrated-squared-m2-derivative penalty for the bs basis with order m0+1."""
     nk = len(knots) - 2 * m0
-    # Interior knots: k0 = knots[m0 : m0 + nk]
     k0 = knots[m0 : m0 + nk]
     h = np.diff(k0)  # length nk-1
     pord = m0 - m2
@@ -5828,23 +4907,18 @@ def _bs_penalty(knots: np.ndarray, m0: int, m2: int) -> np.ndarray:
         raise ValueError("requested non-existent derivative in B-spline penalty")
 
     if pord == 0:
-        # integrand is a step function; midpoint quadrature
         k1 = 0.5 * (k0[:-1] + k0[1:])
         D = _bs_design(k1, knots, m0, deriv=m2)
         D_scaled = np.sqrt(h)[:, None] * D
         return D_scaled.T @ D_scaled
 
-    # pord > 0: pord+1 evenly spaced points per interval, shared endpoints
-    # Build k1 by cumulative step over each interval.
     h1 = np.repeat(h / pord, pord)
     k1 = np.cumsum(np.concatenate([[k0[0]], h1]))
-    # Evaluate the m2-th derivative of each basis at k1 → (len(k1), n_basis)
     D = _bs_design(k1, knots, m0, deriv=m2)
 
     W1 = _bs_penalty_W1(pord)  # (pord+1, pord+1)
     n_quad = len(k1)
     W = np.zeros((n_quad, n_quad))
-    # Each interval i contributes (h[i]/2) * W1 to rows/cols [i*pord .. i*pord+pord]
     for i in range(nk - 1):
         a = i * pord
         b = a + pord + 1
@@ -5861,10 +4935,6 @@ def _bs_raw(
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, int]:
     """Bare bs basis — returns ``(X, S_list, knots, m0)``, pre-absorb/by.
     Shared by ``_build_bs_smooth`` and the te/ti/t2 bs-margin path.
-
-    ``knots_vec``: length-2 → [lo,hi] range (must cover data), padded even-knot
-    build; length-4 → sorted boundary+interior span, NO pad; full vector
-    (nk + 2*m0) verbatim.
     """
     if term is None:
         term = _smooth_term_vars(call)
@@ -5938,9 +5008,6 @@ def _cp_raw(
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray, int]:
     """Bare cp basis — returns ``(X, S_list, knots, ord_)``, pre-absorb/by.
     Shared by ``_build_cp_smooth`` and the te/ti/t2 cp-margin path.
-
-    ``knots_vec``: length-2 gives the period endpoints [lo,hi] over which the
-    nk knots are placed EVENLY (seq, range must cover data); length-nk verbatim.
     """
     if term is None:
         term = _smooth_term_vars(call)
@@ -5996,17 +5063,6 @@ def _build_cp_smooth(
         term,
         raw_basis=raw,
     )
-
-
-# ---- gp (Gaussian process / Kammann–Wand) ----------------------------------
-#
-# Port of mgcv's smooth.construct.gp.smooth.spec. Covariance kernel over
-# (centered) covariates, truncated via eigendecomposition of the kernel
-# matrix on unique data points. Penalty S has the top-k eigenvalues of the
-# kernel on the diagonal (zeros on the null-space block). Design matrix X
-# = [E(x, knt) @ UZ | T(x)], where UZ are the kept kernel eigenvectors and
-# T is the polynomial null space (constant, or constant+linear when not
-# stationary). `m=c(sign*type, rho, k)` controls the kernel family.
 
 
 def _gp_parse_m(call: Call) -> tuple[bool, int, float, float]:
@@ -6081,7 +5137,6 @@ def _gp_default_k(call: Call, d: int, null_space_dim: int) -> int:
     k = call.kwargs.get("k")
     if isinstance(k, Literal) and k.kind == "num":
         return int(k.value)
-    # mgcv default: d + 1 + [10, 30, 100][d-1]
     table = {1: 10, 2: 30, 3: 100}
     add = table.get(d, 100)
     bs_dim = d + 1 + add
@@ -6099,7 +5154,6 @@ def _build_gp_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     bs_dim = _gp_default_k(call, d, null_space_dim)
     bs_dim = max(bs_dim, d + 2)
 
-    # Knots: unique covariate combinations (mgcv's `uniquecombs`).
     xu = np.unique(x_full, axis=0)
     nk = xu.shape[0]
     if nk < bs_dim:
@@ -6107,21 +5161,16 @@ def _build_gp_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
             f"gp: fewer unique covariate combinations ({nk}) than bs.dim ({bs_dim})"
         )
 
-    # Center both data and knots by the DATA column means.
     shift = x_full.mean(axis=0)
     x_c = x_full - shift
     xu_c = xu - shift
 
-    # Kernel matrix on knots — this is also what resolves `rho` if default.
     sign_type = -1 if stationary else 1
     E, defn = _gp_E_defn(xu_c, xu_c, type_, rho_init, power_k, sign_type)
 
     k_radial = bs_dim - null_space_dim
 
     if k_radial < nk:
-        # Top-k eigendecomposition of E by magnitude. For positive-definite
-        # kernels this is just top-k by value; spherical/negative-sign types
-        # may produce indefinite E, so sort by |λ|.
         eigs, vecs = np.linalg.eigh(E)
         order = np.argsort(-np.abs(eigs))[:k_radial]
         lam = eigs[order]
@@ -6133,7 +5182,6 @@ def _build_gp_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         D = np.zeros((bs_dim, bs_dim))
         D[:nk, :nk] = E
 
-    # Design matrix on original (possibly duplicate) x using resolved defn.
     E_x = _gp_E_with_defn(x_c, xu_c, defn)
     X_radial = E_x @ UZ
     T = _gp_T(x_c, stationary)
@@ -6182,10 +5230,7 @@ def _build_gp_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
 
 
 def _tp_eta_const(m: int, d: int) -> float:
-    """`eta_const` from mgcv/src/tprs.c — the irrelevant constant for TPS basis.
-
-    For d=1, m=2: returns 1/12 (verified empirically vs mgcv).
-    """
+    """`eta_const` from mgcv/src/tprs.c — the irrelevant constant for TPS basis."""
     pi = math.pi
     Ghalf = math.sqrt(pi)
     d2 = d // 2
@@ -6238,12 +5283,7 @@ def _tp_fast_eta_vec(m: int, d: int, rsq: np.ndarray, f0: float) -> np.ndarray:
     """Broadcasted `_tp_fast_eta`. Replicates the scalar form's iterated-
     multiplication order so the output matches bit-for-bit on shared ops
     (sign of Ritz vectors inside _tp_rlanczos is sensitive to any drift).
-
-    For d ODD the kernel f0·(r²)^(m−d/2−1)·√(r²) is naturally 0 at r²=0
-    (√0=0, and any leading r² factor is 0), so no ``r>0`` mask is needed —
-    this matches the scalar `fast_eta`'s early ``return 0`` byte-for-byte
-    while skipping the boolean-mask compaction/scatter. For d EVEN the
-    log(r²) term diverges at r²=0, so that branch keeps the mask."""
+    """
     rsq = np.asarray(rsq, dtype=float)
     d2 = d // 2
     if d % 2 == 0:
@@ -6258,8 +5298,6 @@ def _tp_fast_eta_vec(m: int, d: int, rsq: np.ndarray, f0: float) -> np.ndarray:
             f *= r
         out[mask] = f
         return out
-    # d odd: maskless — √(r²)=0 at r²=0 gives the exact 0 fast_eta returns,
-    # with the same multiplication order as the masked form on r²>0 entries.
     f = np.full_like(rsq, f0)
     for _ in range(m - d2 - 1):
         f *= rsq
@@ -6268,10 +5306,7 @@ def _tp_fast_eta_vec(m: int, d: int, rsq: np.ndarray, f0: float) -> np.ndarray:
 
 
 def _tp_null_space_dim(d: int, m: int) -> int:
-    """Dim of penalty null space = C(m+d-1, d).
-
-    If 2m ≤ d, mgcv bumps m up until 2m > d+1 (visual smoothness).
-    """
+    """Dim of penalty null space = C(m+d-1, d)."""
     if 2 * m <= d:
         m = 1
         while 2 * m < d + 2:
@@ -6353,11 +5388,7 @@ def _tp_gen_poly_powers(M: int, m: int, d: int) -> np.ndarray:
 
 
 def _tp_T(X: np.ndarray, m: int, d: int) -> np.ndarray:
-    """`tpsT` — the polynomial null-space basis evaluated row-wise on X (n × d).
-
-    Returns (n, M) where M = null_space_dim(d, m). Col j corresponds to the
-    polynomial ∏_k x_k^{pi[j,k]}.
-    """
+    """`tpsT` — the polynomial null-space basis evaluated row-wise on X (n × d)."""
     M = _tp_null_space_dim(d, m)
     pi_pow = _tp_gen_poly_powers(M, m, d)
     n = X.shape[0]
@@ -6373,16 +5404,12 @@ def _tp_T(X: np.ndarray, m: int, d: int) -> np.ndarray:
 
 
 def _tp_E(Xu: np.ndarray, m: int, d: int) -> np.ndarray:
-    """`tpsE` — full η matrix on unique rows Xu (nu × d).
-
-    E_ij = η(||Xu_i - Xu_j||) with mgcv's fast_eta convention (r passed as r²).
-    """
+    """`tpsE` — full η matrix on unique rows Xu (nu × d)."""
     nu = Xu.shape[0]
     eta0 = _tp_eta_const(m, d)
     if nu == 0:
         return np.zeros((0, 0))
     if _tp_eval_E_rs is not None:
-        # Rust tpsE: rayon over rows, byte-identical to the numpy build below.
         return _tp_eval_E_rs(np.ascontiguousarray(Xu), int(m), int(d), float(eta0))
     # Squared distances by the SAME sequential accumulate as tpsE (tprs.c:91-94):
     # `r=0; for(k) { x=Xu_i,k - Xu_j,k; r += x*x; }` → `fma(x,x,r)` on arm64. The
@@ -6395,8 +5422,6 @@ def _tp_E(Xu: np.ndarray, m: int, d: int) -> np.ndarray:
     for k in range(d):
         zk = diff[..., k]
         rsq = _rfma_vec(zk, zk, rsq)
-    # Diagonal is exactly 0 from the subtraction; the vec helper returns 0
-    # there too (d-even mask excludes it, d-odd √0=0), so no fill is needed.
     return _tp_fast_eta_vec(m, d, rsq, eta0)
 
 
@@ -6412,26 +5437,11 @@ def _tp_eval_X_raw(
 ) -> np.ndarray:
     """Build the (n, k) tp design block ``[η(‖x_i−Xu_j‖) | T(x_i)] @ UZ`` for
     mgcv's kernel-eval path (knots ≠ data; `XBuild`, tprs.c:560).
-
-    Speed/memory: the radial table E is filled **row-chunked** so the (n, nu, d)
-    distance temporary (half a gigabyte at scale) never fully materialises, and
-    d=1 takes a 2-D ``diff`` (no length-1 axis to reduce). **Bit-identical to an
-    unchunked build:** the chunked fill is elementwise (each E entry is
-    the same scalar regardless of chunking — for d=1 the 2-D diff equals the
-    (n,nu,1) form reduced over a no-op axis), and the matmul is done **once on
-    the full E** (NOT per chunk — a per-chunk matmul drifts ~1 ULP under
-    Accelerate's shape-dependent kernel dispatch, which `absorb.cons` can
-    amplify into an O(1) basis rotation for near-degenerate d≥2 bases). Used by
-    both the fit-time `_tp_raw` subsample branch and predict-time
-    `_TPRawBasis.eval`.
     """
     n = x_c.shape[0]
     nu = Xu.shape[0]
     M = UZ.shape[0] - nu
     if _tp_eval_b_rs is not None:
-        # Rust XBuild: rayon-parallel b=[E|T], byte-identical to the numpy build
-        # below (3-way parity gated); keep the BLAS matmul in numpy so `b @ UZ`
-        # stays byte-exact too.
         pp = np.ascontiguousarray(_tp_gen_poly_powers(M, m, d).astype(np.int64))
         b = _tp_eval_b_rs(
             np.ascontiguousarray(x_c),
@@ -6465,11 +5475,7 @@ def _tp_eval_X_raw(
 
 
 def _tp_qt_factor(A_in: np.ndarray) -> np.ndarray:
-    """`QT(Q, A, fullQ=0)` — produces HH vector storage Z (n × m).
-
-    A is n × m with n ≤ m. Z stores, in each row, the scaled Householder vector
-    u_i (I - u_i u_i') such that A Q = [0, T] where Q = H_0 H_1 … H_{n-1}.
-    """
+    """`QT(Q, A, fullQ=0)` — produces HH vector storage Z (n × m)."""
     A = A_in.astype(float, copy=True)
     n, m = A.shape
     Z = np.zeros((n, m))
@@ -6494,19 +5500,13 @@ def _tp_qt_factor(A_in: np.ndarray) -> np.ndarray:
         g_sqrt = math.sqrt(g) if g > 0 else 0.0
         Z[i, :cu] = row[:cu] * g_sqrt
         Z[i, cu:] = 0.0
-        # A[i] becomes [0,…,0, -lsq, untouched trailing]; only used implicitly.
     return Z
 
 
 def _tp_hqmult_right(
     C_in: np.ndarray, Z: np.ndarray, transposed: bool = False
 ) -> np.ndarray:
-    """`HQmult(C, Z, p=0, t=transposed)`.
-
-    p=0 (post-mult), t=0: C := C @ H_0 @ H_1 @ … @ H_{r-1}  (ascending order).
-    p=0, t=1:             C := C @ H_{r-1} @ … @ H_0         (descending).
-    Each H_k = I - u_k u_k' with u_k = Z[k, :].
-    """
+    """`HQmult(C, Z, p=0, t=transposed)`."""
     C = C_in.astype(float, copy=True)
     nhh = Z.shape[0]
     order = range(nhh - 1, -1, -1) if transposed else range(nhh)
@@ -6518,11 +5518,7 @@ def _tp_hqmult_right(
 
 
 def _tp_hqmult_left_transposed(C_in: np.ndarray, Z: np.ndarray) -> np.ndarray:
-    """`HQmult(C, Z, p=1, t=1)` — C := Q' @ C where Q = H_0 … H_{r-1}.
-
-    Since each H_k is symmetric, Q' = H_{r-1}' … H_0' = H_{r-1} … H_0, so
-    the loop applies H_0 first from the left, then H_1, etc. (ascending).
-    """
+    """`HQmult(C, Z, p=1, t=1)` — C := Q' @ C where Q = H_0 … H_{r-1}."""
     C = C_in.astype(float, copy=True)
     nhh = Z.shape[0]
     for k in range(nhh):
@@ -6564,20 +5560,7 @@ def _tp_rlanczos(
     tol: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Port of mgcv/src/mat.c::Rlanczos (symmetric Lanczos w/ full reorth).
-
-    A: n×n symmetric. Returns (D, U) where D has length m+lm and U is n×(m+lm).
-    If lm<0 on entry ("biggest" mode), returns the m largest-magnitude
-    eigenpairs, with the positive eigenvalues filling the leading slots in
-    descending order and the negative ones in the trailing slots (most
     negative last) — matching mgcv tprs.c's `minus = -1` call at tprs.c:408.
-
-    The key reason for porting (vs. using np.linalg.eigh) is matching mgcv's
-    basis choice inside degenerate eigenspaces of A. Lanczos with a fixed
-    start vector picks one specific orthonormal basis for any such subspace;
-    a dense eigendecomp picks a different one. For the tp smooth the Ritz
-    vectors feed into U @ diag(v) @ Z and the final X matrix, so matching
-    mgcv bit-for-bit requires the same start vector (same LCG seed), same
-    iteration order, same reorth strategy, and same tridiag eigendecomp.
     """
     n = A.shape[0]
     if tol is None:
@@ -6588,29 +5571,12 @@ def _tp_rlanczos(
         biggest = True
         lm = 0
 
-    # How often to do the tridiag eigendecomp / convergence test. Direct
-    # port of mgcv's heuristic.
     f_check = (m + lm) // 2
     f_check = max(f_check, 10)
     kk_fc = n // 10
     kk_fc = max(kk_fc, 1)
     f_check = min(f_check, kk_fc)
 
-    # Reorthogonalization uses classical Gram-Schmidt twice (CGS2) via a
-    # batched BLAS matmul — mgcv's C code uses sequential MGS2 in a tight
-    # per-column loop. CGS2 has a different floating-point trajectory, so
-    # eigenvectors of T_j may rotate within degenerate subspaces, but the
-    # final X matrix stays within the 1e-5 relative tolerance of the R
-    # oracle on the full tp/te/fs fixture suite.
-    #
-    # a_j / b_j and the start-vector norm still use `np.sum(u*v)` (pairwise,
-    # BLAS-free, deterministic). Those feed the tridiagonal eigendecomp, so
-    # run-to-run consistency there avoids spurious basis drift beyond what
-    # CGS2 already introduces.
-
-    # mgcv's LCG-seeded start vector. The specific constants (106, 1283, 6075)
-    # and the `jran=1` seed are load-bearing — changing them would pick a
-    # different basis within degenerate subspaces.
     ia, ic, im_mod = 106, 1283, 6075
     jran = 1
     q0 = np.empty(n, dtype=float)
@@ -6619,9 +5585,6 @@ def _tp_rlanczos(
         q0[i] = jran / im_mod - 0.5
     q0 /= float(np.sqrt(np.sum(q0 * q0)))
 
-    # Q stores Lanczos vectors as rows of a dense (n+1, n) array. Row-wise
-    # layout makes Q[i] a C-contiguous view, so np.multiply(Q[i], z, out=buf)
-    # has the same pairwise-reduce semantics as np.sum(q[i] * z) for 1D q.
     Q = np.zeros((n + 1, n))
     Q[0] = q0
 
@@ -6629,13 +5592,6 @@ def _tp_rlanczos(
     b = np.zeros(n)
     err = np.full(n, 1e300)
 
-    # Scratch buffer for aj / bj reductions. Keeps the np.sum(u*v) pairwise
-    # reduction (not BLAS dot) so the tridiagonal T_j entries are deterministic
-    # between runs — the wine dataset (n=47, mgcv_0020) has near-degenerate
-    # eigenvalues where a 1 ULP shift rotates eigenvectors within a degenerate
-    # subspace and breaks fixture comparison. CGS2 above is tolerant of that
-    # because reorth is already O(eps) off anyway; a[j] / b[j] directly feed
-    # the eigendecomp, so stability matters more there.
     buf = np.empty(n)
 
     d_sorted: np.ndarray | None = None
@@ -6644,9 +5600,6 @@ def _tp_rlanczos(
     j = 0
     while j < n:
         qj = Q[j]
-        # z = A q[j]  (full matvec; symmetry is exploited by dsymv in mgcv
-        # but the numerical difference vs a dense matmul is within the
-        # 1e-5 basis-equivalence tolerance we test against).
         z = A @ qj
         np.multiply(qj, z, out=buf)
         aj = float(buf.sum())
@@ -6656,18 +5609,8 @@ def _tp_rlanczos(
         else:
             z -= aj * qj
             z -= b[j - 1] * Q[j - 1]
-            # Reorthogonalize via classical Gram-Schmidt, twice (CGS2).
-            # mgcv's C code uses sequential MGS-twice; CGS2 has a different
-            # arithmetic trajectory but achieves machine-precision orthogonality
-            # in two passes and collapses the inner O(j) dot-product loop into
-            # a single BLAS matmul. The resulting basis still lies in the same
-            # Krylov subspace; eigenvectors of T_j may rotate within degenerate
-            # subspaces, but stay within the 1e-5 relative tolerance of the
-            # R-oracle fixtures. Verified empirically on the full tp/te/fs
-            # suite (tests/test_smooths.py).
             Qact = Q[: j + 1]  # (j+1, n)
             for _ in range(2):
-                # c = Qact @ z  -> (j+1,), then z -= Qact.T @ c
                 c = Qact @ z
                 z -= c @ Qact
         np.multiply(z, z, out=buf)
@@ -6675,21 +5618,11 @@ def _tp_rlanczos(
         b[j] = bj
         if j < n - 1 and bj > 0.0:
             np.divide(z, bj, out=Q[j + 1])
-            # else: Q[j+1] already zero-initialized.
 
         if ((j >= m + lm) and (j % f_check == 0)) or (j == n - 1):
             d_copy = a[: j + 1].copy()
             g_copy = b[:j].copy()
-            # Pin the LAPACK driver to stemr (MRRR). scipy 1.17 changed the
-            # `lapack_driver='auto'` default from stemr to stevd (D&C), and
-            # for small near-zero off-diagonals the two drivers pick different
-            # eigenvector signs. That shows up downstream as a ~0.1 rotation in
-            # the absorb.cons'd X matrix — passed at scipy 1.15 / fails at 1.17
-            # (see mgcv_0020 wine tp). stemr is what matches mgcv's ground-truth
-            # basis empirically on every tp/te/tp-by fixture we have.
             w, V = _eigh_tridiagonal(d_copy, g_copy, lapack_driver="stemr")
-            # scipy returns ascending; mgcv_trisymeig(descending=1) returns
-            # descending. Reverse.
             w = w[::-1].copy()
             V = V[:, ::-1].copy()
             d_sorted = w
@@ -6711,11 +5644,6 @@ def _tp_rlanczos(
                                 break
                             pi += 1
                         else:
-                            # mgcv checks err[ni], not err[j-ni]. Replicating
-                            # the exact C code for behavioral parity — the
-                            # convergence check is loose but the eigenvectors
-                            # produced are still correct once the iteration
-                            # stops.
                             if err[ni] > max_err:
                                 converged = False
                                 break
@@ -6740,9 +5668,6 @@ def _tp_rlanczos(
 
     assert d_sorted is not None and v_eig is not None
 
-    # Ritz vectors: U[:,k] = sum_{l<j} q[l] * V[l, idx(k)].
-    # Q stored row-wise (Q[l] = q[l]); transpose to match the (n, j) @ (j,)
-    # matmul shape the original code used with np.column_stack(q[:j]).
     Qj = Q[:j].T
     D_out = np.empty(m + lm)
     U_out = np.zeros((n, m + lm))
@@ -6854,13 +5779,8 @@ def _tp_raw(
     no absorb.cons, no drop_null. Returns `(X_raw, S_list, M, k, rank, state)`
     where `rank = k - M` and ``state`` carries the predict-time replay
     fields (``shift``, ``Xu``, ``m``, ``d``, ``UZ``, ``w``).
-
-    Separated from `_build_tp_smooth` so that `fs` smooths (which
-    reparameterize the bare tp output before duplicating across factor
-    levels) can reuse the same code with a caller-provided `term` list.
     """
     d = len(term)
-    # Build (n × d) matrix of covariates, shifted by column mean.
     x_full = np.column_stack([data[v].to_numpy().astype(float) for v in term])
     shift = x_full.mean(axis=0)
     x_c = x_full - shift
@@ -6894,14 +5814,7 @@ def _tp_raw(
     pure_knot = nu == k
 
     if pure_knot:
-        # When nu == k mgcv skips the eigendecomposition entirely (no
-        # truncation needed) and builds UZ from QT(T', fullQ=1). X is then
-        # computed by evaluating the TPS kernel + polynomial basis at each
-        # data point directly, rather than by indexing an X1-on-Xu table.
-        # The resulting basis differs from the Lanczos-based one by a rotation
-        # within the null-space block, so the two paths are not interchangeable.
         Z_hh = _tp_qt_factor(T_mat.T.copy())
-        # Full Q (nu × nu) via applying HH reflectors to identity from the right.
         Q_full = _tp_hqmult_right(np.eye(nu), Z_hh, transposed=False)
 
         UZ = np.zeros((nu + M, k))
@@ -6931,7 +5844,6 @@ def _tp_raw(
         if _tp_is_fixed(call):
             S_list: list[np.ndarray] = []
         else:
-            # S starts from E itself (not diag(v)), embedded in a k×k frame.
             S = np.zeros((k, k))
             S[:nu, :nu] = E
             S = _tp_hqmult_right(S, Z_hh, transposed=False)
@@ -6941,19 +5853,11 @@ def _tp_raw(
             S = (S + S.T) / 2.0
             S_list = [S]
     else:
-        # Top-k eigendecomposition of E via mgcv's Rlanczos. Lanczos (with
-        # a fixed LCG start vector) picks a specific orthonormal basis for
-        # any degenerate eigenspace; np.linalg.eigh picks a different one,
-        # which causes several tp fixtures with clustered/repeated eigenvalues
-        # to diverge from mgcv's output by a basis rotation.
         v_k, U = _tp_rlanczos(E, k, -1)
 
-        # TU = T' U, QT-factorize, apply to U, T, S.
         TU = T_mat.T @ U
         Z_hh = _tp_qt_factor(TU)
 
-        # UZ: (nu + M) × k. Radial block = U @ Q on rows 0..nu-1. Poly block
-        # on last M rows is the identity (diagonal on the last M cols).
         UZ = np.zeros((nu + M, k))
         UZ[:nu, :] = U
         UZ[:nu, :] = _tp_hqmult_right(UZ[:nu, :], Z_hh, transposed=False)
@@ -6962,22 +5866,15 @@ def _tp_raw(
             UZ[(nu + M) - i - 1, k - i - 1] = 1.0
 
         if yxindex is not None:
-            # X1 on unique rows: first (k-M) cols = U diag(v) applied with
-            # Q, last M cols = polynomial T; map unique → full data rows.
             X1 = U * v_k  # col-wise scaling
             X1 = _tp_hqmult_right(X1, Z_hh, transposed=False)
             X1[:, k - M :] = 0.0
             X1[:, k - M : k - M + M] = T_mat
             X_raw = X1[yxindex, :]
         else:
-            # Knots are a subsample — evaluate the kernel basis at the
-            # data rows (mgcv builds X through the same map as
-            # Predict.matrix.tp when knots ≠ data; cf. _TPRawBasis.eval).
             eta0 = _tp_eta_const(m, d)
             X_raw = _tp_eval_X_raw(x_c, Xu, m, d, UZ, eta0)
 
-        # Penalty S: Q' diag(v) Q, zero-pad last M rows/cols (polynomial
-        # part is unpenalized).
         if _tp_is_fixed(call):
             S_list: list[np.ndarray] = []
         else:
@@ -6989,9 +5886,6 @@ def _tp_raw(
             S = (S + S.T) / 2.0
             S_list = [S]
 
-    # Rescale each X column so its sum-of-squares = n (= mgcv's "rms=1").
-    # Apply same factor to UZ cols and to S rows+cols. After this, we have
-    # the pre-absorb.cons smooth; still need scale.penalty + absorb.cons.
     w = np.sqrt(np.sum(X_raw**2, axis=0) / n)
     w = np.where(w == 0, 1.0, w)
     X_raw = X_raw / w
@@ -7002,18 +5896,11 @@ def _tp_raw(
 
 
 def _build_tp_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
-    """Build thin-plate regression spline (`bs="tp"`, the default) block.
-
-    Exact port of mgcv/src/tprs.c::tprs_setup (case `n_knots < k`, which is
-    the default when user passes no `knots=`). Matches mgcv's output for
-    `absorb.cons=TRUE, scale.penalty=TRUE` after our standard post-processing.
-    """
+    """Build thin-plate regression spline (`bs="tp"`, the default) block."""
     term = _smooth_term_vars(call)
     X_raw, S_list, M, k, _rank, state = _tp_raw(call, data, term)
 
     if _tp_drop_null(call):
-        # `m=c(m, 0)`: drop the last M (null-space) columns, center remaining,
-        # and skip absorb.cons entirely.
         keep = k - M
         full_raw = _TPRawBasis(
             term=list(term),
@@ -7073,8 +5960,6 @@ def _build_ts_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     so ts does too."""
     term = _smooth_term_vars(call)
     X_raw, S_list, M, k, _rank, state = _tp_raw(call, data, term)
-    # mgcv: es$values[(k-M+1):k] <- es$values[k-M]*0.1 — all M null directions
-    # set to 0.1 * smallest positive eigenvalue.
     S_list = [_shrink_null_penalty(S_list[0], null_dim=M, cascade=False)]
     raw = _TPRawBasis(
         term=list(term),
@@ -7298,16 +6183,6 @@ def _build_ds_smooth(
     )
 
 
-# ---- sos: spline on the sphere ----------------------------------------------
-#
-# Port of mgcv's smooth.construct.sos.smooth.spec — an isotropic spline of a
-# scalar response over positions on S² (lat, long in degrees), based on
-# Wendelberger (1981) / Wahba (1981). Shares ds's low-rank reduction
-# (_lowrank_kernel_reduce); the kernel is the geodesic reproducing kernel
-# (makeR), order m ∈ {−2,−1,0,1,2,3,4} (default 0). The m=0 kernel (mgcv's
-# C rksos series) is the closed form via the dilogarithm derived below.
-
-
 def _rksos(z: np.ndarray) -> np.ndarray:
     """mgcv's `rksos` (m=0 sphere kernel), as a dilogarithm closed form.
     z = cos(geodesic angle). Verified to ≤3e-10 vs mgcv's C series. With
@@ -7370,7 +6245,6 @@ def _makeR(
         return zz * zz * np.log(zz) / (8.0 * np.pi), t_la, t_lak
     if m == 0:
         return _rksos(v) / (4.0 * np.pi), t_la, t_lak
-    # m >= 1: closed-form q_m in W = (1−cosγ)/2
     zz = np.maximum(1.0 - v, np.finfo(float).eps * 1e-4)
     W = zz / 2.0
     C = np.sqrt(W)
@@ -7480,8 +6354,6 @@ def _sos_raw(
     S, UZ, _nd, _rank = _lowrank_kernel_reduce(R_kk, T_kk, k)
     R_xk, T_x, _ = _makeR(la, lo, la_k, lo_k, m)
     X = np.hstack([R_xk @ UZ, T_x])
-    # mgcv column scaling: divide each col by its sd, with the smallest-sd
-    # column(s) (incl. the constant null-space col, sd=0) left at scale 1.
     xs = X.std(axis=0, ddof=1)
     xs[xs == xs.min()] = 1.0
     xs = 1.0 / xs
@@ -7510,16 +6382,6 @@ def _build_sos_smooth(
     )
 
 
-# ---- fs: factor-smooth interaction ------------------------------------------
-#
-# mgcv's `smooth.construct.fs.smooth.spec` builds one base smooth on the
-# non-factor terms, reparameterizes it via nat.param, then duplicates that
-# basis block-wise across factor levels. Penalties: one block-diagonal range
-# penalty plus one single-entry penalty per null-space dimension. Sets
-# `side.constrain = FALSE` and `C = matrix(0, 0, ncol(X))` so smoothCon
-# skips absorb.cons entirely. scale.penalty still runs on the final block.
-
-
 def _nat_param(
     X: np.ndarray,
     S: np.ndarray,
@@ -7528,33 +6390,12 @@ def _nat_param(
     unit_fnorm: bool = True,
     return_rank: bool = False,
 ):
-    """Port of mgcv's `nat.param(X, S, rank, type, unit.fnorm)`.
-
-    type=0: QR on X, eigendecompose R^-T S R^-1; leave the penalty diagonal
-    (the natural parameterization). type=1: as type=0 then rescale so the
-    penalty is identity on its range (mgcv stops there, leaving the degenerate
-    null-space basis to LAPACK noise; hea additionally applies the type=3
-    centered-Gram null rotation — see the inline note).
-    type=3: eigendecompose S directly; rescale columns by sqrt(eigenvalue)
-    (range) or by a col-norm match (null). Null-space eigenvectors are
-    post-rotated via the eigen of the centered null-block Gram.
-
-    `rank=None` computes the penalty rank internally as mgcv does
-    (`sum(eigenvalues > max·eps^0.8)`, on RSR for type 0/1, on S for type 2/3).
-    Returns `(X_new, D, P)`: X_new = X @ P; D is the range diagonal of the
-    transformed penalty (length `rank`); P is the parameter-transform — or
-    `(X_new, D, P, rank)` when ``return_rank`` (mgcv's mrf low-rank path needs
-    the computed rank)."""
+    """Port of mgcv's `nat.param(X, S, rank, type, unit.fnorm)`."""
     p = X.shape[1]
     _np_tol = float(np.finfo(float).eps) ** 0.8
 
     if type_ == 3:
         S_sym = 0.5 * (S + S.T)
-        # Use LAPACK's `syevr` (MRRR) driver — for degenerate null-spaces
-        # the eigenvector basis is LAPACK-choice-dependent, and `evr` is
-        # what R's default eigen() resolves to for symmetric matrices.
-        # numpy's linalg.eigh uses `evd` (D&C), which gives a different
-        # rotation of the same null space.
         from scipy.linalg import eigh as _sla_eigh
 
         w, V = _sla_eigh(S_sym, driver="evr")
@@ -7573,7 +6414,6 @@ def _nat_param(
         E_safe = np.where(E > 1e-14, E, 1.0)
         X_new = X_rot / E_safe
         P = V / E_safe
-        # Re-rotate null space so the constant vector is the final column.
         if null_exists and rank < p - 1:
             ind = np.arange(rank, p)
             rind = np.arange(p - 1, rank - 1, -1)  # reversed
@@ -7601,10 +6441,6 @@ def _nat_param(
         return X_new, D, P
 
     Q, R = np.linalg.qr(X, mode="reduced")
-    # RSR = R^-T @ S @ R^-1, via the same two triangular solves as mgcv's
-    # forwardsolve(t(R), t(forwardsolve(t(R), t(S)))) — and, like mgcv, NO
-    # symmetrization before eigen (an LU solve or a 0.5*(A+A') perturbs the
-    # null cluster enough to land on a different resolution).
     from scipy.linalg import eigh as _sla_eigh
     from scipy.linalg import solve_triangular as _sla_tri
 
@@ -7628,19 +6464,6 @@ def _nat_param(
         P = P / E_safe
         D = np.ones(rank)
 
-    # mgcv stops here for type=1: the null block keeps eigen()'s arbitrary
-    # resolution of the zero-eigenvalue cluster — pure LAPACK noise, decided
-    # by the last bits of RSR. macOS x86 Accelerate doesn't even keep those
-    # bits stable per call (heap-phase-sensitive kernels): the cluster came
-    # out rotated 44° between two fits in ONE process, which is a different
-    # model whenever each null dimension carries its own λ (fs) — measured
-    # 2.1 on a free-sp fs REML and 0.7 at fixed sp. So hea pins the
-    # resolution down with the SAME centered-Gram rotation mgcv applies in
-    # the type=3 branch: orientation and order become data-determined
-    # (eigengap O(1) vs O(1e-20)) and reproduce across BLAS builds to
-    # ~1e-14. This is a deliberate deviation from nat.param; the fs
-    # reference pins are R-validated against this exact parametrization via
-    # paraPen (see the fs tests in tests/test_gam.py).
     if type_ == 1 and rank < p - 1:
         ind = np.arange(rank, p)
         rind = np.arange(p - 1, rank - 1, -1)  # reversed
@@ -7671,10 +6494,7 @@ def _nat_param(
 def _fs_find_factor(
     term: list[str], data: pl.DataFrame
 ) -> tuple[str | None, list[str]]:
-    """Split a term list into (factor_var | None, non_factor_vars).
-
-    Returns `(None, term)` when no term is factor-like — mgcv falls through
-    to the base smooth in that case (smooth.r line 2025-2028)."""
+    """Split a term list into (factor_var | None, non_factor_vars)."""
     fterm: str | None = None
     others: list[str] = []
     for v in term:
@@ -7689,61 +6509,39 @@ def _fs_find_factor(
 
 
 def _build_fs_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
-    """`bs="fs"` — factor-smooth interaction.
-
-    Default base smooth is `tp` (`xt$bs="tp"` in mgcv; alternative bases
-    require `xt=list(bs=...)` which is not yet parsed here).
-
-    Fallthrough: mgcv's fs.smooth.spec checks for a factor among the terms;
-    if none is found it reclasses the object as the base smooth and
-    returns that constructor's output (smooth.r line 2025-2028). We mirror
-    that by dispatching to `_build_tp_smooth` on the full term list.
-    """
+    """`bs="fs"` — factor-smooth interaction."""
     term = _smooth_term_vars(call)
     fterm, others = _fs_find_factor(term, data)
     if fterm is None:
         return _build_tp_smooth(call, data)
 
-    # Build base tp smooth on the non-factor terms — bare output, no
-    # scale.penalty, no absorb.cons.
     Xb, Sb_list, M, k, rank, state = _tp_raw(call, data, others)
     null_d = k - rank
     Sb = Sb_list[0]
 
-    # nat.param(type=1) — make the base penalty an identity on its range.
-    # The null-space basis is canonicalized by the centered-Gram rotation
-    # (see _nat_param): column rank+0 is the constant-like direction, the
-    # final column the most-variable one, deterministically on every BLAS
-    # build (mgcv leaves this order/orientation to LAPACK noise).
     Xr, D, P = _nat_param(Xb, Sb, rank=rank, type_=1, unit_fnorm=True)
     p = Xr.shape[1]
 
-    # Factor levels in alphabetic order (R's factor() default).
     fac_col = data[fterm]
     flev = _factor_levels(fac_col)
     nf = len(flev)
     n = Xr.shape[0]
 
-    # Duplicate block-wise across levels.
     X = np.zeros((n, p * nf))
     fac_arr = fac_col.to_numpy()
     for j, lev in enumerate(flev):
         mask = (fac_arr == lev).astype(float)
         X[:, j * p : (j + 1) * p] = Xr * mask[:, None]
 
-    # Penalty 1: range — diag of [D, 0...0] replicated nf times.
     range_block = np.concatenate([D, np.zeros(null_d)])
     S_range = np.diag(np.tile(range_block, nf))
 
-    # Penalties 2..null_d+1: one per null-space dimension. Each is
-    # diag(replicated e_vec) where e_vec has a single 1 at position rank+i.
     S_list: list[np.ndarray] = [S_range]
     for i in range(null_d):
         um = np.zeros(p)
         um[rank + i] = 1.0
         S_list.append(np.diag(np.tile(um, nf)))
 
-    # scale.penalty runs on the final (duplicated) X and each S.
     S_list, S_scale = _scale_penalty(X, S_list)
 
     base_raw = _TPRawBasis(
@@ -7780,24 +6578,12 @@ def _build_fs_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
 
 
 def _xz_kr_contrast(X: np.ndarray, m: list[int], inner_p: int) -> np.ndarray:
-    """Port of mgcv's `XZKr(X, m)` (smooth.r:3747) — Kronecker sum-to-zero.
-
-    Postmultiplies X by a Kronecker product of sum-to-zero contrasts
-    `rbind(diag(m[i]-1), -1)` per factor, with a trailing inner identity of
-    size `inner_p`. In mgcv, `inner_p = ncol(X) / prod(m)` so this is the
-    base-smooth dimension after all factor blocks have been accounted for.
-    Column layout is [level ⊗ inner]: the outer factor indices cycle slowest.
-    """
+    """Port of mgcv's `XZKr(X, m)` (smooth.r:3747) — Kronecker sum-to-zero."""
     X = np.asarray(X, dtype=float).copy()
     n = X.shape[0]
-    # Replicate mgcv's in-place reshape-then-contract loop.
     for mi in m:
         L = X.size // mi
         X = X.reshape(L, mi, order="F")
-        # For each factor: contrast = last block is subtracted from every
-        # non-last block, then the last block is dropped. After this the
-        # factor dimension is mi-1 and we transpose so the next factor
-        # populates the trailing axis.
         X = (X[:, : mi - 1] - X[:, mi - 1 : mi]).T
     p = inner_p
     X = X.reshape(X.size // p, p, order="F")
@@ -7807,31 +6593,13 @@ def _xz_kr_contrast(X: np.ndarray, m: list[int], inner_p: int) -> np.ndarray:
 
 def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     """`bs="sz"` — zero-center nested smooth.
-
-    Default base smooth is `tp` (`xt$bs="tp"` in mgcv; alternative bases
-    require `xt=list(bs=...)` which is not yet parsed here).
-
     Fallthrough: mgcv's sz.smooth.spec (smooth.r:2211-2214) checks for any
-    factor among the terms; if none is found it reclasses the object as the
-    base smooth and returns that constructor's output. We mirror that by
-    dispatching to `_build_tp_smooth` on the full term list.
-
-    Factor-present path: build the base tp smooth on the non-factor terms
-    (`_tp_raw`, *before* scale.penalty and absorb.cons — mgcv calls the
-    constructor directly, not via smoothCon). Duplicate the base X block-wise
-    across factor levels, build one block-diagonal penalty per level (one S
-    per `prod(nf)` block unless `id=` is set), then apply the Kronecker
-    sum-to-zero contrast (`XZKr` — drops the last-level block and subtracts
-    it from each other level). scale.penalty runs on the pre-contrast X.
     """
     term = _smooth_term_vars(call)
     fterm, _others = _fs_find_factor(term, data)
     if fterm is None:
         return _build_tp_smooth(call, data)
 
-    # Collect all factor terms in the order they appear in the call (mgcv
-    # preserves `object$term` order). `_fs_find_factor` returns the first
-    # factor; gather the full list for the multi-factor tensor case.
     ftermlist: list[str] = []
     otherlist: list[str] = []
     for t in term:
@@ -7839,14 +6607,11 @@ def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
             ftermlist.append(t)
         else:
             otherlist.append(t)
-    # Factor-only case: mgcv reclasses to `re.smooth.spec`. Not exercised
-    # by current fixtures — defer until we see one.
     if not otherlist:
         raise NotImplementedError(
             "sz smooth with only factor terms (→ re fallback) not supported"
         )
 
-    # Base smooth: tp on non-factor terms, raw constructor output.
     Xb, Sb_list, M, k, _rank, state = _tp_raw(call, data, otherlist)
     if len(Sb_list) != 1:
         raise NotImplementedError("sz with multiply-penalized base basis not supported")
@@ -7854,7 +6619,6 @@ def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     p0 = Xb.shape[1]
     n = Xb.shape[0]
 
-    # Factor level lists and sizes (R's factor levels = Categorical categories).
     flev: list[list] = []
     nf: list[int] = []
     fac_arrs: list[np.ndarray] = []
@@ -7868,12 +6632,8 @@ def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     total_levels = int(np.prod(nf))
     p_full = p0 * total_levels
 
-    # Build the expanded X via tensor.prod.model.matrix with factor indicator
-    # matrices: X[i, (a1, a2, ..., b)] = prod_j 1{fac_j[i]==lev_j[a_j]} * Xb[i, b].
-    # Column layout matches mgcv's: outermost factor index cycles slowest.
     X = np.zeros((n, p_full))
 
-    # Enumerate all factor-index combinations in row-major over factors.
     def _iter_factor_indices():
         if not nf:
             yield ()
@@ -7881,7 +6641,6 @@ def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         idx = [0] * len(nf)
         while True:
             yield tuple(idx)
-            # Increment — last dim fastest.
             for d in range(len(nf) - 1, -1, -1):
                 idx[d] += 1
                 if idx[d] < nf[d]:
@@ -7896,9 +6655,6 @@ def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
             mask *= (fac_arrs[j] == flev[j][a]).astype(float)
         X[:, blk_pos * p0 : (blk_pos + 1) * p0] = Xb * mask[:, None]
 
-    # Build penalties. mgcv's sz:
-    #   if id is NULL: one penalty per prod(nf) block (prod(nf) penalties).
-    #   else: single penalty = sum of block-diagonal S_base across all blocks.
     has_id = call.kwargs.get("id") is not None
     S_list: list[np.ndarray] = []
     if has_id:
@@ -7912,14 +6668,9 @@ def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
             S_b[b * p0 : (b + 1) * p0, b * p0 : (b + 1) * p0] = S_base
             S_list.append(S_b)
 
-    # scale.penalty runs on the duplicated X and each S (mgcv applies it
-    # before the Kronecker constraint — XZKr rescales column norms but
-    # `scale.penalty=TRUE` matches on the pre-contrast `sm$X`).
     S_list = [(S + S.T) / 2.0 for S in S_list]
     S_list, S_scale = _scale_penalty(X, S_list)
 
-    # Kronecker sum-to-zero: absorb.cons with C = c(0, nf). XZKr drops the
-    # last-level block per factor and subtracts it from each non-last block.
     X_out = _xz_kr_contrast(X, nf, p0)
     S_out: list[np.ndarray] = []
     for S in S_list:
@@ -7983,7 +6734,6 @@ def _ad_order_m(call: Call, d: int) -> tuple[int, int]:
         if not vals:
             return (5, 0)
         return (vals[0], 0)
-    # 2D
     if not vals:
         return (3, 3)
     if len(vals) == 1:
@@ -8016,9 +6766,6 @@ def _ad_Db_1d(nk: int) -> np.ndarray:
 def _ad_penalty_basis_1d(nk: int, k_pen: int) -> np.ndarray:
     """The inner ps basis V (shape (nk-2, k_pen)) used to weight the
     rows of the outer 2nd-difference matrix Db. Matches mgcv:
-
-        x <- 1:(nk-2)/nk
-        s(x, k=k_pen, bs="ps", m=2, fx=TRUE)
     """
     x_v = np.arange(1, nk - 1, dtype=float) / nk
     knots = _ps_knots(x_v, m0=2, k=k_pen)
@@ -8026,15 +6773,7 @@ def _ad_penalty_basis_1d(nk: int, k_pen: int) -> np.ndarray:
 
 
 def _ad_D2(ni: int, nj: int) -> dict:
-    """Port of mgcv's `D2(ni, nj)` (smooth.r:2377).
-
-    Returns second-difference matrices (`Drr`, `Dcc`, `Dcr`) on a ni-by-nj
-    coefficient grid, plus the row/col indices of each D's central
-    stencil (used to evaluate the penalty-weighting basis at those
-    locations). The mixed-derivative factor `sqrt(0.125)` bakes the `2`
-    from the thin-plate penalty into Dcr, so
-    `Drr^T Drr + Dcc^T Dcc + Dcr^T Dcr` is the discrete TPS penalty.
-    """
+    """Port of mgcv's `D2(ni, nj)` (smooth.r:2377)."""
     Ind = np.arange(ni * nj).reshape(nj, ni).T  # column-major like R
     rmt = np.tile(np.arange(1, ni + 1), nj)
     cmt = np.repeat(np.arange(1, nj + 1), ni)
@@ -8044,7 +6783,6 @@ def _ad_D2(ni: int, nj: int) -> dict:
         M[rows, flat_cols] = vals
         return M
 
-    # Drr: 2nd diff along rows (i direction), fixed j.
     ci0 = Ind[1 : ni - 1, 0:nj].ravel(order="F")
     n_ci = len(ci0)
     rows = np.arange(n_ci)
@@ -8056,7 +6794,6 @@ def _ad_D2(ni: int, nj: int) -> dict:
     rr_ri = rmt[ci0]
     rr_ci = cmt[ci0]
 
-    # Dcc: 2nd diff along cols.
     ci0 = Ind[0:ni, 1 : nj - 1].ravel(order="F")
     n_ci = len(ci0)
     rows = np.arange(n_ci)
@@ -8068,7 +6805,6 @@ def _ad_D2(ni: int, nj: int) -> dict:
     cc_ri = rmt[ci0]
     cc_ci = cmt[ci0]
 
-    # Dcr: cross derivative.
     ci0 = Ind[1 : ni - 1, 1 : nj - 1].ravel(order="F")
     n_ci = len(ci0)
     rows = np.arange(n_ci)
@@ -8105,29 +6841,13 @@ def _ad_inner_2d_basis(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Build the inner penalty-weight matrices Vrr, Vcc, Vcr (one column per
     adaptive penalty) for the 2D adaptive case with `kp.tot > 1`.
-
-    Mirrors mgcv:
-        m <- min(min(kp)-2, 1); m <- c(m, m)
-        ps2 <- smooth.construct(te(i, j, bs="ps", k=kp, fx=TRUE, m=m, np=FALSE),
-                                data=data.frame(i=rmt, j=cmt))
-        Vrr/Vcc/Vcr <- Predict.matrix(ps2, <rr/cc/cr indices>)
-
-    With `np=FALSE`, te's basis is the row-wise Kronecker product of
-    two ps bases, so Predict.matrix evaluates each margin at the given
-    (i, j) grid coordinates and tensor-multiplies.
     """
     kp_tot = kp[0] * kp[1]
     if kp_tot == 3:
-        # "Planar adaptiveness": V = [1, Drr_flat, Dcc_flat] — but Drr/Dcc
-        # here are the indices, not the matrices. Use the rr/cc/cr indices
-        # directly as the two planar coordinates.
         raise NotImplementedError("ad 2D kp.tot=3 planar adaptiveness not implemented")
-    # General adaptive: build an inner ps basis per margin, then Kronecker.
     m_inner = min(min(kp) - 2, 1)
-    # Inner basis on each margin — the grid is the full (rmt, cmt) grid.
     rmt = Db["rmt"].astype(float)
     cmt = Db["cmt"].astype(float)
-    # Each ps basis needs knots over the relevant range.
     ki, kj = kp
     knots_i = _ps_knots(rmt, m0=m_inner, k=ki)
     knots_j = _ps_knots(cmt, m0=m_inner, k=kj)
@@ -8136,8 +6856,6 @@ def _ad_inner_2d_basis(
         Bi = _ps_basis(ri.astype(float), knots_i, m0=m_inner)
         Bj = _ps_basis(ci.astype(float), knots_j, m0=m_inner)
         n = Bi.shape[0]
-        # te(i, j) has margin-i as outermost in tensor.prod.model.matrix,
-        # so V[r, a*kj + b] = Bi[r, a] * Bj[r, b].
         return (Bi[:, :, None] * Bj[:, None, :]).reshape(n, ki * kj)
 
     Vrr = _eval_V(Db["rr_ri"], Db["rr_ci"])
@@ -8179,7 +6897,6 @@ def _ad_raw_build(
         )
         return X, S_list, raw
 
-    # d == 2
     k_vec = _ad_default_k(call, 2)
     ki, kj = int(k_vec[0]), int(k_vec[1])
     kp = _ad_order_m(call, 2)
@@ -8189,8 +6906,6 @@ def _ad_raw_build(
     knots_j = _ps_knots(xj, m0=2, k=kj)
     Xi = _ps_basis(xi, knots_i, m0=2)
     Xj = _ps_basis(xj, knots_j, m0=2)
-    # Row-wise Kronecker (tensor.prod.model.matrix on two matrices). mgcv
-    # iterates column of Xj outermost: X[r, a + ki*b] = Xi[r, a] * Xj[r, b].
     n = Xi.shape[0]
     X = (Xi[:, :, None] * Xj[:, None, :]).reshape(n, ki * kj)
     Db = _ad_D2(ki, kj)
@@ -8220,15 +6935,7 @@ def _ad_raw_build(
 
 
 def _build_ad_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
-    """`bs="ad"` — adaptive P-spline (1D or 2D).
-
-    1D: builds a standard ps basis, then replaces its single penalty with
-    `k_pen = m` adaptive penalties of the form `Db^T diag(V[:,i]) Db`.
-    2D: builds a tensor of two ps bases (equivalent to the X matrix of
-    `te(..., bs="ps", np=FALSE)`), then replaces penalties with either a
-    single discrete-TPS penalty (kp.tot=1) or `kp[0]*kp[1]` adaptive
-    versions weighted by an inner ps basis.
-    """
+    """`bs="ad"` — adaptive P-spline (1D or 2D)."""
     term = _smooth_term_vars(call)
     X, S_list, raw = _ad_raw_build(call, data)
     return _apply_by_and_absorb(
@@ -8298,14 +7005,9 @@ def _te_cast_bool(node) -> bool:
 
 
 def _te_parse_margins(call: Call, data: pl.DataFrame) -> list[dict]:
-    """Parse a te/ti/t2 call into a list of margin specs.
-
-    Each margin spec is a dict `{term, bs, k, m, fx}` describing what to
-    pass to the underlying marginal smooth constructor.
-    """
+    """Parse a te/ti/t2 call into a list of margin specs."""
     term = _smooth_term_vars(call)
     dim = len(term)
-    # d: number of covariates per margin. Default is c(1, ..., 1).
     d_src = call.kwargs.get("d")
     if d_src is None:
         d_list = [1] * dim
@@ -8331,8 +7033,6 @@ def _te_parse_margins(call: Call, data: pl.DataFrame) -> list[dict]:
         k_list = _te_parse_vec(k_src, n_bases, 5, _te_cast_int)
     bs_list = _te_parse_vec(call.kwargs.get("bs"), n_bases, "cr", _te_cast_str)
     fx_list = _te_parse_vec(call.kwargs.get("fx"), n_bases, False, _te_cast_bool)
-    # m is parsed as-is per margin (default NA → None here); each margin's
-    # constructor handles its own default.
     m_src = call.kwargs.get("m")
     if m_src is None:
         m_list: list = [None] * n_bases
@@ -8348,7 +7048,6 @@ def _te_parse_margins(call: Call, data: pl.DataFrame) -> list[dict]:
     else:
         m_list = [m_src] * n_bases
 
-    # Promote bs=cr/cs/ps/cp to tp for multi-d margins.
     for i in range(n_bases):
         if d_list[i] > 1 and bs_list[i] in ("cr", "cs", "ps", "cp"):
             bs_list[i] = "tp"
@@ -8371,17 +7070,7 @@ def _te_parse_margins(call: Call, data: pl.DataFrame) -> list[dict]:
 
 
 def _apply_tero(specs: list[dict]) -> list[dict]:
-    """Apply mgcv's ``tero`` margin reorder (bam.r:1900-1917).
-
-    Find the margin with the largest ``k`` (basis dim). If it's not already
-    last, swap it with the last margin. Ties go to the *latest* margin
-    because mgcv loops with ``>=`` and updates ``maxi`` on each match, so the
-    last equal-largest wins.
-
-    This reorder runs once for each te/ti/t2 spec on the discrete=TRUE path
-    so the per-margin ``compress.df`` shuffle order AND the tensor ``kron``
-    ordering both reflect the reordered margins.
-    """
+    """Apply mgcv's ``tero`` margin reorder (bam.r:1900-1917)."""
     if len(specs) < 2:
         return specs
     maxd = -1
@@ -8400,12 +7089,9 @@ def _apply_tero(specs: list[dict]) -> list[dict]:
 def _te_make_margin_call(spec: dict) -> Call:
     """Build a synthetic `s(term..., k=..., bs=..., m=...)` Call for a single
     margin so we can reuse the existing bs-specific raw helpers.
-
-    `fx` is deliberately NOT forwarded: mgcv builds every margin penalized
     ("NOTE: fx and by not dealt with here!", smooth.r:462) and instead drops
-    the corresponding TENSOR penalty for fx margins after the product is
     formed (smooth.r:830). Forwarding fx here would leave the margin with no
-    penalty and break the one-penalty-per-margin tensor assembly."""
+    """
     args: list = [Name(ident=t) for t in spec["term"]]
     kwargs: dict = {}
     kwargs["k"] = Literal(value=spec["k"], kind="num")
@@ -8426,11 +7112,6 @@ def _te_build_margin_raw(
     should skip the np=TRUE SVD reparameterization (matches mgcv's
     `noterp` attribute on cr / cc / cs). ``raw`` is the corresponding
     `_RawBasis` for predict-time replay.
-
-    ``knots_vec`` (mgcv ``knots=list(term=...)`` for this margin) overrides the
-    cr margin's default knot placement; mgcv passes the same list to every
-    marginal ``smooth.construct``, so a cr margin resolves it like a standalone
-    cr (verbatim, length k).
     """
     mcall = _te_make_margin_call(spec)
     bs = spec["bs"]
@@ -8444,7 +7125,6 @@ def _te_build_margin_raw(
 
         return X, S_list, _predict, True, raw
     if bs == "cc":
-        # cyclic cubic margin (noterp=True like cr — already nicely parameterised).
         X, S_list, kn, BD = _cc_raw(mcall, data, term, knots_vec=knots_vec)
         raw = _CCRawBasis(term=term[0], knots=kn, BD=BD)
 
@@ -8453,7 +7133,6 @@ def _te_build_margin_raw(
 
         return X, S_list, _predict, True, raw
     if bs == "cp":
-        # cyclic P-spline margin (noterp=False → np=TRUE SVD reparam applies).
         X, S_list, kn, ord_ = _cp_raw(mcall, data, term, knots_vec=knots_vec)
         raw = _CPRawBasis(term=term[0], knots=kn, ord_=ord_)
 
@@ -8491,7 +7170,6 @@ def _te_build_margin_raw(
             w=state["w"],
         )
 
-        # np-reparam predict callable: only invoked when len(term) == 1.
         def _predict(x_new: np.ndarray) -> np.ndarray:
             df = pl.DataFrame({term[0]: np.asarray(x_new, dtype=float)})
             return raw.eval(df)
@@ -8527,16 +7205,11 @@ def _te_build_margin_centered(
     absorb, returning `(X, S_list, predict, noterp, raw)`. Equivalent to
     `smoothCon(..., absorb.cons=TRUE)[[1]]` but keeps the Z matrix so
     `predict(x_new)` evaluates the raw basis and applies the same rotation.
-
-    The centering (scale.penalty + mean-constraint Z) is basis-agnostic, so this
-    supports every basis the bare builder does; ``knots_vec`` is forwarded.
     """
     X_raw, S_raw, predict_bare, noterp, bare = _te_build_margin_raw(
         spec, data, knots_vec=knots_vec
     )
     S_sym = [(S + S.T) / 2.0 for S in S_raw]
-    # Margin-level rescale: interior te machinery, not mgcv's per-smooth
-    # S.scale (that's recorded on the assembled tensor penalties).
     S_scaled, _ = _scale_penalty(X_raw, S_sym)
     C = X_raw.mean(axis=0)
     Q, _ = np.linalg.qr(C.reshape(-1, 1), mode="complete")
@@ -8556,11 +7229,6 @@ def _te_reparam_margin(
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray | None]:
     """Reparameterize a margin to spread basis evenly in x (matches mgcv's
     `np=TRUE` path at smooth.r:796-822).
-
-    Evaluates `predict_basis(knt)` at `knt = seq(min(x), max(x), length=np)`
-    where `np = ncol(X)`, SVDs that matrix, and applies `XP = V D^-1 U^T` so
-    that `X_new = X @ XP`, `S_new = XP^T @ S @ XP`. Returns None for XP if
-    the matrix is too ill-conditioned.
     """
     np_cols = X.shape[1]
     knt = np.linspace(float(np.min(x_vals)), float(np.max(x_vals)), np_cols)
@@ -8591,16 +7259,7 @@ def _tensor_prod_S(
     Sm_lists: list[list[np.ndarray]],
 ) -> tuple[list[np.ndarray], list[int]]:
     """Kronecker-lift each marginal penalty over the tensor basis.
-
-    Matches mgcv's `tensor.prod.penalties` — `S` lifts to `I⊗…⊗S⊗…⊗I` (identities
-    sized by the other margins' basis dims) — but GENERALISED so a margin may
-    carry several penalties: `Sm_lists[i]` is margin `i`'s penalty list (one for
-    cr/ps/tp; several for ad). mgcv stops on multi-penalty margins
     (smooth.r:773); this is the hea extension that lifts each one. Single-penalty
-    margins are bit-for-bit what mgcv gives (same order, same symmetrise).
-
-    Returns the lifted penalties (margin-grouped) and a parallel list giving each
-    penalty's source-margin index (so fx margins can drop all their penalties).
     """
     m = len(Sm_lists)
     dims = [Sm_lists[i][0].shape[0] for i in range(m)]
@@ -8627,17 +7286,7 @@ def _build_te_smooth(
     matrix_arg: bool = False,
     knots: dict | None = None,
 ) -> list[SmoothBlock]:
-    """`te(...)` / `ti(...)` constructor.
-
-    Shared code path, differentiated by:
-      - `inter=False` (te): raw margins, outer absorb.cons applied.
-      - `inter=True` (ti): centered margins (per `mc`), no outer absorb.cons.
-
-    When ``matrix_arg`` is True, ``data`` is the long-form (n*m row) view of
-    a matrix-typed te() call, and the outer absorb.cons + scale.penalty are
-    deferred to ``_summation_apply_blocks`` — mgcv's ``bam(discrete=FALSE)``
-    runs both on the row-summed (n, p_raw) X (sparse.cons=-1 path).
-    """
+    """`te(...)` / `ti(...)` constructor."""
     specs = _te_parse_margins(call, data)
     # tero (bam.r:1900-1917): on the discrete=True path, reorder margins so
     # the largest ``bs.dim`` is last. ``maxd`` ties go to the *latest* margin
@@ -8651,7 +7300,6 @@ def _build_te_smooth(
         if mc is None:
             mc_list = [True] * n_bases
         else:
-            # mgcv accepts 0/1 or FALSE/TRUE; length 1 recycles.
             if len(mc) == 1:
                 mc_list = [bool(mc[0])] * n_bases
             elif len(mc) == n_bases:
@@ -8672,8 +7320,6 @@ def _build_te_smooth(
     Sm_lists: list[list[np.ndarray]] = []  # per-margin penalty lists (≥1)
     margin_raws: list[_RawBasis] = []
     for i, spec in enumerate(specs):
-        # mgcv passes the same knots= list to every marginal smooth.construct;
-        # 1-D cr margins consume it, others (tp) ignore it.
         kv = knots.get(spec["term"][0]) if knots and len(spec["term"]) == 1 else None
         if mc_list[i]:
             Xi, Si_list, predict_i, noterp_i, raw_i = _te_build_margin_centered(
@@ -8694,7 +7340,6 @@ def _build_te_smooth(
             if XP is not None:
                 raw_i = _LinearTransformRawBasis(inner=raw_i, M=XP)
 
-        # Scale each marginal penalty by its largest eigenvalue.
         scaled = []
         for S in Si_list:
             top = float(np.linalg.eigvalsh(0.5 * (S + S.T))[-1])
@@ -8707,7 +7352,6 @@ def _build_te_smooth(
     X = _tensor_prod_X(Xm)
     S_list, pen_margin = _tensor_prod_S(Sm_lists)
 
-    # fx: drop ALL tensor penalties belonging to margins with fx=TRUE.
     for idx in reversed(range(len(S_list))):
         if specs[pen_margin[idx]]["fx"]:
             del S_list[idx]
@@ -8718,12 +7362,6 @@ def _build_te_smooth(
     tensor_raw = _TensorRawBasis(margins=margin_raws)
 
     if matrix_arg:
-        # Matrix-argument (summation convention) te()/ti(): defer
-        # scale.penalty (on the long-form X) + numeric by-multiply + row-sum +
-        # the centering constraint + check.rank to _summation_apply_blocks,
-        # which has the long-vs-summed shapes mgcv's smoothCon needs. For ti
-        # (inter) the dispatcher passes no_outer_cons=True so the centering
-        # step is skipped regardless of the by-row-sum test. Symmetrize S now.
         S_list = [(S + S.T) / 2.0 for S in S_list]
         return _defer_matrix_block(
             call,
@@ -8736,7 +7374,6 @@ def _build_te_smooth(
         )
 
     if inter:
-        # Skip outer absorb.cons (C = matrix(0,0,0)).
         S_list, S_scale = _scale_penalty(X, S_list)
         return [
             SmoothBlock(
@@ -8750,7 +7387,6 @@ def _build_te_smooth(
             )
         ]
 
-    # te: outer absorb.cons.
     return _apply_by_and_absorb(
         call,
         data,
@@ -8770,8 +7406,7 @@ def _build_ti_smooth(
 ) -> list[SmoothBlock]:
     """`ti(...)` — like te but each margin is centered (absorb.cons
     applied) before the tensor, and the outer absorb.cons is skipped.
-
-    The `mc` kwarg selects which margins get centered (default: all)."""
+    """
     mc_src = call.kwargs.get("mc")
     if mc_src is None:
         mc_vals = None
@@ -8798,16 +7433,13 @@ def _t2_margin_raw_and_rank(
     The marginal penalty rank determines the range/null split used by
     `t2.model.matrix`. ``raw`` is the corresponding `_RawBasis` for the
     bare margin (predict-time replay).
-
-    ``knots_vec`` overrides the cr margin's default knots (see
-    :func:`_te_build_margin_raw`)."""
+    """
     mcall = _te_make_margin_call(spec)
     bs = spec["bs"]
     term = spec["term"]
     if bs == "cr":
         X, S_list, kn = _cr_raw(mcall, data, term, knots_vec=knots_vec)
         S = 0.5 * (S_list[0] + S_list[0].T)
-        # cr null.space.dim = 2 for un-shrunk cr.
         rank = X.shape[1] - 2
         raw = _CRRawBasis(term=term[0], knots=kn)
         return X, S, rank, raw
@@ -8857,13 +7489,7 @@ def _t2_model_matrix(
     Xm: list[np.ndarray],
     ranks: list[int],
 ) -> tuple[np.ndarray, list[int]]:
-    """Port of mgcv's `t2.model.matrix` with `full=FALSE, ord=NULL`.
-
-    Each margin's X is split into range (first `rank[i]` cols) and null
-    (remaining cols). Builds all Kronecker combinations and returns
-    `(X, sub_cols)` where `sub_cols` is the column count per sub-block
-    with the trailing all-null block dropped (that block is unpenalized).
-    """
+    """Port of mgcv's `t2.model.matrix` with `full=FALSE, ord=NULL`."""
     n = Xm[0].shape[0]
 
     def _row_kron(A: np.ndarray, B: np.ndarray) -> np.ndarray:
@@ -8886,10 +7512,8 @@ def _t2_model_matrix(
             no_null = True
         Ni = Xm[i][:, ri:] if null_i_exists else None
         new_blocks: list[np.ndarray] = []
-        # Range products first: X1[ii] * Zi for all ii.
         for Xii in blocks:
             new_blocks.append(_row_kron(Xii, Zi))
-        # Then null products: X1[ii] * Ni for all ii (if null exists).
         if null_i_exists:
             for Xii in blocks:
                 new_blocks.append(_row_kron(Xii, Ni))
@@ -8898,7 +7522,6 @@ def _t2_model_matrix(
     sub_cols = [B.shape[1] for B in blocks]
     X = np.concatenate(blocks, axis=1)
     if not no_null:
-        # Trailing block is the pure null×null×... tail — unpenalized.
         sub_cols = sub_cols[:-1]
     return X, sub_cols
 
@@ -8909,12 +7532,6 @@ def _build_t2_smooth(
     knots: dict | None = None,
 ) -> list[SmoothBlock]:
     """`t2(...)` — Wood's alternative tensor product.
-
-    Each margin is reparameterized by `nat.param(type=3, unit.fnorm=TRUE)`
-    so its penalty becomes diag([1..1, 0..0]) with range (rank) first, then
-    null. `t2.model.matrix(full=FALSE)` builds sub-blocks via all Kronecker
-    combinations; each penalized sub-block gets a simple identity ridge.
-    The tensor's null space is then constrained by a single row C
     (smooth.r:1117-1120) before scaling and constraint absorption.
     """
     if _smooth_pc_value(call) is not None:
@@ -8948,7 +7565,6 @@ def _build_t2_smooth(
     nsc = len(sub_cols)
     p = X_raw_full.shape[1]
 
-    # Penalties: simple ridge on each sub-block.
     cx = [0]
     for s in sub_cols:
         cx.append(cx[-1] + s)
@@ -8957,8 +7573,6 @@ def _build_t2_smooth(
         D = np.zeros(p)
         D[cx[j] : cx[j + 1]] = 1.0
         S_list.append(np.diag(D))
-
-    # (t2 fx is rejected up front — mgcv hardcodes fx=FALSE for t2.)
 
     # Tensor null-space constraint (smooth.r:1117-1120). Rank of the null is
     # p - sum(sub_cols). Build C = [0_{nup}, colSums(X[:, nup:])] as 1×p.
@@ -8969,8 +7583,6 @@ def _build_t2_smooth(
     term_all = _smooth_term_vars(call)
 
     if null_dim == 0:
-        # No null space, no identifiability constraint needed; sm$Cp is NULL,
-        # so fit basis == predict basis.
         S_list, S_scale = _scale_penalty(X_raw_full, S_list)
         t2_raw = _T2RawBasis(
             margins=margin_raws,
@@ -8991,11 +7603,6 @@ def _build_t2_smooth(
             )
         ]
 
-    # Predict-time basis (mgcv's full absorb.cons via sm$Cp = colSums(X_raw_full)):
-    # `Predict.matrix.t2.smooth` applies Z_p = qr.qy(qrc, [0; I_q]) — equivalent
-    # to Q_p[:, 1:] from the complete QR of colSums(X_raw_full).T — to the raw
-    # t2 design. Z_p only depends on fit-time X_raw_full (not on new data), so
-    # we cache it here and replay it via _T2PredictRawBasis.
     cP = X_raw_full.sum(axis=0).reshape(-1, 1)
     Q_p, _ = np.linalg.qr(cP, mode="complete")
     Z_p = Q_p[:, 1:]
@@ -9091,15 +7698,7 @@ def _build_t2_smooth(
 
 
 def _smooth_matrix_vars(call: Call, data: pl.DataFrame) -> list[str]:
-    """Collect the matrix-typed arg variables for one smooth call.
-
-    Walks the smooth's positional ``args`` and returns the subset of
-    plain-Name arguments whose column in ``data`` is matrix-typed
-    (``Array(Float64, m)``). Expression-typed args (already materialised
-    into synth columns by ``_apply_smooth_arg_exprs``) and ``by=`` exprs
-    are skipped — mgcv's matrix convention only fires on bare-column
-    matrix arguments to ``s()`` / ``te()`` / ``ti()`` / ``t2()``.
-    """
+    """Collect the matrix-typed arg variables for one smooth call."""
     out: list[str] = []
     cols = set(data.columns)
     for a in call.args:
@@ -9112,20 +7711,7 @@ def _check_rank(
     X: np.ndarray,
     S_list: list[np.ndarray],
 ) -> tuple[np.ndarray, list[np.ndarray], np.ndarray | None]:
-    """Mgcv `smoothCon`'s ``check.rank`` block (lines 485-518).
-
-    When matrixArg=TRUE, mgcv probes for redundant columns by pivoted Cholesky
-    of ``X'X / |X'X|_1 + Σ S_i / |S_i|_1`` (one-norm). If the rank ``r`` is
-    less than ``p = ncol(X)``, columns ``r..p-1`` (0-indexed) are dropped from
-    ``X`` and from each ``S_i``.
-
-    Returns ``(X_new, S_list_new, keep_mask)`` with ``keep_mask=None`` when
-    nothing is dropped. The drop is on *original column order*, matching mgcv
-    — the pivot from ``chol(..., pivot=TRUE)`` is used only for rank determi-
-    nation, not for picking which columns to drop. mgcv's tensor product
-    construction places redundant columns at the end so the trailing-cols
-    drop is correct.
-    """
+    """Mgcv `smoothCon`'s ``check.rank`` block (lines 485-518)."""
     from scipy.linalg import lapack
 
     p = X.shape[1]
@@ -9140,7 +7726,6 @@ def _check_rank(
         normS = float(np.abs(S).sum(axis=0).max())
         if normS > 0:
             M = M + S / normS
-    # Pivoted Cholesky → rank. tol=-1 ⇒ LAPACK auto tol = n·eps·max(diag).
     M_sym = 0.5 * (M + M.T)
     _c, _piv, rank_c, info = lapack.dpstrf(M_sym, lower=0, tol=-1.0)
     if info < 0:
@@ -9164,23 +7749,10 @@ def _summation_apply_blocks(
 ) -> list[SmoothBlock]:
     """Run mgcv's ``smoothCon`` matrix-argument pipeline on each raw long-form
     block, in mgcv's order (smooth.r:3877-4051):
-
-      1. ``scale.penalty`` — rescale each ``S`` against
-         ``maXX = norm(X,"I")^2`` of the **long-form** (n*m, p) X, *before* the
          by-multiply (smooth.r:3879). Scaling on the row-summed X instead
-         inflates maXX by the summation and gives a different ``S.scale``.
-      2. numeric ``by``-multiply on the long form, then row-block summation
          ``Σ_k by[i,k]·X[i,k,:]`` (smooth.r:3997-4008).
-      3. centering constraint — applied unless either the by-matrix row-sums
-         ``L1[i]=Σ_k by[i,k]`` vary (``sd(L1) > mean(L1)·eps·1000`` ⇒ no
          constraint, smooth.r:3925-3943) or ``no_outer_cons`` (ti, whose
-         margins are already centered). ``sparse.cons=-1`` ⇒ sweep-drop.
-      4. ``check.rank`` — pivoted-Cholesky probe on the summed (n, p) design
          (matrixArg always sets ``check.rank=TRUE``, smooth.r:4035).
-
-    The matching predict-time replay (``BasisSpec.predict_mat``) evaluates the
-    raw basis on the long form, by-multiplies, row-sums, then applies absorb +
-    ``keep_cols`` — the same order.
     """
     out: list[SmoothBlock] = []
     mvars = tuple(matrix_vars)
@@ -9194,9 +7766,7 @@ def _summation_apply_blocks(
                 f"with {X.shape[0]} rows, expected n*m = {n * m}"
             )
         S_list = list(b.S)
-        # (1) scale.penalty on the long-form (pre-by) X.
         S_list, S_scale = _scale_penalty(X, S_list)
-        # (2) numeric by-multiply (long form) + the centering-constraint test.
         drop_cons = False
         by_mask = b.spec.by if b.spec is not None else None
         if by_mask is not None:
@@ -9208,29 +7778,22 @@ def _summation_apply_blocks(
             )
             by_arr = by_arr.astype(float)
             X = X * by_arr[:, None]
-            # L1 = row-sums of the by-matrix (one per original row). mgcv drops
-            # the centering constraint when these vary (sd(L1) on R's n-1
-            # denominator vs the signed mean — mean<0 ⇒ RHS<0 ⇒ always drop).
             L1 = by_arr.reshape(n, m).sum(axis=1)
             sd_L1 = float(np.std(L1, ddof=1)) if n > 1 else 0.0
             drop_cons = sd_L1 > float(np.mean(L1)) * eps * 1000.0
-        # (3) row-block summation.
         X_summed = X.reshape(n, m, X.shape[1]).sum(axis=1)
-        # (4) centering constraint (unless ti, or dropped by the by-row test).
         abs_T = None
         if not no_outer_cons and not drop_cons:
             if sparse_cons == -1:
                 X_summed, S_list, abs_T = _absorb_sweep_drop(X_summed, S_list)
             else:
                 X_summed, S_list, abs_T = _absorb_sumzero(X_summed, S_list)
-        # (5) check.rank (always, for matrixArg).
         X_summed, S_list, keep_mask = _check_rank(X_summed, S_list)
         if b.spec is not None:
             b.spec.summation_dim = m
             b.spec.matrix_vars = mvars
             b.spec.absorb = abs_T
             if keep_mask is not None:
-                # Compose with any existing keep_cols (gam.side may have set it).
                 if b.spec.keep_cols is not None:
                     composed = np.zeros_like(b.spec.keep_cols)
                     composed[b.spec.keep_cols] = keep_mask
@@ -9319,11 +7882,6 @@ def materialize_smooths(
     mgcv way (length-2 range vs verbatim, per ``smooth.construct.*``). Bases
     that ignore ``knots`` in mgcv (re/tp/gp/fs/sz/ad/te/ti/t2) ignore it here.
     """
-    # NA-drop on every column the smooths reference. For plain ``Name``
-    # args this is just the column name; for expressions we union in every
-    # ``Name.ident`` mentioned inside the AST so e.g. ``s(I(b.depth^.5))``
-    # NA-drops on ``b.depth`` (not on the not-yet-materialised
-    # ``"I(b.depth^0.5)"`` synth column).
     referenced: set[str] = set()
     for c in expanded.smooths:
         for a in c.args:
@@ -9332,23 +7890,12 @@ def materialize_smooths(
                     referenced.add(a.ident)
             else:
                 _collect_name_idents(a, referenced)
-        # ``by=`` may also be a non-Name expression in mgcv; the existing
-        # ``_eval_by_col`` only supports a small set of forms and pulls
-        # source columns out itself, so we skip walking it here.
     referenced &= set(data.columns)
     if referenced:
-        # Polars' ``drop_nulls`` only drops cells flagged null; matrix
-        # columns may carry NaN inside their ``Array`` cells, which mgcv's
-        # ``na.action=na.omit`` would also drop. ``prepare_design`` does the
-        # NaN-aware drop upstream, so here we only need cell-null dropping
-        # for the parametric / smooth-arg side.
         ref_no_matrix = [c for c in referenced if not is_matrix_col(data[c])]
         if ref_no_matrix:
             data = data.drop_nulls(subset=ref_no_matrix)
 
-    # Materialise smooth-arg expressions into synthesised columns. After
-    # this, every term name returned by ``_smooth_term_vars`` resolves
-    # against ``data.columns`` directly.
     expr_map = _smooth_arg_expr_map(expanded)
     if expr_map:
         data = _apply_smooth_arg_exprs(data, expr_map)
@@ -9360,9 +7907,6 @@ def materialize_smooths(
         matrix_arg: bool = False,
     ) -> list[SmoothBlock]:
         if call.fn in ("te", "ti", "t2"):
-            # mgcv threads the same knots= list to every marginal
-            # smooth.construct. hea consumes it for 1-D cr margins; tp
-            # margins ignore it (matches mgcv).
             if call.fn == "te":
                 return _build_te_smooth(call, d, matrix_arg=matrix_arg, knots=knots)
             if call.fn == "ti":
@@ -9435,9 +7979,6 @@ def materialize_smooths(
         call_i = calls[i]
         bs = None if base_call.fn in ("te", "ti", "t2") else _smooth_bs(base_call)
         if base_call.fn == "t2" or bs in ("fs", "sz"):
-            # t2's fit/predict-basis remap and fs/sz's factor-product
-            # bases don't fit the shared-raw-basis replay below; refuse
-            # rather than link with unshared bases (a different model).
             what = "t2" if base_call.fn == "t2" else f"bs={bs!r}"
             raise NotImplementedError(
                 f"{_smooth_label(call_i)}: id= linkage across {what} "
@@ -9445,10 +7986,6 @@ def materialize_smooths(
                 "class is not ported)."
             )
         if bs == "re":
-            # Indicator basis — no knots to share. Identical level sets
-            # give identical bases, so construct each member normally and
-            # let the fitters link the sp's; differing level sets would
-            # need mgcv's pooled (union-level) basis.
             base_levels = [
                 _factor_levels(data[v]) for v in _smooth_term_vars(base_call)
             ]
@@ -9531,9 +8068,6 @@ def materialize_smooths(
                 blocks = _dispatch_id_linked(call_group[i], i)
             elif mvars:
                 if call.fn == "t2":
-                    # t2()'s fit/predict basis remap (sm$Cp full absorb) has no
-                    # summation-convention port; the deferred matrix pipeline
-                    # would double-absorb. Honest raise, not a silent mis-fit.
                     raise NotImplementedError(
                         f"{_smooth_label(call)}: t2() with matrix arguments "
                         "(summation convention) is not supported; use te()."
@@ -9559,27 +8093,6 @@ def materialize_smooths(
     finally:
         _TERO_CV.reset(tero_token)
         _SPARSE_CONS_CV.reset(token)
-
-
-# ===========================================================================
-# Inlined ``hea.design`` — formula → fitting-ready design bundle.
-#
-# Sits one layer above the per-stage primitives above (parse / expand /
-# materialize / materialize_bars / materialize_smooths). ``prepare_design``
-# is the canonical "formula + data → (expanded, data, X, y, response)"
-# entry point that all model classes consume. LHS evaluation is here
-# (next to the RHS-eval primitives) so the formula compiler owns both
-# sides of the tilde.
-#
-# Lives here per the single-consumer rule: the model files are the only
-# consumers, and folding it in removes a circular import — as a separate
-# ``design`` module, ``formula`` needs lazy ``from .design import
-# long_form_view`` / ``is_matrix_col`` to break the cycle.
-#
-# Public symbols (``Design``, ``prepare_design``, ``normalize_data``,
-# ``is_matrix_col``, ``matrix_to_2d``, ``long_form_view``) are reachable as
-# ``from hea.formula import <name>`` per the inline convention.
-# ===========================================================================
 
 
 # ---------------------------------------------------------------------------
@@ -9707,15 +8220,8 @@ def long_form_view(
             continue
         s = data[col]
         if is_matrix_col(s):
-            # Other matrix cols not involved in this smooth — flatten too,
-            # so the long DataFrame has no ragged columns. Most smooths
-            # only see their own variables, so this rarely fires.
             a = matrix_to_2d(s)
             if a.shape != (n, m):
-                # Different m → can't co-exist in one long view; just
-                # repeat the first column. Will only matter if some
-                # later smooth tries to use this var simultaneously
-                # under the same long view, which we don't do.
                 long_cols[col] = np.repeat(a[:, 0], m)
             else:
                 long_cols[col] = a.reshape(n * m)
@@ -9754,24 +8260,11 @@ class Design:
     X: pl.DataFrame
     y: pl.Series
     response: str
-    # R model.matrix's ``assign``: per X column, 0 = intercept, i = the
-    # 1-based index into ``expanded.terms``. Exact term→column mapping
-    # (factors contribute several columns) — summary/anova pTerms use it.
     param_assign: list[int] = None
-    # Fast-lane numpy view of the design (additive; ``X`` stays the canonical
-    # polars contract). ``X_values`` is the F-contiguous ``(n, p)`` array that
-    # ``X`` was built from — the *same* buffer (``pl.from_numpy`` views it), so
-    # numpy consumers can read it directly and skip ``X.to_numpy()``. Treat it
-    # as read-only (mutating it would corrupt ``X``). ``None`` for an empty
-    # design or a ``Design`` built without the fast lane. ``X_names`` are the
-    # matching column labels (== ``X.columns``).
     X_values: np.ndarray | None = None
     X_names: list[str] | None = None
 
 
-# LHS function table — maps R-side function names to a polars-expr builder.
-# Mirrors what mgcv/base R accept on a formula LHS: arithmetic via
-# `_eval_lhs_expr` (UnaryOp/BinOp), plus these elementary transforms.
 _LHS_FUNCS: dict[str, callable] = {
     "log": lambda e: e.log(),
     "log2": lambda e: e.log(2.0),
@@ -9783,12 +8276,7 @@ _LHS_FUNCS: dict[str, callable] = {
 
 
 def _lhs_referenced_cols(node, columns: set[str]) -> set[str]:
-    """Walk an LHS AST and collect ``Name`` idents that exist in ``data``.
-
-    Used by ``prepare_design`` to decide which columns to NA-drop on
-    before evaluating the response. Names that don't match a column name
-    are silently skipped — they'll error later in ``_eval_lhs_expr``.
-    """
+    """Walk an LHS AST and collect ``Name`` idents that exist in ``data``."""
     out: set[str] = set()
 
     def visit(n):
@@ -9814,27 +8302,13 @@ def _lhs_referenced_cols(node, columns: set[str]) -> set[str]:
             for v in n.kwargs.values():
                 visit(v)
             return
-        # Anything else (Dot, Empty, Subscript, …) shouldn't appear on a
-        # response LHS — let _eval_lhs_expr raise the clearer error.
 
     visit(node)
     return out
 
 
 def _eval_lhs_expr(node, columns: set[str]) -> pl.Expr:
-    """Recursively evaluate an LHS AST as a polars expression.
-
-    Supported:
-      * ``Name``    → ``pl.col(name)``
-      * numeric ``Literal``
-      * ``+``/``-`` (unary), ``+``/``-``/``*``/``/``/``^``
-      * ``I(expr)`` (R's "as is" — just unwraps)
-      * one-arg numeric calls listed in ``_LHS_FUNCS``
-      * parens
-
-    Multi-column responses (``cbind(succ, fail)``) and arbitrary user
-    functions are not yet supported.
-    """
+    """Recursively evaluate an LHS AST as a polars expression."""
     if isinstance(node, Name):
         if node.ident not in columns:
             raise KeyError(f"LHS references unknown column {node.ident!r}")
@@ -9895,13 +8369,7 @@ def _na_mask_with_matrix_cols(
     data: pl.DataFrame,
     na_cols: set[str],
 ) -> np.ndarray:
-    """Boolean keep-mask for rows with no NA across ``na_cols``.
-
-    Polars' ``drop_nulls`` only drops rows where the *cell* is null; for
-    a matrix-typed (``Array(Float64, m)``) column, NaN *inside* the
-    array is kept. mgcv's ``na.omit`` equivalent drops a row if any
-    matrix entry is NaN, so we walk matrix columns row-wise.
-    """
+    """Boolean keep-mask for rows with no NA across ``na_cols``."""
     n = data.height
     keep = np.ones(n, dtype=bool)
     for col in na_cols:
@@ -9912,12 +8380,6 @@ def _na_mask_with_matrix_cols(
         else:
             arr = s.to_numpy()
             if np.issubdtype(arr.dtype, np.floating):
-                # ``to_numpy`` maps polars null → NaN for float/int columns, so
-                # ``isnan`` already catches *both* nulls and NaNs — the separate
-                # ``is_null`` pass (one extra O(n) scan + materialization per
-                # column) is redundant here. Only non-float columns
-                # (bool/string/categorical) need it, since their ``to_numpy``
-                # keeps nulls as objects rather than NaN.
                 keep &= ~np.isnan(arr)
             else:
                 keep &= ~s.is_null().to_numpy()
@@ -9925,15 +8387,7 @@ def _na_mask_with_matrix_cols(
 
 
 def _multivariate_lhs_specs(lhs) -> list[tuple[str, Node]] | None:
-    """Response columns for a multivariate LHS, else ``None``.
-
-    R's ``cbind(y1, y2, ...) ~ rhs`` fits a multivariate linear model (class
-    ``mlm``): each ``cbind`` argument is one response column, labelled by its
-    deparse (``y1``, ``log(a)``, …) exactly as R names the ``cbind`` result.
-    Returns ``[(label, node), ...]`` so ``prepare_design`` can build a 2-D
-    ``Design.y``. A bare single-name/expression LHS returns ``None`` (the
-    ordinary univariate path).
-    """
+    """Response columns for a multivariate LHS, else ``None``."""
     if isinstance(lhs, Call) and lhs.fn == "cbind" and not lhs.kwargs:
         return [(deparse(a), a) for a in lhs.args]
     return None
@@ -10015,8 +8469,6 @@ def prepare_design(
         )
     na_cols = (referenced_columns(expanded) | lhs_cols) & columns
     if na_cols and _na != "pass":
-        # Custom NA mask so that NaN inside ``Array(Float64, m)`` matrix
-        # columns triggers a row drop (polars' drop_nulls keeps these).
         keep = _na_mask_with_matrix_cols(data, na_cols)
         if not keep.all():
             if _na == "fail":
@@ -10027,35 +8479,17 @@ def prepare_design(
     else:
         data_clean = data  # "pass": keep NA rows untouched
 
-    # NOTE: a multivariate `cbind(y1, y2) ~ ...` LHS is NOT handled here — it
-    # stays an `_eval_lhs_expr` raise (below). Models that accept a two-column
-    # response intercept `cbind` *before* `prepare_design`: `glm`/`gam` rewrite
-    # it to R's binomial proportion+trials form, and `lm` routes a multivariate
-    # response to its own per-column `mlm` builder (`lm._init_mlm`). Returning a
-    # 2-D `Design.y` here would break models that rely on the raise as their
-    # "cbind unsupported" boundary (e.g. `bam`), so prepare_design keeps a
-    # single-column `Design.y` contract.
     if isinstance(f_parsed.lhs, Name):
         y = data_clean[f_parsed.lhs.ident]
     else:
-        # Evaluate the LHS expression over the cleaned frame and tag
-        # the resulting Series with the deparsed label so consumers
-        # (stats printers, residual formatters) see the original text.
         y = data_clean.select(
             _eval_lhs_expr(f_parsed.lhs, columns).alias(response_label)
         )[response_label]
 
-    # ``data_clean`` is already NA-resolved above (rows dropped for omit/fail,
-    # kept for pass), so the design build skips its own redundant NA scan
-    # (``drop_na=False``). ``_build_design`` hands back the F-order numpy design
-    # directly; we keep the polars ``X`` for the public ``Design.X`` contract
-    # *and* stash the same array as ``X_values`` so numpy consumers (the lm/glm
-    # fit + rank screen) skip the ``pl.from_numpy`` → ``to_numpy`` round-trip.
     with with_contrasts(contrasts):
         X_values, X_names, param_assign = _build_design(
             expanded, data_clean, drop_na=False, basis_state=basis_state
         )
-    # ``orient="row"`` required for the square-design case — see ``materialize``.
     X = (
         pl.DataFrame()
         if X_values is None

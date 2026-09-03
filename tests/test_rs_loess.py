@@ -57,7 +57,6 @@ def test_loess_eval_matches_python(n, degree, span):
 
 
 def test_loess_eval_matches_python_with_robust_weights():
-    # symmetric-family path feeds non-uniform M-step weights to the same kernel.
     n = 300
     g = np.random.default_rng(7)
     x = np.sort(g.uniform(0, 10, n))
@@ -70,7 +69,6 @@ def test_loess_eval_matches_python_with_robust_weights():
 
 
 def test_loess_eval_predict_grid_matches_python():
-    # queries distinct from the data x (the predict path).
     g = np.random.default_rng(11)
     x = np.sort(g.uniform(0, 10, 500))
     y = np.cos(x) + g.normal(0, 0.2, 500)

@@ -52,12 +52,7 @@ def _coerce_to_list(values):
 
 
 def _auto_accuracy(scaled_values, largest_with_cents):
-    """scales' auto-precision rule for currency / number formatters:
-
-    * any |x| >= ``largest_with_cents`` → accuracy 1 (no decimals)
-    * else if all values are exact integers → accuracy 1
-    * else accuracy 0.01 (two decimals)
-    """
+    """scales' auto-precision rule for currency / number formatters:"""
     finite = [v for v in scaled_values if v is not None]
     if not finite:
         return 1
@@ -80,8 +75,6 @@ def _format_number(x, accuracy, big_mark, decimal_mark):
         s = f"{round(rounded):,}"
     else:
         s = f"{rounded:,.{ndigits}f}"
-    # Swap default separators (',' and '.') for the requested ones.
-    # Use a placeholder so the swap is order-independent.
     if big_mark != "," or decimal_mark != ".":
         s = s.replace(",", "\x00").replace(".", decimal_mark).replace("\x00", big_mark)
     return s

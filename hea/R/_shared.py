@@ -22,10 +22,6 @@ import math
 import numpy as np
 import polars as pl
 
-# Moved to :mod:`hea._rfma` -- a leaf, so that consumers outside ``hea.R``
-# (``hea.formula``, ``hea.models.bam``) do not have to import this package to
-# reach it. Re-exported here because every ``hea.R`` module imports it from
-# ``._shared``.
 from .._rfma import _R_FMA, _rfma, _rfma_vec  # noqa: F401
 
 
@@ -97,8 +93,6 @@ class NamedVector:
         """Build from a name→value mapping (preserves insertion order)."""
         return cls(list(d.keys()), list(d.values()))
 
-    # ---- container protocol ----------------------------------------
-
     def __len__(self) -> int:
         return len(self.values)
 
@@ -109,23 +103,17 @@ class NamedVector:
         return item in self.names
 
     def __getitem__(self, key):
-        # Name lookup → scalar.
         if isinstance(key, str):
             i = self.names.index(key)
             return float(self.values[i])
 
-        # 0-based integer scalar → length-1 NamedVector. (hea is 0-based
-        # throughout — the translator's job is to shift R's 1-based
-        # indices when emitting Python, not the runtime container's.)
         if isinstance(key, (int, np.integer)) and not isinstance(key, bool):
             i = int(key)
             return NamedVector([self.names[i]], [self.values[i]])
 
-        # Python slice → 0-based exclusive (Python convention).
         if isinstance(key, slice):
             return NamedVector(self.names[key], self.values[key])
 
-        # Iterable of int / bool / str → fancy index, 0-based.
         if isinstance(key, (list, tuple, np.ndarray)):
             arr = np.asarray(key)
             if arr.dtype == bool:
@@ -148,8 +136,6 @@ class NamedVector:
                 )
 
         raise TypeError(f"NamedVector: invalid index type {type(key).__name__}")
-
-    # ---- arithmetic ------------------------------------------------
 
     def _binop(self, other, op):
         a = self.values
@@ -194,12 +180,9 @@ class NamedVector:
     def __pos__(self):
         return NamedVector(self.names, +self.values)
 
-    # ---- representation -------------------------------------------
-
     def __repr__(self) -> str:
         if not self.names:
             return "NamedVector()"
-        # R-style two-line print: names row, values row, column-aligned.
         vals = [_format_num(v) for v in self.values]
         widths = [max(len(n), len(v)) for n, v in zip(self.names, vals)]
         name_row = " ".join(n.rjust(w) for n, w in zip(self.names, widths))
@@ -209,8 +192,6 @@ class NamedVector:
     def to_dict(self) -> dict:
         """Convert to a plain ``{name: value}`` dict."""
         return dict(zip(self.names, self.values.tolist()))
-
-    # ---- numpy / polars interop -----------------------------------
 
     def __array__(self, dtype=None):
         """Allow ``np.asarray(nv)`` — return the values."""

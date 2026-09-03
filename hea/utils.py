@@ -29,14 +29,7 @@ _MAX_DECIMALS = 6
 
 
 def _format_numeric_column(vals: list) -> list[str]:
-    """Format a numeric column with a single column-wide decimal count.
-
-    Each value is converted to the shortest round-trip Python ``repr``; the
-    column-wide decimal count is the max observed there (capped at 6, matching
-    pandas' default ``display.precision``), and every value is then padded to
-    that count. Scientific-repr values (e.g. ``6.8e-07``) stay in scientific
-    form so they don't balloon to long fixed strings.
-    """
+    """Format a numeric column with a single column-wide decimal count."""
     out: list[str] = []
     reprs: list[tuple[str, float] | None] = []
     max_dec = 0
@@ -138,8 +131,6 @@ _MACHINE_EPS = float(
     np.finfo(float).eps
 )  # ≈ 2.22e-16, matches R's `.Machine$double.eps`
 
-# Magnitudes |x| < 10^_FIXED_LOWER print as scientific; otherwise fixed.
-# Matches R's ``format()`` rule of switching to scientific when ``expo < -4``.
 _FIXED_LOWER = -4
 
 

@@ -34,10 +34,7 @@ __all__ = ["lm"]
 
 
 def _row_frame(values: np.ndarray, columns: list[str]) -> pl.DataFrame:
-    """Build a 1-row pl.DataFrame from a flat numpy array + column names.
-
-    Constructs straight from the 2-D ``(1, p)`` array (≈2× faster than a
-    dict-of-singleton-lists for the per-fit coefficient frames)."""
+    """Build a 1-row pl.DataFrame from a flat numpy array + column names."""
     arr = np.asarray(values, dtype=float).reshape(1, -1)
     return pl.DataFrame(arr, schema=list(columns))
 
@@ -57,36 +54,21 @@ def _zapsmall(x: np.ndarray, digits: int) -> np.ndarray:
 
 
 def _subset_keep(n: int, subset) -> list[int]:
-    """0-based row indices kept by R's ``subset=`` argument.
-
-    Single source of truth for ``lm()`` / ``glm()`` / ``gmm()`` subsetting,
-    so the data frame and the ``weights`` vector get filtered identically.
-    Three forms: boolean mask (length == nrow), non-negative 0-based
-    indices (keep), or negative indices (drop). Negative indices use
-    Python's ``range(n) − k`` semantics: ``-1`` is the last row, ``-2``
-    the second-to-last, etc. Mixing non-negative and negative isn't
-    valid and is rejected.
-
-    R / dplyr ``subset=`` is 1-based; hea follows Python indexing.
-    """
+    """0-based row indices kept by R's ``subset=`` argument."""
     if isinstance(subset, (pl.Series, np.ndarray, list, tuple)):
         arr = np.asarray(subset)
         if arr.dtype == bool:
             return [int(i) for i in np.flatnonzero(arr)]
         ints = arr.astype(int)
     else:
-        # scalar
         ints = np.asarray([int(subset)])
     has_nonneg = bool((ints >= 0).any())
     has_neg = bool((ints < 0).any())
     if has_nonneg and has_neg:
         raise ValueError("subset=: cannot mix non-negative and negative indices")
     if has_neg:
-        # Negative indices drop the corresponding rows (Python convention:
-        # -1 is the last row).
         drop_set = {n + int(idx) for idx in ints.tolist()}
         return [i for i in range(n) if i not in drop_set]
-    # Non-negative indices: keep those rows.
     return [int(i) for i in ints.tolist()]
 
 
@@ -113,17 +95,7 @@ def _referenced_model_cols(formula: str, data: pl.DataFrame) -> list[str]:
 
 
 def _model_frame_keep_mask(formula: str, data: pl.DataFrame) -> np.ndarray:
-    """Boolean keep-mask matching ``prepare_design``'s ``na.omit`` policy.
-
-    Mirrors R's ``na.action = na.omit`` on the model frame: a row is
-    dropped when the response or any RHS-referenced column is NA. Used to
-    carry the ``weights`` vector through the *same* row-drops the design
-    matrix gets, so weights stay aligned to the rows actually fit (R keeps
-    weights inside the model frame, so this is automatic there).
-
-    Reuses ``prepare_design``'s own ``_na_mask_with_matrix_cols`` so the
-    mask can't drift from the rows ``prepare_design`` actually keeps.
-    """
+    """Boolean keep-mask matching ``prepare_design``'s ``na.omit`` policy."""
     na_cols = set(_referenced_model_cols(formula, data))
     if not na_cols:
         return np.ones(data.height, dtype=bool)
@@ -131,19 +103,7 @@ def _model_frame_keep_mask(formula: str, data: pl.DataFrame) -> np.ndarray:
 
 
 def _resolve_subset(subset, data: pl.DataFrame):
-    """Evaluate R's ``subset=`` to a form :func:`_subset_keep` accepts.
-
-    R evaluates ``subset`` as an expression in the data frame
-    (``subset = Area > 10``). hea accepts, in addition to a bool mask /
-    integer indices (returned untouched):
-
-    * a **polars expression** — ``pl.col("Area") > 10`` (native, full power);
-    * an **R-style string** — ``"Area > 10 & Elevation < 200"`` — run through
-      hea's R→Python translator first so R's operator precedence (``&`` /
-      ``|`` bind *looser* than comparisons, the opposite of Python) is
-      honored, then evaluated with the frame's columns bound as polars
-      Series. Returns a boolean ndarray for the string / expression forms.
-    """
+    """Evaluate R's ``subset=`` to a form :func:`_subset_keep` accepts."""
     if isinstance(subset, str):
         from ..translate import translate_r  # local: avoid import cycle
 
@@ -163,38 +123,13 @@ def _resolve_subset(subset, data: pl.DataFrame):
 def _drop_aliased_cols(
     X_df: pl.DataFrame, tol: float = 1e-7, *, values: np.ndarray | None = None
 ) -> list[str]:
-    """Identify linearly-dependent columns in a design matrix.
-
-    With the Rust kernel present, use R's **exact** ``dqrdc2`` pivot/rank
-    (``hea._rs`` ``dqrls``, ``dqrdc2.f``): the columns deferred
-    to pivot positions ``rank+1..p`` are precisely the ones R's ``lm`` aliases,
-    so hea drops bit-identically what R drops and the rank decision is
-    *deterministic* (immune to BLAS-bistable rank flakes). ``tol=1e-7`` is R's
-    ``lm.fit`` default.
-
-    Fallback (no Rust / ``HEA_NO_RS``): a left-to-right ``dgeqrf`` +
-    relative-tolerance heuristic — the *later* of two collinear columns is
-    flagged (``dqrdc2`` prefers earlier columns: intercept first, then RHS terms
-    in order), so the intercept isn't dropped when a later predictor is a
-    constant + centered copy. Either way ``df_residuals`` reflects effective rank.
-
-    ``values`` is an optional precomputed numpy view of ``X_df`` (the design's
-    F-order ``X_values`` fast lane); when supplied, the screen reads it directly
-    and skips ``X_df.to_numpy()``. It is read-only here (``dgeqrf`` does not
-    overwrite its input), so reusing the buffer shared with ``X_df`` is safe.
-    """
+    """Identify linearly-dependent columns in a design matrix."""
     if X_df.height == 0 or X_df.width == 0:
         return []
     X = values if values is not None else X_df.to_numpy().astype(float)
     cols = X_df.columns
     p = X.shape[1]
 
-    # Fast screen (always): the in-order dgeqrf R-diagonal. The common case —
-    # a clearly full-rank design — is decided here with no Rust call, so the hot
-    # path keeps its speed (the dqrdc2 factorization is ~2-3× the Accelerate one,
-    # per the receipt). A column is "suspect" when its pivot diagonal has
-    # collapsed relative to the column's original norm (R's dqrdc2 negligibility,
-    # relative tol = 1e-7) — only then is an *exact* rank/pivot decision needed.
     qr_c, _tau, _wk, _info = dgeqrf(X)
     diag_abs = np.abs(np.diag(qr_c))
     if diag_abs.size == 0:
@@ -206,25 +141,16 @@ def _drop_aliased_cols(
         return []  # clearly full rank — fast path
 
     if _linalg._rs_dqrls_rank is not None:
-        # Rank-deficient → resolve EXACTLY with R's dqrdc2 (Rust): the columns
-        # deferred to pivot positions rank+1..p are bit-identically R's aliased
-        # set, and the decision is deterministic (no BLAS-bistable rank flake).
-        # dqrls_rank is the lean path — rank+pivot only, no QR/coef marshalling.
         rank, pivot = _linalg.dqrls_rank(X, tol)
         if rank >= p:
             return []
         return [cols[i] for i in sorted(int(pivot[j]) - 1 for j in range(rank, p))]
-    # no Rust: the strict-tolerance heuristic (later of two collinear cols flagged)
     tol_h = max(float(diag_abs.max()), 1.0) * np.finfo(float).eps * max(X.shape)
     return [cols[i] for i, v in enumerate(diag_abs) if v <= tol_h]
 
 
 def _lowess(x, y, frac=2 / 3, it=3):
-    """Cleveland's LOWESS — local linear smoother with robustness reweighting.
-
-    Matches the smoother R uses in `panel.smooth` for `plot.lm`.
-    Returns (x_sorted, y_smooth). O(n^2) memory; pass `smooth=False` if n is huge.
-    """
+    """Cleveland's LOWESS — local linear smoother with robustness reweighting."""
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
     n = len(x)
@@ -295,11 +221,7 @@ def _qq_plot(
     ylabel="Standardized Residuals",
     title="Normal Q-Q",
 ):
-    """Normal Q-Q on ax with quartile-based reference line, label top |vals|.
-
-    `labels` optionally maps an index to a custom annotation string;
-    otherwise the integer index is used.
-    """
+    """Normal Q-Q on ax with quartile-based reference line, label top |vals|."""
     vals = np.asarray(vals, dtype=float)
     n = len(vals)
     if n < 2:
@@ -361,8 +283,6 @@ class SummaryLm:
         self._model = model
         self._digits = digits
         self._cor = cor
-        # Components in R's summary.lm order — names use ``.`` like R
-        # so ``["cov.unscaled"]`` etc. round-trip in translated code.
         self.sigma = float(np.sqrt(model.sigma_squared))
         self.r_squared = float(model.r_squared)
         self.adj_r_squared = float(model.r_squared_adjusted)
@@ -371,17 +291,9 @@ class SummaryLm:
             if model.fstats is not None
             else None
         )
-        # R: ``summary.lm`` sets ``ans$df <- c(p, rdf, NCOL(Qr$qr))`` — that's
-        # (rank incl. intercept, residual df, *total* columns incl. aliased),
-        # NOT (df_model, rdf, kept_cols). ``model.p`` is the kept-column count,
-        # which equals the rank (hea drops aliased columns up front), and
-        # ``len(model._full_names)`` is the pre-drop column total.
         self.df = (model.p, model.df_residuals, len(model._full_names))
         self.cov_unscaled = np.asarray(model.XtXinv)
         self.residuals = model.residuals
-        # Coefficients matrix — R's ``summary(lm)$coef`` is a numeric
-        # matrix; we expose it as a NumPy 2D array with row/col labels
-        # held alongside.
         bhat = np.asarray(model._bhat_arr, dtype=float)
         se = np.asarray(model._se_bhat_arr, dtype=float)
         t = np.divide(bhat, se, out=np.full_like(bhat, np.nan), where=se > 0)
@@ -389,12 +301,7 @@ class SummaryLm:
         self.coefficients = np.column_stack([bhat, se, t, p])
         self._coef_rownames = list(model.column_names)
         self._coef_colnames = ("Estimate", "Std. Error", "t value", "Pr(>|t|)")
-        # R's ``summary(lm)$aliased`` — a logical over the *full* column set
-        # flagging coefficients dropped for singularity (NA in coef()). The
-        # ``$coefficients`` matrix above holds only the estimable rows, as in R.
         self.aliased = ~np.isfinite(np.asarray(model._bhat_disp, dtype=float))
-
-    # ---- R-style ``$`` access (partial name matching) ---------------
 
     _ALIASES: ClassVar[dict[str, str]] = {
         "sig": "sigma",
@@ -410,8 +317,6 @@ class SummaryLm:
     }
 
     def __getitem__(self, key):
-        # R's partial-name matching: ``$sig`` resolves to ``$sigma`` if
-        # exactly one alias has it as a prefix.
         key = str(key)
         if key in self._ALIASES:
             return getattr(self, self._ALIASES[key])
@@ -423,7 +328,6 @@ class SummaryLm:
         raise KeyError(f"summary(lm) has no component {key!r}")
 
     def __getattr__(self, name):
-        # ``.sig`` partial-match via attribute access too.
         try:
             return self.__getitem__(name)
         except KeyError as e:
@@ -457,7 +361,6 @@ class SummaryMlm:
 
     def __getitem__(self, key):
         if isinstance(key, int):
-            # R's summary(m)[[i]] is 1-based; allow Python negatives too.
             return self._summaries[self._names[key - 1 if key > 0 else key]]
         k = key[len("Response ") :] if str(key).startswith("Response ") else key
         return self._summaries[k]
@@ -472,17 +375,11 @@ class SummaryMlm:
 
 
 def _format_summary_lm(model, digits: int, cor: bool) -> str:
-    """Build the R-style ``summary.lm`` print block.
-
-    Pulled out of :meth:`lm.summary` so :class:`SummaryLm` can call it
-    from ``__repr__`` without rebuilding the dependency on ``model``.
-    """
+    """Build the R-style ``summary.lm`` print block."""
     docstring = f"Formula: {model.formula}\n\n"
     docstring += "\n".join(model._residuals_lines(digits=digits))
     docstring += "\n\n" + model._coef_header() + "\n"
 
-    # Display-width arrays: equal to the fit columns normally, widened to the
-    # full column set with NA for aliased columns when rank-deficient.
     bhat_disp = model._bhat_disp
     se_disp = model._se_disp
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -513,8 +410,6 @@ def _format_summary_lm(model, digits: int, cor: bool) -> str:
         }
     )
     num_cols = ("Estimate", "Std. Error", ci_low_col, ci_hi_col, "t value", "Pr(>|t|)")
-    # Aliased rows print "NA" in every numeric column (R's printCoefmat
-    # ``na.print="NA"``); the formatters emit "NaN" for those NaN entries.
     aliased = ~np.isfinite(np.asarray(bhat_disp, dtype=float))
     if aliased.any():
         res = res.with_columns(
@@ -570,10 +465,6 @@ class lm:
         singular_ok: bool = True,
         offset=None,
     ):
-        # R: ``lm(..., method="model.frame")`` returns the *model frame*, not a
-        # fit. A constructor can't return a non-``lm``, so intercept in
-        # ``__new__`` (standard factory idiom): returning a non-instance skips
-        # ``__init__``. Every other ``method`` builds an ``lm`` as usual.
         if method == "model.frame":
             return cls._model_frame(formula, data, subset=subset, na_action=na_action)
         return super().__new__(cls)
@@ -618,9 +509,6 @@ class lm:
         offset: np.ndarray | None = None,
     ):
 
-        # R's `cbind(y1, y2, ...) ~ rhs` fits a multivariate linear model
-        # (class "mlm") — m independent fits sharing one X/QR. Detect it from
-        # the LHS and route to the mlm builder (which wraps m per-column `lm`s).
         from hea.formula import _multivariate_lhs_specs
         from hea.formula import parse as _parse
 
@@ -642,7 +530,6 @@ class lm:
             return
         self._is_mlm = False
 
-        # meta
         self.formula = formula
         # R supports only method="qr" for the fit (method="model.frame" is
         # intercepted in __new__). Any other value warns and falls back to qr
@@ -658,12 +545,6 @@ class lm:
         self.method = method
         self.contrasts = contrasts
 
-        # R's ``na.action``: how to treat rows with NA in a referenced
-        # column. ``omit`` (default) drops them — hea's established
-        # behaviour, matching R's default. ``fail`` errors on any NA.
-        # ``exclude`` fits on the complete cases but pads the *accessors*
-        # (resid / fitted / predict) back to the model-frame length with NA
-        # (see _na_pad). Accept R-style aliases.
         _na_norm = {
             "omit": "omit",
             "na.omit": "omit",
@@ -681,11 +562,6 @@ class lm:
                 f"got {na_action!r}"
             )
 
-        # ``weights`` are validated against the input frame, then carried
-        # through the *same* ``subset=`` + ``na.omit`` row-drops the data
-        # gets, so they stay aligned to the rows actually fit. R keeps
-        # weights inside the model frame, so this alignment is automatic
-        # there; hea takes a bare vector, so we replay the row-drops on it.
         if weights is not None:
             w_arr = np.asarray(weights, dtype=float).reshape(-1)
             if w_arr.shape[0] != data.height:
@@ -693,16 +569,10 @@ class lm:
                     "Length of weights should be the same as the number of rows in the dataframe"
                 )
             if not np.all(np.isfinite(w_arr)) or np.any(w_arr < 0.0):
-                # R: lm.wfit() — `any(w < 0 | is.na(w))` is a hard error.
                 raise ValueError("missing or negative weights not allowed")
         else:
             w_arr = None
 
-        # ``offset=`` (R's lm ``offset`` argument): a length-n vector added to
-        # the linear predictor. R sums it with any in-formula ``offset(...)``
-        # term; we carry it through the same ``subset=`` + ``na.omit`` row-drops
-        # as ``weights`` so it stays aligned to the fit rows, then fold it into
-        # ``self._offset`` (see the offset summation below).
         if offset is not None:
             off_arg = np.asarray(offset, dtype=float).reshape(-1)
             if off_arg.shape[0] != data.height:
@@ -712,10 +582,6 @@ class lm:
         else:
             off_arg = None
 
-        # R's ``subset=`` filters rows before fitting. Accepts an R-style
-        # expression (string / polars expr) evaluated in the frame, a bool
-        # mask, or 0-based keep / negative drop indices (see _resolve_subset
-        # / _subset_keep). Filter weights in lockstep through the same index.
         if subset is not None:
             subset = _resolve_subset(subset, data)
             keep = _subset_keep(data.height, subset)
@@ -725,14 +591,6 @@ class lm:
             if off_arg is not None:
                 off_arg = off_arg[keep]
 
-        # na.action keep-mask over the (post-subset) frame: which rows survive
-        # na.omit. Drives ``fail`` (error), ``exclude`` (output padding), and
-        # the weight/offset alignment below. ``prepare_design`` recomputes the
-        # same na.omit internally, so for the common path (omit/pass with no
-        # weights/offset) the lm-side mask is never read — skip it and avoid the
-        # duplicate ``_na_mask_with_matrix_cols`` pass (it is the redundant work
-        # the fit profile flagged). The ``exclude``-padding readers all guard on
-        # ``na_action == "exclude"`` first, so ``None`` is safe otherwise.
         self._n_full = data.height  # model-frame length (post-subset, pre-na)
         need_mask = (
             self.na_action in ("fail", "exclude")
@@ -744,7 +602,6 @@ class lm:
             if self.na_action == "fail" and not na_keep.all():
                 raise ValueError("missing values in object")  # R: na.fail
             if self.na_action == "pass":
-                # R's na.pass: keep every row (NA flows into X/y; fit may be NaN).
                 na_keep = np.ones(data.height, dtype=bool)
             self._na_mask = na_keep
             if w_arr is not None and not na_keep.all():
@@ -758,8 +615,6 @@ class lm:
         self.weights = w_arr
         self._offset_arg = off_arg
 
-        # R's predvars: capture each poly/bs/ns/scale call's training params at
-        # fit so predict() replays them on new data instead of recomputing.
         self._basis_state: dict = {}
         d = prepare_design(
             formula,
@@ -772,23 +627,11 @@ class lm:
         self._design_data = d.data
         self.X = d.X
         self.y = d.y  # pl.Series
-        # F-order numpy fast lane: the same buffer ``self.X`` (polars) views, so
-        # the rank screen + fit read it directly instead of round-tripping
-        # through ``self.X.to_numpy()``. Read-only (mutating it corrupts
-        # ``self.X``); ``_qr`` row-scales into a fresh array, never in place.
-        # ``None`` if the design is empty; reset below if columns get dropped.
         self._X_values = d.X_values
 
-        # R's na.pass keeps NA rows in the model frame; lm.fit then rejects a
-        # non-finite design ("NA/NaN/Inf in 'x'"). Match that intentionally
-        # (rather than tripping over it in the QR below).
         if self.na_action == "pass" and not np.all(np.isfinite(self.X.to_numpy())):
             raise ValueError("NA/NaN/Inf in 'x'")
 
-        # Column → term-assignment map (R's model.matrix ``assign``): 0 for
-        # the intercept, i for the columns of the i-th RHS term. Captured
-        # keyed by name so it survives the rank-deficiency column drop below,
-        # and used by predict(type="terms") to group columns into terms.
         _assign = getattr(d, "param_assign", None)
         self._col_assign = (
             {c: int(a) for c, a in zip(self.X.columns, _assign)}
@@ -811,25 +654,15 @@ class lm:
             self.X, values=self._X_values
         )
         if self._aliased_cols and not singular_ok:
-            # R: lm.fit(singular.ok=FALSE) — refuse rank-deficient designs.
             raise ValueError("singular fit encountered")
-        # Keep the full (pre-drop) design when rank-deficient: predict() needs
-        # it to flag non-estimable newdata rows (rows that leave the training
-        # row space). ``None`` for a full-rank fit — no estimability check then.
         self._X_full_train = None
         if self._aliased_cols:
             self._X_full_train = self.X.to_numpy().astype(float)
             keep = [c for c in self.X.columns if c not in self._aliased_cols]
             self.X = self.X.select(keep)
-            # The kept-column subset no longer matches the full F-order buffer;
-            # the fit below falls back to ``self.X.to_numpy()`` for this design.
             self._X_values = None
 
         self.column_names = list(self.X.columns)
-        # Full (pre-drop) column set + the kept→full index map. The fit runs
-        # on the estimable (kept) columns; the *public* coefficient views are
-        # widened back to the full set with NA for the aliased columns, so
-        # coef(m)["<aliased>"] resolves and summary prints the NA row (R parity).
         self._full_names = _full_cols
         self._kept_idx = [_full_cols.index(c) for c in self.column_names]
         self.feature_names = (
@@ -838,9 +671,6 @@ class lm:
             else self.column_names
         )
 
-        # Common full-rank path: reuse the F-order design buffer directly (no
-        # ``to_numpy`` round-trip). ``_X_values`` is float64 + F-contiguous by
-        # construction; the ``dtype`` guard is a cheap no-op safety net.
         if self._X_values is not None:
             X = self._X_values
             if X.dtype != np.float64:
@@ -853,67 +683,36 @@ class lm:
             n,
             _p,
         ) = X.shape  # n_samples x n_features (intercept included if available)
-        # Prior weights as a length-n vector (all-ones when unweighted);
-        # ``self.weights`` was already aligned to X's rows above. The
-        # solvers / leverage consume the diagonal ``W``.
         self._w = (
             np.ones(n)
             if self.weights is None
             else np.asarray(self.weights, dtype=float)
         )
-        # Effective sample size: R drops zero-weight rows from the fit, so
-        # df / logLik / adjusted-R² count only rows with w > 0 (n_eff == n
-        # whenever unweighted or all weights are positive).
         self._n_eff = (
             n if self.weights is None else int(np.count_nonzero(self._w > 0.0))
         )
-        # NB: R never forms the n×n weight matrix W; lm.wfit row-scales by √w.
-        # We carry only the length-n diagonal ``self._w`` (O(n), not O(n²)).
 
-        # model degree of freedom
         self.df_model = self.p - 1 if "(Intercept)" in self.column_names else self.p
 
-        # residual degrees of freedom (n_eff - p)
         self.df_residuals = (
             self._n_eff - self.df_model - 1
             if "(Intercept)" in self.column_names
             else self._n_eff - self.df_model
         )
 
-        # total parameter count (p fixed + 1 residual variance), for the
-        # generic AIC() comparison table and AIC/BIC formulas below.
         self.npar = self.p + 1
 
-        # Sum any `offset(...)` atoms from the formula. R's lm() solves
-        # (y - offset) ~ X, then adds the offset back to ŷ — so β̂ has the
-        # same df as without offset. expanded.offsets holds the inner ASTs.
         off = np.zeros(n)
         for off_node in d.expanded.offsets:
             off = off + _eval_atom(off_node, d.data).values.flatten().astype(float)
-        # R's lm() adds the ``offset=`` argument on top of any in-formula
-        # offset(...) term (the two sum). ``off_arg`` is already aligned to the
-        # fit rows by the subset + na.omit drops above. NOTE: predict() on *new*
-        # data re-evaluates only formula offsets (R replays object$call$offset);
-        # the constructor ``offset=`` is reflected in fitted values / residuals
-        # but not in predict(newdata=...).
         if self._offset_arg is not None:
             off = off + self._offset_arg
         self._offset = off
         y_solve = y - off
 
-        ##############
-        # Estimation #
-        ##############
-
-        # Single weighted QR (R's lm.wfit / Cdqrls) — yields β̂, the R factor
-        # (for chol2inv), the length-n effects (Qᵀ√w·y), and the Householder
-        # qraux, all stored below as R's lm components.
         bhat, self._qr_R, self.effects, self.qraux = self.compute_bhat(
             X, y_solve, self._w
         )
-        # R's lm$rank / $assign. hea drops aliased columns at fit time, so the
-        # kept design is full rank → rank == p; assign is the model.matrix
-        # column→term map over the FULL (pre-drop) column set (R parity).
         self.rank = self.p
         self.assign = (
             np.array([self._col_assign[c] for c in self._full_names])
@@ -925,38 +724,23 @@ class lm:
         from ..R import NamedVector
 
         self.bhat = _row_frame(self._bhat_arr, self.column_names)
-        # R-canonical alias: ``m$coef`` is a named numeric vector, so we
-        # expose the same on the Python side. ``.bhat`` keeps its 1-row
-        # DataFrame shape for internal callers that want a frame.
         self.coef = NamedVector(self.column_names, self._bhat_arr)
         self.coefficients = self.coef
 
-        # compute predicted (fitted values ŷ = Xβ̂)
         self.yhat = self.compute_yhat()
         yhat = self.yhat["fit"].to_numpy().astype(float)
 
-        # compute residuals ϵ̂
         residuals = y - yhat
         self._residuals_arr = residuals
         self.residuals = pl.DataFrame({"residuals": residuals})
 
-        # compute residual sum of squares (RSS). Weighted by the prior
-        # weights — R's summary.lm / deviance.lm use Σ wᵢ·rᵢ² for the
-        # residual variance, and zero-weight rows drop out naturally.
-        # ``self._w`` is all-ones when unweighted, so this is the ordinary
-        # Σ rᵢ² in that case.
         self.rss = float(np.sum(self._w * residuals * residuals))
 
-        # compute standard deviation of model coefficients
-        # aka Residual SE: σ^2 = RSS / df_residuals. A saturated fit
-        # (df_residuals == 0, e.g. n == rank) has no residual variance —
-        # R returns NaN (and NaN SEs / t / p) rather than erroring.
         self.sigma_squared = (
             self.rss / self.df_residuals if self.df_residuals > 0 else float("nan")
         )
         self.sigma = np.sqrt(self.sigma_squared)
 
-        # compute standard error for β̂
         self.XtXinv = self.compute_XtXinv()
 
         se_bhat, V_bhat = self.compute_se_bhat()
@@ -964,25 +748,12 @@ class lm:
         self._se_bhat_arr = np.asarray(se_bhat).reshape(-1)
         self.se_bhat = _row_frame(self._se_bhat_arr, self.column_names)
 
-        # hat-matrix diagonal h_ii (leverages) and internally studentized
-        # residuals are LAZY (``leverage`` / ``std_residuals`` cached
-        # properties below): only diagnostics (hatvalues/rstandard/rstudent/
-        # cooks/dffits/influence) and plot_* read them, never the fit/predict/
-        # summary path, so a plain fit does not pay the O(n·p²) hat matmul.
-        # R is lazy here too (lm() omits leverage; hat()/lm.influence compute it).
-
-        # compute confidence interval for β̂
         self.ci_bhat = self.compute_ci_bhat()
 
-        # compute t values of model coefficients
         self.t_values = self.compute_t_values()
 
-        # p values
         self.p_values = self.compute_p_values()
 
-        # Display-width coefficient views default to the estimable (fit)
-        # columns; widen to the full column set with NA for aliased columns
-        # when the design was rank-deficient (R keeps every column in coef()).
         self._bhat_disp = self._bhat_arr
         self._se_disp = self._se_bhat_arr
         self._p_disp = np.asarray(self.p_values.row(0), dtype=float)
@@ -990,32 +761,20 @@ class lm:
         if self._aliased_cols:
             self._widen_public_coefs()
 
-        # compute r2 and r2adjusted, aka coefficient of determination
-        # aka percentage of variance explained. Noted that the formulae
-        # are different for cases with and without intercept
         (
             self.tss,
             self.r_squared,
             self.r_squared_adjusted,
         ) = self.compute_goodness_of_fit()
 
-        # compute F-statistic; p-value via the ported nmath _dist.pf (no scipy)
-        # H0: all coefficients == 0
-        # H1: at least one coefficient != 0
         self.fstats, self.f_p_value = self.compute_fstats()
 
-        # compute log-likelihood
         self.loglike = self.compute_loglikelihood()
 
-        # compute AIC (Akaike Information criterion): -2logL + 2p, p is the total number of parameters
         self.AIC = self.compute_AIC()
 
-        # compute BIC (Bayes Information criterian): -2logL + p * log(n)
         self.BIC = self.compute_BIC()
 
-    # ------------------------------------------------------------------
-    # Multivariate response (R's "mlm": cbind(y1, y2, ...) ~ rhs)
-    # ------------------------------------------------------------------
     def _init_mlm(
         self,
         formula,
@@ -1064,8 +823,6 @@ class lm:
             raise ValueError(f"duplicate response columns in {resp_names}")
         self._response_names = resp_names
 
-        # Replicate lm's subset → na-omit → weights/offset alignment, but
-        # na-omit JOINTLY over every response (R's shared model frame).
         w_arr = (
             None if weights is None else np.asarray(weights, dtype=float).reshape(-1)
         )
@@ -1095,9 +852,6 @@ class lm:
         na_keep = _model_frame_keep_mask(formula, data)
         if self.na_action == "fail" and not na_keep.all():
             raise ValueError("missing values in object")
-        # Model-frame length (post-subset, pre-na) + the joint keep-mask, so
-        # na.action="exclude" can pad the combined n×m accessors back to full
-        # length with NA (R's naresid on an mlm). ``omit`` ignores both.
         self._n_full = data.height
         self._na_mask = na_keep
         if not na_keep.all():
@@ -1107,8 +861,6 @@ class lm:
             if off_arr is not None:
                 off_arr = off_arr[na_keep]
 
-        # Materialize any expression responses (cbind(log(a), b)) into named
-        # columns so each per-column sub-formula can reference them.
         cols = set(data.columns)
         add = {}
         for lbl, node in mv_specs:
@@ -1119,7 +871,6 @@ class lm:
         if add:
             data = data.with_columns([pl.Series(k, v) for k, v in add.items()])
 
-        # Per-column fits on the shared clean frame (na-omit now a no-op).
         self._mlm_models = {
             lbl: lm(
                 f"`{lbl}` ~ {rhs_src}",
@@ -1136,7 +887,6 @@ class lm:
         self.response_models = self._mlm_models
         m0 = self._mlm_models[resp_names[0]]
 
-        # Shared design pieces (identical across columns).
         self.data = data
         self.column_names = m0.column_names
         self.X = m0.X
@@ -1144,7 +894,6 @@ class lm:
         self.df_residuals = m0.df_residuals
         self.df_residual = m0.df_residuals
 
-        # Combined accessors.
         self._coef_matrix = np.column_stack(
             [self._mlm_models[r]._bhat_arr for r in resp_names]
         )
@@ -1311,22 +1060,10 @@ class lm:
         residuals = self._residuals_arr
         n = len(residuals)
 
-        # X and w are constant across draws, so the QR-WLS factorisation
-        # (√w·X, qr) is constant too — the per-iter ``compute_bhat`` call
-        # would otherwise redo it on every draw. Hoist it and keep the
-        # per-iter ``√w·y_star``, ``Q.T @ ·``, ``solve_triangular`` exactly as
-        # ``_qr`` does, so each bhat_star matches the loop's arithmetic
-        # bit-for-bit. (cholesky(diag(w)) == diag(√w), so this is identical to
-        # the former L.T@· form for positive weights, and robust to zero w.)
         Xhat = sw[:, None] * X
         Q, R = qr(Xhat, mode="economic")
         X_bhat_flat = (X @ bhat).flatten()
 
-        # ``choice(..., size=(B, n))`` produces the same draws and advances the
-        # RNG by the same amount as B sequential ``size=n`` calls (verified on
-        # the legacy MT19937), so this batched sample is RNG-byte-equivalent to
-        # the unrolled loop. ``seed=None`` keeps the legacy global-``np.random``
-        # path; an int / Generator gives a reproducible local stream.
         if seed is None:
             gen = np.random
         elif isinstance(seed, np.random.Generator):
@@ -1366,12 +1103,6 @@ class lm:
         df_q=None,
         pred_var=None,
     ):
-        # ``res_var`` / ``df_q`` override the residual variance σ² and the
-        # interval-quantile df (R's ``scale²`` / ``df``); ``None`` → the fit's
-        # own σ² / df.residual. ``pred_var`` overrides the prediction-interval
-        # variance (R's ``pred.var``; default = ``res_var``). (``sigma_squared``
-        # isn't set yet during the fit-time ``compute_yhat()`` call, so it's
-        # only read in the ``se_fit`` / interval branches below.)
         if Xnew is None:
             X = self.X.to_numpy().astype(float)
             off = self._offset
@@ -1382,20 +1113,14 @@ class lm:
                 .to_numpy()
                 .astype(float)
             )
-            # Re-evaluate formula offsets against newdata, mirroring R's
-            # predict.lm. Offsets are zero unless the formula uses offset(...).
             off = np.zeros(X.shape[0])
             for off_node in self._expanded.offsets:
                 off = off + _eval_atom(off_node, Xnew).values.flatten().astype(float)
-        # compute predicted or fitted values ŷ = Xβ̂ + offset
         bhat = self._bhat_arr[:, None]
         yhat_vals = (X @ bhat).flatten() + off
         yhat = pl.DataFrame({"fit": yhat_vals})
 
         if se_fit:
-            # R's predict.lm `se.fit`: SE of the fitted mean,
-            # √(res_var·xᵀ(XᵀWX)⁻¹x). Same quantity the confidence interval
-            # uses (and reported even when interval="prediction").
             rv = self.sigma_squared if res_var is None else res_var
             var_mean = np.einsum("ij,jk,ik->i", X, self.XtXinv, X) * rv
             yhat = yhat.with_columns(
@@ -1406,8 +1131,6 @@ class lm:
             case None:
                 return yhat
             case True:
-                # Both CI and PI in one frame — column names are prefixed
-                # so the two interval kinds don't collide.
                 ci_yhat = self.compute_ci_yhat(yhat, Xnew, alpha, res_var, df_q).rename(
                     {"lwr": "ci_lwr", "upr": "ci_upr"}
                 )
@@ -1441,7 +1164,6 @@ class lm:
                 .astype(float)
             )
 
-        # Var(ŷ) = res_var · x'(X'X)⁻¹x  ⇒  se = √diag(res_var · X(X'X)⁻¹Xᵀ).
         var_mean = np.einsum("ij,jk,ik->i", X, self.XtXinv, X) * rv
         se_yhat_mean = np.sqrt(np.maximum(var_mean, 0.0))
         yhat_vals = yhat["fit"].to_numpy().astype(float)[:, None]
@@ -1471,8 +1193,6 @@ class lm:
                 .astype(float)
             )
 
-        # Var(y_new − ŷ) = pred_var + res_var·x'(X'X)⁻¹x  (R: ip + pred.var,
-        # pred.var defaulting to res_var).
         var_mean = np.einsum("ij,jk,ik->i", X, self.XtXinv, X) * rv
         pv = rv if pred_var is None else pred_var
         se_yhat = np.sqrt(pv + np.maximum(var_mean, 0.0))
@@ -1489,20 +1209,11 @@ class lm:
         )
 
     def compute_t_values(self):
-        # R's summary.lm forms `est/se` directly. For an essentially perfect
-        # fit the SE collapses to (near) zero; R's QR leaves ~1e-17 dust so it
-        # gets a finite-huge t, but with an exactly-zero SE the ratio is the
-        # honest ±Inf / NaN limit. R's division is silent at the C level (it
-        # only warns separately via "essentially perfect fit"), so suppress
-        # numpy's 0/0 and x/0 warnings to match that silent ratio.
         with np.errstate(divide="ignore", invalid="ignore"):
             t_values = self._bhat_arr / self._se_bhat_arr
         return _row_frame(t_values, self.column_names)
 
     def compute_p_values(self):
-        # coefficient p-values via the ported nmath _dist.pt (no scipy)
-        # H0: βi==0
-        # H1: βi!=0
         with np.errstate(divide="ignore", invalid="ignore"):
             t_arr = self._bhat_arr / self._se_bhat_arr
         p_values = 2 * _dist.pt(np.abs(t_arr), self.df_residuals, lower_tail=False)
@@ -1553,21 +1264,13 @@ class lm:
     def compute_goodness_of_fit(self):
 
         y = self.y.to_numpy().astype(float)
-        # Weighted TSS — R's summary.lm uses the weighted mean ȳ_w =
-        # Σwy/Σw and tss = Σ w (y − ȳ_w)², so that tss = mss + rss and
-        # R² = 1 − rss/tss = mss/(mss+rss) matches R exactly. With the
-        # all-ones weight vector this is the ordinary (unweighted) TSS.
         w = self._w
 
-        # Adjusted R² divides by df_residuals — NaN for a saturated fit
-        # (df_residuals == 0), matching R.
         df_ok = self.df_residuals > 0
         if "(Intercept)" in self.column_names:
             ybar = float(np.sum(w * y) / np.sum(w))
             tss = float(np.sum(w * (y - ybar) ** 2))
-            # Eq: r2 = 1 - RSS / TSS = 1 -  sum(w (ŷ - yi)**2) / sum(w (y - ȳ)**2)
             r_squared = float(1 - self.rss / tss)
-            # Eq: r2adj = 1 - (1 - r2) * (n_eff - 1) / df_residuals
             r_squared_adjusted = (
                 1 - (1 - r_squared) * (self._n_eff - 1) / self.df_residuals
                 if df_ok
@@ -1575,9 +1278,7 @@ class lm:
             )
         else:
             tss = float(np.sum(w * y**2))
-            # Eq: r2 = 1 - RSS / TSS = 1 -  sum(w (ŷ - yi)**2) / sum(w y**2)
             r_squared = float(1 - self.rss / tss)
-            # Eq: r2adj = 1 - (1 - r2) * n_eff / df_residuals
             r_squared_adjusted = (
                 1 - (1 - r_squared) * self._n_eff / self.df_residuals
                 if df_ok
@@ -1587,15 +1288,7 @@ class lm:
         return tss, r_squared, r_squared_adjusted
 
     def compute_fstats(self):
-        # No F-statistic for an intercept-only model (df_model == 0) or a
-        # saturated fit (df_residuals == 0, where the denominator vanishes).
         if self.df_model != 0 and self.df_residuals > 0:
-            # R's summary.lm divides msr/mse with no rss>0 guard, so an exact
-            # fit (rss == 0 — which a solver that nails a perfectly collinear
-            # response hits, where R's QR usually leaves a tiny non-zero rss)
-            # gives F = +inf via IEEE division, not a Python ZeroDivisionError.
-            # Mirror R's plain formula with numpy float division (as the
-            # t-values just above already do for se == 0).
             msr = (self.tss - self.rss) / self.df_model
             mse = self.rss / self.df_residuals
             with np.errstate(divide="ignore", invalid="ignore"):
@@ -1608,14 +1301,8 @@ class lm:
         return fstats, f_p_value
 
     def compute_loglikelihood(self):
-        # R's logLik.lm (Gaussian):
-        #   0.5·(Σ log wᵢ − N·(log 2π + 1 − log N + log Σ wᵢ rᵢ²))
-        # with N = #{wᵢ ≠ 0} (zero-weight rows excluded) and Σ wᵢ rᵢ² the
-        # weighted RSS. Reduces to −0.5·n·(log(rss/n)+log 2π+1) when w ≡ 1.
         n = self._n_eff
         if self.rss <= 0.0:
-            # Perfect (saturated) fit: the Gaussian log-likelihood diverges;
-            # R returns +Inf. Guard the log(0) so construction stays warning-free.
             return float("inf")
         if self.weights is None:
             sum_log_w = 0.0
@@ -1628,12 +1315,9 @@ class lm:
         )
 
     def compute_AIC(self):
-        # npar = p + 1 (residual variance) — matches R, see
-        # https://stackoverflow.com/q/37917437
         return -2 * self.loglike + 2 * self.npar
 
     def compute_BIC(self):
-        # R's BIC uses log(nobs) with nobs = N = #{wᵢ ≠ 0}.
         return -2 * self.loglike + np.log(self._n_eff) * self.npar
 
     def predict(
@@ -1696,10 +1380,6 @@ class lm:
             return self._mlm_predict(newdata, interval, se_fit, type)
         if level is not None:
             alpha = 1.0 - level
-        # R: scale= overrides res.var (=scale²) and df= the quantile df
-        # (default ∞ ⇒ normal). With scale=None, R uses σ² and df.residual
-        # (the df= argument is ignored), so leave them None to pick the
-        # fit's own values downstream.
         if scale is not None:
             res_var = float(scale) ** 2
             df_q = float("inf") if df is None else float(df)
@@ -1722,15 +1402,10 @@ class lm:
             raise ValueError(
                 f"predict(): type must be 'response' or 'terms', got {type!r}"
             )
-        # Rank-deficient fit + new data: flag / NA non-estimable rows (R's
-        # rankdeficient=). type="terms" is exempt, matching R (its FIXME).
         if type == "response" and newdata is not None and self._aliased_cols:
             out = self._apply_rankdeficient(out, newdata, rankdeficient)
         if newdata is None and self.na_action == "exclude" and not self._na_mask.all():
             out = self._na_pad_frame(out)
-        # R's se.fit return is list(fit, se.fit, df, residual.scale); hea keeps
-        # the frame and carries df / residual.scale as attributes (an additive
-        # improvement on R's list shape).
         if se_fit and type == "response":
             from ..tidy import DataFrame as _DF  # local: avoid import cycle
 
@@ -1746,11 +1421,6 @@ class lm:
         """Boolean mask over ``newdata`` rows that are *non-estimable* from a
         rank-deficient fit: the full (pre-drop) design row leaves the training
         row space, so the dropped aliased columns would change the prediction.
-
-        R's ``predict.lm`` uses the QR null-space basis and flags rows where
-        ``tol·‖x‖ ≤ ‖N′x‖``. Equivalently we project each newdata row onto the
-        training row space (``P = X⁺X``) and flag rows whose out-of-span part
-        ``‖x·(I − P)‖`` exceeds ``tol·‖x‖``. ``None`` for a full-rank fit.
         """
         if not self._aliased_cols or self._X_full_train is None:
             return None
@@ -1795,8 +1465,6 @@ class lm:
             if mode == "NAwarn":
                 warnings.warn(f"{msg}: NAs produced for non-estimable cases")
             return pl.DataFrame(cols)
-        # "warnif" / "non-estim": attach the flagged 0-based row indices as
-        # ``.non_estim`` (R's attr(*, "non-estim")); "warnif" also warns.
         if mode == "warnif":
             warnings.warn(f"{msg}; .non_estim has doubtful cases")
         from ..tidy import DataFrame as _DF  # local: avoid import cycle
@@ -1837,17 +1505,7 @@ class lm:
         return padded
 
     def _predict_terms(self, Xnew=None, se_fit=False, terms=None):
-        """R: ``predict.lm(type="terms")`` — per-term contributions.
-
-        Each column is the centered contribution of one RHS term,
-        ``(X[:, cols] − colMeans(Xtrain)[cols]) · β̂[cols]`` — R centers by
-        the *training* design's (unweighted) column means. The overall
-        constant ``Σ colMeans·β̂`` (= mean fitted value) is attached as the
-        ``.constant`` attribute, so ``fit = constant + rowSums(terms)``.
-        ``se_fit=True`` appends ``se.{label}`` columns,
-        ``√(σ²·diag(X_c[:,cols]·(XᵀWX)⁻¹[cols,cols]·X_cᵀ))``; ``terms=``
-        (label or list) selects a subset of term labels.
-        """
+        """R: ``predict.lm(type="terms")`` — per-term contributions."""
         if self._col_assign is None:
             raise RuntimeError(
                 "predict(type='terms') needs the column→term map "
@@ -1886,7 +1544,6 @@ class lm:
 
         if terms is not None:
             sel = [terms] if isinstance(terms, str) else list(terms)
-            # R warns and ignores unknown labels; we just intersect.
             data = {k: v for k, v in data.items() if k in sel}
             se_data = {k: v for k, v in se_data.items() if k in sel}
 
@@ -1897,17 +1554,10 @@ class lm:
         from ..tidy import DataFrame as _DF  # local: avoid import cycle
 
         out = _DF(data)
-        # R attaches the term constant as attr(., "constant"); hea's
-        # DataFrame subclass carries it as a plain attribute.
         out.constant = constant
         return out
 
     def _residuals_lines(self, digits: int = 4) -> list[str]:
-        # R's print.summary.lm shows *weighted* residuals (√wᵢ·rᵢ) under a
-        # "Weighted Residuals:" header when the weights vary; otherwise the
-        # raw residuals under "Residuals:". The body has three forms keyed on
-        # the residual df (rdf): the 5-number summary for rdf > 5, each
-        # residual for 0 < rdf ≤ 5, and a perfect-fit note for rdf == 0.
         r = self._residuals_arr
         header = "Residuals:"
         if self.weights is not None and float(np.ptp(self._w)) > 0.0:
@@ -1916,18 +1566,14 @@ class lm:
 
         rdf = self.df_residuals
         if rdf == 0:
-            # R: "ALL <rank> residuals are 0: no residual degrees of freedom!"
             return [
                 header,
                 f"ALL {self.p} residuals are 0: no residual degrees of freedom!",
             ]
         if rdf <= 5:
-            # R prints each residual, index-labelled (0-based here; R 1-based).
             labels = [str(i) for i in range(len(r))]
             vals = format_signif(r, digits=digits)
         else:
-            # R: 5-number summary, zapsmall'd to (digits+1) so a numerically
-            # negligible quantile (e.g. a ~1e-16 median) prints as 0, not noise.
             qs = _zapsmall(np.quantile(r, [0.0, 0.25, 0.5, 0.75, 1.0]), digits + 1)
             labels = ["Min", "1Q", "Median", "3Q", "Max"]
             vals = format_signif(qs, digits=digits)
@@ -1937,15 +1583,10 @@ class lm:
         return [header, hdr, row]
 
     def _correlation_block(self) -> str:
-        # cov2cor(vcov(m)) — correlation between coefficient estimates,
-        # including the intercept. Layout mirrors R's print.summary.lm:
-        # strict lower triangle, first row and last column dropped.
         sd = np.sqrt(np.diag(self.V_bhat))
         corr = self.V_bhat / np.outer(sd, sd)
         names = self.column_names
         rows, cols = names[1:], names[:-1]
-        # R's format() pads non-negatives with a leading space iff the
-        # displayed values contain any negative (so signs line up).
         tri_vals = [corr[i + 1, j] for i in range(len(rows)) for j in range(i + 1)]
         pad_pos = any(v < 0 for v in tri_vals)
 
@@ -2089,12 +1730,6 @@ class lm:
         h = self.leverage
         r = self.std_residuals
 
-        # R's plot.lm swaps panel 5 to a factor-level stripchart when hat
-        # values are essentially constant (pure-ANOVA, balanced one-way
-        # design, etc.). The standard Residuals-vs-Leverage view is
-        # degenerate then — every point stacks at the same h, and the
-        # Cook's contours sweep over leverages that don't exist in the
-        # data, looking informative but meaning nothing.
         h_mean = float(np.mean(h))
         if h_mean > 0 and bool(np.all(np.abs(h - h_mean) < 1e-10 * h_mean)):
             return self._plot_constant_leverage(
@@ -2110,8 +1745,6 @@ class lm:
         if smooth:
             xs, ys = _lowess(h, r)
             ax.plot(xs, ys, color="red", linewidth=1.0)
-        # Cook's contours: D_i = (r_i^2 / p) · h_i / (1 - h_i)
-        # ⇒ r = ±sqrt(c · p · (1 - h) / h)
         ymin, ymax = ax.get_ylim()
         h_max = float(np.clip(h.max() * 1.1, 1e-3, 0.999))
         h_grid = np.linspace(1e-3, h_max, 200)
@@ -2120,7 +1753,6 @@ class lm:
             ax.plot(h_grid, rline, color="red", linestyle="--", linewidth=0.8)
             ax.plot(h_grid, -rline, color="red", linestyle="--", linewidth=0.8)
         ax.set_ylim(ymin, ymax)
-        # label by Cook's distance
         cook = (r**2 / self.p) * h / np.clip(1 - h, 1e-12, None)
         _label_top_n(ax, h, r, scores=cook, n=label_n)
         ax.set_xlabel("Leverage")
@@ -2342,11 +1974,6 @@ class lm:
         return fig
 
 
-#################
-# Estimate bhat #
-#################
-
-
 def _chol2inv(R: np.ndarray) -> np.ndarray:
     """R's ``chol2inv``: ``(RᵀR)⁻¹`` from an upper-triangular factor ``R``,
     via LAPACK ``dpotri`` — the exact routine R calls. Used on the QR ``R``
@@ -2357,7 +1984,6 @@ def _chol2inv(R: np.ndarray) -> np.ndarray:
 
     inv, info = dpotri(np.ascontiguousarray(R), lower=0)
     if info != 0:
-        # singular factor — fall back to the triangular-solve form (same value)
         Rinv = solve_triangular(R, np.eye(R.shape[0]))
         return Rinv @ Rinv.T
     return np.triu(inv) + np.triu(inv, 1).T  # dpotri fills one triangle; mirror
@@ -2377,19 +2003,7 @@ def _qty_householder(qr_c: np.ndarray, tau: np.ndarray, c: np.ndarray) -> np.nda
 
 
 def _qr(X: np.ndarray, y: np.ndarray, w: np.ndarray):
-    """QR weighted least squares — R's ``lm.wfit`` (the only method R supports).
-
-    ``w`` is the length-n prior-weight vector. We whiten by √w row-scaling
-    (R fits on ``√w·X`` / ``√w·y``) rather than ``cholesky(W)`` so zero
-    weights don't break the factorization (a zero on the diagonal makes W
-    only positive-*semi*definite).
-
-    Returns ``(β̂, R, effects, qraux)`` mirroring R's ``Cdqrls`` outputs:
-    ``R`` is the upper-triangular factor (``RᵀR == XᵀWX``, fed to ``chol2inv``);
-    ``effects`` is the length-n ``Qᵀ(√w·y)`` (R's ``$effects``, first ``p``
-    named, used by ``anova``/``effects``); ``qraux`` are the Householder scalar
-    factors (R's ``$qr$qraux``). β̂ is the triangular solve on the first ``p``
-    effects — bit-identical to the former ``solve_triangular(R, Qᵀy)`` path."""
+    """QR weighted least squares — R's ``lm.wfit`` (the only method R supports)."""
     wts = np.sqrt(w)
     Xhat = wts[:, None] * X
     yhat = wts * y

@@ -1,12 +1,3 @@
-//! Noncentral distributions — R's nmath `pnchisq.c` / `dnchisq.c` / `qnchisq.c`
-//! (and, added below, pnt/dnt/qnt, pnbeta/dnbeta/qnbeta, pnf/dnf/qnf).
-//!
-//! Line-by-line mirror of the `hea/R/nmath.py` noncentral cluster, which mirrors
-//! upstream C. R accumulates the AS-275 / AS-226 / AS-243 series in `LDOUBLE`
-//! (80-bit on x86-64); Rust has no 80-bit float, so the accumulators here are
-//! `f64`. The parity gate (tests/test_rs_parity.py) measures the residual vs live
-//! R: 0-ulp where the extended precision does not change the double-rounded
-//! result, a documented ≤few-ulp platform residual where it does.
 #![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
@@ -41,7 +32,6 @@ fn qchisq(p: f64, df: f64, lower_tail: bool, log_p: bool) -> f64 {
 
 #[inline]
 fn r_dt_val(x: f64, lower_tail: bool, log_p: bool) -> f64 {
-    // R_DT_val(x) = lower_tail ? R_D_val(x) : R_D_Clog(x)
     if lower_tail {
         if log_p {
             x.ln()
@@ -55,7 +45,6 @@ fn r_dt_val(x: f64, lower_tail: bool, log_p: bool) -> f64 {
     }
 }
 
-// === pnchisq (AS 275) ========================================================
 pub(crate) fn pnchisq_raw(
     x: f64,
     f: f64,
@@ -85,7 +74,6 @@ pub(crate) fn pnchisq_raw(
             && f > 0.0
             && x.ln() < M_LN2 + 2.0 / f * (lgammafn(f / 2.0 + 1.0) + PNCH_DBL_MIN_EXP)
         {
-            // everything underflows: work in log scale
             let lam = 0.5 * theta;
             let mut pr = -lam;
             let log_lam = lam.ln();
@@ -122,7 +110,6 @@ pub(crate) fn pnchisq_raw(
         return if log_p { ans.ln() } else { ans };
     }
 
-    // theta >= 80: AS 275 series
     let lam = 0.5 * theta;
     let mut lam_sml = -lam < PNCH_DBL_MIN_EXP;
     let mut l_lam = -1.0f64;
@@ -241,7 +228,6 @@ pub(crate) fn pnchisq_scalar(x: f64, df: f64, ncp: f64, lower_tail: bool, log_p:
     if !log_p || ans < -1e-8 {
         return ans;
     }
-    // log_p and ans near 0: recompute via the other tail
     ans = pnchisq_raw(
         x,
         df,
@@ -255,7 +241,6 @@ pub(crate) fn pnchisq_scalar(x: f64, df: f64, ncp: f64, lower_tail: bool, log_p:
     (-ans).ln_1p()
 }
 
-// === dnchisq =================================================================
 pub(crate) fn dnchisq_scalar(x: f64, df: f64, ncp: f64, give_log: bool) -> f64 {
     let eps = 5e-15;
     if x.is_nan() || df.is_nan() || ncp.is_nan() {
@@ -307,7 +292,6 @@ pub(crate) fn dnchisq_scalar(x: f64, df: f64, ncp: f64, give_log: bool) -> f64 {
     }
 
     let mut sum = mid;
-    // upper tail
     let mut term = mid;
     let mut dfv = dfmid;
     let mut i = imax;
@@ -322,7 +306,6 @@ pub(crate) fn dnchisq_scalar(x: f64, df: f64, ncp: f64, give_log: bool) -> f64 {
             break;
         }
     }
-    // lower tail
     term = mid;
     dfv = dfmid;
     i = imax;
@@ -343,7 +326,6 @@ pub(crate) fn dnchisq_scalar(x: f64, df: f64, ncp: f64, give_log: bool) -> f64 {
     }
 }
 
-// === qnchisq =================================================================
 pub(crate) fn qnchisq_scalar(p: f64, df: f64, ncp: f64, mut lower_tail: bool, log_p: bool) -> f64 {
     let accu = 1e-13;
     let racc = 4.0 * f64::EPSILON;
@@ -358,7 +340,6 @@ pub(crate) fn qnchisq_scalar(p: f64, df: f64, ncp: f64, mut lower_tail: bool, lo
     if df < 0.0 || ncp < 0.0 {
         return f64::NAN;
     }
-    // R_Q_P01_boundaries(p, 0, ML_POSINF)
     if log_p {
         if p > 0.0 {
             return f64::NAN;
@@ -386,7 +367,6 @@ pub(crate) fn qnchisq_scalar(p: f64, df: f64, ncp: f64, mut lower_tail: bool, lo
         return if lower_tail { f64::INFINITY } else { 0.0 };
     }
 
-    // Pearson (1959) initial bracket
     let b = (ncp * ncp) / (df + 3.0 * ncp);
     let c = (df + 3.0 * ncp) / (df + 2.0 * ncp);
     let ff = (df + 2.0 * ncp) / (c * c);
@@ -455,7 +435,6 @@ pub(crate) fn qnchisq_scalar(p: f64, df: f64, ncp: f64, mut lower_tail: bool, lo
     0.5 * (ux + lx)
 }
 
-// === pnt / dnt / qnt (Lenth 1989 AS 243) =====================================
 pub(crate) fn pnt_scalar(t: f64, df: f64, ncp: f64, mut lower_tail: bool, log_p: bool) -> f64 {
     let itrmax = 1000;
     let errmax = 1e-12;
@@ -670,7 +649,6 @@ pub(crate) fn qnt_scalar(p: f64, df: f64, ncp: f64, lower_tail: bool, log_p: boo
     0.5 * (lx + ux)
 }
 
-// === pnbeta / dnbeta / qnbeta (AS 226/R84) ===================================
 fn pnbeta_raw(x: f64, o_x: f64, a: f64, b: f64, ncp: f64) -> f64 {
     let errmax = 1.0e-9;
     let itrmax = 10000;
@@ -885,7 +863,6 @@ pub(crate) fn qnbeta_scalar(
     0.5 * (ux + lx)
 }
 
-// === pnf / dnf / qnf =========================================================
 pub(crate) fn pnf_scalar(
     x: f64,
     df1: f64,
@@ -1015,7 +992,6 @@ pub(crate) fn qnf_scalar(
     y / (1.0 - y) * (df2 / df1)
 }
 
-// === PyO3 wrappers ===========================================================
 #[pyfunction]
 #[pyo3(name = "pnchisq", signature = (x, df, ncp, lower_tail=true, log_p=false))]
 pub fn pnchisq<'py>(

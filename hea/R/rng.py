@@ -92,16 +92,10 @@ _INV_2P32 = 2.3283064365386963e-10
 # fixup() boundary epsilon (RNG.c:86) — R's i2_32m1, a distinct constant
 # (1/(2^32-1)-ish); only reachable when a tempered word is exactly 0.
 _I2_32M1 = 2.328306437080797e-10
-# rbeta (rbeta.c) overflow guard: expmax = DBL_MAX_EXP * M_LN2, and DBL_MAX.
 _EXPMAX = 1024 * 0.6931471805599453
 _DBL_MAX = 1.7976931348623157e308
 _INT_MAX = 2147483647  # C INT_MAX — rhyper's large-n threshold
 
-# qnorm5 — R's normal quantile (nmath/qnorm.c, Wichura 1988 AS-241): the exact
-# rational-approx coefficients + Horner nesting R uses. norm_rand's Inversion
-# case calls this on the combined-uniform argument, so a bit-exact port (not
-# SciPy's ndtri, which differs ~1e-12) makes rnorm 0-ulp to R. Three branches
-# keyed on |p-0.5|: central, near-tail (r<=5), far-tail.
 _QN_A = (
     2509.0809287301226727,
     33430.575583588128105,
@@ -165,8 +159,6 @@ _QN_F = (
 
 
 def _qn_horner(r, c, fma=_rfma):
-    # `((c[0]*r + c[1])*r + …)` — R fuses each step to fmadd on arm64. `fma` is
-    # `_rfma` (scalar) or `_rfma_vec` (array); both per-arch.
     v = c[0]
     for k in c[1:]:
         v = fma(v, r, k)
@@ -208,10 +200,8 @@ def _qnorm5_vec(p: np.ndarray) -> np.ndarray:
     leak through the discarded lanes."""
     p = np.asarray(p, dtype=float)
     q = p - 0.5
-    # Central: r = 0.180625 - q^2 (finite for all q).
     rc = _rfma_vec(-q, q, 0.180625)
     val_c = q * _qn_horner(rc, _QN_A, _rfma_vec) / _qn_horner(rc, _QN_B, _rfma_vec)
-    # Tails: r = sqrt(-log(min(p, 1-p))).
     rt = np.sqrt(-np.log(np.where(q > 0.0, 1.0 - p, p)))
     rn = rt - 1.6
     rf = rt - 5.0
@@ -285,17 +275,11 @@ def _revsort(a: np.ndarray, ib: np.ndarray) -> None:
 def _mroot_chol(V: np.ndarray) -> np.ndarray:
     """``mgcv::mroot(V, rank=ncol(V), method="chol")`` — a pivoted-Cholesky
     matrix square root ``R`` (p×p) with ``R @ R.T == V``.
-
-    Uses LAPACK ``dpstrf`` (the exact routine R's ``chol(pivot=TRUE, tol=0)``
-    calls), then un-pivots the columns and transposes, mirroring ``mroot``'s R
-    source line-for-line. Verified bit-identical to ``mgcv::mroot`` (the pivot
-    order and every factor entry match). Used by :meth:`RMersenneTwister.rmvn`."""
+    """
     V = np.asarray(V, dtype=float)
     if V.ndim != 2 or V.shape[0] != V.shape[1]:
         raise ValueError("V must be a square matrix")
     p = V.shape[1]
-    # Upper factor U (p×p) and 1-based pivot s.t. U' U == V[piv, piv]. tol=0
-    # matches mroot's chol(..., tol=0): stop only on a non-positive pivot.
     c, piv, rank, info = dpstrf(V, lower=0, tol=0.0)
     if info < 0:
         raise ValueError(f"dpstrf: illegal argument {-info}")
@@ -308,10 +292,8 @@ def _mroot_chol(V: np.ndarray) -> np.ndarray:
     return Lp.T.copy()  # t(L[1:rank,]) with rank == ncol(V)
 
 
-# log(sqrt(2*pi)) — R's M_LN_SQRT_2PI, used by rhyper's Stirling afc().
 _M_LN_SQRT_2PI = 0.918938533204672741780329736406
 
-# ln(i!) table for i = 0..7 (rhyper.c `afc`), exact to the printed digits.
 _AFC_AL = (
     0.0,
     0.0,
@@ -369,17 +351,11 @@ class RMersenneTwister:
         for j in range(625):
             s = (69069 * s + 1) & 0xFFFFFFFF
             fills[j] = s
-        # fills[0] is i_seed[0] (the mti slot) which FixupSeeds discards;
-        # the remaining 624 words are the MT state.
         self._mt = fills[1:].copy()
         self._buf = np.empty(0)
         self._pos = 0
 
     def _refill(self) -> None:
-        # One MT19937 twist of the 624-word state, vectorized in
-        # dependency-free slices. Wrap-around: the last word's y pairs
-        # old mt[623] with the freshly updated mt[0] (the C loop has
-        # already overwritten it by then).
         mt = self._mt
         y = (mt[: _N - 1] & _UPPER) | (mt[1:] & _LOWER)
         mag = np.where((y & np.uint32(1)) != 0, _MATRIX_A, np.uint32(0))
@@ -417,9 +393,6 @@ class RMersenneTwister:
             v = float(self._buf[self._pos])
             self._pos += 1
             return v
-        # Bulk-copy whole buffer slices instead of n scalar pulls — identical
-        # values (the buffer is already fixup'd in _refill), refilling at the
-        # same 624-word boundaries.
         n = int(n)
         out = np.empty(n)
         filled = 0
@@ -520,7 +493,6 @@ class RMersenneTwister:
             pool[j] = pool[m]
         return out
 
-    # bam-era aliases, kept for the established call sites.
     def sample_no_replace(self, n: int, k: int) -> np.ndarray:
         return self.sample_int(n, k)
 
@@ -532,12 +504,6 @@ class RMersenneTwister:
         x = np.asarray(x)
         return x[self.sample_int(len(x), len(x))]
 
-    # ------------------------------------------------------------------
-    # Family samplers — ports of R's nmath ``r*`` on this bit-exact stream
-    # (sexp.c / rpois.c / rbinom.c / rgamma.c). Used by simulate.merMod.
-    # ------------------------------------------------------------------
-
-    # cumulative ln(2)^k / k! — R sexp.c
     _EXP_Q = (
         0.6931471805599453,
         0.9333736875190459,
@@ -604,14 +570,12 @@ class RMersenneTwister:
                 q += p
                 if u <= q:
                     return float(k)
-            # tail: keep walking (rare)
             while True:
                 k += 1
                 p *= mu / k
                 q += p
                 if u <= q or p == 0.0:
                     return float(k)
-        # big mu (>= 10): Ahrens-Dieter (1982) "PD" algorithm — R rpois.c.
         M_1_SQRT_2PI = 0.398942280401432677939946059934
         a0, a1, a2, a3 = -0.5, 0.3333333, -0.2500068, 0.2000118
         a4, a5, a6, a7 = -0.1661269, 0.1421878, -0.1384794, 0.1250060
@@ -669,7 +633,6 @@ class RMersenneTwister:
             fy = omega * (((c3 * xx + c2) * xx + c1) * xx + c0)
             return px, py, fx, fy
 
-        # Step N — normal candidate (immediate / squeeze acceptance)
         g = mu + s * self.norm_rand()
         if g >= 0.0:
             pois = math.floor(g)
@@ -683,7 +646,6 @@ class RMersenneTwister:
             px, py, fx, fy = step_f(pois, fk, difmuk)
             if fy - u * fy <= py * math.exp(px - fx):
                 return float(pois)
-        # Step E — exponential candidates
         while True:
             e = self.exp_rand()
             u = 2.0 * self.unif_rand() - 1.0
@@ -726,7 +688,6 @@ class RMersenneTwister:
                     u -= f
                     ix += 1
                     f *= g / ix - r
-        # BTPE (Kachitvichyanukul & Schmeiser)
         ffm = np_ + p
         m = int(ffm)
         fm = m
@@ -814,7 +775,6 @@ class RMersenneTwister:
             if alv <= t:
                 return float(ix if prob <= 0.5 else n - ix)
 
-    # rgamma coefficients (R rgamma.c)
     _GA_Q = (
         0.04166669,
         0.02083148,
@@ -855,7 +815,6 @@ class RMersenneTwister:
                     if self.exp_rand() >= x:
                         break
             return scale * x
-        # GD algorithm (a >= 1)
         sqrt32 = 5.656854
         s2 = a - 0.5
         s = math.sqrt(s2)
@@ -897,8 +856,6 @@ class RMersenneTwister:
         while True:
             e = self.exp_rand()
             u = 2.0 * self.unif_rand() - 1.0
-            # R: `t = b - si*e` / `b + si*e` (clang fuses to fma on arm64);
-            # copysign(si*e, u) rounds si*e first → diverges. Match R's fused form.
             t = _rfma(-si, e, b) if u < 0.0 else _rfma(si, e, b)
             if t >= -0.71874483771719:
                 v = t / (s + s)
@@ -923,13 +880,6 @@ class RMersenneTwister:
         if mu <= 0.0:
             return 0.0
         return self.rpois(self.rgamma(size, scale=mu / size))
-
-    # ------------------------------------------------------------------
-    # Composed continuous families (R's rchisq/rt/rf built from the already
-    # bit-exact rgamma/rnorm/rpois) and Cheng's rbeta. Central rt/rf are
-    # per-draw scalars; the noncentral *block* ordering lives in
-    # hea.R.distributions, where R applies it at the vector level.
-    # ------------------------------------------------------------------
 
     def rchisq(self, df: float, ncp: float = 0.0) -> float:
         """R's ``rchisq(df, ncp=0)`` — central ``rgamma(df/2, 2)``; noncentral
@@ -999,7 +949,6 @@ class RMersenneTwister:
                 if alpha * (math.log(alpha / (a + w)) + v) - 1.3862944 >= math.log(z):
                     break
             return a / (a + w) if aa == a else w / (a + w)
-        # --- Algorithm BB ---
         beta = math.sqrt((alpha - 2.0) / (2.0 * a * b - alpha))
         gamma = a + 1.0 / beta
         while True:
@@ -1035,14 +984,6 @@ class RMersenneTwister:
         if prob == 1.0:
             return 0.0
         return self.rpois(self.rgamma(size, scale=(1.0 - prob) / prob))
-
-    # ------------------------------------------------------------------
-    # Rank-statistic + hypergeometric + multinomial variates — ports of R's
-    # rsignrank/rwilcox (signrank.c/wilcox.c), rhyper (rhyper.c, H2PE) and
-    # rmultinom (rmultinom.c). Each consumes the uniform stream in the same
-    # order as the C code (via the primitive draws above), so set.seed() is
-    # bit-exact. No _impl branch: the primitives already route through Rust.
-    # ------------------------------------------------------------------
 
     def rsignrank(self, n: float) -> float:
         """R's ``rsignrank(nn)`` — one Wilcoxon signed-rank variate,
@@ -1142,7 +1083,6 @@ class RMersenneTwister:
         if nn1in < 0 or nn2in < 0 or kkin < 0 or kkin > nn1in + nn2in:
             return math.nan
         if nn1in >= _INT_MAX or nn2in >= _INT_MAX or kkin >= _INT_MAX:
-            # large n: evade int overflow / inappropriate algorithms
             if kkin == 1.0:
                 return self.rbinom(kkin, nn1in / (nn1in + nn2in))
             from . import nmath as _nm
@@ -1152,7 +1092,6 @@ class RMersenneTwister:
         nn1 = int(nn1in)
         nn2 = int(nn2in)
         kk = int(kkin)
-        # --- setup (always, on fresh parameters) ---
         N = nn1 + float(nn2)
         if nn1 <= nn2:
             n1, n2 = nn1, nn2
@@ -1243,7 +1182,6 @@ class RMersenneTwister:
                     if v <= f:
                         break
                     continue
-                # squeeze using upper and lower bounds
                 deltal = 0.0078
                 deltau = 0.0034
                 y = float(ix)
@@ -1290,25 +1228,16 @@ class RMersenneTwister:
                     de /= 1.0 + e
                 if alv < ub - 0.25 * (dr + ds + dt + de) + (y + m) * (gl - gu) - deltal:
                     break  # test lower bound
-                # Stirling to machine accuracy
                 if alv <= (
                     a - _afc(ix) - _afc(n1 - ix) - _afc(k - ix) - _afc(n2 - k + ix)
                 ):
                     break
-                # else reject → redraw
 
-        # --- L_finis: map ix back to the original parameterisation ---
         if kk + kk >= N:
             ix = (kk - nn2 + ix) if (nn1 > nn2) else (nn1 - ix)
         elif nn1 > nn2:
             ix = kk - ix
         return float(ix)
-
-    # ------------------------------------------------------------------
-    # Multivariate variates: rcont2 (AS 159, backs r2dtable) and the
-    # standardized Wishart Bartlett factor (backs rWishart). ``fact`` (the
-    # log-factorial table) is supplied by the caller so this stays nmath-free.
-    # ------------------------------------------------------------------
 
     def rcont2(self, nrowt, ncolt, ntotal, fact):
         """R's ``rcont2`` (rcont.c, AS 159) — one random 2-way table with the
@@ -1411,13 +1340,6 @@ class RMersenneTwister:
                 ans[i, j] = self.norm_rand()  # upper triangle
         return ans
 
-    # ------------------------------------------------------------------
-    # Batch samplers — the whole per-element loop runs in one call (Rust when
-    # available, else a Python list-comp), saving n Python↔Rust crossings for
-    # the family ``$rd`` hooks and the public ``hea.R.r*`` vector draws. Each
-    # element is bit-identical to the scalar method and the draw order is the
-    # same as n scalar calls.
-    # ------------------------------------------------------------------
     def rpois_n(self, mu) -> np.ndarray:
         mu = np.ascontiguousarray(mu, dtype=float)
         if self._impl is not None:
@@ -1513,7 +1435,6 @@ class RMersenneTwister:
                     j += 1
                 out[i] = pm[j]
             return out
-        # ProbSampleNoReplace — revsort once, then shrinking-pool walk.
         pw = p.copy()
         pm = perm.copy()
         _revsort(pw, pm)
@@ -1568,8 +1489,6 @@ class RMersenneTwister:
             q[i] += i
         out = np.empty(k, dtype=np.int64)
         for i in range(k):
-            # Sample_kind = REJECTION (R's default): index via R_unif_index,
-            # then one more unif_rand for the within-cell test (random.c).
             kk = int(self.unif_index(n))
             rU = kk + self.unif_rand()
             out[i] = kk if rU < q[kk] else int(a[kk])
@@ -1593,11 +1512,9 @@ class RMersenneTwister:
         n = int(n)
         z = self.rnorm(p * n)
         if mu.ndim == 2:
-            # matrix-mu: z <- matrix(rnorm(p*n), n, p) %*% t(R) + mu
             if mu.shape != (n, p):
                 raise ValueError("mu dimensions wrong")
             return z.reshape((n, p), order="F") @ R.T + mu
-        # vector-mu: z <- t(R %*% matrix(rnorm(p*n), p, n) + as.numeric(mu))
         if mu.shape[0] != p:
             raise ValueError("mu dimensions wrong")
         out = (R @ z.reshape((p, n), order="F") + mu[:, None]).T

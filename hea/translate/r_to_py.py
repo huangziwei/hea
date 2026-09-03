@@ -30,21 +30,10 @@ from .registry.functions import FUNCTION_TABLE, Func, resolve_kwarg
 from .registry.ggplot import is_chain_extension
 from .registry.verbs import VERB_TABLE, Verb
 
-# ---------------------------------------------------------------------------
-# Standalone runnable preamble — discover what's importable from hea, hea.R,
-# and hea.plot once at import time. The translator uses these to emit a
-# needs-based import block at the top of every translated module so the
-# output can be ``python script.py``'d without a wrapper.
-# ---------------------------------------------------------------------------
-
 
 def _callable_exports(module_name: str) -> frozenset[str]:
     """Public names a module exports — callables and module-level
     constants (e.g. ``hea.R.pi``, ``hea.R.LETTERS``).
-
-    Submodule attributes and dunders are excluded; everything else with
-    a public name is importable as a bare identifier in translated R
-    scripts.
     """
     import types
 
@@ -63,11 +52,6 @@ def _callable_exports(module_name: str) -> frozenset[str]:
     return frozenset(out)
 
 
-# Top-level ``hea`` callables. Computed lazily so additions to
-# ``hea.__init__`` that land AFTER ``translate.r_to_py`` is imported
-# (e.g. the ``read_csv`` shim and ``cols`` stub) still register. Strip
-# the submodule names so ``plot``/``R`` resolve to the function-bearing
-# surfaces below, not the submodule object.
 @functools.cache
 def _hea_exports() -> frozenset[str]:
     return _callable_exports("hea") - {"R", "plot", "ggplot"}
@@ -129,17 +113,11 @@ def _module_exports(module_name: str) -> frozenset[str]:
     return frozenset(out)
 
 
-# Submodules of ``hea`` we want to import on demand — e.g. ``selectors``
-# is ``polars.selectors`` re-exported via ``hea.__init__``. Translator
-# emits ``selectors.starts_with(...)`` so the preamble must contain
-# ``from hea import selectors``. Lazy to dodge import-order issues like
-# ``_hea_exports``.
 @functools.cache
 def _hea_submodules() -> frozenset[str]:
     return _module_exports("hea")
 
 
-# Python builtins — names we never need to import.
 _PY_BUILTINS: frozenset[str] = frozenset(
     __builtins__.keys() if isinstance(__builtins__, dict) else dir(__builtins__)
 ) | {  # type: ignore[union-attr]
@@ -148,15 +126,6 @@ _PY_BUILTINS: frozenset[str] = frozenset(
     "None",
 }
 
-
-# ---------------------------------------------------------------------------
-# Unported-construct sentinel. R idioms outside the supported sublanguage
-# (replacement-function assigns, ``with(df, expr)``, ...) emit a uniquely
-# tagged statement that ``Translator.translate`` rewrites to a Python
-# comment block after ``ast.unparse``. The sentinel survives a regular
-# AST walk so downstream passes (autoload, import inference) don't see
-# the original R text as a phantom name reference.
-# ---------------------------------------------------------------------------
 
 _UNPORTED_TAG = "__HEA_UNPORTED__"
 _UNPORTED_LINE_RE = re.compile(rf"^\s*['\"]({_UNPORTED_TAG}):([0-9]+)['\"]\s*$")
@@ -168,11 +137,6 @@ class RTranslateError(Exception):
     def __init__(self, message: str, node: R.Node):
         self.node = node
         super().__init__(f"{message} at span {node.span}")  # type: ignore[union-attr]
-
-
-# ---------------------------------------------------------------------------
-# Public entry
-# ---------------------------------------------------------------------------
 
 
 def translate(
@@ -195,12 +159,6 @@ def translate(
     )
 
 
-# ---------------------------------------------------------------------------
-# Translator
-# ---------------------------------------------------------------------------
-
-
-# R BinOp → Python ast operator class (for arithmetic / shift / bitwise).
 _BINOP_PY = {
     "+": P.Add,
     "-": P.Sub,
@@ -211,7 +169,6 @@ _BINOP_PY = {
     "%/%": P.FloorDiv,
 }
 
-# R comparison ops → Python ast comparison op.
 _CMP_PY = {
     "==": P.Eq,
     "!=": P.NotEq,
@@ -222,12 +179,6 @@ _CMP_PY = {
 }
 
 
-# R S3 / S4 generics that, when called with a single positional
-# identifier (typically a fitted model name), reverse to Python
-# method form: ``summary(m)`` → ``m.summary()``. Mirrors hea's
-# convention of exposing per-object inspectors as methods rather
-# than free functions. Multi-arg calls (``anova(m1, m2)``) stay as
-# function calls so they round-trip cleanly with hea's Python API.
 _R_GENERIC_METHOD_FORM: frozenset[str] = frozenset(
     {
         "summary",
@@ -261,43 +212,15 @@ class Translator:
         self, src: str = "", *, log_gaps: bool = False, source_label: str = "<inline>"
     ):
         self.nse = NSEContext()
-        # Packages the source declared via ``library(pkg)`` /
-        # ``require(pkg)``. Used to disambiguate autoload candidates
-        # below — if ``penguins`` is in two packages and one of them
-        # was loaded, prefer that one.
         self._loaded_packages: set[str] = set()
-        # Explicit ``pkg::name`` references — emit an autoload for
-        # ``name`` from ``pkg`` regardless of whether rdatasets carries
-        # it (the dataset may live in a bundled CSV or be downloaded).
-        # Keyed by the bare name so the autoload preamble dedupes.
         self._namespaced_refs: dict[str, str] = {}
-        # Loop variables whose iter we shifted from R's 1-based ``a:b``
-        # to Python's 0-based ``range(a-1, b)``. While translating the
-        # body of such a loop, ``(var - 1)`` collapses to ``var`` —
-        # R-source ``(i - 1)`` is the manual "shift to 0-based for
-        # arithmetic" pattern; after we've already shifted the loop
-        # counter the subtraction is redundant.
         self._shifted_loop_vars: set[str] = set()
-        # Depth of "index context" — inside a subscript's arg list,
-        # ``1:N`` shifts to ``range(N)`` (positions are 0-based in hea).
-        # Tracked as a counter so nested subscripts compose.
         self._index_context: int = 0
-        # Stack of data-frame names introduced by ``with(df, expr)``. R's
-        # ``with()`` evaluates ``expr`` in an env where ``df``'s columns
-        # are bound locally; while a frame is active, bare identifiers
-        # in value position rewrite to ``df["name"]`` so the same
-        # resolution happens at runtime.
         self._with_stack: list[str] = []
-        # Original R source — used to slice back the text of an
-        # unportable statement when emitting its comment block.
         self._src = src
-        # ``[(kind, subject, r_text, notes)]`` — one row per unported
-        # statement. Resolved post-unparse into Python comments.
         self._unported: list[tuple[str, str, str, str]] = []
         self._log_gaps = log_gaps
         self._source_label = source_label
-
-    # -- public ------------------------------------------------------------
 
     def translate(self, prog: R.Program) -> str:
         module = self._visit_program(prog)
@@ -305,8 +228,6 @@ class Translator:
         src = P.unparse(module)
         src = self._rewrite_unported(src)
         return src
-
-    # -- unported sentinel ------------------------------------------------
 
     def _emit_unported(
         self,
@@ -367,56 +288,31 @@ class Translator:
                 out_lines.append(f"{indent}#   {r_line}")
         return "\n".join(out_lines)
 
-    # -- top-level ---------------------------------------------------------
-
     def _visit_program(self, prog: R.Program) -> P.Module:
         body: list[P.stmt] = []
         for stmt in prog.statements:
-            # ``library(pkg)`` / ``require(pkg)`` — drop, but record the
-            # package so autoload inference can prefer it for ambiguous
-            # dataset names below.
             if _is_library_call(stmt):
                 _record_library_pkg(stmt, self._loaded_packages)
                 continue
             if _is_noop_call(stmt):
                 continue
-            # Standalone ``data("X", package="Y")`` — rewrite as a
-            # Python assignment ``X = hea.data("X", package="Y")``. The
-            # R side is side-effectful (data() loads into the env); the
-            # Python equivalent needs an explicit binding.
             smart = self._maybe_smart_data_call(stmt)
             if smart is not None:
                 body.append(smart)
                 continue
-            # Top-level checks for constructs we can't translate cleanly.
-            # Each emits a sentinel that ``_rewrite_unported`` later turns
-            # into a comment block — and logs a gap row.
             unported = self._maybe_unported(stmt)
             if unported is not None:
                 body.append(unported)
                 continue
             body.append(self._as_stmt(self._visit(stmt)))
 
-        # Autoload preamble: bare names referenced but not defined that
-        # match a known rdatasets entry get a ``hea.data(...)`` load
-        # prepended to the module body.
         autoload = self._build_autoload_preamble(body)
-        # Import preamble: scan body+autoload for bare Load Name refs and
-        # emit minimal ``from hea[.R|.plot] import ...`` so the translated
-        # source is runnable standalone (``python script.py``).
         imports = self._build_import_preamble(autoload + body)
         return P.Module(body=imports + autoload + body, type_ignores=[])
-
-    # -- unportable-construct detection ------------------------------------
 
     def _maybe_unported(self, stmt: R.Node) -> P.stmt | None:
         """Return a sentinel statement for top-level constructs the
         translator cannot emit as valid Python; otherwise ``None``."""
-        # ``f(x) <- v`` replacement-function assignment. R has dozens of
-        # these (``levels``, ``names``, ``colnames``, ``contrasts``,
-        # ``diag``, ``dim``, ``attr``, ...) — far cleaner to detect by
-        # structure (any Assign whose target is a Call) than to maintain
-        # a whitelist.
         if (
             isinstance(stmt, R.Assign)
             and isinstance(stmt.target, R.Call)
@@ -429,9 +325,6 @@ class Translator:
                 subject=f"{fn}<-",
                 notes=f"R's `{fn}(x) <- v` setter has no direct hea analog yet.",
             )
-        # Any statement containing a call to a Python-keyword name
-        # (``class(x)``, ``try(expr)``, ``except(...)`` etc.). Emitting
-        # ``class(x)`` would be a Python syntax error.
         kw = _first_python_keyword_call(stmt)
         if kw is not None:
             return self._emit_unported(
@@ -446,10 +339,6 @@ class Translator:
         """Scan ``body`` for Load Name + root-of-Attribute references that
         aren't locally bound; emit minimal imports from ``hea``, ``hea.R``,
         and ``hea.plot`` (in that priority).
-
-        Names not present in any of the three are left alone — they'll
-        surface as ``NameError`` at runtime, which is the right signal
-        that a gap remains rather than silently masking with a wildcard.
         """
         defined: set[str] = set()
         referenced: set[str] = set()
@@ -470,8 +359,6 @@ class Translator:
                         defined.add(a.arg)
                 elif isinstance(node, P.Name) and isinstance(node.ctx, P.Load):
                     referenced.add(node.id)
-                # ``hea.data(...)`` / ``selectors.starts_with(...)`` — the root
-                # name (``hea`` / ``selectors``) is what must be importable.
                 elif (
                     isinstance(node, P.Attribute)
                     and isinstance(node.value, P.Name)
@@ -481,16 +368,6 @@ class Translator:
 
         candidates = referenced - defined - _PY_BUILTINS
 
-        # hea.R first: R-script translations want R semantics (e.g. ``mean``
-        # is a scalar reducer with na_rm=True, not the polars expression
-        # helper). Then hea.tidy for tidyverse-only ports (stringr / lubridate /
-        # forcats / dplyr-window-helpers / readr / tibble). Then the
-        # restructure-split sub-namespaces — hea.models (lm/glm/gmm/…),
-        # hea.family (binomial/gaussian/…). Then ``hea`` top-level so
-        # the user-facing surface (``data``, ``map_data``) imports via
-        # ``from hea import data`` rather than the deeper
-        # ``from hea.io import data``. After that hea.io (read_csv /
-        # scan_*) for the io-only helpers, then hea.plot / hea.ggplot.
         r_names = sorted(n for n in candidates if n in _hea_r_exports())
         used = set(r_names)
         tidy_names = sorted(n for n in (candidates - used) if n in _hea_tidy_exports())
@@ -513,15 +390,12 @@ class Translator:
             n for n in (candidates - used) if n in _hea_ggplot_exports()
         )
         used |= set(ggplot_names)
-        # Submodules used as Attribute roots: ``selectors.starts_with``,
-        # ``pl.col``, etc. ``from hea import selectors`` resolves the root.
         submod_names = sorted(n for n in (candidates - used) if n in _hea_submodules())
 
         out: list[P.stmt] = []
         if "hea" in referenced:
             out.append(P.Import(names=[P.alias(name="hea", asname=None)]))
         if "np" in referenced:
-            # Translator emits ``np.array([...])`` for all-numeric ``c(...)``.
             out.append(P.Import(names=[P.alias(name="numpy", asname="np")]))
         if hea_names or submod_names:
             out.append(
@@ -595,10 +469,6 @@ class Translator:
         """If ``stmt`` is a standalone ``data("X", package="Y")`` call,
         emit it as ``X = data("X", package="Y")`` (bare call — import
         preamble will pull in ``from hea import data``).
-
-        R's ``data()`` loads the named dataset into the calling
-        environment as a side-effect; Python needs an explicit binding
-        for the script to work after translation.
         """
         if not (
             isinstance(stmt, R.Call)
@@ -637,10 +507,6 @@ class Translator:
         """Scan ``body`` for bare ``Name`` references that aren't bound
         anywhere and match a known dataset; emit a ``hea.data(...)``
         assignment for each.
-
-        The user's ``library(...)`` declarations bias the resolution: an
-        ambiguous name like ``penguins`` (modeldata or palmerpenguins)
-        gets the loaded package if one was declared.
         """
         defined: set[str] = set()
         referenced: set[str] = set()
@@ -663,10 +529,6 @@ class Translator:
                     referenced.add(node.id)
 
         loaded = frozenset(self._loaded_packages)
-        # Function-table emitted names (``sd → std``, ``cumsum``, ``ntile``,
-        # …) are translator output, not dataset references. Without this,
-        # ``sd(x)`` translating to ``std(x)`` would trigger a phantom
-        # ``std = hea.data("std", package="KMsurv")`` autoload.
         emitted_helpers = frozenset(
             f.hea_name.split(".", 1)[0] for f in FUNCTION_TABLE.values()
         )
@@ -675,9 +537,6 @@ class Translator:
         )
         out: list[P.stmt] = []
         emitted: set[str] = set()
-        # First: explicit ``pkg::name`` references take precedence over
-        # registry-based resolution. ``hea.data`` will fall back to a
-        # bundled CSV or GitHub download if rdatasets doesn't carry it.
         for name, pkg in sorted(self._namespaced_refs.items()):
             if name in defined or name not in referenced:
                 continue
@@ -700,8 +559,6 @@ class Translator:
             return node
         return P.Expr(value=node)
 
-    # -- dispatch ----------------------------------------------------------
-
     def _visit(self, node: R.Node) -> P.AST:
         """Dispatch on R AST node type."""
         method = getattr(self, "_visit_" + type(node).__name__, None)
@@ -709,14 +566,7 @@ class Translator:
             raise RTranslateError(f"no translator for {type(node).__name__}", node)
         return method(node)
 
-    # -- literals ----------------------------------------------------------
-
     def _visit_NumLit(self, n: R.NumLit) -> P.AST:
-        # R's bare ``1`` is technically a double, but downstream hea/polars
-        # code reads cleaner with Python ints when the value is whole — and
-        # polars coerces literals on comparison either way. Users wanting
-        # explicit double semantics can write ``1L`` (which becomes IntLit
-        # — also emitted as int) or just any non-integer literal.
         if n.value.is_integer() and -(2**53) < n.value < 2**53:
             return P.Constant(value=int(n.value))
         return P.Constant(value=n.value)
@@ -737,10 +587,7 @@ class Translator:
         return P.Constant(value=None)
 
     def _visit_NaLit(self, n: R.NaLit) -> P.AST:
-        # In EXPR slot, R's NA maps to polars' null literal. Outside, to None.
         if self.nse.is_expr():
-            # ``pl.lit(None)`` — but we want everything to flow through hea,
-            # so emit ``hea.lit(None)``.
             return _call(
                 _attr(_attr(_name("hea"), "tidy"), "lit"),
                 [P.Constant(None)],
@@ -753,21 +600,12 @@ class Translator:
     def _visit_NanLit(self, n: R.NanLit) -> P.AST:
         return _call(_name("float"), [P.Constant("nan")])
 
-    # -- identifiers -------------------------------------------------------
-
     def _visit_Identifier(self, n: R.Identifier) -> P.AST:
         slot = self.nse.current
         if slot is Slot.EXPR:
             return _call(_name("col"), [P.Constant(n.name)])
         if slot is Slot.COLUMN_NAME:
             return P.Constant(value=n.name)
-        # Inside ``with(df, expr)``: bare identifier resolves to a
-        # column lookup on ``df``. Matches R's NSE binding — ``with()``
-        # checks the data frame's columns before falling back to the
-        # parent environment. Known R functions (``mean``, ``sum``,
-        # tidyverse verbs, …) bypass the rewrite so e.g.
-        # ``with(df, tapply(x, g, mean))`` keeps ``mean`` as a function
-        # rather than mis-resolving to ``df["mean"]``.
         if (
             self._with_stack
             and n.name not in FUNCTION_TABLE
@@ -779,13 +617,7 @@ class Translator:
                 slice=P.Constant(value=n.name),
                 ctx=P.Load(),
             )
-        # NONE — emit as a Python name. Dot identifiers (``data.frame``,
-        # ``na.omit``) become underscores; identifiers that collide with
-        # Python keywords (``lambda``, ``class``, ``True``, ...) get a
-        # trailing ``_`` so the result is always a valid Python name.
         return _name(_to_py_identifier(n.name))
-
-    # -- operators ---------------------------------------------------------
 
     def _visit_UnaryOp(self, n: R.UnaryOp) -> P.AST:
         operand = self._visit(n.operand)
@@ -794,16 +626,8 @@ class Translator:
         if n.op == "+":
             return P.UnaryOp(P.UAdd(), operand)
         if n.op == "!":
-            # In EXPR slot, polars Expr negation uses ``~``; elsewhere ``not``.
             if self.nse.is_expr():
                 return P.UnaryOp(P.Invert(), operand)
-            # In COLUMN_NAME (tidy-select) slot, ``!cols`` means "exclude
-            # these cols". Strategy depends on operand shape:
-            # - ``!(a:b)`` — operand is ``cols_between(...)`` which
-            #   supports ``__invert__`` natively → emit ``~operand``.
-            # - ``!single_col`` / ``!c(...)`` — wrap in
-            #   ``~selectors.by_name(operand)`` so polars' selector tree
-            #   handles the inversion at expansion time.
             if self.nse.current is Slot.COLUMN_NAME:
                 if (
                     isinstance(operand, P.Call)
@@ -820,25 +644,15 @@ class Translator:
                 )
             return P.UnaryOp(P.Not(), operand)
         if n.op == "?":
-            # Help operator — rare. Translate to a comment placeholder.
             raise RTranslateError("R help operator `?` not supported", n)
         raise RTranslateError(f"unknown unary operator {n.op!r}", n)
 
     def _visit_BinOp(self, n: R.BinOp) -> P.AST:
         op = n.op
 
-        # ggplot chain extension: ``<plot expr> + geom_x(args)``. We
-        # detect by the RHS shape — it's a chain step iff it's a Call to
-        # a name like ``geom_*`` / ``scale_*`` / ``labs`` / etc. The LHS
-        # is recursively translated, so a long chain unfolds left-to-right.
         if op == "+" and _is_ggplot_chain_call(n.right):
             return self._emit_ggplot_chain_step(n.left, n.right)
 
-        # ``(var - 1)`` where ``var`` is a 0-based-shifted loop counter
-        # → just ``var``. R's ``for(i in 1:N) ... i - 1 ...`` is the
-        # manual "convert 1-based loop counter to 0-based for math"
-        # pattern; after the translator has already shifted the loop,
-        # the subtraction is redundant and (worse) makes i=0 become -1.
         if (
             op == "-"
             and isinstance(n.left, R.Identifier)
@@ -851,28 +665,14 @@ class Translator:
         left = self._visit(n.left)
         right = self._visit(n.right)
 
-        # Arithmetic / shift / bitwise.
         py_op = _BINOP_PY.get(op)
         if py_op is not None:
             return P.BinOp(left=left, op=py_op(), right=right)
 
-        # Comparison.
         cmp = _CMP_PY.get(op)
         if cmp is not None:
             return P.Compare(left=left, ops=[cmp()], comparators=[right])
 
-        # Logical and/or.
-        #
-        # R distinguishes single (``&`` / ``|`` — elementwise) from double
-        # (``&&`` / ``||`` — short-circuit / scalar). We mirror:
-        # - ``&``/``|`` ALWAYS emit Python bitwise. That's correct for
-        #   polars Expr (elementwise) AND patchwork plot composition
-        #   (``p1 | p2``), and the scalar-bool case (``True | False``)
-        #   evaluates the same way. Short-circuit was never R's semantics
-        #   for these operators anyway.
-        # - ``&&``/``||`` are short-circuit in R; outside EXPR slot we
-        #   emit Python ``and``/``or``. Inside EXPR slot they still mean
-        #   elementwise (polars Expr), so we emit bitwise.
         if op == "&":
             return P.BinOp(left=left, op=P.BitAnd(), right=right)
         if op == "|":
@@ -886,33 +686,13 @@ class Translator:
                 return P.BinOp(left=left, op=P.BitOr(), right=right)
             return P.BoolOp(op=P.Or(), values=[left, right])
 
-        # Sequence ``a:b`` → ``seq(a, b)`` by default; the for-loop iter
-        # and subscript visitors special-case to ``range(...)`` shifts so
-        # those positions match hea's 0-based indexing without breaking
-        # value uses elsewhere (e.g. ``plot(m, which=1:2)`` panel IDs).
         if op == ":":
-            # In COLUMN_NAME slot (``select(year:day)``, ``relocate(...)``)
-            # ``a:b`` is dplyr's column-range selector, not a numeric
-            # range. Emit ``cols_between('a', 'b')`` — hea's tidy-select
-            # placeholder that supports ``~`` for ``select(!(a:b))``.
             if self.nse.current is Slot.COLUMN_NAME:
                 return _call(_name("cols_between"), [left, right])
-            # Inside an index context (subscript arg, recursively into
-            # function calls there), ``1:N`` shifts to ``range(N)`` so
-            # downstream consumers like ``sample(1:N)`` produce 0-based
-            # values that match hea's container indexing.
             if self._index_context and isinstance(left, P.Constant) and left.value == 1:
                 return _call(_name("range"), [right])
             return _call(_name("seq"), [left, right])
 
-        # Namespace access ``pkg::name`` / ``pkg:::name``. Drop the package
-        # qualifier — the function registry handles renaming — but
-        # record the LHS as a loaded package AND the (name, pkg) pair as
-        # an explicit autoload hint. ``Lahman::Batting`` is often the
-        # only hint we get that ``Batting`` is a dataset (the user
-        # didn't write ``library(Lahman)``); the rdatasets registry
-        # doesn't carry Lahman, so without this hint the autoload pass
-        # would silently skip it.
         if op == "::" or op == ":::":
             if isinstance(n.left, R.Identifier):
                 pkg_name = n.left.name
@@ -921,46 +701,23 @@ class Translator:
                     self._namespaced_refs.setdefault(n.right.name, pkg_name)
             return right
 
-        # ``%in%`` → ``.is_in(...)``.
         if op == "%in%":
             return _call(_attr(left, "is_in"), [right])
 
-        # ``%*%`` — R matrix multiplication. Python's ``@`` matmul
-        # operator is the right target (works on numpy arrays + hea
-        # DataFrames-as-matrices).
         if op == "%*%":
             return P.BinOp(left=left, op=P.MatMult(), right=right)
 
-        # Other ``%infix%`` operators — emit as a function call so the user
-        # sees something sensible; the registry resolves no specific names
-        # for these. The function-name strips ``%`` and any other
-        # operator-only character so we never produce ``*(...)``-style
-        # invalid Python identifiers.
         if op.startswith("%") and op.endswith("%"):
             fname = "".join(c for c in op.strip("%") if c.isalnum() or c == "_")
             if not fname:
-                # All-symbol infix (``%~%``, ``%^%``) with no usable
-                # Python identifier. Emit as ``_infix_<op>(left, right)``
-                # to surface the original operator in the gap log.
                 fname = "_infix_" + "".join(f"{ord(c):x}" for c in op.strip("%"))
             return _call(_name(fname), [left, right])
 
         raise RTranslateError(f"unknown binary operator {op!r}", n)
 
-    # -- pipes -------------------------------------------------------------
-
     def _visit_Pipe(self, n: R.Pipe) -> P.AST:
-        """``lhs |> rhs`` or ``lhs %>% rhs``.
-
-        For the native pipe ``|>``, the lhs is inserted as the first
-        positional arg of rhs (which must be a call).
-        For magrittr ``%>%``, the ``.`` placeholder in rhs's args becomes
-        the lhs; if no placeholder, lhs is inserted as the first positional
-        arg (same as native pipe).
-        """
+        """``lhs |> rhs`` or ``lhs %>% rhs``."""
         if not isinstance(n.rhs, R.Call):
-            # ``x |> f`` — rhs is a bare name, equivalent to ``x |> f()``.
-            # Synthesize a zero-arg call.
             synth_call = R.Call(n.rhs, (), n.rhs.span)  # type: ignore[arg-type]
             return self._emit_call_with_first(n.lhs, synth_call)
 
@@ -997,19 +754,8 @@ class Translator:
         synth = R.Call(rhs.func, (lhs, *rhs.args), rhs.span)
         return self._visit_Call(synth)
 
-    # -- calls -------------------------------------------------------------
-
     def _visit_Call(self, n: R.Call) -> P.AST:
-        """Three dispatch layers, tried in order:
-
-        1. If ``func`` is a known **verb**: rewrite to ``first_arg.verb(rest)``
-           with the verb's NSE slot active for the rest.
-        2. If ``func`` is a known **function/helper** in
-           :data:`FUNCTION_TABLE`: dispatch on form.
-        3. Otherwise: emit a regular function call, walking args with the
-           current slot.
-        """
-        # Strip namespace qualifier: ``pkg::name(...)`` — keep just ``name``.
+        """Three dispatch layers, tried in order:"""
         func = n.func
         if isinstance(func, R.BinOp) and func.op in ("::", ":::"):
             func = func.right  # type: ignore[assignment]
@@ -1017,58 +763,31 @@ class Translator:
         if isinstance(func, R.Identifier):
             name = func.name
 
-            # 0) ggplot(df, aes(...)) — the only ggplot entry point that
-            # takes a data frame. Rewritten to ``df.ggplot(...)`` so it
-            # composes with the chain rewriter via the ``+`` operator.
             if name == "ggplot":
                 return self._emit_ggplot_root(n.args)
 
-            # ``with(df, expr)`` — push the df name onto the stack so
-            # bare identifiers in ``expr``'s subtree rewrite to
-            # ``df["name"]``; the call itself "returns" the translated
-            # expression value (R's ``with()`` is value-producing).
             if name == "with":
                 return self._emit_with_call(n.args)
 
-            # ``slice(df, <positions>)`` — dplyr's positional slice. Maps to
-            # ``df.slice([...])`` (keep) or ``df.slice(drop([...]))``
-            # (negative = drop), shifting R's 1-based positions to hea's
-            # 0-based. Returns ``None`` (→ falls through to the default call)
-            # when the positions can't be statically shifted, e.g. a bare
-            # runtime variable whose sign is unknown.
             if name == "slice" and n.args:
                 emitted = self._maybe_emit_slice(n.args)
                 if emitted is not None:
                     return emitted
 
-            # 1) Verb dispatch.
             verb = VERB_TABLE.get(name)
             if verb is not None and n.args:
                 return self._emit_verb_call(verb, n.args)
 
-            # 2) Function-helper dispatch.
             helper = FUNCTION_TABLE.get(name)
             if helper is not None:
                 return self._emit_helper_call(helper, name, n.args)
 
-            # Unify lme4's lmer/glmer onto hea's single ``gmm`` class before
-            # model handling, so both the no-data frame builder and the
-            # import resolver see the hea name.
             name = self._R_MODEL_ALIASES.get(name, name)
 
-            # 2.5) Model fits with no ``data`` argument — R resolves
-            # ``lm(y ~ x)``'s ``y``/``x`` from the caller's environment.
-            # Translate-time we can do the same by building a frame from
-            # the formula's terms.
             synthesized = self._maybe_lm_no_data(name, n.args)
             if synthesized is not None:
                 return synthesized
 
-            # 3) R-generic method-form: ``summary(m)`` → ``m.summary()``
-            # when ``m`` is a bare identifier. Round-trips with hea
-            # Python's idiomatic ``m.summary()`` method form. Multi-arg
-            # generics (``anova(m1, m2)``) and non-identifier first args
-            # (``summary(fit(...))``) fall through to regular call.
             if name in _R_GENERIC_METHOD_FORM:
                 positional = [a for a in n.args if not isinstance(a, R.NamedArg)]
                 if len(positional) == 1 and isinstance(positional[0], R.Identifier):
@@ -1077,39 +796,20 @@ class Translator:
                     py_args, py_kwargs = self._translate_args(rest)
                     return _call(_attr(receiver, name), py_args, py_kwargs)
 
-            # 4) Default: regular call. Args walked under current slot,
-            # which is what's wanted for nested user calls.
             return self._emit_regular_call(name, n.args)
 
-        # ``obj$method(...)`` / ``(obj$method)(...)`` — R's call of a
-        # function-valued list slot on an S3 / S4 object. Reverse to
-        # Python attribute access ``obj.method(args)``. Bare ``obj$col``
-        # without a trailing call still goes through ``_visit_Dollar``
-        # which emits ``obj["col"]`` (the data-frame column-access shape).
         if isinstance(func, R.Dollar):
             target = self._visit(func.target)
             args, kwargs = self._translate_args(n.args)
             callee = P.Attribute(value=target, attr=func.name, ctx=P.Load())
             return _call(callee, args, kwargs)
 
-        # Non-identifier callable (e.g. ``f()(g)`` — Call of Call).
         callee = self._visit(func)
         args, kwargs = self._translate_args(n.args)
         return _call(callee, args, kwargs)
 
     def _emit_verb_call(self, verb: Verb, args: tuple[R.Node, ...]) -> P.AST:
-        """First arg becomes the receiver; rest walked under ``verb.slot``.
-
-        Any ``across()`` call inside the verb's args is expanded BEFORE
-        translation — it's a translate-time macro that fans one entry
-        into N kwargs (one per matched column).
-
-        After translating the user's kwargs, any :attr:`Verb.auto_kwargs`
-        are appended — that's how ``transmute`` becomes ``mutate(..., _keep="none")``.
-        Auto kwargs only land if the user didn't already pass that name,
-        so the user can override the default (``transmute(..., .keep="all")``
-        would emit ``.mutate(..., _keep="all")``, not both).
-        """
+        """First arg becomes the receiver; rest walked under ``verb.slot``."""
         receiver = self._visit(args[0])
         rest = self._expand_across_in_args(args[1:])
         with self.nse.enter(verb.slot):
@@ -1123,16 +823,7 @@ class Translator:
         return _call(_attr(receiver, verb.hea_method), py_args, py_kwargs)
 
     def _maybe_emit_slice(self, args: tuple[R.Node, ...]) -> P.AST | None:
-        """dplyr ``slice(df, <positions>)`` → ``df.slice([...])`` / ``df.slice(drop([...]))``.
-
-        Positive positions keep, a leading ``-`` drops (R's
-        ``slice(df, -c(1, 2))``). R's 1-based positions are shifted to hea's
-        0-based. Returns ``None`` — so the caller falls back to the default
-        call emission — unless the call is ``slice(df, <one index>)`` with
-        no named args and the index is a *statically shiftable* literal
-        (``c(...)`` of positive ints, ``a:b``, ``n()``, or a single positive
-        int); a bare runtime variable can't be shifted at translate time.
-        """
+        """dplyr ``slice(df, <positions>)`` → ``df.slice([...])`` / ``df.slice(drop([...]))``."""
         if len(args) != 2 or any(isinstance(a, R.NamedArg) for a in args):
             return None
         idx = args[1]
@@ -1148,7 +839,6 @@ class Translator:
     def _shift_slice_positions(self, node: R.Node) -> P.AST | None:
         """Shift an R 1-based ``slice`` index to a 0-based Python positions
         expression, or ``None`` if it isn't a statically shiftable literal."""
-        # ``c(1, 3, 5)`` of positive int literals → ``[0, 2, 4]``.
         if (
             isinstance(node, R.Call)
             and isinstance(node.func, R.Identifier)
@@ -1160,8 +850,6 @@ class Translator:
                 elts=[P.Constant(value=int(x.value) - 1) for x in node.args],
                 ctx=P.Load(),
             )
-        # ``a:b`` of positive int literals → ``range(a-1, b)`` (1-based
-        # inclusive → 0-based half-open); ``1:b`` collapses to ``range(b)``.
         if (
             isinstance(node, R.BinOp)
             and node.op == ":"
@@ -1172,7 +860,6 @@ class Translator:
             if a == 1:
                 return _call(_name("range"), [P.Constant(value=b)])
             return _call(_name("range"), [P.Constant(value=a - 1), P.Constant(value=b)])
-        # ``n()`` → the last row (0-based ``[-1]``).
         if (
             isinstance(node, R.Call)
             and isinstance(node.func, R.Identifier)
@@ -1180,22 +867,12 @@ class Translator:
             and not node.args
         ):
             return P.List(elts=[P.Constant(value=-1)], ctx=P.Load())
-        # A single positive int literal → ``[n - 1]``.
         if _is_pos_int_lit(node):
             return P.List(elts=[P.Constant(value=int(node.value) - 1)], ctx=P.Load())
         return None
 
-    # ----- ggplot ---------------------------------------------------------
-
     def _emit_ggplot_root(self, args: tuple[R.Node, ...]) -> P.AST:
-        """``ggplot(df, aes(x = a, y = b))`` → ``df.ggplot(x="a", y="b")``.
-
-        The first positional arg is the data frame (receiver). Subsequent
-        args may be:
-        - ``aes(...)`` positional (or as ``mapping = aes(...)``) — unwrap
-          its kwargs into ``ggplot()``'s kwargs.
-        - Other named kwargs (``environment = ...``) — pass through.
-        """
+        """``ggplot(df, aes(x = a, y = b))`` → ``df.ggplot(x="a", y="b")``."""
         if not args:
             return _call(_attr(_attr(_name("hea"), "ggplot"), "ggplot"))
         receiver = self._visit(args[0])
@@ -1207,8 +884,6 @@ class Translator:
         receiver = self._visit(left)
         func_name = right.func.name  # type: ignore[attr-defined]
         kwargs = self._collect_ggplot_kwargs(right.args)
-        # Positional args (besides aes) pass through under NSE.NONE so
-        # ``annotate("text", x=, y=, label=)`` keeps its string literal.
         positional: list[P.AST] = []
         with self.nse.enter(Slot.NONE):
             for arg in right.args:
@@ -1217,7 +892,6 @@ class Translator:
                 if _is_named_call(arg, "aes"):
                     continue
                 if isinstance(arg, R.Tilde):
-                    # facet_wrap(~island) / facet_grid(rows ~ cols)
                     positional.append(P.Constant(value=_format_formula(arg)))
                     continue
                 positional.append(self._visit(arg))
@@ -1233,7 +907,6 @@ class Translator:
                 kwargs.extend(self._translate_aes_args(arg.args))
                 continue
             if isinstance(arg, R.NamedArg) and _is_named_call(arg.value, "aes"):
-                # ``mapping = aes(...)`` form.
                 kwargs.extend(self._translate_aes_args(arg.value.args))
                 continue
             if isinstance(arg, R.NamedArg):
@@ -1247,24 +920,10 @@ class Translator:
                 kwargs.append(P.keyword(arg=alias.py_name, value=value))
         return kwargs
 
-    # ggplot's documented positional-aesthetic order for ``aes()``. R's
-    # convention (and ``?aes``): the first positional is ``x``, the
-    # second is ``y``. Everything else is named. We map by position so
-    # ``aes(x, y, color = z)`` translates as the user intends.
     _AES_POS_AESTHETICS = ("x", "y")
 
     def _translate_aes_args(self, args: tuple[R.Node, ...]) -> list[P.keyword]:
-        """Translate ``aes()`` args to ggplot kwargs.
-
-        Each arg becomes a kwarg by either its explicit name (NamedArg)
-        or its position (mapping to ``x``, then ``y`` — R's convention).
-        The value translation rules:
-
-        - Bare ``Identifier`` → string ``"name"`` (the column reference).
-        - ``StrLit`` → string (pass-through).
-        - Anything else → translate under EXPR slot for column-aware
-          expressions like ``log(weight)``.
-        """
+        """Translate ``aes()`` args to ggplot kwargs."""
         kwargs: list[P.keyword] = []
         pos_idx = 0
         for arg in args:
@@ -1273,14 +932,11 @@ class Translator:
                 value = self._translate_aes_value(arg.value)
                 kwargs.append(P.keyword(arg=name, value=value))
                 continue
-            # Positional — map to x, y in order.
             if pos_idx < len(self._AES_POS_AESTHETICS):
                 name = self._AES_POS_AESTHETICS[pos_idx]
                 value = self._translate_aes_value(arg)
                 kwargs.append(P.keyword(arg=name, value=value))
                 pos_idx += 1
-            # Extra positional args (3rd+) in aes are non-standard. Drop
-            # silently rather than guess at color/fill/etc.
         return kwargs
 
     def _translate_aes_value(self, node: R.Node) -> P.AST:
@@ -1292,8 +948,6 @@ class Translator:
             return P.Constant(value=node.value)
         with self.nse.enter(Slot.EXPR):
             return self._visit(node)
-
-    # ----- across() expansion ---------------------------------------------
 
     def _expand_across_in_args(self, args: tuple[R.Node, ...]) -> tuple[R.Node, ...]:
         """Walk verb args; replace each ``across(...)`` call with the
@@ -1307,30 +961,13 @@ class Translator:
         return tuple(out)
 
     def _expand_across(self, call: R.Call) -> list[R.Node]:
-        """Translate-time expansion of ``across(cols, fn[, .names = ...])``.
-
-        Supported:
-        - ``across(col, fn)``               — single col, single fn
-        - ``across(c(a, b, ...), fn)``      — multiple cols, single fn
-        - ``fn`` may be an :class:`R.Identifier` (named function) or a
-          :class:`R.FunctionDef` (anonymous lambda) of one parameter.
-
-        Out of scope (raises :class:`RTranslateError`):
-        - list-of-functions form ``list(mean = mean, sd = sd)``
-        - ``.names`` glue templates
-
-        Returns a list of synthetic :class:`R.NamedArg` nodes — one per
-        target column. Each NamedArg's value is the function applied to
-        an :class:`R.Identifier` for that column.
-        """
+        """Translate-time expansion of ``across(cols, fn[, .names = ...])``."""
         if len(call.args) < 2:
             raise RTranslateError("across() requires (cols, fns) — got fewer", call)
 
         cols_arg = call.args[0]
         fn_arg = call.args[1]
 
-        # Reject the unsupported `.names` / list-of-fns forms cleanly so the
-        # user sees what's missing instead of a wrong-looking translation.
         for extra in call.args[2:]:
             if isinstance(extra, R.NamedArg) and extra.name == ".names":
                 raise RTranslateError(
@@ -1352,12 +989,7 @@ class Translator:
         return results
 
     def _apply_across_fn(self, fn_arg: R.Node, col: R.Identifier, span) -> R.Node:
-        """Apply ``fn_arg`` to ``col``, returning an R AST node.
-
-        - ``fn_arg`` is an Identifier: emit ``fn_arg(col)``.
-        - ``fn_arg`` is a FunctionDef with one param ``p``: substitute
-          ``p`` with ``col`` in the body.
-        """
+        """Apply ``fn_arg`` to ``col``, returning an R AST node."""
         if isinstance(fn_arg, R.Identifier):
             return R.Call(fn_arg, (col,), span)
         if isinstance(fn_arg, R.FunctionDef):
@@ -1375,46 +1007,28 @@ class Translator:
     def _emit_helper_call(
         self, helper: Func, r_name: str, args: tuple[R.Node, ...]
     ) -> P.AST:
-        """Translate one of the registered helpers (mean, desc, n, …).
-
-        ``form="method"``  — only used in EXPR slot; emits
-        ``col("x").func(rest_kwargs)`` when the first arg is a single
-        identifier, else ``(<expr>).func(...)``.
-
-        ``form="function"`` — emits ``hea.func(args)`` (with the registry's
-        ``hea_name`` resolving qualified names like ``selectors.starts_with``).
-        """
-        # Special-case: c(...) → Python list / dict literal.
+        """Translate one of the registered helpers (mean, desc, n, …)."""
         if helper.hea_name == "__list__":
             return self._emit_c_call(args)
 
-        # Special-case: case_when — Tilde args become (cond, value) tuples.
         if helper.hea_name == "case_when":
             return self._emit_case_when(args)
 
-        # Special-case: data.frame / tibble — emit ``hea.DataFrame({...})``.
         if helper.hea_name == "__data_frame__":
             return self._emit_data_frame_call(args)
 
-        # Special-case: tribble — row-form literal, reshape to column-major.
         if helper.hea_name == "__tribble__":
             return self._emit_tribble_call(args)
 
-        # Special-case: where(is.X) — tidyselect predicate.
         if helper.hea_name == "__where__":
             return self._emit_where_call(args)
 
-        # Special-case: join_by — bare ID → string; comparison → Expr.
         if helper.hea_name == "__join_by__":
             return self._emit_join_by_call(args)
 
-        # Special-case: quote / expression / bquote — pass the inner R
-        # source text through as a string so ``hea.quote()`` can parse
-        # it as plotmath.
         if helper.hea_name == "__quote__":
             return self._emit_quote_call(args)
 
-        # Override arg slot if registry specifies one.
         arg_slot_ctx = (
             self.nse.enter(helper.arg_slot)
             if helper.arg_slot is not None
@@ -1422,33 +1036,16 @@ class Translator:
         )
 
         if helper.form == "method" and self.nse.is_expr() and args:
-            # ``mean(x, na.rm = TRUE)`` → ``col("x").mean()``.
-            # The first arg becomes the receiver; remaining args become
-            # the method's positional / kw args.
-            #
-            # ``na_rm`` is dropped: polars ``Expr.mean()`` / ``.sum()`` etc.
-            # don't take that kwarg, and their behavior matches R's
-            # ``na.rm = TRUE`` (skip nulls). If the user wrote
-            # ``na.rm = FALSE``, we still drop the kwarg — the resulting
-            # behavior diverges from R, but the parity runner will catch
-            # any value diff and report it as a real hea/R gap rather
-            # than a translator bug.
             first = args[0]
             if isinstance(first, R.Identifier):
                 receiver = _call(_name("col"), [P.Constant(first.name)])
             else:
-                # Complex first arg — visit with EXPR slot still active so
-                # nested column refs get col()-wrapped.
                 receiver = self._visit(first)
             with arg_slot_ctx:
                 rest_args, rest_kwargs = self._translate_args(args[1:])
             rest_kwargs = [kw for kw in rest_kwargs if kw.arg != "na_rm"]
             return _call(_attr(receiver, helper.hea_name), rest_args, rest_kwargs)
 
-        # Drop R-side kwargs that have no hea counterpart (e.g. readr's
-        # ``col_types=`` / ``id=``) so the emitted .py doesn't carry
-        # them. Done pre-translate so the dropped arg's value isn't
-        # walked at all (the value may itself reference R-only names).
         if helper.drop_kwargs:
             args = tuple(
                 a
@@ -1456,11 +1053,9 @@ class Translator:
                 if not (isinstance(a, R.NamedArg) and a.name in helper.drop_kwargs)
             )
 
-        # Function form (or method-form fallback outside EXPR slot).
         with arg_slot_ctx:
             py_args, py_kwargs = self._translate_args(args)
 
-        # ``selectors.starts_with`` → ast.Attribute chain.
         callee = _dotted_name(helper.hea_name)
         return _call(callee, py_args, py_kwargs)
 
@@ -1471,14 +1066,7 @@ class Translator:
         return _call(_name(_to_py_identifier(name)), py_args, py_kwargs)
 
     def _emit_with_call(self, args: tuple[R.Node, ...]) -> P.AST:
-        """``with(df, expr)`` — R's NSE binding.
-
-        ``expr`` is translated with bare identifiers rewritten to
-        ``df["name"]`` lookups. Currently requires the ``df`` argument
-        to be a bare :class:`R.Identifier` (the common case across
-        idiomatic R scripts); anything more elaborate falls through to
-        the regular-call emission so the user can see the gap.
-        """
+        """``with(df, expr)`` — R's NSE binding."""
         if len(args) < 2 or not isinstance(args[0], R.Identifier):
             return self._emit_regular_call("with", args)
         df_name = _to_py_identifier(args[0].name)
@@ -1492,22 +1080,11 @@ class Translator:
     _LM_LIKE: frozenset[str] = frozenset(
         {"lm", "glm", "gam", "bam", "gmm", "lmer", "glmer"}
     )
-    # lme4 exposes two entry points (lmer / glmer); hea folds both into one
-    # ``gmm`` class that dispatches lmer-vs-glmer on ``family`` internally.
-    # Reverse direction in ``py_to_r._emit_gmm_call``.
     _R_MODEL_ALIASES: ClassVar[dict[str, str]] = {"lmer": "gmm", "glmer": "gmm"}
     _FORMULA_OPS: frozenset[str] = frozenset({"+", "-", "*", "/", ":", "^", "|"})
 
     def _maybe_lm_no_data(self, name: str, args: tuple[R.Node, ...]) -> P.AST | None:
-        """Catch ``lm(y ~ x)`` / ``glm(...)`` / etc. with no ``data`` arg.
-
-        R resolves the formula's variables in the caller's environment;
-        hea requires an explicit ``data=`` frame. We build that frame
-        at translate time from the formula's *additive terms*: bare
-        identifiers become eponymous columns, compound expressions get
-        synthesized names (``term_0``…) with the expression itself as
-        the column value. The formula text is rewritten to match.
-        """
+        """Catch ``lm(y ~ x)`` / ``glm(...)`` / etc. with no ``data`` arg."""
         if name not in self._LM_LIKE:
             return None
         if not args or not isinstance(args[0], R.Tilde):
@@ -1517,7 +1094,6 @@ class Translator:
         has_data_kwarg = any(
             isinstance(a, R.NamedArg) and a.name in ("data", ".data") for a in args
         )
-        # Second positional arg fills the ``data`` slot in R.
         if has_data_kwarg or len(positional) >= 2:
             return None
 
@@ -1532,7 +1108,6 @@ class Translator:
                     pairs.append((node.name, node))
                     seen.add(node.name)
                 return node
-            # Compound term — synthesize a fresh name.
             new_name = f"term_{counter[0]}"
             counter[0] += 1
             pairs.append((new_name, node))
@@ -1540,8 +1115,6 @@ class Translator:
             return R.Identifier(name=new_name, span=node.span)
 
         def walk(side: R.Node) -> R.Node:
-            # Recurse through top-level formula operators; everything
-            # else is a terminal "term."
             if isinstance(side, R.BinOp) and side.op in self._FORMULA_OPS:
                 return R.BinOp(
                     op=side.op,
@@ -1551,7 +1124,6 @@ class Translator:
                 )
             if isinstance(side, R.UnaryOp) and side.op in ("-", "+"):
                 return R.UnaryOp(op=side.op, operand=walk(side.operand), span=side.span)
-            # Literals (``y ~ 1`` intercept, ``y ~ 0`` no-intercept) pass through.
             if isinstance(side, (R.NumLit, R.IntLit, R.BoolLit)):
                 return side
             return take(side)
@@ -1561,7 +1133,6 @@ class Translator:
         new_tilde = R.Tilde(lhs=new_lhs, rhs=new_rhs, span=formula.span)
         formula_str = _format_formula(new_tilde)
 
-        # hea.DataFrame({col: <visited value>, ...}).
         keys: list[P.AST] = []
         values: list[P.AST] = []
         for col_name, ast_node in pairs:
@@ -1573,7 +1144,6 @@ class Translator:
             [],
         )
 
-        # Propagate any non-formula kwargs (weights=, method=, …).
         py_kwargs: list[P.keyword] = []
         for a in args[1:]:
             if isinstance(a, R.NamedArg):
@@ -1591,19 +1161,13 @@ class Translator:
     def _emit_case_when(self, args: tuple[R.Node, ...]) -> P.AST:
         """``case_when(cond1 ~ val1, cond2 ~ val2, .default = d)`` →
         ``case_when((c1, v1), (c2, v2), default=d)``.
-
-        Every Tilde-typed positional arg becomes a 2-tuple. The named
-        ``.default`` becomes the Python ``default=`` kwarg (handled by
-        the generic kwarg path).
         """
         tuples: list[P.AST] = []
         kwargs: list[P.keyword] = []
-        # case_when's cond/value pairs are NSE expressions — push EXPR slot.
         with self.nse.enter(Slot.EXPR):
             for arg in args:
                 if isinstance(arg, R.Tilde):
                     if arg.lhs is None:
-                        # ``~ value`` form — degenerate; treat as the default branch.
                         kwargs.append(
                             P.keyword(arg="default", value=self._visit(arg.rhs))
                         )
@@ -1622,14 +1186,9 @@ class Translator:
                         value = self._visit(arg.value)
                     kwargs.append(P.keyword(arg=alias.py_name, value=value))
                 else:
-                    # Non-tilde positional — surprising. Keep as-is so the
-                    # user can see what happened.
                     tuples.append(self._visit(arg))
         return _call(_name("case_when"), tuples, kwargs)
 
-    # R's tidyselect predicates → equivalent ``polars.selectors`` calls.
-    # All return a Selector (no extra args needed); the translator emits
-    # ``selectors.<name>()``.
     _WHERE_PREDICATE_MAP: ClassVar[dict[str, str]] = {
         "is.character": "string",
         "is.string": "string",
@@ -1645,12 +1204,7 @@ class Translator:
     }
 
     def _emit_quote_call(self, args: tuple[R.Node, ...]) -> P.AST:
-        """``quote(x[i]^2 == 0)`` → ``quote('x[i]^2 == 0')``.
-
-        Pass the inner expression through as R-source text (rebuilt from
-        the AST) so hea's runtime ``quote()`` can parse and render it as
-        matplotlib mathtext.
-        """
+        """``quote(x[i]^2 == 0)`` → ``quote('x[i]^2 == 0')``."""
         positional = [a for a in args if not isinstance(a, R.NamedArg)]
         if not positional:
             return _call(_name("quote"), [P.Constant(value="")])
@@ -1662,15 +1216,6 @@ class Translator:
     def _emit_join_by_call(self, args: tuple[R.Node, ...]) -> P.AST:
         """``join_by(x, dest == faa, closest(t >= u))`` — dplyr's NSE
         join spec. Each arg gets its own treatment:
-
-        - ``Identifier`` (bare name) → emit ``'name'`` (string; same key
-          on both sides; hea's ``join_by`` recognises this shape).
-        - ``BinOp`` with a comparison op → emit
-          ``col('lhs') op col('rhs')`` so polars' ``Expr.__eq__`` /
-          ``__lt__`` / etc. fires and produces a join-binary expression.
-        - ``Call`` to one of ``closest`` / ``between`` / ``overlaps`` /
-          ``within`` (or anything else) → translate normally with
-          ``Slot.EXPR`` active so its args (column names) become col()s.
         """
         py_args: list[P.AST] = []
         for a in args:
@@ -1695,19 +1240,12 @@ class Translator:
             sel = self._WHERE_PREDICATE_MAP.get(args[0].name)
             if sel is not None:
                 return _call(_attr(_name("selectors"), sel), [])
-        # Fallback — let ``where`` resolve at runtime (will likely error).
         py_args, py_kwargs = self._translate_args(args)
         return _call(_name("where"), py_args, py_kwargs)
 
     def _emit_tribble_call(self, args: tuple[R.Node, ...]) -> P.AST:
         """``tribble(~a, ~b, 1, "x", 2, "y")`` →
         ``hea.DataFrame({"a": [1, 2], "b": ["x", "y"]})``.
-
-        Leading args of the form ``~name`` (unary tilde over a bare
-        identifier) are column headers; the remaining args fill those
-        columns in row-major order. A trailing partial row falls
-        through to ``hea.DataFrame`` which will raise (matches R's own
-        behavior — tribble requires complete rows).
         """
         col_names: list[str] = []
         data_args: list[R.Node] = []
@@ -1727,11 +1265,8 @@ class Translator:
             data_args.append(a)
         n = len(col_names)
         if n == 0:
-            # No header rows — degenerate; fall back to data.frame
-            # emission so the user sees a useful error / shape.
             return self._emit_data_frame_call(args)
         keys: list[P.AST] = [P.Constant(value=name) for name in col_names]
-        # Reshape row-major data into n parallel column lists.
         columns: list[list[P.AST]] = [[] for _ in range(n)]
         for i, a in enumerate(data_args):
             columns[i % n].append(self._visit(a))
@@ -1744,17 +1279,6 @@ class Translator:
     def _emit_data_frame_call(self, args: tuple[R.Node, ...]) -> P.AST:
         """``data.frame(a = c(1, 2), b = c("x", "y"))`` →
         ``hea.DataFrame({"a": [1, 2], "b": ["x", "y"]})``.
-
-        Tibble cross-column references (``tibble(x = 1:10, y = x * 2 +
-        rnorm(length(x)))``) are detected: any named arg whose VALUE
-        translates to a polars-Expr-shaped expression (contains a
-        ``col(...)`` call after visiting in EXPR slot) lands in a
-        trailing ``.with_columns(expr.alias(name))`` chain rather than
-        in the constructor dict. That mirrors dplyr's left-to-right
-        NSE evaluation of tibble args.
-
-        Unnamed positional args become ``V1``, ``V2``, …  by position
-        (R's default — though uncommon in idiomatic code).
         """
         literal_keys: list[P.AST] = []
         literal_values: list[P.AST] = []
@@ -1765,9 +1289,6 @@ class Translator:
             if isinstance(arg, R.NamedArg):
                 if arg.name == "stringsAsFactors":
                     continue
-                # Visit value in EXPR slot so backticked-numeric / cross
-                # column refs become ``col("name")`` and ``length`` etc.
-                # dispatch as Expr methods.
                 with self.nse.enter(Slot.EXPR):
                     value = self._visit(arg.value)
                 if _contains_col_call(value):
@@ -1788,8 +1309,6 @@ class Translator:
             _attr(_attr(_name("hea"), "tidy"), "DataFrame"),
             [P.Dict(keys=literal_keys, values=literal_values)],
         )
-        # Append a single ``.with_columns(...)`` carrying every cross-ref
-        # column (polars resolves them left-to-right against the frame).
         if expr_columns:
             aliased = [
                 _call(_attr(expr, "alias"), [P.Constant(value=name)])
@@ -1802,11 +1321,6 @@ class Translator:
         """``c(a, b, c)`` → Python list. ``c("a" = "b", "x" = "y")`` →
         Python dict (idiomatic for join ``by`` mappings). The split is
         decided by whether any arg is named.
-
-        All-numeric-literal vectors (``c(2, 3, 5)`` / ``c(-1.5, 0, 1.5)``)
-        emit as ``np.array([...])`` so R's elementwise arithmetic
-        (``primes * 2``, ``primes - 1``) carries over — Python's bare
-        ``list`` rejects ``-``  and repeats on ``*``.
         """
         if any(isinstance(a, R.NamedArg) for a in args):
             keys: list[P.AST] = []
@@ -1827,32 +1341,17 @@ class Translator:
             )
         return P.List(elts=list(elems), ctx=P.Load())
 
-    # -- args --------------------------------------------------------------
-
     def _translate_args(
         self, args: tuple[R.Node, ...]
     ) -> tuple[list[P.AST], list[P.keyword]]:
-        """Walk an R argument list, splitting positional from named.
-
-        Named-arg name is resolved via :func:`resolve_kwarg` — known
-        kwargs (``.by``, ``.keep``, ``.before`` etc.) may force a specific
-        NSE slot for their value, overriding the surrounding verb's slot.
-        Unknown kwargs inherit the current slot.
-        """
+        """Walk an R argument list, splitting positional from named."""
         py_args: list[P.AST] = []
         py_kwargs: list[P.keyword] = []
-        # R lets named args use any string literal name (``fct_recode(
-        # "Republican, strong" = ...)``) and even repeat the same name
-        # (``fct_recode("Other" = "x", "Other" = "y")`` — many-to-one
-        # merge). Python accepts neither shape as plain ``name=v`` kwargs,
-        # so anything non-identifier OR repeated lands in a trailing
-        # ``**{...}`` dict; repeats become value lists.
         name_counts: dict[str, int] = {}
         for arg in args:
             if isinstance(arg, R.NamedArg):
                 py_name = resolve_kwarg(arg.name).py_name
                 name_counts[py_name] = name_counts.get(py_name, 0) + 1
-        # Dict of merged kwargs we'll emit as a single ``**{}`` at the end.
         merged_keys: list[str] = []  # insertion order
         merged_values: dict[str, list[P.AST]] = {}
         for arg in args:
@@ -1873,7 +1372,6 @@ class Translator:
                         merged_values[alias.py_name] = []
                     merged_values[alias.py_name].append(value)
             elif isinstance(arg, R.MissingArg):
-                # Empty arg in subscript context — represent as None.
                 py_args.append(P.Constant(value=None))
             else:
                 py_args.append(self._visit(arg))
@@ -1886,9 +1384,6 @@ class Translator:
                 if len(vals) == 1:
                     dict_values.append(vals[0])
                 else:
-                    # Many → list. Matches fct_recode's many-to-one merge
-                    # shape (and is generally less lossy than picking the
-                    # last value as Python would do for plain dup kwargs).
                     dict_values.append(P.List(elts=vals, ctx=P.Load()))
             py_kwargs.append(
                 P.keyword(
@@ -1898,19 +1393,10 @@ class Translator:
             )
         return py_args, py_kwargs
 
-    # -- assignment & top-level control flow -------------------------------
-
     def _visit_Assign(self, n: R.Assign) -> P.AST:
-        """``x <- expr`` / ``x = expr`` → ``x = expr``.
-
-        ``<<-`` global-scope assignment is emitted the same as ``<-``;
-        nested scope semantics aren't translatable to Python's rules
-        without ``global`` declarations, which is not currently handled.
-        """
-        # The LHS of an Assign is the variable name — NOT a column ref.
+        """``x <- expr`` / ``x = expr`` → ``x = expr``."""
         with self.nse.enter(Slot.NONE):
             target = self._visit(n.target)
-        # Ensure target is a Name (or Attribute / Subscript) in Store context.
         if isinstance(target, (P.Name, P.Attribute, P.Subscript)):
             target.ctx = P.Store()
         value = self._visit(n.value)
@@ -1925,31 +1411,18 @@ class Translator:
     def _visit_MissingArg(self, n: R.MissingArg) -> P.AST:
         return P.Constant(value=None)
 
-    # -- subscript / dollar / at ------------------------------------------
-
     def _visit_Subscript(self, n: R.Subscript) -> P.AST:
-        """``df[i]`` / ``df[i, j]`` — Python ``df[i]`` / ``df[i, j]``.
-
-        R's blank-axis form ``df[, j]`` / ``df[i, ]`` maps to a Python
-        slice (``df[:, j]`` / ``df[i, :]``) — polars and numpy both accept
-        that, whereas ``None`` is rejected.
-
-        R-range subscripts ``vec[a:b]`` translate to Python slices
-        ``vec[a-1:b]`` so 0-based positional indexing on the hea side
-        selects the same elements R's 1-based ``a:b`` would.
-        """
+        """``df[i]`` / ``df[i, j]`` — Python ``df[i]`` / ``df[i, j]``."""
 
         def _arg(a):
             if isinstance(a, R.MissingArg):
                 return P.Slice(lower=None, upper=None, step=None)
             if isinstance(a, R.BinOp) and a.op == ":":
                 return self._range_subscript(a)
-            # R 1-based literal index → Python 0-based.
             if isinstance(a, R.IntLit):
                 return P.Constant(value=a.value - 1)
             if isinstance(a, R.NumLit) and a.value == int(a.value) and a.value > 0:
                 return P.Constant(value=int(a.value) - 1)
-            # ``c(1, 3, 5)`` of positive int literals → shifted Python list.
             if (
                 isinstance(a, R.Call)
                 and isinstance(a.func, R.Identifier)
@@ -1967,10 +1440,6 @@ class Translator:
             ):
                 elts = [P.Constant(value=int(x.value) - 1) for x in a.args]
                 return P.List(elts=elts, ctx=P.Load())
-            # ``vec[expr + 1]`` — R's idiom for "shift 0-based-arithmetic
-            # result to 1-based index" (e.g. ``letters[dm + 1]`` where
-            # ``dm`` was built from ``%% s``). hea is 0-based, so the
-            # ``+ 1`` is redundant; drop it.
             if (
                 isinstance(a, R.BinOp)
                 and a.op == "+"
@@ -1982,9 +1451,6 @@ class Translator:
                     return self._visit(a.left)
                 finally:
                     self._index_context -= 1
-            # Recurse with index context active: ``sample(1:N)`` and any
-            # other nested ``1:N`` literal inside the subscript arg should
-            # shift to ``range(N)`` so the produced indices are 0-based.
             self._index_context += 1
             try:
                 return self._visit(a)
@@ -2000,17 +1466,10 @@ class Translator:
         return P.Subscript(value=target, slice=slice_, ctx=P.Load())
 
     def _range_subscript(self, bin_op: R.BinOp) -> P.AST:
-        """Emit a Python slice for an R ``a:b`` index expression.
-
-        R ``vec[1:5]`` selects 1-based positions 1..5 = first 5 elements;
-        Python ``vec[:5]`` does the same. R ``vec[a:b]`` (positions a..b
-        1-based, length b-a+1) becomes Python ``vec[a-1:b]`` (positions
-        a-1..b-1 0-based, same length).
-        """
+        """Emit a Python slice for an R ``a:b`` index expression."""
         with self.nse.enter(Slot.NONE):
             left = self._visit(bin_op.left)
             right = self._visit(bin_op.right)
-        # ``1:N`` → ``:N``
         if isinstance(left, P.Constant) and left.value == 1:
             return P.Slice(lower=None, upper=right, step=None)
         shifted = P.BinOp(left=left, op=P.Sub(), right=P.Constant(value=1))
@@ -2047,8 +1506,6 @@ class Translator:
             target = self._visit(n.target)
         return P.Attribute(value=target, attr=n.name, ctx=P.Load())
 
-    # -- formulas / blocks / control flow ----------------------------------
-
     def _visit_Tilde(self, n: R.Tilde) -> P.AST:
         """Formula. Emit as a string literal so consumers like
         ``hea.lm(formula="y ~ x")`` and ``facet_wrap("~island")`` work.
@@ -2065,9 +1522,6 @@ class Translator:
         which is what R does at runtime."""
         if not n.statements:
             return P.Constant(value=None)
-        # Only the statement case is required (function bodies,
-        # control-flow bodies). The expression case can come later.
-        # For safety here, emit the last statement's value.
         return self._visit(n.statements[-1])
 
     def _visit_If(self, n: R.If) -> P.AST:
@@ -2086,11 +1540,6 @@ class Translator:
 
     def _visit_For(self, n: R.For) -> P.stmt:
         iterable, shifted = self._visit_for_iter(n.iterable)
-        # When the R loop ``for(i in a:b)`` is shifted to a 0-based
-        # ``range(a-1, b)``, body references to ``(i - 1)`` (R's manual
-        # "shift to 0-based for arithmetic") are redundant — the loop
-        # counter is already 0-based. Rewrite them so the math matches
-        # the original R script.
         if shifted:
             self._shifted_loop_vars.add(n.var)
         try:
@@ -2107,13 +1556,7 @@ class Translator:
         )
 
     def _visit_block_as_stmts(self, body: R.Node) -> list[P.stmt]:
-        """Translate a control-flow body to a list of Python statements.
-
-        R's ``{stmt1; stmt2; ...}`` blocks contain multiple statements —
-        the visitor that's emitting an `if` / `for` / `while` / function
-        body needs every one, not just the last. Single-statement bodies
-        (no braces) collapse to a 1-element list.
-        """
+        """Translate a control-flow body to a list of Python statements."""
         if isinstance(body, R.Block):
             if not body.statements:
                 return [P.Pass()]
@@ -2121,22 +1564,11 @@ class Translator:
         return [self._as_stmt(self._visit(body))]
 
     def _visit_for_iter(self, iter_node: R.Node) -> tuple[P.AST, bool]:
-        """Translate the iter of an R ``for(i in <iter>)``.
-
-        R is 1-based; hea is 0-based throughout. Emitting ``range(a-1, b)``
-        for R's ``a:b`` makes the loop counter a 0-based index, which is
-        how the body normally uses it. ``range`` matches Python idiom
-        and is what numpy / polars indexing expects.
-
-        Returns the iter AST plus a flag indicating whether the loop's
-        counter was shifted (caller propagates this into the body so
-        ``(i - 1)`` references collapse to ``i``).
-        """
+        """Translate the iter of an R ``for(i in <iter>)``."""
         if isinstance(iter_node, R.BinOp) and iter_node.op == ":":
             with self.nse.enter(Slot.NONE):
                 left = self._visit(iter_node.left)
                 right = self._visit(iter_node.right)
-            # ``1:N`` → ``range(N)``; ``a:b`` → ``range(a-1, b)``.
             if isinstance(left, P.Constant) and left.value == 1:
                 return _call(_name("range"), [right]), True
             shifted = P.BinOp(left=left, op=P.Sub(), right=P.Constant(value=1))
@@ -2181,17 +1613,8 @@ class Translator:
         return P.Lambda(args=py_args, body=body)
 
 
-# ---------------------------------------------------------------------------
-# Small AST helpers
-# ---------------------------------------------------------------------------
-
-
 def _contains_col_call(node: P.AST) -> bool:
-    """``True`` if the AST contains a ``col(...)`` Call.
-
-    Used by ``_emit_data_frame_call`` to spot cross-column references
-    that need ``with_columns`` rather than a literal dict-value slot.
-    """
+    """``True`` if the AST contains a ``col(...)`` Call."""
     for sub in P.walk(node):
         if (
             isinstance(sub, P.Call)
@@ -2214,16 +1637,7 @@ def _is_numeric_literal(node: R.Node) -> bool:
 
 
 def _to_py_identifier(name: str) -> str:
-    """Normalize an R identifier into a valid Python identifier:
-
-    1. ``.`` → ``_`` (``data.frame`` → ``data_frame``).
-    2. Trailing ``_`` if the result is a hard Python keyword (``lambda``
-       → ``lambda_``, ``class`` → ``class_``).
-
-    Soft keywords (``match``, ``case``, ``type``, ``_``) are left alone
-    — they're valid identifiers outside their reserved-statement
-    contexts.
-    """
+    """Normalize an R identifier into a valid Python identifier:"""
     import keyword
 
     py = name.replace(".", "_")
@@ -2275,11 +1689,7 @@ _NOOP_CALL_NAMES: frozenset[str] = frozenset(
 
 
 def _is_library_call(node) -> bool:
-    """``True`` if ``node`` is ``library(pkg)`` / ``require(pkg)``.
-
-    These are tracked separately from other no-ops because the package
-    name they declare is used to disambiguate autoload candidates.
-    """
+    """``True`` if ``node`` is ``library(pkg)`` / ``require(pkg)``."""
     return (
         isinstance(node, R.Call)
         and isinstance(node.func, R.Identifier)
@@ -2312,13 +1722,7 @@ def _record_library_pkg(node: R.Call, packages: set[str]) -> None:
 
 
 def _make_data_load_stmt(name: str, pkg: str) -> P.stmt:
-    """Build a Python AST node for ``<name> = data("<name>", package="<pkg>")``.
-
-    Emitted as a bare ``data(...)`` call (not ``hea.data(...)``) so the
-    import-preamble inference pulls in ``from hea import data`` —
-    matching the user's preferred ``from hea import data`` idiom over
-    the qualified ``import hea; hea.data(...)`` form.
-    """
+    """Build a Python AST node for ``<name> = data("<name>", package="<pkg>")``."""
     return P.Assign(
         targets=[P.Name(id=name, ctx=P.Store())],
         value=P.Call(
@@ -2348,18 +1752,6 @@ def _contains_call_to(node: R.Node, fn_name: str) -> bool:
 def _first_python_keyword_call(node: R.Node) -> str | None:
     """Return the first hard-Python-keyword function name called anywhere
     inside ``node``'s subtree, or ``None`` if there is none.
-
-    R has plenty of functions whose names collide with Python keywords
-    — ``class``, ``try``, ``while``, ``return``, ``except``, ``finally``,
-    ``raise``, ``yield``, ``del``, ``assert``, ``global``, ``nonlocal``,
-    ``lambda``, ``pass``, ``elif``, ``async``, ``await``. Emitting them
-    as Python identifiers is a syntax error.
-
-    Soft keywords (``match``, ``case``, ``type``, ``_``) are valid as
-    identifiers outside their reserved-statement contexts, so we do
-    **not** unport them. ``with`` is also a Python keyword but the
-    translator handles ``with(df, expr)`` natively via NSE rebinding —
-    excluded here so it isn't flagged as a gap.
     """
     import keyword
 
@@ -2401,9 +1793,6 @@ def _first_matching_call(node: R.Node, predicate) -> str | None:
 def _is_ggplot_chain_call(node) -> bool:
     """``True`` iff ``node`` is a Call whose head identifier marks it as a
     ggplot chain extension (geom_*, scale_*, labs, theme, …).
-
-    Plus ``theme(...)`` itself, which the prefix rule already catches
-    via ``theme_*``-startswith — but we also want bare ``theme``.
     """
     if not isinstance(node, R.Call) or not isinstance(node.func, R.Identifier):
         return False
@@ -2423,13 +1812,7 @@ def _format_formula(t: R.Tilde) -> str:
 
 
 def _extract_col_names(cols_arg) -> list[str]:
-    """Best-effort extraction of column names from across()'s first arg.
-
-    Accepts: ``a`` (bare ident), ``"a"`` (string), or ``c(a, b, "c")``.
-    Rejects: tidy-select helpers (``starts_with("x")``), slices, etc. —
-    those need a runtime resolver, which is not supported. Raise so the
-    user sees the gap instead of a silently-wrong expansion.
-    """
+    """Best-effort extraction of column names from across()'s first arg."""
     if isinstance(cols_arg, R.Identifier):
         return [cols_arg.name]
     if isinstance(cols_arg, R.StrLit):
@@ -2458,12 +1841,7 @@ def _extract_col_names(cols_arg) -> list[str]:
 def _substitute_identifier(
     node: R.Node, param_name: str, replacement: R.Identifier
 ) -> R.Node:
-    """Recursively replace ``Identifier(name=param_name)`` with ``replacement``.
-
-    Walks every field of every dataclass node, transforming tuples and
-    nested dataclasses. Non-dataclass values (strings, ints, tuples of
-    primitives like ``Span``) pass through untouched.
-    """
+    """Recursively replace ``Identifier(name=param_name)`` with ``replacement``."""
     from dataclasses import fields, is_dataclass
     from dataclasses import replace as _dc_replace
 
@@ -2486,12 +1864,7 @@ def _substitute_identifier(
 
 
 def _unparse_for_plotmath(node: R.Node) -> str:
-    """Render an R AST node back to source text suitable for plotmath.
-
-    Differs from :func:`_unparse_for_formula` in handling subscript
-    (``x[i]``) and superscript (``x^2``) — both common in plotmath but
-    rare in regression formulas.
-    """
+    """Render an R AST node back to source text suitable for plotmath."""
     if isinstance(node, R.Identifier):
         return node.name
     if isinstance(node, R.NumLit):
@@ -2507,7 +1880,6 @@ def _unparse_for_plotmath(node: R.Node) -> str:
     if isinstance(node, R.BinOp):
         return f"{_unparse_for_plotmath(node.left)} {node.op} {_unparse_for_plotmath(node.right)}"
     if isinstance(node, R.Subscript):
-        # ``x[i]`` → ``x[i]`` (R plotmath subscript syntax).
         base = _unparse_for_plotmath(node.target)
         idx = ", ".join(
             _unparse_for_plotmath(a)
@@ -2531,8 +1903,6 @@ def _unparse_for_formula(node: R.Node) -> str:
     if isinstance(node, R.Identifier):
         return node.name
     if isinstance(node, R.NumLit):
-        # Integer-valued doubles render without the ``.0`` — a formula's
-        # ``(1 | g)`` must stay ``1``, not become ``1.0``.
         if node.value.is_integer():
             return str(int(node.value))
         return str(node.value)
@@ -2542,9 +1912,6 @@ def _unparse_for_formula(node: R.Node) -> str:
         return f"{node.op}{_unparse_for_formula(node.operand)}"
     if isinstance(node, R.BinOp):
         inner = f"{_unparse_for_formula(node.left)} {node.op} {_unparse_for_formula(node.right)}"
-        # lme4 random-effect bars are syntactically parenthesized — ``(1 | g)``,
-        # ``(x | g)``, ``(1 || g)`` — but the parser drops the grouping parens.
-        # Restore them around ``|``/``||`` so the formula round-trips.
         if node.op in ("|", "||"):
             return f"({inner})"
         return inner
@@ -2556,7 +1923,6 @@ def _unparse_for_formula(node: R.Node) -> str:
         return f"{node.name} = {_unparse_for_formula(node.value)}"
     if isinstance(node, R.StrLit):
         return repr(node.value)
-    # Last-resort fallback: opaque marker.
     return f"<{type(node).__name__}>"
 
 

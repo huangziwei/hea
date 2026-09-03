@@ -25,12 +25,7 @@ from .scale import _NAME_MISSING, Scale
 
 @dataclass
 class ScaleOrdinal(Scale):
-    # Trained category levels in the order they should appear on the axis
-    # absent an explicit ``limits=`` override.
     levels: list | None = field(default=None, init=False, repr=False)
-    # Default discrete expansion: matches ggplot2's
-    # ``expansion(add=0.6, mult=0)`` — half a category-position of padding
-    # on each side so bars/points don't kiss the axis bounds.
     expand: tuple = (0.0, 0.6)
 
     def train(self, data) -> None:
@@ -98,11 +93,6 @@ class ScaleOrdinal(Scale):
         if n == 0:
             return
 
-        # ggplot2's discrete expansion (``expansion(add=0.6, mult=0)``)
-        # on a 0-based n-category axis → ``[-0.6, n - 1 + 0.6]``. We
-        # only set this when ``limits`` is explicit (otherwise let
-        # matplotlib autoscale from the artists, which gives a tighter
-        # fit that matches existing behaviour for the default-order case).
         if view_limits is not None:
             if axis == "x":
                 ax.set_xlim(view_limits)
@@ -117,9 +107,6 @@ class ScaleOrdinal(Scale):
             else:
                 ax.set_ylim(lo, hi)
 
-        # Tick labels: by default the level strings themselves (matches
-        # R: ``breaks`` and ``labels`` both default to the levels). A
-        # user-supplied ``breaks`` / ``labels`` can override.
         if self.breaks is None:
             ticks = []
             tick_labels = []
@@ -127,8 +114,6 @@ class ScaleOrdinal(Scale):
             ticks = list(range(n))
             tick_labels = list(levels)
         else:
-            # Explicit breaks: list of level names. Position each at its
-            # index in ``levels``; drop ones not in levels.
             ticks = []
             tick_labels = []
             for b in self.breaks:
@@ -151,11 +136,7 @@ class ScaleOrdinal(Scale):
             ax.set_yticklabels(tick_labels)
 
     def _padding(self) -> tuple[float, float]:
-        """Return ``(pad_lo, pad_hi)`` from the ``expand`` field.
-
-        Accepts ``Expansion``, legacy ``(mult, add)`` tuple, or anything
-        else (falls back to ggplot2's discrete default ``add=0.6``).
-        """
+        """Return ``(pad_lo, pad_hi)`` from the ``expand`` field."""
         from ..expansion import Expansion
 
         exp = self.expand
@@ -163,8 +144,6 @@ class ScaleOrdinal(Scale):
             _, _, a_lo, a_hi = exp.split()
             return (float(a_lo), float(a_hi))
         if isinstance(exp, (list, tuple)) and len(exp) >= 2:
-            # Order is ``(mult, add)`` to match ScaleContinuous's legacy
-            # form; for discrete we use ``add`` only.
             return (float(exp[1]), float(exp[1]))
         return (0.6, 0.6)
 
@@ -199,6 +178,5 @@ def scale_y_ordinal(
     return ScaleOrdinal(**kwargs)
 
 
-# ggplot2's other spelling.
 scale_x_discrete = scale_x_ordinal
 scale_y_discrete = scale_y_ordinal

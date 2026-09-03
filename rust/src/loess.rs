@@ -1,30 +1,9 @@
-//! LOESS local-regression pass — the O(n²) hot loop of hea's `loess()`.
-//!
-//! Each query point's local weighted polynomial fit is independent, so the whole
-//! pass parallelizes with rayon. Mirrors `hea/ggplot/stats/smooth.py`
-//! `_loess_local_fit` (degrees 1 and 2): k-NN tricube bandwidth, then a weighted
-//! local polynomial; returns per-query `(fitted = β0, var00 = (XᵀWX)⁻¹[0,0])`.
-//!
-//! Numerics: we form the weighted NORMAL EQUATIONS in a SCALED monomial basis
-//! `t = (x_i − xq)/h` (|t| < 1 inside the tricube window). Column scaling by
-//! `D = diag(1, h, h², …)` leaves the intercept `β0` (the fitted value) and
-//! `var00 = (XᵀWX)⁻¹[0,0]` mathematically UNCHANGED (because `D[0,0] = 1`), while
-//! keeping the moment matrix well-conditioned — so the small solve matches the
-//! Python lstsq path closely without squaring the condition number. Both hea's
-//! fit and predict route through this one kernel, so fitted == predict-at-x
-//! bit-for-bit regardless of the serial/parallel split.
-
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
-// Each query does O(n_data) work, so the crossover is far below the element-wise
-// PAR_THRESHOLD used for the d/p/q kernels — parallelize once there are enough
-// independent queries to amortize the thread dispatch.
 const LOESS_PAR_MIN_QUERIES: usize = 64;
 
-/// One local fit at `xq`. Returns `(fitted = β0, var00 = (XᵀWX)⁻¹[0,0])`,
-/// matching `_loess_local_fit`'s special cases (exact ties, rank-deficient).
 fn local_fit(
     xq: f64,
     x: &[f64],
@@ -38,7 +17,6 @@ fn local_fit(
     let p = degree + 1;
     let k = ((span * n as f64).ceil() as usize).max(p);
 
-    // bandwidth h = k-th smallest distance (or max distance when k ≥ n)
     let mut dist: Vec<f64> = x.iter().map(|&xi| (xi - xq).abs()).collect();
     let h = if k >= n {
         dist.iter().copied().fold(f64::NEG_INFINITY, f64::max)
@@ -49,7 +27,6 @@ fn local_fit(
     };
 
     if h <= 0.0 {
-        // exact ties at xq: weighted average of the coincident y's
         let mut sw = 0.0;
         let mut swy = 0.0;
         for i in 0..n {
@@ -64,9 +41,6 @@ fn local_fit(
         return (swy / sw, f64::INFINITY);
     }
 
-    // weighted power sums in the scaled basis t = (x − xq)/h:
-    //   S[j] = Σ w·tʲ     (j = 0..=2·degree)
-    //   T[j] = Σ w·tʲ·y   (j = 0..=degree)
     let mut s = [0.0f64; 5];
     let mut t_rhs = [0.0f64; 3];
     let mut nz = 0usize;
@@ -95,7 +69,6 @@ fn local_fit(
         return (f64::NAN, f64::NAN);
     }
 
-    // M[a][b] = S[a+b]; solve M·β = T → β0, and M·z = e0 → var00 = z0 = inv[0,0]
     let mut m = [[0.0f64; 3]; 3];
     for a in 0..p {
         for b in 0..p {
@@ -113,8 +86,6 @@ fn local_fit(
     (fitted, var00)
 }
 
-/// Solve `M·x = rhs` (p×p, p ≤ 3) by Gaussian elimination with partial
-/// pivoting; return `x[0]`. `M` is the well-conditioned scaled moment matrix.
 fn solve_first(m_in: &[[f64; 3]; 3], p: usize, rhs: &[f64; 3]) -> f64 {
     let mut a = *m_in;
     let mut b = *rhs;
@@ -154,9 +125,6 @@ fn solve_first(m_in: &[[f64; 3]; 3], p: usize, rhs: &[f64; 3]) -> f64 {
     x[0]
 }
 
-/// Evaluate the local fits at every query in `xq` against data `(x, y)` with
-/// robustness weights `extra_w`. Returns `(fitted, var00)` arrays. Used for both
-/// the fit (queries = the data x) and predict (queries = new x).
 #[pyfunction]
 #[pyo3(name = "loess_eval", signature = (xq, x, y, span, degree, extra_w, want_var=true))]
 pub fn loess_eval<'py>(

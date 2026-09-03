@@ -137,7 +137,6 @@ __all__ = [
     "label_comma",
     "label_currency",
     "label_dollar",
-    # scales::label_* formatters
     "label_number",
     "label_percent",
     "lims",

@@ -68,19 +68,12 @@ impl IntWidth {
 /// (`cholmod_amd.c:177-180`), plus the statistics `amd_2.c` computes alongside.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AmdInfo {
-    /// `Info [AMD_LNZ]` — nz in L excluding the diagonal.
     pub lnz: f64,
-    /// `Info [AMD_NDIV]`.
     pub ndiv: f64,
-    /// `Info [AMD_NMULTSUBS_LDL]`.
     pub nms_ldl: f64,
-    /// `Info [AMD_NMULTSUBS_LU]`.
     pub nms_lu: f64,
-    /// `Info [AMD_NDENSE]`.
     pub ndense: f64,
-    /// `Info [AMD_DMAX]`.
     pub dmax: f64,
-    /// `Info [AMD_NCMPA]` — garbage collections.
     pub ncmpa: f64,
     /// `Common->anz` (`cholmod_amd.c:145`) — `nnz(C)/2 + n`, i.e. the entries
     /// of `tril(A+A')` counting the diagonal. Not part of AMD's `Info` and not
@@ -1469,8 +1462,6 @@ pub fn cholmod_amd(
      * Common->anz includes the diagonal, and just the lower part of C */
     let anz = (cnz / 2 + n as i64) as f64;
 
-    // `cholmod_amd` hands `amd_2` the column pointers as `Pe`; `amd_2` writes
-    // through them, so the (n+1)-length `Cp` is passed as its leading n.
     let info = amd_2(
         n as i64,
         &mut cp[..n],
@@ -1502,10 +1493,6 @@ pub fn cholmod_amd(
 
 #[cfg(test)]
 mod tests {
-    //! Memory safety and structural invariants for [`amd_2`] and the routines
-    //! around it, run against [`crate::sparse::testcorpus`] in a build where
-    //! [`Ws`] still checks its bounds. Bit-exactness against upstream's C is
-    //! checked from the Python suite instead.
 
     use super::*;
     use crate::sparse::testcorpus::{corpus, triangle_csc, Lcg};
@@ -1514,11 +1501,6 @@ mod tests {
         [IntWidth::I32, IntWidth::I64]
     }
 
-    /// The C accumulates `hash` in `UInt`, so it wraps at the build's width on
-    /// every `hash += e`; the port accumulates in `u64` and truncates once, at
-    /// the `% n`. Those agree, but only because addition is congruence-
-    /// preserving — and no corpus matrix is remotely large enough to push
-    /// `hash` past 2^32 and show it, so check the identity directly.
     #[test]
     fn truncating_hash_once_matches_wrapping_every_step() {
         for &mask in &[u32::MAX as u64, u64::MAX] {
@@ -1538,8 +1520,6 @@ mod tests {
         }
     }
 
-    /// The point of the whole module: every subscript AMD forms, under a build
-    /// where [`Ws`] still checks them.
     #[test]
     fn amd_never_indexes_out_of_bounds() {
         for (name, n, edges) in corpus() {
@@ -1575,8 +1555,6 @@ mod tests {
         }
     }
 
-    /// A corpus that misses the awkward branches would let this module pass
-    /// while checking nothing, so assert the branches were reached.
     #[test]
     fn corpus_reaches_the_branches_worth_checking() {
         let (mut any_gc, mut any_dense, mut any_super) = (false, false, false);

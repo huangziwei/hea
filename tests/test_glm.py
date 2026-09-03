@@ -35,11 +35,6 @@ from conftest import load_dataset, load_glm_oracle
 from hea.family import Binomial, Gamma, Gaussian, InverseGaussian, Poisson, Quasi
 from hea.models import glm
 
-# =============================================================================
-# 1. Oracle presence (every (family, link, dataset) triple in glm-port plan)
-# =============================================================================
-
-
 EXPECTED = [
     ("gaussian_identity_iris", "gaussian", "identity"),
     ("gaussian_log_insurance", "gaussian", "log"),
@@ -110,21 +105,10 @@ def test_oracle_present(oid: str, family: str, link: str):
     assert len(o["linear_pred"]) == n
     assert len(o["res_deviance"]) == n
     assert o["test_kind"] in ("z", "t")
-    # binomial / poisson are scale-known → z-test; the rest → t-test.
     if family in ("poisson", "binomial"):
         assert o["test_kind"] == "z"
     else:
         assert o["test_kind"] == "t"
-
-
-# =============================================================================
-# 2. Per-oracle parity
-# =============================================================================
-#
-# Per-oracle case construction. Each entry is a dict that knows how to
-# rebuild the hea fit corresponding to its R-side oracle. Centralizing
-# this keeps the parametrized tests below from each having a custom
-# fitting branch.
 
 
 def _build_iris():
@@ -151,10 +135,6 @@ def _build_quine(link: str):
 
 
 def _build_menarche(link: str):
-    # cbind(Menarche, Total - Menarche) ~ Age. hea's parser doesn't yet
-    # accept cbind() on the LHS, so we pre-convert to
-    # (proportion, weights=Total) which is the algebraically equivalent
-    # binomial-with-size form.
     d = load_dataset("MASS", "menarche")
     d2 = d.with_columns([(d["Menarche"] / d["Total"]).alias("p")])
     return glm(
@@ -199,10 +179,6 @@ def _allclose(actual, expected, *, atol, rtol=0.0, name=""):
     )
 
 
-# engine + core fit (coef, deviance, fitted/η, residuals, iter).
-# Tight tolerances: Fisher IRLS is essentially deterministic.
-
-
 @pytest.mark.parametrize("oid", ALL_ORACLES)
 def test_glm_core_fit(oid: str):
     o = load_glm_oracle(oid)
@@ -212,11 +188,6 @@ def test_glm_core_fit(oid: str):
     assert m.n == o["n"]
     assert m.df_residual == o["df_residual"]
     assert m.converged == o["converged"]
-    # IRLS iter count: hea must not blow up vs R, but converging faster is
-    # fine — gaussian_log_insurance is the canonical example, where R was
-    # given a deliberately poor `start = log(y+1e-3)` to satisfy μ>0 and so
-    # needs 11 iters, while hea's default init lands near the optimum and
-    # converges in 4. Allow hea ≤ R+2.
     assert m.iter <= o["iter"] + 2, f"iter: hea={m.iter} R={o['iter']}"
 
     _allclose(m._bhat_arr, np.asarray(o["coefficients"]), atol=5e-5, name="coef")
@@ -251,29 +222,20 @@ def test_glm_core_fit(oid: str):
     )
 
 
-# Wald inference (vcov, SE, t/z, p, CI). The t-vs-z dispatch is
-# scale_known-driven; the column header for the printed summary follows
-# the same rule.
-
-
 @pytest.mark.parametrize("oid", ALL_ORACLES)
 def test_glm_inference(oid: str):
     o = load_glm_oracle(oid)
     m = CASES[oid]()
 
-    # vcov
     _allclose(m.vcov, np.asarray(o["vcov"]), atol=5e-6, name="vcov")
     _allclose(m._se_bhat_arr, np.asarray(o["std_error"]), atol=5e-5, name="se")
 
-    # t / z statistic — column 3 of summary(m)$coefficients
     expected_kind = o["test_kind"]
     assert m._test_kind == expected_kind, (
         f"test kind: hea={m._test_kind} R={expected_kind}"
     )
     _allclose(m._stat_arr, np.asarray(o["test_stat"]), atol=5e-3, name="test_stat")
 
-    # p-values — broaden tol on extreme-tail entries (R uses exact tail
-    # math; we use scipy's). Anything > 1e-10 should match to 5e-3 abs.
     p_hea = np.asarray(m.p_values.row(0), dtype=float)
     p_R = np.asarray(o["p_value"])
     mask_meaningful = p_R > 1e-10
@@ -284,25 +246,17 @@ def test_glm_inference(oid: str):
             atol=5e-3,
             name="p_value(meaningful)",
         )
-    # Tiny p-values: just assert hea is also tiny.
     if (~mask_meaningful).any():
         assert np.all(p_hea[~mask_meaningful] < 1e-6), (
             f"p-value(tiny): hea={p_hea} R={p_R}"
         )
 
-    # 95% Wald CI — confint.default convention.
     ci_low = m.ci_bhat[m.ci_bhat.columns[1]].to_numpy()
     ci_hi = m.ci_bhat[m.ci_bhat.columns[2]].to_numpy()
     _allclose(ci_low, np.asarray(o["ci_lower"]), atol=5e-4, name="CI lower")
     _allclose(ci_hi, np.asarray(o["ci_upper"]), atol=5e-4, name="CI upper")
 
-    # dispersion — Pearson estimator; 1.0 for scale-known.
     _allclose(m.dispersion, o["dispersion"], atol=5e-5, name="dispersion")
-
-
-# null deviance, AIC, BIC, logLik. Family/link-aware AIC routes
-# through family.aic + 2·rank (R glm convention; the dispersion df is
-# folded into family.aic for unknown-scale families).
 
 
 @pytest.mark.parametrize("oid", ALL_ORACLES)
@@ -320,28 +274,17 @@ def test_glm_aic_bic_loglik(oid: str):
     _allclose(m.bic, o["bic"], atol=5e-3, name="bic")
 
 
-# predict(type=link/response, se.fit=TRUE). The link-scale SE
-# is √diag(X·vcov·Xᵀ); the response-scale SE is |dμ/dη(η̂)|·se_link
-# (delta method). predict.glm with no newdata reuses the fit-time
-# offset so η̂ matches `m$linear.predictors`.
-
-
 @pytest.mark.parametrize("oid", ALL_ORACLES)
 def test_glm_predict(oid: str):
     o = load_glm_oracle(oid)
     m = CASES[oid]()
 
-    # Link scale.
     pred_link = m.predict(type="link", se_fit=True)
     fit_link = pred_link["fit"].to_numpy()
     se_link = pred_link["se.fit"].to_numpy()
     _allclose(fit_link, np.asarray(o["pred_link_fit"]), atol=5e-4, name="pred_link_fit")
     _allclose(se_link, np.asarray(o["pred_link_se"]), atol=5e-5, name="pred_link_se")
 
-    # Response scale (delta method on SE). Use rtol on the SE because the
-    # delta-method multiplier |dμ/dη| is huge for some links (IG canonical:
-    # ~μ³/2 ≈ 1.9e4 on Insurance), which amplifies tiny vcov differences
-    # (~1e-7) to ~5e-3 absolute even though relative error stays ~1e-4.
     pred_resp = m.predict(type="response", se_fit=True)
     fit_resp = pred_resp["fit"].to_numpy()
     se_resp = pred_resp["se.fit"].to_numpy()
@@ -354,7 +297,6 @@ def test_glm_predict(oid: str):
         name="pred_resp_se",
     )
 
-    # Without se_fit, predict returns a 1-column DataFrame — same numbers.
     _allclose(
         m.predict(type="link")["fit"].to_numpy(), fit_link, atol=0.0, name="link no-se"
     )
@@ -364,22 +306,6 @@ def test_glm_predict(oid: str):
         atol=0.0,
         name="response no-se",
     )
-
-
-# =============================================================================
-# 3. Edge cases
-# =============================================================================
-#
-# Each block here covers one ``glm()`` API surface that's commonly used
-# in R but easy to overlook in a port.
-#
-# Where the value is small and stable we inline an R-computed reference
-# (``Rscript -e ...`` produced the literals in the comment beside each
-# ``np.testing.assert_allclose`` call). For larger pinned cases we reuse
-# the existing JSON oracles via :func:`load_glm_oracle`.
-
-
-# 6.1 — cbind(success, failure) on LHS for binomial.
 
 
 def test_cbind_lhs_matches_proportion_weights_form():
@@ -393,13 +319,9 @@ def test_cbind_lhs_matches_proportion_weights_form():
             "x": np.arange(10, dtype=float),
         }
     )
-    # f has a non-integer entry (0.1) → hea warns exactly like R's two-column
-    # binomial initialize ("non-integer counts in a binomial glm!"); assert it
-    # so the expected R-parity warning is captured, not leaked.
     with pytest.warns(UserWarning, match="non-integer counts"):
         m_cb = glm("cbind(s, f) ~ x", d, family=Binomial())
 
-    # Equivalent rewrite the user could do by hand.
     p = d["s"] / (d["s"] + d["f"])
     w = (d["s"] + d["f"]).to_numpy()
     d2 = d.with_columns(p.alias("p"))
@@ -416,7 +338,6 @@ def test_cbind_lhs_matches_menarche_oracle():
     same coefficients and deviance as R."""
     o = load_glm_oracle("binomial_logit_menarche")
     d = load_dataset("MASS", "menarche")
-    # cbind(a, b) accepts any expression, including subtraction.
     m = glm("cbind(Menarche, Total - Menarche) ~ Age", d, family=Binomial(link="logit"))
     np.testing.assert_allclose(m._bhat_arr, np.asarray(o["coefficients"]), atol=5e-5)
     np.testing.assert_allclose(m.deviance, o["deviance"], atol=5e-4)
@@ -438,8 +359,6 @@ def test_bracket_lhs_equals_cbind_binomial():
             "x": np.arange(10, dtype=float),
         }
     )
-    # Both go through the cbind two-column path; f's 0.1 makes counts
-    # non-integer, so each warns exactly like R (and like the cbind test above).
     with pytest.warns(UserWarning, match="non-integer counts"):
         m_br = glm("[s, f] ~ x", d, family=Binomial())
     with pytest.warns(UserWarning, match="non-integer counts"):
@@ -450,35 +369,19 @@ def test_bracket_lhs_equals_cbind_binomial():
 
 
 def test_bracket_lhs_rejects_non_binomial():
-    # Brackets inherit cbind's family guard exactly (same canonical AST, so the
-    # error still names cbind).
     d = pl.DataFrame({"s": [1.0, 2], "f": [3.0, 4], "x": [1.0, 2]})
     with pytest.raises(ValueError, match="cbind.*Binomial"):
         glm("[s, f] ~ x", d, family=Gaussian())
 
 
 def test_cbind_prior_weights_and_na_drop_match_r():
-    """The two C10 corners on glm's cbind path (family-review B7):
+    """The two C10 corners on glm's cbind path:
     (1) prior weights pw≠1 — R's binomial aic evaluates dbinom at the
-    true counts with coefficient wt/n = pw, needing the trials vector
-    kept distinct from the merged weights (pre-fix hea folded trials
-    into wt and rounded pw·n as the size); (2) counts evaluated
-    pre-NA-drop — both cbind columns now ride the design frame so
+    true counts with coefficient wt/n = pw, so the trials vector has to
+    stay distinct from the merged weights; (2) counts evaluated
+    pre-NA-drop — both cbind columns ride the design frame so
     prepare_design's NA-omit keeps trials/proportions row-aligned.
-
-    R 4.6.0 reference (set.seed(4): x~runif(40), ntr~rpois(8)+1,
-    s~rbinom(ntr, plogis(-0.5+2.1x)), pw alternating 1.0/2.5):
-        glm(cbind(s,f) ~ x, binomial, weights=pw)
-            coef -0.3590009136 1.8278292807  dev 77.4834446946
-            AIC 246.1291034502  null.dev 116.3366152535
-        with x[7] <- NA (1-indexed):
-            coef -0.3540628519 1.7828651293  dev 74.1404894214
-            AIC 240.8651231928  nobs 39
-    (hea's weights= contract is post-drop length — R subsets length-n
-    weights in model.frame; that intake difference is glm-wide and
-    out of scope here.)
     """
-    # R's set.seed(4) fixture captured as literals (no R dependency).
     import json
     from pathlib import Path
 
@@ -493,7 +396,6 @@ def test_cbind_prior_weights_and_na_drop_match_r():
     np.testing.assert_allclose(m.deviance, 77.4834446946, rtol=0, atol=1e-9)
     np.testing.assert_allclose(m.AIC, 246.1291034502, rtol=0, atol=1e-8)
     np.testing.assert_allclose(m.null_deviance, 116.3366152535, rtol=0, atol=1e-9)
-    # NA in a covariate: row dropped, trials/weights stay aligned.
     d2 = d.with_columns(
         pl.when(pl.arange(0, d.height) == 6)
         .then(None)
@@ -509,9 +411,6 @@ def test_cbind_prior_weights_and_na_drop_match_r():
     )
     np.testing.assert_allclose(m2.deviance, 74.1404894214, rtol=0, atol=1e-9)
     np.testing.assert_allclose(m2.AIC, 240.8651231928, rtol=0, atol=1e-8)
-
-
-# 6.2 — offset(...) inside the formula.
 
 
 def test_formula_offset_matches_kwarg_offset():
@@ -553,9 +452,6 @@ def test_formula_offset_sums_with_kwarg_offset():
     np.testing.assert_allclose(m_split._bhat_arr, m_all._bhat_arr, atol=1e-10)
 
 
-# 6.3 — frequency weights: one pinned oracle.
-
-
 def test_weighted_poisson_matches_r():
     """``glm(y ~ x, weights=...)`` for Poisson. R-pinned literals from:
     d <- data.frame(y=c(1,2,3,4,5), x=c(1,2,3,4,5))
@@ -571,9 +467,6 @@ def test_weighted_poisson_matches_r():
     )
 
 
-# 6.4 — intercept-only.
-
-
 def test_intercept_only_gaussian():
     """``y ~ 1`` Gaussian: β̂_0 = mean(y); deviance = Σ (y-ȳ)²; df_residual = n-1."""
     y = np.array([1.0, 2, 3, 4, 5])
@@ -583,7 +476,6 @@ def test_intercept_only_gaussian():
     np.testing.assert_allclose(m.deviance, ((y - y.mean()) ** 2).sum(), atol=1e-12)
     assert m.df_residual == len(y) - 1
     assert m.df_null == len(y) - 1
-    # null deviance == residual deviance for the intercept-only model.
     np.testing.assert_allclose(m.null_deviance, m.deviance, atol=1e-12)
 
 
@@ -593,9 +485,6 @@ def test_intercept_only_poisson():
     d = pl.DataFrame({"y": y})
     m = glm("y ~ 1", d, family=Poisson())
     np.testing.assert_allclose(m._bhat_arr, [np.log(y.mean())], atol=1e-7)
-
-
-# 6.5 — rank-deficient X.
 
 
 def test_rank_deficient_x_drops_to_NA_slot():
@@ -611,18 +500,12 @@ def test_rank_deficient_x_drops_to_NA_slot():
     m = glm("y ~ x + z", d, family=Gaussian())
 
     coefs = m._bhat_arr
-    # One slot — the second-encountered collinear column — must be NaN.
     assert np.sum(np.isnan(coefs)) == 1, f"expected exactly 1 NaN coef, got {coefs}"
-    # The non-NaN coefs are the intercept and (x or z, whichever R kept).
     assert m.rank == 2
     assert m.df_residual == n - m.rank
-    # Fit still hits the data: deviance ≈ Σ (y - ŷ)² with x's true slope.
     np.testing.assert_allclose(
         m.deviance, ((y - m.fitted_values) ** 2).sum(), atol=1e-12
     )
-
-
-# 6.6 — factor-response binomial.
 
 
 def test_factor_response_binomial_string():
@@ -656,13 +539,10 @@ def test_factor_response_binomial_enum_respects_declared_order():
             "x": [1.0, 2, 3, 4, 5, 6, 7, 8],
         }
     )
-    # default alphabetical ⇒ "a"=0, "b"=1
     d_ab = base.with_columns(pl.col("y").cast(pl.Enum(["a", "b"])))
-    # reversed ⇒ "b"=0, "a"=1
     d_ba = base.with_columns(pl.col("y").cast(pl.Enum(["b", "a"])))
     m_ab = glm("y ~ x", d_ab, family=Binomial())
     m_ba = glm("y ~ x", d_ba, family=Binomial())
-    # Reversing the success/failure flips the sign of every coefficient.
     np.testing.assert_allclose(m_ab._bhat_arr, -m_ba._bhat_arr, atol=1e-10)
 
 
@@ -683,7 +563,6 @@ def test_factor_response_binomial_drops_unused_enum_levels():
     irisr = iris.filter(pl.col("Species") != "virginica").select(
         "Sepal.Width", "Sepal.Length", "Species"
     )
-    # The Enum still declares all 3 levels; only 2 are present.
     assert irisr["Species"].dtype.categories.to_list() == [
         "setosa",
         "versicolor",
@@ -692,9 +571,6 @@ def test_factor_response_binomial_drops_unused_enum_levels():
     assert set(irisr["Species"].unique().to_list()) == {"setosa", "versicolor"}
 
     m = glm("Species ~ Sepal.Width + Sepal.Length", data=irisr, family=Binomial())
-    # R's coefficients (data is perfectly separable, R warns about
-    # non-convergence; the betas still match across implementations
-    # because both stop at the same step-halved point).
     np.testing.assert_allclose(
         m._bhat_arr,
         [-360.6100, -110.1258, 131.7941],
@@ -709,17 +585,12 @@ def test_factor_response_binomial_drops_unused_when_first_level_absent():
     the naive ``y != levels[0]`` would map every row to 1.
     """
     iris = load_dataset("R", "iris")
-    # Filter to setosa+versicolor, then re-cast Species so virginica
-    # comes first in the level order.
     irisr = iris.filter(pl.col("Species") != "virginica").with_columns(
         pl.col("Species")
         .cast(pl.String)
         .cast(pl.Enum(["virginica", "setosa", "versicolor"]))
     )
     m = glm("Species ~ Sepal.Width + Sepal.Length", data=irisr, family=Binomial())
-    # After dropping unused virginica, declared order is
-    # [setosa, versicolor] → setosa = 0, versicolor = 1. Same betas
-    # as the previous test (R produces identical coefficients).
     np.testing.assert_allclose(
         m._bhat_arr,
         [-360.6100, -110.1258, 131.7941],
@@ -735,12 +606,7 @@ def test_factor_response_binomial_boolean():
         }
     )
     m = glm("y ~ x", d, family=Binomial())
-    # FALSE=0, TRUE=1 — same as factor("a","b") above (alphabetical).
     np.testing.assert_allclose(m._bhat_arr, [-0.8822461, 0.1960547], atol=5e-7)
-
-
-# 6.7 — Quasi family: variance="mu" + log link == quasi-Poisson. Same
-# point estimates as Poisson; dispersion estimated; t-tests for Wald.
 
 
 def test_quasi_poisson_matches_poisson_betas_with_estimated_dispersion():
@@ -750,27 +616,21 @@ def test_quasi_poisson_matches_poisson_betas_with_estimated_dispersion():
         "Days ~ Sex + Age + Eth + Lrn", d, family=Quasi(link="log", variance="mu")
     )
 
-    # Point estimates must be identical (same IRLS path; scale only enters SE).
     np.testing.assert_allclose(m_quasi._bhat_arr, m_pois._bhat_arr, atol=1e-10)
-    # Same deviance and df.
     np.testing.assert_allclose(m_quasi.deviance, m_pois.deviance, atol=1e-10)
     assert m_quasi.df_residual == m_pois.df_residual
 
-    # Dispersion: Poisson is fixed at 1; Quasi is the Pearson chi^2 / df_resid.
     assert m_pois.dispersion == 1.0
     assert m_quasi.dispersion != 1.0
     assert m_quasi.dispersion > 1.0  # quine is overdispersed
 
-    # SE(quasi) == sqrt(disp) * SE(poisson).
     np.testing.assert_allclose(
         m_quasi._se_bhat_arr,
         np.sqrt(m_quasi.dispersion) * m_pois._se_bhat_arr,
         atol=1e-10,
     )
 
-    # Quasi has no proper likelihood — AIC/BIC/logLik are NaN.
     assert np.isnan(m_quasi.aic) and np.isnan(m_quasi.bic) and np.isnan(m_quasi.loglike)
-    # Wald tests use t-distribution because scale is unknown.
     assert m_quasi._test_kind == "t"
     assert m_pois._test_kind == "z"
 
@@ -781,11 +641,6 @@ def test_quasi_rejects_unknown_variance():
 
 
 def test_quasibinomial_quasipoisson_constructors_through_glm():
-    # R's convenience constructors: quasipoisson == Quasi(log, "mu") at
-    # the point-estimate level (initialize differs only in mustart);
-    # quasibinomial additionally accepts the cbind response form, which
-    # plain Quasi("mu(1-mu)") does not. Bare-class family= mirrors R's
-    # function-valued family argument.
     from hea.family import quasibinomial, quasipoisson
 
     d = load_dataset("MASS", "quine")
@@ -799,7 +654,6 @@ def test_quasibinomial_quasipoisson_constructors_through_glm():
     men = load_dataset("MASS", "menarche")
     m_qb = glm("cbind(Menarche, Total - Menarche) ~ Age", men, family=quasibinomial)
     m_b = glm("cbind(Menarche, Total - Menarche) ~ Age", men, family=Binomial())
-    # Same IRLS fixed point as binomial; dispersion estimated, t tests.
     np.testing.assert_allclose(m_qb._bhat_arr, m_b._bhat_arr, atol=1e-8)
     assert m_qb.dispersion != 1.0 and m_qb._test_kind == "t"
     assert np.isnan(m_qb.aic)

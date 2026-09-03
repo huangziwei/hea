@@ -42,11 +42,6 @@ class CoordFixed(CoordCartesian):
     ratio: float = 1.0
 
     def apply_to_axes(self, ax) -> None:
-        # ``adjustable``: when no user xlim/ylim, ``datalim`` lets matplotlib
-        # stretch the data range to satisfy the aspect (single-plot case looks
-        # natural). When the user pins limits via ``xlim=``/``ylim=``, switch
-        # to ``box`` so the axes box resizes — otherwise matplotlib silently
-        # ignores the limits to fulfil the aspect.
         adjustable = (
             "box" if (self.xlim is not None or self.ylim is not None) else "datalim"
         )
@@ -68,7 +63,6 @@ class CoordQuickmap(CoordCartesian):
 
         lat   <- mean(y_range)
         ratio <- cos(lat · π/180)
-        # ggplot2 returns Δy/Δx / ratio for its grid system.
 
     Matplotlib's ``set_aspect`` takes ``dy/dx``, so we feed it
     ``1/ratio`` directly — the panel size handles the Δy/Δx part.
@@ -79,9 +73,6 @@ class CoordQuickmap(CoordCartesian):
         y_lo, y_hi = ax.get_ylim()
         mean_lat = 0.5 * (float(y_lo) + float(y_hi))
         cos_lat = math.cos(mean_lat * math.pi / 180.0)
-        # Guard the polar edge case: ``cos(±90°) = 0`` would blow up the
-        # aspect. Fall back to 1:1 (pure cartesian) — same effective
-        # behaviour as ggplot2 at the limit.
         ratio = 1.0 / cos_lat if abs(cos_lat) > 1e-9 else 1.0
         adjustable = (
             "box" if (self.xlim is not None or self.ylim is not None) else "datalim"

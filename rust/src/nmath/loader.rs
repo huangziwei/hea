@@ -22,7 +22,6 @@ pub(crate) fn libm_lgamma(x: f64) -> f64 {
     unsafe { lgamma(x) }
 }
 
-/// R's `stirlerr(n) = log(n!) - log(sqrt(2*pi*n)*(n/e)^n)`.
 pub fn stirlerr(n: f64) -> f64 {
     if n <= 23.5 {
         let nn2 = n + n;
@@ -36,10 +35,8 @@ pub fn stirlerr(n: f64) -> f64 {
             return rfma(n, 1.0 - l_n, libm_lgamma(n)) + (l_n - M_LN_2PI) * 0.5;
         }
         if n < 1.0 {
-            // C: lgamma1p(n) - (n + 0.5)*log(n) + n - M_LN_SQRT_2PI
             return rfma(-(n + 0.5), n.ln(), lgamma1p(n)) + n - M_LN_SQRT_2PI;
         }
-        // 5.25 < n <= 23.5 — asymptotic series, length by threshold
         let nn = n * n;
         if n > 12.8 {
             return (S[0]
@@ -175,7 +172,6 @@ pub fn stirlerr(n: f64) -> f64 {
                 / nn)
             / n;
     }
-    // n > 23.5
     let nn = n * n;
     if n > 15.7e6 {
         return S[0] / n;
@@ -195,13 +191,11 @@ pub fn stirlerr(n: f64) -> f64 {
     (S[0] - (S[1] - (S[2] - (S[3] - (S[4] - S[5] / nn) / nn) / nn) / nn) / nn) / n
 }
 
-/// R's `bd0(x, np) = x*log(x/np) + np - x`, accurate near `x/np == 1`.
 pub fn bd0(x: f64, np_: f64) -> f64 {
     if !(x.is_finite() && np_.is_finite() && np_ != 0.0) {
         return f64::NAN;
     }
     if (x - np_).abs() < 0.1 * (x + np_) {
-        // close: Taylor series
         let d = x - np_;
         let mut v = d / (x + np_);
         if d != 0.0 && v == 0.0 {
@@ -231,7 +225,6 @@ pub fn bd0(x: f64, np_: f64) -> f64 {
         }
         ldexp(s, 1)
     } else {
-        // far: direct
         let xnp = x / np_;
         let lg = if xnp.is_finite() {
             xnp.ln()
@@ -246,7 +239,6 @@ pub fn bd0(x: f64, np_: f64) -> f64 {
     }
 }
 
-/// R's `ebd0(x, M)` (Welinder) — returns `(yh, yl)` with `yh+yl = x*log(x/M)+(M-x)`.
 pub fn ebd0(x: f64, m: f64) -> (f64, f64) {
     const SB: i32 = 10;
     let s_f = 1024.0_f64; // S = 1 << Sb
@@ -266,7 +258,6 @@ pub fn ebd0(x: f64, m: f64) -> (f64, f64) {
         return (m, 0.0);
     }
     let (r, e) = frexp(mox);
-    // overflow guard: M_LN2 * (-e) > 1 + DBL_MAX/x
     if M_LN2 * (-(e as f64)) > 1.0 + f64::MAX / x {
         return (f64::INFINITY, 0.0);
     }
@@ -279,7 +270,6 @@ pub fn ebd0(x: f64, m: f64) -> (f64, f64) {
 
     let mut lh = 0.0;
     let mut ll = 0.0;
-    // ADD1(d): d1 = floor(d+0.5); lh += d1; ll += d - d1
     macro_rules! add1 {
         ($d:expr) => {{
             let d = $d;
@@ -289,7 +279,6 @@ pub fn ebd0(x: f64, m: f64) -> (f64, f64) {
         }};
     }
 
-    // ADD1(-x * log1pmx((M*fg - x)/x)) — R's ebd0 uses the accurate log1pmx.
     let arg = rfma(m, fg, -x) / x;
     add1!(-x * super::gamma::log1pmx(arg));
 
@@ -308,7 +297,6 @@ pub fn ebd0(x: f64, m: f64) -> (f64, f64) {
     (lh, ll)
 }
 
-/// R's `pow1p(x, y) = (1+x)^y`, accurate for `|x| << 1`.
 pub fn pow1p(x: f64, y: f64) -> f64 {
     if y.is_nan() {
         return if x == 0.0 { 1.0 } else { y };
@@ -331,7 +319,6 @@ pub fn pow1p(x: f64, y: f64) -> f64 {
     }
 }
 
-/// R's `dpois_raw(x, lambda, give_log)` (dpois.c) — Loader saddlepoint w/ ebd0.
 pub fn dpois_raw(x: f64, lam: f64, give_log: bool) -> f64 {
     let tiny = DBL_MIN; // np.finfo(float).tiny (smallest normal)
     if lam == 0.0 {
@@ -356,7 +343,6 @@ pub fn dpois_raw(x: f64, lam: f64, give_log: bool) -> f64 {
         };
         return if give_log { lr } else { lr.exp() };
     }
-    // saddlepoint
     let (yh, yl) = ebd0(x, lam);
     let yl_total = yl + stirlerr(x);
     let lrg = x >= X_LRG;
@@ -373,7 +359,6 @@ pub fn dpois_raw(x: f64, lam: f64, give_log: bool) -> f64 {
     }
 }
 
-/// R's `dbinom_raw(x, n, p, q, give_log)` (dbinom.c) — Loader saddlepoint w/ bd0.
 pub fn dbinom_raw(x: f64, n: f64, p: f64, q: f64, give_log: bool) -> f64 {
     if p == 0.0 {
         let lr = if x == 0.0 { 0.0 } else { f64::NEG_INFINITY };
@@ -401,7 +386,6 @@ pub fn dbinom_raw(x: f64, n: f64, p: f64, q: f64, give_log: bool) -> f64 {
     if x < 0.0 || x > n {
         return if give_log { f64::NEG_INFINITY } else { 0.0 };
     }
-    // saddlepoint
     let lc = stirlerr(n) - stirlerr(x) - stirlerr(n - x) - bd0(x, n * p) - bd0(n - x, n * q);
     let lf = M_LN_2PI + x.ln() + (-x / n).ln_1p();
     let lr = rfma(-0.5, lf, lc);
@@ -411,8 +395,6 @@ pub fn dbinom_raw(x: f64, n: f64, p: f64, q: f64, give_log: bool) -> f64 {
         lr.exp()
     }
 }
-
-// === PyO3 wrappers (numpy-vectorized; Python pre-broadcasts equal-length) =====
 
 #[pyfunction]
 #[pyo3(name = "stirlerr")]

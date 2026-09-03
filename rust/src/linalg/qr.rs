@@ -1,25 +1,8 @@
-//! R's least-squares QR kernel — a mechanical port of the LINPACK routines R
-//! calls from `lm.fit`/`lm.wfit` via `Cdqrls`: `dqrdc2` (R's modified pivoted
-//! Householder QR, `dqrdc2.f`) + `dqrsl` (apply Q, `dqrsl.f`,
-//! the `job=1110` path that `dqrls.f` uses: `Qᵀy`, coef, residuals).
-//!
-//! The point is *determinism + R-faithfulness* (the `chol.rs` precedent): the
-//! BLAS kernels (`dnrm2`/`ddot`/`daxpy`/`dscal`) accumulate strictly in order,
-//! so the rank/pivot/coef/effects are bit-identical across platform/run — unlike
-//! Accelerate/OpenBLAS, whose reduction order is the source of hea's
-//! BLAS-bistable rank flakes. Spec/oracle: `hea/R/linalg.py`; checked 3-way
-//! (Rust ≡ Python ≡ live R) in `tests/`.
-//!
-//! Storage is **column-major** internally (matching the Fortran `x(ldx,p)`), so
-//! a column `j` is the contiguous slice `x[j*n .. j*n+n]`.
-
 use numpy::ndarray::Array2;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
-/// Reference-BLAS `dnrm2` — Euclidean norm via the classic scaled sum-of-squares
-/// (overflow-safe, in-order → deterministic, matches R's `dnrm2`).
 pub(crate) fn dnrm2(v: &[f64]) -> f64 {
     let mut scale = 0.0_f64;
     let mut ssq = 1.0_f64;
@@ -43,25 +26,16 @@ pub(crate) fn dnrm2(v: &[f64]) -> f64 {
     }
 }
 
-/// In-order dot product (deterministic). Iterator form so the bounds checks are
-/// elided and the fold stays strictly sequential (f64 `sum` is not reassociated
-/// without fast-math, so this matches R's `ddot` order — no SIMD reduction).
 fn ddot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
-/// `y += t*x` over equal-length slices (deterministic daxpy, bounds-check-free).
 fn daxpy(t: f64, x: &[f64], y: &mut [f64]) {
     for (yi, &xi) in y.iter_mut().zip(x) {
         *yi += t * xi;
     }
 }
 
-/// Copy a 2-D view into a fresh column-major `Vec`, as cheaply as the input
-/// layout allows. When the array is already F-contiguous (the polars-origin
-/// path — its memory order *is* column-major) this is a single `memcpy` with no
-/// zero-fill and no per-element stride math; only a C-order/strided caller pays
-/// the transpose loop.
 fn to_colmajor(xv: &numpy::ndarray::ArrayView2<f64>) -> Vec<f64> {
     let (n, p) = (xv.nrows(), xv.ncols());
     if !xv.is_standard_layout() {
@@ -80,15 +54,12 @@ fn to_colmajor(xv: &numpy::ndarray::ArrayView2<f64>) -> Vec<f64> {
     v
 }
 
-/// R's `dqrdc2` (lower-level): factor the column-major `n×p` matrix `x`
-/// in place. Returns `(qraux, jpvt, rank)`; `jpvt` is 1-based.
 fn dqrdc2(x: &mut [f64], n: usize, p: usize, tol: f64) -> (Vec<f64>, Vec<usize>, usize) {
     let mut qraux = vec![0.0_f64; p];
     let mut work1 = vec![0.0_f64; p]; // work(:,1) — original norms
     let mut work2 = vec![0.0_f64; p]; // work(:,2) — original norms, 0→1
     let mut jpvt: Vec<usize> = (1..=p).collect();
 
-    // column norms
     if n > 0 {
         for j in 0..p {
             let nrm = dnrm2(&x[j * n..j * n + n]);
@@ -103,9 +74,7 @@ fn dqrdc2(x: &mut [f64], n: usize, p: usize, tol: f64) -> (Vec<f64>, Vec<usize>,
     let mut tmpcol = vec![0.0_f64; n];
     for l in 1..=lup {
         let l0 = l - 1;
-        // cycle negligible columns l..p to the right
         while !(l >= k || qraux[l0] >= work2[l0] * tol) {
-            // cyclic left-shift of columns l0..p-1, moving column l0 to p-1
             tmpcol.copy_from_slice(&x[l0 * n..l0 * n + n]);
             x.copy_within((l0 + 1) * n..p * n, l0 * n);
             x[(p - 1) * n..p * n].copy_from_slice(&tmpcol);
@@ -123,7 +92,6 @@ fn dqrdc2(x: &mut [f64], n: usize, p: usize, tol: f64) -> (Vec<f64>, Vec<usize>,
             k -= 1;
         }
         if l != n {
-            // Householder for column l (rows l..n) — slice x(l:n, l)
             let col_l = l0 * n; // base of column l0
             let mut nrmxl = dnrm2(&x[col_l + l0..col_l + n]);
             if nrmxl != 0.0 {
@@ -136,16 +104,8 @@ fn dqrdc2(x: &mut [f64], n: usize, p: usize, tol: f64) -> (Vec<f64>, Vec<usize>,
                 }
                 x[col_l + l0] += 1.0;
                 let pivot_diag = x[col_l + l0];
-                // Split so the pivot column l0 (read) and the trailing columns
-                // l0+1..p (written) are disjoint borrows. Each trailing column's
-                // update depends ONLY on the shared pivot column `cl` (read-only)
-                // — columns are mutually independent, so they run in parallel
-                // (rayon) with each column's dot/daxpy kept strictly in order →
-                // bit-identical regardless of thread count (deterministic). This
-                // is the lever that beats R's single-threaded dqrdc2 at scale.
                 let (left, right) = x.split_at_mut((l0 + 1) * n);
                 let cl = &left[col_l + l0..col_l + n]; // pivot col, rows l0..n
-                                                       // per-column Householder update (col rows l0..n, its qraux, work1)
                 let update = |cj: &mut [f64], qx: &mut f64, w1: &mut f64| {
                     let cj = &mut cj[l0..n]; // rows l0..n of this column
                     let dot: f64 = cl.iter().zip(cj.iter()).map(|(a, b)| a * b).sum();
@@ -169,8 +129,6 @@ fn dqrdc2(x: &mut [f64], n: usize, p: usize, tol: f64) -> (Vec<f64>, Vec<usize>,
                 };
                 let qx = &mut qraux[l..p];
                 let w1 = &mut work1[l..p];
-                // Parallelize only when the trailing block is big enough to beat
-                // rayon's dispatch overhead (small fits stay serial).
                 const PAR_MIN_ELEMS: usize = 1 << 15;
                 if right.len() >= PAR_MIN_ELEMS {
                     right
@@ -194,10 +152,6 @@ fn dqrdc2(x: &mut [f64], n: usize, p: usize, tol: f64) -> (Vec<f64>, Vec<usize>,
     (qraux, jpvt, rank)
 }
 
-/// LINPACK `dqrsl`, `job=1110` path (the only one `dqrls`/`Cdqrls` uses):
-/// compute `qty = Qᵀy`, the coefficients `b` (length `rank`, pivoted order) and
-/// the residuals `rsd`. `x` is the column-major `dqrdc2` factor (restored on
-/// return — the diagonal is temporarily swapped with `qraux`).
 fn dqrsl_1110(
     x: &mut [f64],
     n: usize,
@@ -211,7 +165,6 @@ fn dqrsl_1110(
     let ju = k.min(n.saturating_sub(1));
 
     if ju == 0 {
-        // n == 1 special case (cqty, cb, cr)
         if n >= 1 {
             qty[0] = y[0];
             if k >= 1 {
@@ -224,7 +177,6 @@ fn dqrsl_1110(
         return (qty, b, rsd);
     }
 
-    // compute Qᵀy (ascending j)
     for j in 1..=ju {
         let j0 = j - 1;
         if qraux[j0] != 0.0 {
@@ -238,7 +190,6 @@ fn dqrsl_1110(
         }
     }
 
-    // b <- qty[:k]; rsd[k:n] <- qty[k:n]; rsd[:k] <- 0
     b[..k].copy_from_slice(&qty[..k]);
     if k < n {
         rsd[k..n].copy_from_slice(&qty[k..n]);
@@ -247,7 +198,6 @@ fn dqrsl_1110(
         *v = 0.0;
     }
 
-    // back-substitute for b (descending)
     for jj in 1..=k {
         let j = k - jj + 1;
         let j0 = j - 1;
@@ -264,7 +214,6 @@ fn dqrsl_1110(
         }
     }
 
-    // compute rsd (descending)
     for jj in 1..=ju {
         let j0 = (ju - jj + 1) - 1;
         if qraux[j0] != 0.0 {
@@ -280,8 +229,6 @@ fn dqrsl_1110(
     (qty, b, rsd)
 }
 
-/// Full `dqrls` (single rhs): `dqrdc2` then `dqrsl` (job 1110). Returns
-/// `(qr_colmajor, coef_p, residuals, effects, rank, pivot_1based, qraux)`.
 #[allow(clippy::type_complexity)]
 fn dqrls_impl(
     xcol: &mut [f64],
@@ -302,10 +249,6 @@ fn dqrls_impl(
     (coef, rsd, qty, rank, jpvt, qraux)
 }
 
-/// `Cdqrls`-style entry: weighted-least-squares QR of `x` (n×p) against `y`.
-/// Returns `(qr, coefficients, residuals, effects, rank, pivot, qraux)`; `qr` is
-/// row-major `(n,p)` (the compact factor), `pivot` is 1-based. Mirrors
-/// `hea.R.linalg.Cdqrls` exactly (the pure-Python oracle).
 #[pyfunction]
 #[pyo3(signature = (x, y, tol=1e-7))]
 #[allow(clippy::type_complexity)]
@@ -331,7 +274,6 @@ pub fn dqrls<'py>(
 
     let (coef, rsd, qty, rank, jpvt, qraux) = dqrls_impl(&mut xcol, n, p, &yvec, tol);
 
-    // qr back to row-major (n,p)
     let mut qr = Array2::<f64>::zeros((n, p));
     for j in 0..p {
         for i in 0..n {
@@ -350,10 +292,6 @@ pub fn dqrls<'py>(
     ))
 }
 
-/// Rank + pivot only (R's `dqrdc2`) — for alias detection, which needs neither
-/// the coefficients/effects/residuals nor the `n×p` factor. Runs only `dqrdc2`
-/// (no `dqrsl`) and marshals back only the rank and the length-p pivot, so it
-/// avoids the large-array copies `dqrls` does. `pivot` is 1-based.
 #[pyfunction]
 #[pyo3(signature = (x, tol=1e-7))]
 pub fn dqrls_rank<'py>(

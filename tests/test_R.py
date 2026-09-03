@@ -43,7 +43,6 @@ from hea.R import (
     dlogis,
     dmultinom,
     dnbinom,
-    # distributions (a representative subset; full grid checked elsewhere)
     dnorm,
     dpois,
     dsignrank,
@@ -141,10 +140,6 @@ from hea.R import (
     rank as R_rank,
 )
 
-# ---------------------------------------------------------------------------
-# Public surface
-# ---------------------------------------------------------------------------
-
 
 def test_no_builtin_collisions():
     """``from hea.R import *`` must not redefine a Python builtin."""
@@ -158,11 +153,6 @@ def test_all_exports_are_defined():
     """Every name in ``__all__`` must resolve to an attribute."""
     for name in R_mod.__all__:
         assert hasattr(R_mod, name), f"R.{name} declared but not defined"
-
-
-# ---------------------------------------------------------------------------
-# Shape / preview
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -202,7 +192,6 @@ def test_summary_dispatches_on_hea_dataframe():
     """``summary(hea.tidy.DataFrame)`` must reach the existing ``.summary()``."""
     d = hea.tidy.tbl(pl.DataFrame({"x": [1.0, 2.0, 3.0]}))
     out = summary(d)
-    # Existing .summary() returns a Summary object with __repr__
     assert "Min" in repr(out)
 
 
@@ -223,11 +212,6 @@ def test_complete_cases_on_array():
     assert na_omit(arr).tolist() == [1.0, 3.0]
 
 
-# ---------------------------------------------------------------------------
-# Vector helpers
-# ---------------------------------------------------------------------------
-
-
 def test_seq_one_arg_is_zero_based():
     """One-arg ``seq(n)`` matches ``np.arange(n)``, not R's ``1:n``."""
     assert seq(5).tolist() == [0, 1, 2, 3, 4]
@@ -236,7 +220,6 @@ def test_seq_one_arg_is_zero_based():
 def test_seq_from_to_is_inclusive():
     """Two-arg ``seq(from, to)`` keeps R's inclusive endpoints."""
     assert seq(2, 6).tolist() == [2, 3, 4, 5, 6]
-    # The R-1:n bridge: explicit start makes 1-based available again.
     assert seq(1, 5).tolist() == [1, 2, 3, 4, 5]
 
 
@@ -271,7 +254,6 @@ def test_sort_decreasing():
 
 
 def test_order_zero_based_python_convention():
-    # x = [3, 1, 2]; sorted is [1, 2, 3] from indices [1, 2, 0]
     assert order([3, 1, 2]).tolist() == [1, 2, 0]
 
 
@@ -319,18 +301,12 @@ def test_tabulate_zero_based():
     assert tabulate([1, 1, 3], nbins=5).tolist() == [0, 2, 0, 1, 0]
 
 
-# ---------------------------------------------------------------------------
-# Reductions
-# ---------------------------------------------------------------------------
-
-
 def test_mean_median():
     assert mean([1, 2, 3, 4, 5]) == 3.0
     assert median([1, 2, 3, 4, 5]) == 3.0
 
 
 def test_var_sd_use_n_minus_1():
-    # var of 1..5 with N-1: sum((x-3)^2) / 4 = 10/4 = 2.5
     assert var([1, 2, 3, 4, 5]) == pytest.approx(2.5)
     assert sd([1, 2, 3, 4, 5]) == pytest.approx(np.sqrt(2.5))
 
@@ -348,17 +324,6 @@ def test_cor_scalar_and_matrix():
     assert cor(x, y) == pytest.approx(1.0)
     m = np.column_stack([x, y])
     assert cor(m).shape == (2, 2)
-
-
-# ---------------------------------------------------------------------------
-# IQR — agreement with R stats::IQR
-# ---------------------------------------------------------------------------
-#
-# R reference (computed via R --vanilla):
-#   IQR(c(2,5,11,11,19,35))            -> 10.5   (type 7 default, linear)
-#   IQR(c(2,5,11,11,19,35), type=1)    -> 14
-#   IQR(c(2,5,11,11,19,35), type=4)    -> 11.5
-#   IQR(c(1, NA, 3), na.rm=TRUE)       -> 1
 
 
 def test_IQR_eager_list_matches_R_default():
@@ -396,24 +361,8 @@ def test_IQR_series_returns_scalar():
 
     s = pl.Series([2, 5, 11, 11, 19, 35])
     assert IQR(s) == 10.5
-    # hea's default ``na_rm=True`` skips nulls — IQR over the non-null
-    # values [1.0, 3.0] gives 1.0.
     assert IQR(pl.Series([1.0, None, 3.0])) == 1.0
-    # Opt-out: na_rm=False yields null (hea is graceful; R errors here).
     assert IQR(pl.Series([1.0, None, 3.0]), na_rm=False) is None
-
-
-# ---------------------------------------------------------------------------
-# interaction — R reference values
-# ---------------------------------------------------------------------------
-#
-#   interaction(c("a","b","a"), c(1,2,1))
-#     -> values: a.1 b.2 a.1
-#     -> Levels: a.1 b.1 a.2 b.2   (Cartesian product; first factor fastest)
-#   interaction(..., drop=TRUE)
-#     -> Levels: a.1 b.2           (observed only)
-#   interaction(..., lex.order=TRUE)
-#     -> Levels: a.1 a.2 b.1 b.2   (alphabetical)
 
 
 def test_interaction_default_matches_R_cartesian_levels():
@@ -491,7 +440,6 @@ def test_IQR_non_type_7_on_expr_raises():
 
 
 def test_quantile_default_probs():
-    # Linear interpolation matches R's type 7 (default).
     out = quantile([1, 2, 3, 4, 5])
     assert out.tolist() == [1.0, 2.0, 3.0, 4.0, 5.0]
 
@@ -500,11 +448,6 @@ def test_na_rm_drops_nans():
     arr = [1.0, 2.0, float("nan"), 4.0]
     assert mean(arr, na_rm=True) == pytest.approx(7.0 / 3)
     assert sd(arr, na_rm=True) > 0
-
-
-# ---------------------------------------------------------------------------
-# Coercion / predicates
-# ---------------------------------------------------------------------------
 
 
 def test_as_numeric_array_and_series():
@@ -563,24 +506,19 @@ def test_factor_accepts_list_and_unknown_value_handling():
         "Dec",
     ]
 
-    # list input, all values known
     y1 = factor(["Dec", "Apr", "Jan", "Mar"], levels=month_levels)
     assert y1.to_list() == ["Dec", "Apr", "Jan", "Mar"]
     assert levels(y1) == month_levels
 
-    # numpy array input
     y_np = factor(np.array(["Dec", "Apr"]), levels=month_levels)
     assert y_np.to_list() == ["Dec", "Apr"]
 
-    # default strict=False — unknown "Jam" → null (R factor() semantics)
     y2 = factor(["Dec", "Apr", "Jam", "Mar"], levels=month_levels)
     assert y2.to_list() == ["Dec", "Apr", None, "Mar"]
 
-    # strict=True — unknown raises (forcats fct() semantics)
     with pytest.raises(pl.exceptions.InvalidOperationError):
         factor(["Dec", "Apr", "Jam", "Mar"], levels=month_levels, strict=True)
 
-    # strict=True with clean input still works
     y3 = factor(["Dec", "Apr"], levels=month_levels, strict=True)
     assert y3.to_list() == ["Dec", "Apr"]
 
@@ -594,7 +532,6 @@ def test_factor_repr_appends_levels_line():
     text = str(y1)
     assert "Levels: Apr Dec Jan Mar" in text
 
-    # explicit levels keep the user-specified order in the Levels line
     month_levels = [
         "Jan",
         "Feb",
@@ -612,12 +549,10 @@ def test_factor_repr_appends_levels_line():
     y2 = factor(["Dec", "Apr"], levels=month_levels)
     assert "Levels: " + " ".join(month_levels) in str(y2)
 
-    # HTML repr (Jupyter) appends Levels inside the rendered div
     html = y2._repr_html_()
     assert "Levels: " + " ".join(month_levels) in html
     assert html.rstrip().endswith("</div>")
 
-    # non-enum series: no Levels line
     assert "Levels:" not in str(pl.Series([1, 2, 3]))
 
 
@@ -631,47 +566,28 @@ def test_ordered_factor_renders_with_lt_separators():
     from hea.formula import _ORDERED_COLS_CV, set_ordered_cols
     from hea.R import ordered
 
-    # 1. Bare-list input (unnamed): local marker path
     y = ordered(["a", "b", "c"])
     assert "Levels: a < b < c" in str(y)
     assert "&lt;" in y._repr_html_()
 
-    # 2. factor(..., ordered=True) is the same alias underneath
     from hea.R import factor
 
     y2 = factor(["c", "a", "b"], levels=["a", "b", "c"], ordered=True)
     assert "Levels: a < b < c" in str(y2)
 
-    # 3. Unordered factor still uses spaces (no <)
     y3 = factor(["a", "b", "c"])
     assert "Levels: a b c" in str(y3)
     assert "<" not in str(y3).split("Levels:")[1].split("\n")[0]
 
-    # 4. Contextvar path: named column registered for poly contrasts
     prev = _ORDERED_COLS_CV.get()
     try:
         s = pl.Series("g", ["a", "b", "c"]).cast(pl.Enum(["a", "b", "c"]))
         hea_s = hea.tidy.Series._from_pyseries(s._s)
-        # No local marker → check before registration: should be space-separated
         assert "Levels: a b c" in str(hea_s)
-        # Now register the name in the ordered-cols contextvar
         set_ordered_cols(prev | frozenset({"g"}))
-        # Same Series — detection now flips to "<" via the contextvar
         assert "Levels: a < b < c" in str(hea_s)
     finally:
         set_ordered_cols(prev)
-
-
-# ---------------------------------------------------------------------------
-# Readr-style parsing
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Rank — base R / Lindeløv constructions. The dplyr rank family (min_rank,
-# dense_rank, percent_rank, cume_dist, ntile, row_number) is tested in
-# test_dataframe.py — it lives in hea.dataframe with the tidyverse port.
-# ---------------------------------------------------------------------------
 
 
 def test_rank_expr_in_expr_out_preserves_average_method():
@@ -702,22 +618,7 @@ def test_rank_signed_rank_ndarray_backwards_compat():
     assert out2.tolist() == [-4.5, -2.5, 0.0, 2.5, 4.5]
 
 
-# ---------------------------------------------------------------------------
-# Expr-dispatch contract — enforcement test
-#
-# Vector-shape R.py functions (length-preserving transforms and scalar
-# reductions) must dispatch on pl.Expr: given a pl.Expr, return a pl.Expr.
-# This is what makes ``mutate(m = mean(col("x")))`` work for the R-shaped
-# API the same way it does for the polars-shaped one. Exemptions below
-# are categorical — anything not in a SKIP category must pass.
-# ---------------------------------------------------------------------------
-
-
-# Names that legitimately don't fit the "Expr in, Expr out" contract.
-# Grouped by reason so future additions to R.__all__ trip the test until
-# the author explicitly classifies them.
 _R_EXPR_SKIP = {
-    # Hypothesis tests — return HTest, not Expr.
     "t_test",
     "wilcox_test",
     "cor_test",
@@ -747,17 +648,13 @@ _R_EXPR_SKIP = {
     "power_t_test",
     "power_prop_test",
     "power_anova_test",
-    # Multiple-comparison p-value adjustment — vector in / vector out, not Expr.
     "p_adjust",
     "p_adjust_methods",
-    # Result classes — not callable in the vector-shape sense.
     "HTest",
     "AnovaTable",
     "PairwiseHTest",
     "PowerHTest",
     "Terms",
-    # Formula / model-frame helpers — operate on formula strings, frames, or
-    # na.action objects; poly/polym build basis matrices (multi-arg). Not Exprs.
     "reformulate",
     "as_formula",
     "update_formula",
@@ -778,7 +675,6 @@ _R_EXPR_SKIP = {
     "polym",
     "predict_poly",
     "Poly",
-    # Model generics — operate on fitted models, not columns.
     "coef",
     "coefficients",
     "fixef",
@@ -815,7 +711,6 @@ _R_EXPR_SKIP = {
     "add1",
     "drop1",
     "step",
-    # lme4 merMod accessors (operate on a fitted gmm, not on columns).
     "VarCorr",
     "getME",
     "getData",
@@ -834,7 +729,6 @@ _R_EXPR_SKIP = {
     "dfbeta",
     "dfbetas",
     "influence",
-    # lm / aov extras — operate on fitted models, QR objects, or design frames.
     "sigma",
     "cov2cor",
     "weighted_residuals",
@@ -845,11 +739,9 @@ _R_EXPR_SKIP = {
     "ls_diag",
     "ls_print",
     "replications",
-    # emmeans — model-shaped (operate on fitted models / EmmGrid tables).
     "emmeans",
     "EmmGrid",
     "summary_emmgrid_contrasts",
-    # Distribution PDFs/CDFs/quantiles/random — scalar in, scalar out.
     "dnorm",
     "pnorm",
     "qnorm",
@@ -895,7 +787,6 @@ _R_EXPR_SKIP = {
     "pnbinom",
     "qnbinom",
     "rnbinom",
-    # combinatorial / multivariate + Smirnov distribution surface.
     "dmultinom",
     "rmultinom",
     "pbirthday",
@@ -938,7 +829,6 @@ _R_EXPR_SKIP = {
     "qgeom",
     "rgeom",
     "set_seed",
-    # Frame-meta — operate on the DataFrame, not a column.
     "nrow",
     "ncol",
     "dim",
@@ -950,7 +840,6 @@ _R_EXPR_SKIP = {
     "summary",
     "complete_cases",
     "na_omit",
-    # Matrix / frame utilities — operate on 2D shapes, not single columns.
     "rowSums",
     "colSums",
     "rowMeans",
@@ -963,8 +852,6 @@ _R_EXPR_SKIP = {
     "matrix",
     "R_range",
     "R_round",
-    # Distance / clustering — operate on data matrices, Dist objects, or hclust
-    # trees, not single columns (base-R stats clustering surface).
     "Dist",
     "dist",
     "as_dist",
@@ -984,7 +871,6 @@ _R_EXPR_SKIP = {
     "kmeans",
     "fitted_kmeans",
     "print_kmeans",
-    # Dendrogram subsystem — operate on Dendrogram trees, not single columns.
     "Dendrogram",
     "as_dendrogram",
     "cophenetic_dendrogram",
@@ -1002,32 +888,24 @@ _R_EXPR_SKIP = {
     "reorder_dendrogram",
     "rev_dendrogram",
     "str_dendrogram",
-    # Vector primitives — variadic / multi-arg; not column ops.
     "rep",
     "sample",
     "sapply",
     "tapply",
-    # Length-changing transforms — would shorten/lengthen the column.
     "diff",
     "which",
     "tabulate",
-    # Container / contingency tables — return tables, not Exprs.
     "table",
     "xtabs",
     "prop_table",
     "addmargins",
-    # Sequence generators — take ints, not columns.
     "seq",
     "seq_len",
     "seq_along",
-    # Time series construction — returns a DataFrame (R's ``ts``), not an Expr.
     "ts",
-    # Variadic / index-based — multi-input shape.
     "order",
-    # Bucketing — eager-only (custom labels machinery).
     "cut",
     "findInterval",
-    # Categorical / dtype introspection — Expr has no eval-time dtype info.
     "factor",
     "fct",
     "ordered",
@@ -1036,19 +914,13 @@ _R_EXPR_SKIP = {
     "is_factor",
     "is_numeric",
     "is_null",
-    # cov: no clean polars top-level for 2-vector covariance (compute
-    # manually via (x - x.mean()) * (y - y.mean()) / (n - 1) if needed).
     "cov",
-    # I/O & clock — side-effect functions; not column ops.
     "cat",
     "today",
     "now",
-    # plotmath — takes R-source string, not a column.
     "quote",
-    # stringr regex-debug pretty-printers — print to stdout, return None.
     "str_view",
     "str_view_all",
-    # lubridate parsers — operate on strings / scalars, not column Exprs.
     "ymd",
     "mdy",
     "dmy",
@@ -1058,17 +930,12 @@ _R_EXPR_SKIP = {
     "mdy_hm",
     "dmy_hms",
     "dmy_hm",
-    # stringr helpers that don't take an Expr as the first arg or take
-    # multiple required args (covered separately by _R_EXPR_EXTRA below).
     "str_glue",
     "str_sort",
     "str_equal",
 }
 
 
-# Functions that need an extra positional / keyword arg beyond ``x`` to
-# produce a meaningful Expr. Keyed by name; value is a callable that
-# returns the *additional* args + kwargs given the test's ``pl.col("x")``.
 _R_EXPR_EXTRA: dict[str, callable] = {
     "cor": lambda c: ((c,), {}),  # cor needs (x, y)
     "quantile": lambda c: ((0.5,), {}),  # Expr needs scalar prob
@@ -1080,13 +947,7 @@ _R_EXPR_EXTRA: dict[str, callable] = {
 
 
 def test_R_vector_functions_dispatch_on_expr():
-    """Every R.py function not in ``_R_EXPR_SKIP`` must dispatch on Expr.
-
-    This is the load-bearing rule for the R-shaped API: an R function
-    applied to ``pl.col("x")`` inside ``mutate`` must produce an Expr that
-    polars can evaluate, not a numpy array (which triggers the
-    ``pl.lit(ndarray-of-Expr)`` failure path).
-    """
+    """Every R.py function not in ``_R_EXPR_SKIP`` must dispatch on Expr."""
     import hea.R as R_mod
 
     c = pl.col("x")
@@ -1121,19 +982,6 @@ def test_R_vector_functions_dispatch_on_expr():
         raise AssertionError(msg)
 
 
-# ---------------------------------------------------------------------------
-# Distributions — agreement with known R values
-# ---------------------------------------------------------------------------
-
-
-# --- Live-R bit-exact distribution checks -----------------------------------
-# Bit-exactness to R is achievable only on macOS, where hea and R share Apple's
-# scalar libm (on BOTH Intel and arm64); on Linux/glibc they drift a few ulp
-# (the libm floor — see tests/test_rs_parity.py header, and note R itself is not
-# bit-identical across arches because clang fuses nmath's Horners to FMA on arm64
-# but not on x86-64). So: bit-for-bit vs the *live* R on this machine when on
-# macOS+Rscript (no frozen, arch-locked literals); otherwise a tolerance check vs
-# the committed R 4.6.0 value (a ~portable reference, exact only where libm matches).
 _R_BITEXACT = sys.platform == "darwin" and have_rscript()
 
 
@@ -1179,7 +1027,6 @@ def test_dnorm_pnorm_qnorm():
 
 
 def test_pnorm_lower_tail_false():
-    # R's pnorm(.., lower.tail=FALSE) uses the upper-tail kernel directly.
     _assert_r(
         [
             (
@@ -1192,8 +1039,6 @@ def test_pnorm_lower_tail_false():
 
 
 def test_qnorm_lower_tail_false():
-    # P(Z > q) = 0.025  →  q = qnorm(0.975); R's lower.tail=FALSE path differs
-    # from 1-p by 1 ulp (0.5 - p + 0.5 idiom) — we replicate it exactly.
     _assert_r(
         [
             (
@@ -1237,10 +1082,6 @@ def test_f_distribution():
 
 
 def test_tukey_studentized_range():
-    # ptukey/qtukey bit-exact to R via the Python nmath reference (ptukey.c/
-    # qtukey.c). The nmath scalar takes (q, rr=nranges, cc=nmeans, df); R's
-    # user signature is ptukey(q, nmeans, df, nranges=1). The public ptukey/
-    # qtukey add a Rust f64 fast path (≤ few ulp), covered in test_rs_parity.
     _assert_r(
         [
             (
@@ -1273,9 +1114,6 @@ def test_tukey_studentized_range():
 
 
 def test_noncentral_t_f_chisq():
-    # Noncentral t / F / chi-square d/p/q bit-exact to R via the Python nmath
-    # reference (pnt/pnf/pnchisq etc.). The public pt/pf/pchisq(ncp!=0) add a
-    # Rust f64 fast path (≤ few ulp), covered in test_rs_parity.
     _assert_r(
         [
             (
@@ -1319,10 +1157,6 @@ def test_noncentral_t_f_chisq():
 
 
 def test_noncentral_tukey_hyper_rs_fast_path():
-    # The public noncentral / tukey / hyper surface routes through the Rust f64
-    # `_rs` fast path when built. It is ≤ a few ulp from R (f64 accumulators vs
-    # R's 80-bit LDOUBLE) — verified here to a tight tolerance; the 0-ulp Python
-    # reference is asserted above, and _rs-vs-R at scale in test_rs_parity.
     cases = [
         (float(pt(2, 10, ncp=1)), 0.80761156253031108),
         (float(dt(2, 10, ncp=1)), 0.22542404659006754),
@@ -1340,8 +1174,6 @@ def test_noncentral_tukey_hyper_rs_fast_path():
 
 
 def test_signrank_wilcox_distributions():
-    # Exact Wilcoxon signed-rank / rank-sum d/p/q, bit-exact to R
-    # (ported nmath signrank.c / wilcox.c).
     _assert_r(
         [
             (float(psignrank(10, 8)), "psignrank(10, 8)", 0.15625000000000003),
@@ -1355,9 +1187,6 @@ def test_signrank_wilcox_distributions():
 
 
 def test_cauchy_logis_lnorm_weibull_geom():
-    # Second-half continuous + geometric families. Closed-form (no LDOUBLE
-    # series) → the public API (Rust f64 _rs fast path) is itself 0-ulp to R,
-    # so assert it directly (unlike the noncentral f64 kernels).
     _assert_r(
         [
             (float(dcauchy(1.5, 0, 2)), "dcauchy(1.5, 0, 2)", 0.10185916357881301),
@@ -1388,8 +1217,6 @@ def test_cauchy_logis_lnorm_weibull_geom():
 
 
 def test_nbinom_qhyper():
-    # Negative binomial (prob + mu parameterizations) and hypergeometric
-    # quantile. f64 discrete kernels → the public _rs path is 0-ulp to R.
     _assert_r(
         [
             (float(dnbinom(3, 5, 0.4)), "dnbinom(3, 5, 0.4)", 0.077414399999999994),
@@ -1415,8 +1242,6 @@ def test_nbinom_qhyper():
 
 
 def test_r_generators_cauchy_weibull_geom():
-    # r* draws bit-exact to R's set.seed MT stream (rcauchy/rweibull consume one
-    # uniform per variate; rgeom interleaves exp_rand + rpois per rgeom.c).
     set_seed(42)
     assert float(rcauchy(3, 1, 2)[0]) == pytest.approx(0.45155182574632846, rel=1e-12)
     set_seed(13)
@@ -1428,8 +1253,6 @@ def test_r_generators_cauchy_weibull_geom():
 
 
 def test_pbirthday_qbirthday_dmultinom():
-    # Closed-form combinatorial densities — pure R ports (birthday.R / distn.R),
-    # bit-exact (long-double sum/prod + nmath lgammafn).
     _assert_r(
         [
             (float(pbirthday(23)), "pbirthday(23)", 0.5072972343239854),
@@ -1455,8 +1278,6 @@ def test_pbirthday_qbirthday_dmultinom():
 
 
 def test_psmirnov_qsmirnov():
-    # Two-sample Smirnov CDF (exact recursion + asymptotic) and quantile,
-    # bit-exact to R (reuses the ks.test exact kernels; ties via z=).
     _assert_r(
         [
             (float(psmirnov(0.5, (5, 8))), "psmirnov(0.5, c(5,8))", 0.6837606837606837),
@@ -1486,8 +1307,6 @@ def test_psmirnov_qsmirnov():
 
 
 def test_r_generators_nbinom_hyper_rank():
-    # r* draws bit-exact to R's set.seed MT stream: rnbinom (prob + mu via
-    # rpois∘rgamma), rhyper (H2PE), rsignrank/rwilcox (rank statistics).
     set_seed(42)
     assert rnbinom(6, 5, prob=0.4).astype(int).tolist() == [9, 4, 8, 7, 4, 4]
     set_seed(7)
@@ -1501,9 +1320,6 @@ def test_r_generators_nbinom_hyper_rank():
 
 
 def test_r_multinom_2dtable_wishart_smirnov():
-    # Multivariate r* generators bit-exact to R's set.seed stream (rmultinom.c
-    # sequential rbinom, rcont.c AS 159, ks.c Smirnov_sim). rWishart's RNG
-    # stream is exact; its chol/crossprod carry ≤ few ulp of platform-BLAS.
     set_seed(42)
     assert rmultinom(4, 10, [0.2, 0.3, 0.5]).tolist() == [
         [4, 1, 2, 3],
@@ -1525,14 +1341,11 @@ def test_r_multinom_2dtable_wishart_smirnov():
 
 
 def test_binom():
-    # dbinom(3, 10, 0.5) = C(10,3) / 2^10 = 120/1024 = 0.1171875
     assert float(dbinom(3, 10, 0.5)) == pytest.approx(0.1171875)
-    # pbinom(3, 10, 0.5) = sum_{k=0..3} C(10,k)/1024 = (1+10+45+120)/1024
     assert float(pbinom(3, 10, 0.5)) == pytest.approx(176 / 1024)
 
 
 def test_poisson_with_lambda_keyword():
-    # dpois / ppois bit-exact to R (ported dpois saddlepoint, ppois->pgamma).
     _assert_r(
         [
             (float(dpois(2, lambda_=3)), "dpois(2, 3)", 0.22404180765538773),
@@ -1544,7 +1357,6 @@ def test_poisson_with_lambda_keyword():
 def test_uniform_exp_gamma_beta():
     assert float(punif(0.3)) == pytest.approx(0.3)
     assert float(qexp(0.5)) == pytest.approx(np.log(2), rel=1e-6)
-    # pgamma / pbeta bit-exact to R (ported nmath pgamma / toms708 pbeta).
     _assert_r(
         [
             (
@@ -1569,7 +1381,6 @@ def test_rnorm_size_and_params():
     set_seed(0)
     out = rnorm(1000, mean=10, sd=2)
     assert len(out) == 1000
-    # very loose sanity
     assert abs(np.mean(out) - 10) < 0.5
     assert abs(np.std(out, ddof=1) - 2) < 0.5
 
@@ -1727,7 +1538,6 @@ def test_rmersenne_composed_families_match_r():
         ],
         rtol=1e-9,
     )
-    # rbeta BB (min > 1), with the aa/bb swap (rbeta(a,b)+rbeta(b,a)==1).
     np.testing.assert_allclose(
         f(2, lambda r: r.rbeta(2, 3), 6),
         [
@@ -1752,7 +1562,6 @@ def test_rmersenne_composed_families_match_r():
         ],
         rtol=1e-9,
     )
-    # rbeta BC (min <= 1), incl. the a == 1 edge.
     np.testing.assert_allclose(
         f(3, lambda r: r.rbeta(0.5, 0.8), 6),
         [
@@ -1777,8 +1586,6 @@ def test_rmersenne_composed_families_match_r():
         ],
         rtol=1e-9,
     )
-    # weighted sample: ProbSampleReplace, ProbSampleNoReplace, and the Walker
-    # alias path (n=250, >200 sizeable weights → R_unif_index + unif_rand).
     p = np.array([0.30, 0.11, 0.24, 0.05, 0.19, 0.07])
     assert [int(x) + 1 for x in MT(5).sample_prob(p, 10, replace=True)] == [
         1,
@@ -1809,7 +1616,6 @@ def test_public_r_surface_routes_through_mersenne_twister():
     from hea.R import rbeta, rbinom, rchisq, rexp, rf, rgamma, rpois, rt, runif, sample
     from hea.R.rng import RMersenneTwister as MT
 
-    # (1) R parity — set.seed(1); runif(5) / rnorm(5) (R 4.x reference values).
     set_seed(1)
     np.testing.assert_allclose(
         runif(5), [0.2655087, 0.3721239, 0.5728534, 0.9082078, 0.2016819], rtol=1e-6
@@ -1819,7 +1625,6 @@ def test_public_r_surface_routes_through_mersenne_twister():
         rnorm(5), [-0.6264538, 0.1836433, -0.8356286, 1.5952808, 0.3295078], rtol=1e-6
     )
 
-    # (2) routing — each public fn == the same draw off RMersenneTwister(seed).
     def draws(seed, fn, k):
         r = MT(seed)
         return np.array([fn(r) for _ in range(k)])
@@ -1843,21 +1648,16 @@ def test_public_r_surface_routes_through_mersenne_twister():
         rexp(5, 2.0), draws(14, lambda r: r.exp_rand() / 2.0, 5)
     )
 
-    # unweighted sample is R's shrinking-pool walk on the same stream.
     vals = np.arange(1, 11)
     set_seed(2)
     np.testing.assert_array_equal(sample(vals), vals[MT(2).sample_int(10, 10)])
 
-    # (3) one advancing global stream: interleaved runif then rpois ==
-    # sequential draws off a single MT (R's global-RNG semantics).
     set_seed(99)
     u, p = runif(2), rpois(3, 4.0)
     r = MT(99)
     np.testing.assert_array_equal(u, r.unif_rand(2))
     np.testing.assert_array_equal(p, np.array([r.rpois(4.0) for _ in range(3)]))
 
-    # (4) the composed/weighted families also route through the stream — R parity
-    # for rt/rbeta/walker-sample, and routing-equivalence for rchisq/rf.
     def mt_draws(seed, fn, k):
         r = MT(seed)
         return np.array([fn(r) for _ in range(k)])
@@ -1900,7 +1700,6 @@ def test_public_r_surface_routes_through_mersenne_twister():
     set_seed(8)
     np.testing.assert_array_equal(rf(5, 4, 7), mt_draws(8, lambda r: r.rf(4, 7), 5))
 
-    # (5) set_seed no longer touches numpy's global RNG — fully decoupled.
     set_seed(123)
     a = np.random.random()
     set_seed(123)
@@ -2018,19 +1817,12 @@ def test_rmvn_matches_r():
     order are bit-exact; only the trailing ``R %*% Z`` GEMM is BLAS-bound, so
     the vector-``mu`` ``n==1`` branch is bit-identical and ``n>1`` matches to
     machine precision. Reference: ``set.seed(101)`` in R 4.x / mgcv 1.9-4.
-
-    This is the bit-exact guarantee behind itsadug's simultaneous-CI path
-    (:meth:`hea.models.gam.gam.get_difference`): the MVN *draws* now come off
-    R's MT stream rather than numpy. The downstream ``crit`` is only
-    Monte-Carlo-close to R because hea's smooth basis differs from mgcv's, which
-    makes the (basis-dependent) realized draw differ — see the itsadug
-    get_difference test."""
+    """
     from hea.R.rng import RGenerator, RMersenneTwister
 
     V = np.array([[2.0, 0.3, -0.4], [0.3, 1.5, 0.2], [-0.4, 0.2, 1.0]])
     mu = np.array([10.0, -5.0, 2.5])
 
-    # vector-mu, n=2 -> (2, 3); zero mean
     A_R = np.array(
         [
             [-0.46108522671538527, 0.59723538372992691, -0.4195265282782813],
@@ -2041,22 +1833,15 @@ def test_rmvn_matches_r():
     assert A.shape == (2, 3)
     np.testing.assert_allclose(A, A_R, rtol=0, atol=1e-13)
 
-    # vector-mu, n=1 -> length-3 vector (R's as.numeric); bit-identical
     b_R = np.array([9.5389147732846151, -4.4027646162700727, 2.0804734717217186])
     b = RMersenneTwister(101).rmvn(1, mu, V)
     assert b.shape == (3,)
     assert np.array_equal(b, b_R), "n=1 vector-mu rmvn must be bit-identical to R"
 
-    # RGenerator.multivariate_normal facade maps to the same draws.
     sim = RGenerator(101).multivariate_normal(np.zeros(3), V, size=2)
     np.testing.assert_allclose(sim, A_R, rtol=0, atol=1e-13)
     v = RGenerator(101).multivariate_normal(mu, V)  # size=None -> (p,)
     assert v.shape == (3,) and np.array_equal(v, b_R)
-
-
-# ---------------------------------------------------------------------------
-# Model generics
-# ---------------------------------------------------------------------------
 
 
 from hea.R import (
@@ -2122,16 +1907,12 @@ def m_lme():
     return hea.models.gmm("Reaction ~ Days + (Days|Subject)", sleep)
 
 
-# ---- coef / coefficients / fixef ------------------------------------
-
-
 def test_coef_returns_named_vector(m_lm):
     c = coef(m_lm)
     from hea.R import NamedVector
 
     assert isinstance(c, NamedVector)
     assert set(c.names) == {"(Intercept)", "Area", "Elevation"}
-    # Name and 0-based positional indexing both work.
     assert c["Area"] == c[1]["Area"]
     assert all(isinstance(v, float) for v in c.values.tolist())
 
@@ -2144,10 +1925,7 @@ def test_coefficients_alias(m_lm):
 
 def test_coef_works_on_glm_gam_lme(m_glm, m_gam, m_lme):
     assert "(Intercept)" in coef(m_glm)
-    # gam: intercept + 9 wt basis + 9 hp basis
     assert "(Intercept)" in coef(m_gam)
-    # gmm: lme4 coef.merMod — a per-group dict (fixef + matching ranef BLUP),
-    # keyed by grouping factor; use fixef() for the fixed effects alone.
     c = coef(m_lme)
     assert isinstance(c, dict) and set(c) == {"Subject"}
     sub = c["Subject"]
@@ -2183,9 +1961,6 @@ def test_ranef_raises_for_non_mixed(m_lm):
         ranef(m_lm)
 
 
-# ---- residuals / fitted / predict -----------------------------------
-
-
 def test_resid_shape_and_alias(m_lm):
     r = resid(m_lm)
     assert isinstance(r, np.ndarray)
@@ -2199,13 +1974,10 @@ def test_resid_type_dispatch_glm(m_glm):
     pearson = resid(m_glm, type="pearson")
     response = resid(m_glm, type="response")
     assert dev.shape == pearson.shape == response.shape == (30,)
-    # response residuals are y - mu, easy to verify magnitude differs
     assert not np.allclose(dev, response)
 
 
 def test_resid_type_invalid_for_lm(m_lm):
-    # lm supports R's residuals.lm types (response/working/pearson/deviance);
-    # an unknown type still raises.
     with pytest.raises(ValueError, match="not supported"):
         resid(m_lm, type="garbage")
 
@@ -2224,12 +1996,8 @@ def test_fitted_values_alias(m_glm):
 
 def test_predict_dispatches_to_method(m_lm):
     out = R_predict(m_lm)
-    # lm.predict() returns a polars DataFrame with "fit" column
     assert isinstance(out, pl.DataFrame)
     np.testing.assert_array_almost_equal(out["fit"].to_numpy(), fitted(m_lm))
-
-
-# ---- confint --------------------------------------------------------
 
 
 def test_confint_default_level_returns_cached(m_lm):
@@ -2242,9 +2010,7 @@ def test_confint_custom_level_lm_recomputes(m_lm):
     """``level=0.99`` is wider than ``level=0.95`` for lm."""
     ci_95 = confint(m_lm, level=0.95)
     ci_99 = confint(m_lm, level=0.99)
-    # both have shape (3, 3): coef, low, high (column names differ)
     assert ci_95.shape == ci_99.shape
-    # 99% CI is strictly wider than 95% CI
     lo95 = ci_95[ci_95.columns[1]].to_numpy()
     hi95 = ci_95[ci_95.columns[2]].to_numpy()
     lo99 = ci_99[ci_99.columns[1]].to_numpy()
@@ -2266,18 +2032,12 @@ def test_confint_dispatches_to_profile_object():
     pr = fm.profile()
     out = confint(pr)
     assert isinstance(out, pl.DataFrame)
-    # One row per profiled parameter — for the random-intercept Dyestuff
-    # fit that's ``.sig01``, ``.sigma``, ``(Intercept)``.
     assert set(out["parameter"].to_list()) == {".sig01", ".sigma", "(Intercept)"}
-    # 99% CI strictly wider than 95% on the (Intercept) row.
     ci99 = confint(pr, level=0.99)
     icpt95 = out.filter(pl.col("parameter") == "(Intercept)")
     icpt99 = ci99.filter(pl.col("parameter") == "(Intercept)")
     assert icpt99[icpt99.columns[1]][0] < icpt95[icpt95.columns[1]][0]
     assert icpt99[icpt99.columns[2]][0] > icpt95[icpt95.columns[2]][0]
-
-
-# ---- vcov -----------------------------------------------------------
 
 
 def test_vcov_shape_lm_glm(m_lm, m_glm):
@@ -2297,9 +2057,6 @@ def test_vcov_lme_returns_dataframe(m_lme):
     V = vcov(m_lme)
     assert isinstance(V, pl.DataFrame)
     assert V.shape == (2, 2)
-
-
-# ---- scalars: logLik / deviance / nobs / df_residual ----------------
 
 
 def test_logLik_matches_loglike(m_lm, m_glm, m_gam):
@@ -2332,7 +2089,6 @@ def test_nobs(m_lm, m_glm, m_gam, m_lme):
 
 
 def test_df_residual_lm(m_lm):
-    # n=30, p=3 (intercept + Area + Elevation); df_residuals = 30 - 3 = 27
     assert df_residual(m_lm) == 27
 
 
@@ -2340,9 +2096,6 @@ def test_df_residual_raises_for_reml_lme(m_lme):
     """REML gmm fit has no defined residual df; we raise."""
     with pytest.raises(TypeError, match="residual df"):
         df_residual(m_lme)
-
-
-# ---- formula / model_matrix / model_frame ---------------------------
 
 
 def test_formula_returns_string(m_lm):
@@ -2359,9 +2112,6 @@ def test_model_matrix_returns_design(m_lm):
 def test_model_frame_returns_data(m_lm, gala):
     """``model.frame()`` returns the original data passed at fit time."""
     assert model_frame(m_lm) is gala
-
-
-# ---- AIC / BIC: scalar vs comparison table --------------------------
 
 
 def test_AIC_single_model_returns_scalar(m_lm):
@@ -2382,7 +2132,6 @@ def test_AIC_multiple_models_returns_table(gala):
     assert out.height == 2
     assert "df" in out.columns
     assert "AIC" in out.columns
-    # row labels should recover the caller's variable names
     label_col = out[""]
     assert label_col.to_list() == ["m1", "m2"]
 
@@ -2398,11 +2147,6 @@ def test_R_AIC_does_not_print_or_return_none(m_lm, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert out is not None
-
-
-# ---------------------------------------------------------------------------
-# Regression diagnostics
-# ---------------------------------------------------------------------------
 
 
 from hea.R import (
@@ -2453,18 +2197,12 @@ def test_rstandard_algebraic_identity(m_lm):
 
 
 def test_rstudent_closed_form_matches_loo_refit(m_lm, gala):
-    """Spot-check ``rstudent`` by refitting lm without observation 0.
-
-    R's identity: ``rstudent_i = e_i / (σ_(-i) · √(1 − h_i))``.
-    Refit ``lm`` with row 0 dropped, recompute σ from the new fit, and
-    verify the rstudent value at i=0 lines up with that identity.
-    """
+    """Spot-check ``rstudent`` by refitting lm without observation 0."""
     rs_full = rstudent(m_lm)
     h = hatvalues(m_lm)
     e0 = m_lm.residuals.to_series().to_numpy()[0]
     h0 = h[0]
 
-    # Refit without row 0
     gala_drop0 = gala.slice(1)  # drop first row
     m_drop0 = hea.models.lm("Species ~ Area + Elevation", gala_drop0)
     sigma_loo_0 = m_drop0.sigma  # σ from the leave-one-out fit
@@ -2511,11 +2249,7 @@ def test_dfbetas_shape_and_columns(m_lm):
 
 
 def test_dfbetas_matches_loo_refit_first_obs(m_lm, gala):
-    """Check ``dfbetas[0, j]`` against an actual leave-one-out refit.
-
-    R-faithful formula: ``dfbetas_ij = (β̂_j − β̂_(-i)_j) / (σ_(-i) · √diag(XtXinv)_j)``.
-    Refit dropping row 0 and verify each coefficient agrees.
-    """
+    """Check ``dfbetas[0, j]`` against an actual leave-one-out refit."""
     out = dfbetas(m_lm).row(0)  # dfbetas for observation 0 across all coefs
 
     gala_drop0 = gala.slice(1)
@@ -2569,13 +2303,11 @@ def test_weighted_lm_diagnostics_match_loo_refit(gala):
     w = rng.uniform(0.5, 2.0, gala.height)
     m_w = hea.models.lm("Species ~ Area + Elevation", gala, weights=w)
 
-    # Refit dropping observation 0
     m_drop0 = hea.models.lm("Species ~ Area + Elevation", gala.slice(1), weights=w[1:])
     b_full = coef(m_w).values
     b_drop = coef(m_drop0).values
     delta = b_full - b_drop
 
-    # σ_(-0) from the refit's own weighted RSS
     e_drop = m_drop0.residuals.to_series().to_numpy()
     weighted_rss_drop = float(np.sum(w[1:] * e_drop * e_drop))
     sigma_loo_0 = np.sqrt(weighted_rss_drop / (m_w.n - m_w.p - 1))
@@ -2587,7 +2319,6 @@ def test_weighted_lm_diagnostics_match_loo_refit(gala):
     np.testing.assert_allclose(
         np.array(dfbetas(m_w).row(0)), expected_dfbetas_0, atol=1e-10
     )
-    # influence(m)['sigma'][0] should equal that LOO σ exactly.
     assert influence(m_w)["sigma"][0] == pytest.approx(sigma_loo_0, rel=1e-12)
 
 
@@ -2599,11 +2330,6 @@ def test_weighted_lm_rstudent_dffits_consistent(gala):
     h = hatvalues(m_w)
     expected = rstudent(m_w) * np.sqrt(h / (1 - h))
     np.testing.assert_allclose(dffits(m_w), expected, rtol=1e-12)
-
-
-# ---------------------------------------------------------------------------
-# Hypothesis tests (the new batch + verifying the consolidation kept the rest)
-# ---------------------------------------------------------------------------
 
 
 from hea.R import (
@@ -2651,9 +2377,6 @@ def test_chisq_test_still_works():
     out = chisq_test([10, 10, 10, 10])
     assert isinstance(out, HTest)
     assert out.statistic["X-squared"] == pytest.approx(0.0)
-
-
-# ---- fisher_test ----------------------------------------------------
 
 
 def test_fisher_test_2x2_bit_exact_vs_r():
@@ -2775,7 +2498,6 @@ def test_fisher_test_exact_rxc_bit_exact_vs_r():
             ),
         ]
     )
-    # transpose invariance (the algorithm sorts/swaps margins internally)
     a = fisher_test(np.array([[1, 9, 3], [8, 2, 4]])).p_value
     b = fisher_test(np.array([[1, 8], [9, 2], [3, 4]])).p_value
     assert a == b
@@ -2802,7 +2524,6 @@ def test_fisher_test_exact_hybrid_vs_r():
 
 
 def test_fisher_test_exact_rejects_bad_input():
-    # < 2 rows/cols and negative entries are rejected as in R.
     with pytest.raises(ValueError, match="at least 2 rows"):
         fisher_test(np.array([[1, 2, 3]]))
     with pytest.raises(ValueError, match="nonnegative"):
@@ -2810,9 +2531,6 @@ def test_fisher_test_exact_rejects_bad_input():
 
 
 def test_p_adjust_bit_exact_vs_r():
-    # p.adjust — all 8 methods, NAs (default n = non-NA count), explicit n.
-    # order(decreasing=TRUE) keeps ties in original order; BY's harmonic sum
-    # q <- sum(1/(1:n)) uses R's sequential LDOUBLE accumulator.
     p = [0.01, 0.015, 0.005, 0.04, 0.03, 0.2, 0.5, 0.001]
     pv = "c(0.01,0.015,0.005,0.04,0.03,0.2,0.5,0.001)"
     holm = p_adjust(p, "holm")
@@ -2821,11 +2539,9 @@ def test_p_adjust_bit_exact_vs_r():
     bh = p_adjust(p, "BH")
     by = p_adjust(p, "BY")
     bonf = p_adjust(p, "bonferroni")
-    # NAs: R keeps NA slots, default n = count of non-NA.
     pna = [0.01, float("nan"), 0.04, 0.03, float("nan"), 0.001]
     pnav = "c(0.01,NA,0.04,0.03,NA,0.001)"
     holm_na = p_adjust(pna, "holm")
-    # explicit n larger than length(p).
     by10 = p_adjust(p, "BY", n=10)
     _assert_r(
         [
@@ -2846,10 +2562,8 @@ def test_p_adjust_bit_exact_vs_r():
             (by10[0], f'p.adjust({pv},"BY",n=10)[1]', 0.097632275132275126),
         ]
     )
-    # NA slots pass through unchanged; fdr aliases BH.
     assert math.isnan(holm_na[1]) and math.isnan(holm_na[4])
     assert np.array_equal(p_adjust(p, "fdr"), p_adjust(p, "BH"))
-    # n <= 1 returns input untouched; n == 2 hommel -> hochberg.
     assert np.array_equal(p_adjust([0.3], "holm"), np.array([0.3]))
     assert np.array_equal(
         p_adjust([0.02, 0.03], "hommel"), p_adjust([0.02, 0.03], "hochberg")
@@ -3037,7 +2751,6 @@ def test_ansari_test_bit_exact_vs_r():
 
 
 def test_mantelhaen_test_bit_exact_vs_r():
-    # array(c(10,3,5,12, 8,6,4,9, 11,2,3,14), dim=c(2,2,3)) — column-major fill.
     arr = np.zeros((2, 2, 3))
     arr[:, :, 0] = [[10, 5], [3, 12]]
     arr[:, :, 1] = [[8, 4], [6, 9]]
@@ -3104,9 +2817,6 @@ def test_mantelhaen_test_bit_exact_vs_r():
 
 
 def test_prop_trend_and_cmh_generalized_vs_r():
-    # prop.trend.test goes through a weighted lm/anova → inherits the lm QR
-    # ≤2-ulp/FMA residual; the generalized CMH quadratic form inherits a
-    # ≤1-ulp residual from the linear solve. Both checked to a tight tol.
     pt = prop_trend_test([10, 15, 20, 25], [50, 55, 60, 50])
     assert math.isclose(pt.statistic["X-squared"], 10.499880346588514, rel_tol=1e-12)
     assert math.isclose(pt.p_value, 0.0011938227500706187, rel_tol=1e-10)
@@ -3132,7 +2842,6 @@ def test_pairwise_tests_bit_exact_vs_r():
     pp = pairwise_prop_test(xs, ns)
     _assert_r(
         [
-            # pooled-SD t: p[c,a] (row 3, col 1) and p[b,a] (row 2, col 1).
             (
                 pt.p_value[1, 0],
                 f"pairwise.t.test({X},{G})$p.value[2,1]",
@@ -3166,22 +2875,14 @@ def test_pairwise_tests_bit_exact_vs_r():
             ),
         ]
     )
-    # pairwise.prop.test inherits the underlying prop.test X²/pchisq ≤2-ulp
-    # residual → tolerance rather than strict bit-exact.
     assert math.isclose(pp.p_value[2, 0], 0.1185648198595505, rel_tol=1e-12)
     assert math.isclose(pp.p_value[0, 0], 1.0, rel_tol=1e-12)
-    # upper triangle is NaN.
     assert math.isnan(pt.p_value[0, 1])
     assert pt.method == "t tests with pooled SD"
     assert pw.method == "Wilcoxon rank sum exact test"
 
 
 def test_power_tests_vs_r():
-    # power.* solve for the one NULL arg via the ported uniroot(extendInt=).
-    # power.t.test / power.anova.test use the noncentral pt/pf kernels, so on
-    # the default Rust _rs f64 path they carry the documented ≤ few-ulp residual
-    # (the pure-Python path is 0-ulp to R); power.prop.test uses only central
-    # pnorm/qnorm. Committed values are live-R 4.6.0; checked to a tight tol.
     cases = [
         (power_t_test(n=20, delta=1.0).params["power"], 0.86895280169249778),
         (power_t_test(delta=1.0, power=0.8).params["n"], 16.714768142328293),
@@ -3228,7 +2929,6 @@ def test_power_tests_vs_r():
     ]
     for got, ref in cases:
         assert math.isclose(got, ref, rel_tol=1e-12), f"{got!r} !~ R {ref!r}"
-    # exactly-one-NULL guard.
     with pytest.raises(ValueError, match="exactly one"):
         power_t_test(n=20, delta=1.0, power=0.8)
 
@@ -3262,9 +2962,6 @@ from hea.R import (
 
 
 def test_formula_algebra_helpers_vs_r():
-    # Deparse strings are deterministic / platform-independent; committed values
-    # are live R 4.6.0 (reformulate / update.formula / delete.response /
-    # drop.terms / DF2formula / as.formula).
     assert reformulate(["x1", "x2"], "y") == "y ~ x1 + x2"
     assert reformulate(["x1", "x2"]) == "~x1 + x2"
     assert reformulate("x", intercept=False) == "~x - 1"
@@ -3279,7 +2976,6 @@ def test_formula_algebra_helpers_vs_r():
     assert drop_terms("y~a+b+c", 2, keep_response=False) == "~a + c"
     assert DF2formula(pl.DataFrame({"a": [1], "b": [2], "c": [3]})) == "a ~ b + c"
     assert DF2formula(pl.DataFrame({"only": [1]})) == "~only"
-    # update.formula: `.` substitution + terms.formula(simplify=TRUE)
     assert update_formula("y ~ x1 + x2", ". ~ . + x3") == "y ~ x1 + x2 + x3"
     assert update_formula("y ~ x1 + x2", ". ~ . - x2") == "y ~ x1"
     assert update_formula("y ~ a*b", ". ~ . - a:b") == "y ~ a + b"
@@ -3294,29 +2990,24 @@ def test_formula_algebra_helpers_vs_r():
 
 
 def test_get_all_vars_na_family_mfclass_vs_r():
-    # get_all_vars: all.vars columns (log(x2) → raw x2), first-appearance order
     gv = get_all_vars(
         "y ~ x1 + log(x2)",
         pl.DataFrame({"y": [1, 2], "x1": [3, 4], "x2": [5, 6], "junk": [7, 8]}),
     )
     assert gv.columns == ["y", "x1", "x2"]
 
-    # naresid / napredict.exclude: pad back to full length with NaN. R's
-    # na.exclude on rows 2,4,5 (1-based) → omit positions {1,3,4} (0-based).
     oa = NAAction(np.array([1, 3, 4]), kind="exclude")
     got = naresid(oa, np.array([10.0, 30.0, 60.0]))
     exp = [10.0, None, 30.0, None, None, 60.0]
     assert [None if np.isnan(v) else v for v in got] == exp
     got2 = napredict(oa, np.array([10.0, 30.0, 60.0]))
     assert [None if np.isnan(v) else v for v in got2] == exp
-    # naprint singular / plural, matching R's ngettext.
     assert naprint(oa) == "3 observations deleted due to missingness"
     assert (
         naprint(NAAction(np.array([2]))) == "1 observation deleted due to missingness"
     )
     assert naprint(None) == ""
 
-    # na.pass / na.fail
     assert na_pass([1, None, 3]) == [1, None, 3]
     with pytest.raises(ValueError, match="missing values in object"):
         na_fail(pl.Series([1.0, None, 3.0]))
@@ -3332,24 +3023,16 @@ def test_get_all_vars_na_family_mfclass_vs_r():
     assert cleaned.height == 3
     assert list(act.omit) == [1, 3, 4] and act.kind == "exclude"
 
-    # .MFclass
     assert MFclass(pl.Series([1.0, 2.0])) == "numeric"
     assert MFclass(pl.Series([1, 2, 3])) == "numeric"
     assert MFclass(pl.Series([True, False])) == "logical"
     assert MFclass(pl.Series(["a", "b"])) == "character"
     assert MFclass(np.ones((2, 3))) == "nmatrix.3"
-    # hea stores factor & ordered both as polars Enum; the ordered marker
-    # (from ordered()) must still read back as "ordered", plain factor as
-    # "factor" — matching R's .MFclass.
     assert MFclass(R_factor(["a", "b", "c"])) == "factor"
     assert MFclass(R_ordered(["a", "b", "c"])) == "ordered"
 
 
 def test_poly_polym_vs_r():
-    # poly non-raw fit runs R's exact qr() (dqrdc2 + qr.qy), so it carries the
-    # documented ≤2-ulp lm-QR/FMA residual → tolerance-checked. The raw path
-    # (integer powers) and the prediction recurrence are 0-ulp given identical
-    # coefs. Committed fallbacks are live R 4.6.0.
     X = "c(1,2.5,3,4.2,5.1,6.9,8,9.3,10,11.4)"
     x = np.array([1.0, 2.5, 3.0, 4.2, 5.1, 6.9, 8.0, 9.3, 10.0, 11.4])
     P = poly(x, 3)
@@ -3373,7 +3056,6 @@ def test_poly_polym_vs_r():
             ),
         ]
     )
-    # raw = integer powers — 0-ulp.
     Rraw = poly(x, 3, raw=True)
     _assert_r_tol(
         [
@@ -3381,7 +3063,6 @@ def test_poly_polym_vs_r():
             (float(Rraw[3, 1]), f"poly({X}, 3, raw=TRUE)[4,2]", 17.64),
         ]
     )
-    # predict.poly via the stored coefs (recurrence).
     pred = predict_poly(P, np.array([2.0, 5.5, 9.9]))
     _assert_r_tol(
         [
@@ -3397,7 +3078,6 @@ def test_poly_polym_vs_r():
             ),
         ]
     )
-    # polym: tensor product, degree tuples as column names.
     X1 = "c(1,2,3,4,5)"
     X2 = "c(2,1,4,3,6)"
     x1 = np.array([1.0, 2, 3, 4, 5])
@@ -3426,7 +3106,6 @@ from hea.R import (
     weighted_residuals,
 )
 
-# Shared design for the lm/aov-extras oracles (built identically in R & hea).
 _AOV_Y = "c(5.1,6.3,4.0,9.9,9.1,12.2,6.8,7.7,14.0,11.1)"
 _AOV_X1 = "c(2.1,3.4,1.9,5.2,4.4,6.1,3.3,2.8,7.0,5.5)"
 _AOV_X2 = "c(1.0,0.5,2.2,1.7,3.1,2.4,0.9,4.0,1.1,2.9)"
@@ -3453,7 +3132,6 @@ def test_sigma_cov2cor_weighted_residuals_covratio_vs_r():
     d = _aov_frame()
     m = lm("y ~ x1 + x2", d)
     mg = glm("y ~ x1 + x2", d, family=Gamma(link="log"))
-    # sigma / weighted.residuals / covratio go through the lm-QR path → tol.
     _assert_r_tol(
         [
             (sigma(m), f"sigma({_AOV_LM})", 0.5716136426669162),
@@ -3471,7 +3149,6 @@ def test_sigma_cov2cor_weighted_residuals_covratio_vs_r():
             (float(covratio(m)[0]), f"covratio({_AOV_LM})[1]", 1.0813620351622721),
         ]
     )
-    # cov2cor is pure arithmetic on shared libm → bit-exact.
     V = np.array([[4.0, 2.0, 1.0], [2.0, 9.0, 3.0], [1.0, 3.0, 16.0]])
     C = cov2cor(V)
     MAT = "matrix(c(4,2,1,2,9,3,1,3,16), 3, 3)"
@@ -3483,7 +3160,6 @@ def test_sigma_cov2cor_weighted_residuals_covratio_vs_r():
             (float(C[2, 2]), f"cov2cor({MAT})[3,3]", 1.0),
         ]
     )
-    # weighted lm: weighted.residuals = sqrt(w) * response residual.
     w = np.array([1.0, 2.0, 1.0, 0.5, 1.0, 1.5, 1.0, 2.0, 1.0, 1.0])
     mw = lm("y ~ x1 + x2", d, weights=w)
     WLM = f"lm(y ~ x1 + x2, {_AOV_DF}, weights = c(1,2,1,0.5,1,1.5,1,2,1,1))"
@@ -3503,7 +3179,6 @@ def test_influence_measures_vs_r():
     from hea.models.lm import lm
 
     im = influence_measures(lm("y ~ x1 + x2", _aov_frame()))
-    # column labels are exactly R's (abbreviate: "(Intercept)" -> "1_").
     assert im.infmat.columns == [
         "dfb.1_",
         "dfb.x1",
@@ -3514,10 +3189,6 @@ def test_influence_measures_vs_r():
         "hat",
     ]
     IM = f"influence.measures({_AOV_LM})$infmat"
-    # Fallbacks are FULL-PRECISION R doubles (sprintf("%.17g")), not R's printed
-    # 10-digit console output: off-macOS these ARE the comparison target, and
-    # `_assert_r_tol`'s rel_tol=1e-12 needs >12 significant digits to be
-    # satisfiable at all. hea sits ~1e-15 from R here on both arches.
     _assert_r_tol(
         [
             (float(im.infmat["dfb.x1"][7]), f'{IM}[8,"dfb.x1"]', -1.018964267370979),
@@ -3528,7 +3199,6 @@ def test_influence_measures_vs_r():
             (float(im.infmat["hat"][7]), f'{IM}[8,"hat"]', 0.5276606143052539),
         ]
     )
-    # is.inf flags are deterministic — compare the whole matrix to R's output.
     expected = np.zeros((10, 7), dtype=bool)
     expected[7, [1, 2, 3, 5]] = True  # obs 8: dfb.x1/x2, dffit, cook.d
     expected[8, 1] = True  # obs 9: dfb.x1
@@ -3578,7 +3248,6 @@ def test_lsfit_ls_diag_ls_print_vs_r():
                 f"ls.diag({_AOV_LSF})$cov.unscaled[1,2]",
                 -0.1506939600836976201,
             ),
-            # ls.print coef.table: t-value & Pr(>|t|) for x1.
             (
                 float(ct[1, 2]),
                 f"ls.print({_AOV_LSF}, print.it=FALSE)$coef.table[[1]][2,3]",
@@ -3594,7 +3263,6 @@ def test_lsfit_ls_diag_ls_print_vs_r():
 
 
 def test_replications_vs_r():
-    # Balanced design → R returns a named vector (dict of ints here).
     dd = pl.DataFrame(
         {
             "A": ["a"] * 6 + ["b"] * 6,
@@ -3604,8 +3272,6 @@ def test_replications_vs_r():
     )
     assert replications("resp ~ A + B", dd) == {"A": 6, "B": 4}
     assert replications("resp ~ A*B", dd) == {"A": 6, "B": 4, "A:B": 2}
-    # Unbalanced → R returns a list of tables; hea returns per-term count dicts
-    # in sorted factor-level order (matches R's tapply cell counts).
     ub = pl.DataFrame(
         {
             "A": ["a", "a", "a", "b", "b", "b", "b", "b"],
@@ -3628,8 +3294,6 @@ def test_replications_vs_r():
 
 
 def test_chisq_test_simulate_p_value():
-    # Monte-Carlo chisq.test bit-exact to R's set.seed stream: table path via
-    # rcont2 (chisq_sim), goodness-of-fit via weighted sample.int.
     m = np.array([[10, 20, 30], [15, 25, 10], [5, 12, 18]])
     set_seed(42)
     r = chisq_test(m, simulate_p_value=True, B=2000)
@@ -3645,7 +3309,6 @@ def test_chisq_test_simulate_p_value():
 
 
 def test_fisher_test_simulate_p_value():
-    # r×c fisher.test via Monte-Carlo (Fisher_sim / rcont2), bit-exact to R.
     m = np.array([[3, 5, 2], [7, 2, 8], [4, 6, 1]])
     set_seed(42)
     r = fisher_test(m, simulate_p_value=True, B=2000)
@@ -3654,9 +3317,6 @@ def test_fisher_test_simulate_p_value():
     set_seed(99)
     r2 = fisher_test(m2, simulate_p_value=True, B=5000)
     assert r2.p_value == pytest.approx(0.0023995200959808036)
-
-
-# ---- prop_test ------------------------------------------------------
 
 
 def test_prop_test_one_sample_known_value():
@@ -3669,8 +3329,6 @@ def test_prop_test_one_sample_known_value():
 
 def test_prop_test_one_sample_continuity_correction():
     """Yates correction subtracts ``0.5/n`` from |p̂ - p₀|."""
-    # x=4, n=10, p=0.5 → diff=0.1, after correction: 0.1 - 0.05 = 0.05
-    # X² = 0.05² / (0.25/10) = 0.0025 / 0.025 = 0.1
     res = prop_test(4, 10, p=0.5, correct=True)
     assert res.statistic["X-squared"] == pytest.approx(0.1)
 
@@ -3693,13 +3351,9 @@ def test_prop_test_p_vector_not_supported():
         prop_test([1, 2, 3], [10, 10, 10], p=[0.1, 0.2, 0.3])
 
 
-# ---- binom_test -----------------------------------------------------
-
-
 def test_binom_test_exact_p_value():
     """``P(X ≥ 8 | n=10, p=0.5) + P(X ≤ 2 | n=10, p=0.5)``."""
     res = binom_test(8, 10, p=0.5)
-    # Two-sided exact p for 8/10 at p=0.5 is 0.1093750 (from R)
     assert res.p_value == pytest.approx(0.109375, rel=1e-5)
     assert res.estimate == {"probability of success": 0.8}
     assert res.null_value == 0.5
@@ -3716,9 +3370,6 @@ def test_binom_test_ci_brackets_estimate():
     res = binom_test(8, 10, p=0.5)
     lo, hi = res.conf_int
     assert lo < 0.8 < hi
-
-
-# ---- var_test -------------------------------------------------------
 
 
 def test_var_test_f_statistic_known():
@@ -3750,9 +3401,6 @@ def test_var_test_one_sided():
     assert res.p_value < 1e-3  # variances obviously differ
 
 
-# ---- bartlett_test --------------------------------------------------
-
-
 def test_bartlett_test_matches_scipy():
     from scipy import stats as ss
 
@@ -3774,16 +3422,12 @@ def test_bartlett_test_requires_2_groups():
         bartlett_test([1.0, 2.0, 3.0], ["A", "A", "A"])
 
 
-# ---- shapiro_test ---------------------------------------------------
-
-
 def test_shapiro_test_high_p_for_normal_sample():
     rng = np.random.default_rng(4)
     x = rng.normal(size=50)
     res = shapiro_test(x)
     assert isinstance(res, HTest)
     assert 0 < res.statistic["W"] < 1
-    # plenty of power-but-not-rejection on a clean normal sample
     assert res.p_value > 0.05
 
 
@@ -3796,12 +3440,7 @@ def test_shapiro_test_rejects_obvious_nonnormal():
 
 
 def test_cor_test_spearman_exact():
-    """Spearman exact p-value (AS 89, src/prho.c) — bit-exact to R.
-
-    (The reported ``S`` may differ from R by <=1 ulp: R's ``cor`` centers via
-    the system ``sqrtl`` which numpy's long-double sqrt does not reproduce; the
-    p-value uses ``round(S)`` so it is unaffected.)
-    """
+    """Spearman exact p-value (AS 89, src/prho.c) — bit-exact to R."""
     x = [3.1, 1.5, 4.2, 2.8, 5.9, 0.7, 3.3, 4.8, 1.1, 2.2]
     y = [2.9, 1.8, 5.1, 2.2, 6.3, 1.2, 2.7, 4.4, 0.9, 3.0]
     xr = "c(" + ",".join(repr(v) for v in x) + ")"
@@ -3933,9 +3572,6 @@ def test_shapiro_test_n3_exact_p_branch():
     )
 
 
-# ---- ks_test --------------------------------------------------------
-
-
 def test_ks_test_two_sample_exact_bit_exact_vs_r():
     """Two-sample exact Smirnov (nx*ny < 10000) — D and p bit-exact to R."""
     a = [0.80, 1.83, 0.50, 1.62, 2.48, 1.68, 0.55, 1.30]
@@ -4019,14 +3655,10 @@ def test_ks_test_one_sample_exact_bit_exact_vs_r():
     )
 
 
-# ---- mcnemar_test ---------------------------------------------------
-
-
 def test_mcnemar_test_known_table():
     """Standard textbook example: ``[[101, 121], [59, 33]]`` → χ² ≈ 21.36."""
     tbl = np.array([[101, 121], [59, 33]])
     res = mcnemar_test(tbl, correct=False)
-    # (b - c)^2 / (b + c) = (121 - 59)^2 / (121 + 59) = 3844 / 180
     expected_stat = (121 - 59) ** 2 / (121 + 59)
     assert res.statistic["McNemar's chi-squared"] == pytest.approx(expected_stat)
 
@@ -4036,7 +3668,6 @@ def test_mcnemar_test_continuity_correction():
     tbl = np.array([[101, 121], [59, 33]])
     res_raw = mcnemar_test(tbl, correct=False)
     res_corr = mcnemar_test(tbl, correct=True)
-    # (62 - 1)^2 / 180 < 62^2 / 180
     assert (
         res_corr.statistic["McNemar's chi-squared"]
         < res_raw.statistic["McNemar's chi-squared"]
@@ -4048,14 +3679,10 @@ def test_mcnemar_test_rejects_non_2x2():
         mcnemar_test(np.array([[1, 2, 3], [4, 5, 6]]))
 
 
-# ---- friedman_test --------------------------------------------------
-
-
 def test_friedman_test_matches_scipy_long_to_wide():
     """Long-form (y, groups, blocks) reshaped → ``friedmanchisquare(*samples)``."""
     from scipy import stats as ss
 
-    # 3 groups × 5 blocks
     rng = np.random.default_rng(8)
     samples = [rng.normal(loc=mu, size=5) for mu in (0, 0.5, 1.0)]
     y, groups, blocks = [], [], []
@@ -4075,20 +3702,11 @@ def test_friedman_test_length_mismatch():
         friedman_test([1.0, 2.0], ["a", "b", "c"], ["1", "2", "3"])
 
 
-# ---- HTest repr is human-readable -----------------------------------
-
-
 def test_htest_repr_contains_method_and_p():
     out = t_test([1.0, 2.0, 3.0, 4.0, 5.0], mu=3.0)
     s = repr(out)
     assert "One Sample t-test" in s
     assert "p-value" in s
-
-
-# ---------------------------------------------------------------------------
-# DataFrame helpers: cut / findInterval / table / xtabs / prop_table /
-# addmargins
-# ---------------------------------------------------------------------------
 
 
 from hea.R import (
@@ -4100,25 +3718,20 @@ from hea.R import (
     xtabs,
 )
 
-# ---- cut ------------------------------------------------------------
-
 
 def test_cut_default_is_right_closed():
     """``cut(x, breaks)`` defaults to ``right=True``: ``(a, b]`` semantics."""
     out = cut([1, 2, 5, 10, 0, 11], breaks=[0, 2, 5, 10])
-    # boundary value 2 → (0,2]; 5 → (2,5]; 10 → (5,10]; 0 and 11 are out-of-range
     assert out.to_list() == ["(0,2]", "(0,2]", "(2,5]", "(5,10]", None, None]
 
 
 def test_cut_left_closed_with_right_false():
     out = cut([0, 2, 5, 10], breaks=[0, 2, 5, 10], right=False)
-    # 0 → [0,2); 2 → [2,5); 5 → [5,10); 10 not in any (right edge open)
     assert out.to_list() == ["[0,2)", "[2,5)", "[5,10)", None]
 
 
 def test_cut_include_lowest_brings_in_boundary():
     out = cut([1, 2, 5, 10, 0, 11], breaks=[0, 2, 5, 10], include_lowest=True)
-    # x=0 now in [0,2]; lowest label changes from "(0,2]" to "[0,2]"
     assert out.to_list() == [
         "[0,2]",
         "[0,2]",
@@ -4138,8 +3751,6 @@ def test_cut_returns_pl_enum_factor():
 
 def test_cut_labels_false_returns_codes():
     out = cut([1, 3, 7, 100], breaks=[0, 2, 5, 10], labels=False)
-    # 0-based codes (hea convention; R / dplyr emits 1-based);
-    # out-of-range → NaN.
     assert isinstance(out, np.ndarray)
     assert out[0] == 0
     assert out[1] == 1
@@ -4170,41 +3781,30 @@ def test_cut_label_count_must_match_bins():
         cut([1, 2], breaks=[0, 2, 5, 10], labels=["a", "b"])
 
 
-# ---- findInterval ---------------------------------------------------
-
-
 def test_findInterval_basic():
     """``findInterval(x, vec)`` returns 0..N where vec[i-1] ≤ x < vec[i]."""
     out = findInterval([0.5, 2.0, 3.5, 7.0, 10.0, 11.0], [1, 5, 10])
-    # 0.5 < 1 → 0; 2.0 in [1,5) → 1; 3.5 → 1; 7.0 in [5,10) → 2;
-    # 10.0 ≥ 10 → 3 (above all); 11.0 → 3
     assert out.tolist() == [0, 1, 1, 2, 3, 3]
 
 
 def test_findInterval_rightmost_closed_pulls_back_endpoint():
     out = findInterval([10.0, 11.0], [1, 5, 10], rightmost_closed=True)
-    # 10.0 now in [5, 10] (last interval) → 2; 11.0 still 3
     assert out.tolist() == [2, 3]
 
 
 def test_findInterval_all_inside_clips():
     out = findInterval([0, 11.0], [1, 5, 10], all_inside=True)
-    # 0 normally → 0 but all_inside clamps to [1, len(vec)-1] = [1, 2]
     assert out.tolist() == [1, 2]
 
 
 def test_findInterval_left_open():
     out = findInterval([1.0, 5.0, 10.0], [1, 5, 10], left_open=True)
-    # left_open: (vec[i-1], vec[i]]; x=1 not > 1 → 0; x=5 → 1; x=10 → 2
     assert out.tolist() == [0, 1, 2]
 
 
 def test_findInterval_rejects_unsorted_vec():
     with pytest.raises(ValueError, match="non-decreasing"):
         findInterval([1.0], [3, 1, 2])
-
-
-# ---- table ----------------------------------------------------------
 
 
 def test_table_one_way_returns_value_n():
@@ -4216,7 +3816,6 @@ def test_table_one_way_returns_value_n():
 
 def test_table_two_way_pivots():
     out = table(["a", "a", "b", "b", "b"], ["x", "y", "x", "y", "y"])
-    # First col is row label; remaining cols are y-levels (sorted).
     assert out.columns == ["", "x", "y"]
     assert out[""].to_list() == ["a", "b"]
     assert out["x"].to_list() == [1, 1]
@@ -4234,9 +3833,6 @@ def test_table_drops_nulls_by_default():
     assert out["n"].to_list() == [1, 2]
 
 
-# ---- xtabs ----------------------------------------------------------
-
-
 def test_xtabs_one_way():
     df = pl.DataFrame({"g": ["a", "b", "a", "b", "a"]})
     out = xtabs("~ g", df)
@@ -4252,7 +3848,6 @@ def test_xtabs_two_way_uses_dnn():
         }
     )
     out = xtabs("~ g + h", df)
-    # The first column carries the row variable's name (left side of +)
     assert out.columns[0] == "g"
     assert sorted(out.columns[1:]) == ["x", "y"]
 
@@ -4278,9 +3873,6 @@ def test_xtabs_lhs_weighted_two_way():
     out = xtabs("w ~ a + b", df)
     rows = {r["a"]: (r["p"], r["q"]) for r in out.iter_rows(named=True)}
     assert rows == {"x": (10, 20), "y": (30, 40)}
-
-
-# ---- prop_table -----------------------------------------------------
 
 
 def test_prop_table_grand_total_sums_to_one():
@@ -4316,13 +3908,9 @@ def test_prop_table_invalid_margin():
         prop_table(tbl, margin=3)
 
 
-# ---- addmargins -----------------------------------------------------
-
-
 def test_addmargins_2way_default_adds_both():
     tbl = table(["a", "a", "b", "b", "b"], ["x", "y", "x", "y", "y"])
     out = addmargins(tbl)
-    # Adds a "Sum" column AND a "Sum" row (with the grand total at the corner)
     assert "Sum" in out.columns
     assert out[""].to_list()[-1] == "Sum"
     grand_total = float(out.row(-1, named=True)["Sum"])
@@ -4350,19 +3938,11 @@ def test_addmargins_oneway_appends_sum_row():
     assert out["n"].to_list() == [3.0, 2.0, 1.0, 6.0]
 
 
-# ---------------------------------------------------------------------------
-# Newly enabled deferred functions: glm/gam jackknife, update, terms,
-# prop_test for k > 2.
-# ---------------------------------------------------------------------------
-
-
 from hea.R import (
     Terms,
     terms,
     update,
 )
-
-# ---- glm/gam jackknife: rstudent / dffits / dfbetas / influence -----
 
 
 @pytest.fixture(scope="module")
@@ -4405,12 +3985,9 @@ def test_glm_dfbetas_closed_form_vs_loo_refit(gala, m_glm):
     bhat_full = coef(m_glm).values
     bhat_drop = coef(m_drop0).values
     delta = bhat_full - bhat_drop
-    # Poisson is scale-known, so sigma_(-i) = 1; closed form scales delta
-    # by sqrt(diag(XtWXinv)).
     XtWXinv = np.asarray(m_glm.V_bhat) / m_glm.dispersion
     sd_j = np.sqrt(np.diag(XtWXinv))
     expected = delta / sd_j
-    # First-order Taylor approximation; tight on this dataset (~3e-4).
     np.testing.assert_allclose(predicted, expected, atol=1e-3)
 
 
@@ -4448,9 +4025,6 @@ def test_gam_diagnostics_run_end_to_end():
     assert infl["sigma"].shape == (32,)
 
 
-# ---- update ---------------------------------------------------------
-
-
 def test_update_full_formula_returns_new_fit(gala, m_lm):
     new = update(m_lm, "Species ~ Area")
     assert new is not m_lm
@@ -4473,7 +4047,6 @@ def test_update_delta_add_term(gala, m_lm):
     """``. ~ . + x`` keeps existing RHS and appends a term."""
     new = update(m_lm, ". ~ . + Adjacent")
     assert "Adjacent" in coef(new)
-    # Check that all original terms are still there
     assert "Area" in coef(new)
     assert "Elevation" in coef(new)
 
@@ -4487,7 +4060,6 @@ def test_update_delta_drop_term(gala, m_lm):
 def test_update_glm_carries_family(gala, m_glm):
     """``update(glm, …)`` should keep the original family without re-specifying."""
     new = update(m_glm, ". ~ . + Adjacent")
-    # Same family class as original
     assert type(new.family).__name__ == type(m_glm.family).__name__
 
 
@@ -4533,12 +4105,8 @@ def test_update_kwargs_override_auto_forward(gala):
     rng = np.random.default_rng(0)
     w = rng.uniform(0.5, 2.0, gala.height)
     m_w = hea.models.lm("Species ~ Area", gala, weights=w)
-    # Override: refit unweighted
     new = update(m_w, ". ~ . + Elevation", weights=None)
     assert new.weights is None
-
-
-# ---- terms ----------------------------------------------------------
 
 
 def test_terms_returns_dataclass(m_lm):
@@ -4561,15 +4129,11 @@ def test_terms_for_glm(m_glm):
     assert "Area" in t.term_labels
 
 
-# ---- prop_test extension to k > 2 -----------------------------------
-
-
 def test_prop_test_k_3_returns_chi_squared():
     """3-sample equality test produces a chi-squared with df=2."""
     res = prop_test([5, 8, 9], [10, 10, 10])
     assert res.parameter == {"df": 2}
     assert "3-sample" in res.method
-    # Continuity correction is silently dropped for k > 2 (matches R).
     assert "continuity correction" not in res.method
 
 
@@ -4587,14 +4151,6 @@ def test_prop_test_estimates_for_k_3():
 def test_star_import_binds_functions_not_submodules():
     """``from hea.R import *`` is the R-user transition path, so every name in
     ``__all__`` must be the *function*, never the sub-module of the same name.
-
-    ``factor``, ``matrix`` and ``emmeans`` are each both. Importing a sub-module
-    binds it into the parent namespace and shadows the re-export; eagerly the
-    ``from .factor import (...)`` line ran last and the function won, so the
-    clash was invisible. Under a lazy ``__init__`` whoever touches the module
-    first wins, and resolving *any* export from ``.factor`` -- ``fct``, say --
-    was enough to leave ``hea.R.factor`` pointing at the module and to make
-    ``factor(col("test"), labels=...)`` raise ``'module' object is not callable``.
     """
     import types
 
@@ -4605,17 +4161,10 @@ def test_star_import_binds_functions_not_submodules():
     shadowed = [n for n in hea.R.__all__ if isinstance(ns.get(n), types.ModuleType)]
     assert shadowed == [], f"star-import bound sub-modules for {shadowed}"
 
-    # and by attribute, in either touch order
     for first in ("fct", "factor"):
         mod = importlib.reload(importlib.import_module("hea.R"))
         getattr(mod, first)
         assert callable(mod.factor) and not isinstance(mod.factor, types.ModuleType)
-
-
-# ---- cbind on data frames -------------------------------------------
-#
-# ``cbind.data.frame`` delegates to ``data.frame()``, whose height rule these
-# pin. Oracle values are from R 4.x directly.
 
 
 def test_cbind_frames_recycles_to_the_tallest():
@@ -4625,27 +4174,19 @@ def test_cbind_frames_recycles_to_the_tallest():
     from hea.R.matrix import cbind
 
     tall = pl.DataFrame({"a": [1, 2, 3, 4]})
-    # R: cbind(data.frame(a=1:4), data.frame(b=c(10L,20L)))$b -> 10 20 10 20
     assert cbind(tall, pl.DataFrame({"b": [10, 20]}))["b"].to_list() == [10, 20, 10, 20]
-    # R: cbind(data.frame(a=1:4), data.frame(c=7L))$c -> 7 7 7 7
     assert cbind(tall, pl.DataFrame({"c": [7]}))["c"].to_list() == [7, 7, 7, 7]
-    # Equal heights are the common case and stay untouched.
     assert cbind(tall, pl.DataFrame({"z": [9, 9, 9, 9]})).shape == (4, 2)
 
 
 def test_cbind_frames_rejects_a_non_divisor_height():
-    """R errors rather than padding when the height doesn't divide the tallest.
-
-    Polars <2.0 null-padded here, which was never R's behaviour.
-    """
+    """R errors rather than padding when the height doesn't divide the tallest."""
     import polars as pl
 
     from hea.R.matrix import cbind
 
     tall = pl.DataFrame({"a": [1, 2, 3, 4]})
-    # R: "arguments imply differing number of rows: 4, 3"
     with pytest.raises(ValueError, match=r"differing number of rows: 4, 3"):
         cbind(tall, pl.DataFrame({"d": [1, 2, 3]}))
-    # A zero-height frame never recycles (R guards on nrows[i] > 0L).
     with pytest.raises(ValueError, match=r"differing number of rows: 4, 0"):
         cbind(tall, pl.DataFrame({"e": []}))

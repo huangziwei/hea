@@ -22,11 +22,6 @@ def _cooked(src: str) -> list[object]:
     return [t.cooked for t in tokenize(src)]
 
 
-# ---------------------------------------------------------------------------
-# Numeric literals
-# ---------------------------------------------------------------------------
-
-
 class TestNumbers:
     def test_int(self):
         toks = tokenize("42")
@@ -65,11 +60,6 @@ class TestNumbers:
             tokenize("1e")
 
 
-# ---------------------------------------------------------------------------
-# String literals
-# ---------------------------------------------------------------------------
-
-
 class TestStrings:
     def test_double_quoted(self):
         toks = tokenize('"hello"')
@@ -103,18 +93,11 @@ class TestStrings:
         assert tokenize('r"{body}"')[0].cooked == "body"
 
     def test_raw_string_dashed(self):
-        # r"--(...)--" — dashes let the body include the closer ``)``
-        # alone, or the bare quote character, without ending the string.
         assert tokenize('r"--(a "b" c)--"')[0].cooked == 'a "b" c'
 
     def test_unterminated_string(self):
         with pytest.raises(RLexError):
             tokenize('"oops')
-
-
-# ---------------------------------------------------------------------------
-# Identifiers and keywords
-# ---------------------------------------------------------------------------
 
 
 class TestIdents:
@@ -132,7 +115,6 @@ class TestIdents:
         assert toks[0].value == "`weird name`"
 
     def test_dot_leading_is_id(self):
-        # ``.foo`` is an identifier (leading dot, next char non-digit).
         assert _kinds(".foo") == ["IDENT", "EOF"]
 
     def test_keywords(self):
@@ -148,11 +130,6 @@ class TestIdents:
             "function",
         ):
             assert _kinds(kw) == [kw, "EOF"]
-
-
-# ---------------------------------------------------------------------------
-# Constant literals
-# ---------------------------------------------------------------------------
 
 
 class TestConstants:
@@ -173,11 +150,6 @@ class TestConstants:
     def test_inf_nan(self):
         assert tokenize("Inf")[0].kind == "INF"
         assert tokenize("NaN")[0].kind == "NAN"
-
-
-# ---------------------------------------------------------------------------
-# Operators — maximal munch
-# ---------------------------------------------------------------------------
 
 
 class TestOperators:
@@ -218,7 +190,6 @@ class TestOperators:
         assert toks[1].value == "%in%"
 
     def test_modulo_as_infix(self):
-        # %% is just a special-case user infix.
         toks = tokenize("a %% b")
         assert toks[1].kind == "%infix%"
         assert toks[1].value == "%%"
@@ -237,27 +208,14 @@ class TestOperators:
         assert toks[0].kind == "\\"
 
 
-# ---------------------------------------------------------------------------
-# Comments and whitespace
-# ---------------------------------------------------------------------------
-
-
 class TestCommentsWhitespace:
     def test_comment_skipped(self):
         toks = tokenize("x # this is a comment\ny")
-        # x, TERM, y, EOF — the comment is dropped, newline still ends the stmt
         assert [t.kind for t in toks] == ["IDENT", "TERM", "IDENT", "EOF"]
 
     def test_blank_lines(self):
         toks = tokenize("\n\nx\n\n")
-        # Leading blank lines are absorbed (last_kind is None);
-        # trailing newline emits TERM after x.
         assert [t.kind for t in toks] == ["IDENT", "TERM", "EOF"]
-
-
-# ---------------------------------------------------------------------------
-# Newline suppression
-# ---------------------------------------------------------------------------
 
 
 class TestNewlines:
@@ -265,7 +223,6 @@ class TestNewlines:
         assert _kinds("x\ny") == ["IDENT", "TERM", "IDENT", "EOF"]
 
     def test_no_term_after_binary_op(self):
-        # ``x +\n y`` continues — no TERM in between.
         assert _kinds("x +\ny") == ["IDENT", "+", "IDENT", "EOF"]
 
     def test_no_term_inside_parens(self):
@@ -275,7 +232,6 @@ class TestNewlines:
         assert _kinds("df[\nx\n]") == ["IDENT", "[", "IDENT", "]", "EOF"]
 
     def test_term_inside_brace(self):
-        # ``{ }`` does NOT suppress newlines — they separate block statements.
         assert _kinds("{\nx\ny\n}") == [
             "{",
             "IDENT",
@@ -288,11 +244,6 @@ class TestNewlines:
 
     def test_semicolon_always_term(self):
         assert _kinds("x;y") == ["IDENT", "TERM", "IDENT", "EOF"]
-
-
-# ---------------------------------------------------------------------------
-# End-to-end smoke
-# ---------------------------------------------------------------------------
 
 
 def test_canonical_pipeline():
@@ -319,11 +270,7 @@ flights |>
   summarize(arr_delay = mean(arr_delay, na.rm = TRUE))
 """
     kinds = _kinds(src)
-    # Should be one continuous statement (no TERM until the final newline).
-    # The lexer doesn't emit a trailing TERM if there's no token after — but
-    # there's a newline before EOF that follows ``)`` so we do get one.
     assert "TERM" in kinds  # the final newline
-    # The pipeline shouldn't be broken by interior newlines.
     pipe_count = kinds.count("|>")
     assert pipe_count == 3
 

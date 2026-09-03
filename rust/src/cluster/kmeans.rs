@@ -1,18 +1,3 @@
-//! k-means — ALL three of R's algorithms in one module (R splits them across
-//! `kmeans_kmns.f` (Hartigan-Wong, Fortran) and `cluster_kmeans.c` (Lloyd /
-//! MacQueen, C) — a historical language artifact we don't mirror; they're all
-//! `kmeans()`):
-//!   * `kmns`      — Hartigan-Wong (mirrors `_kmns`; OPTRA/QTRAN, serial),
-//!   * `lloyd`     — Lloyd / Forgy (mirrors `_kmeans_lloyd`),
-//!   * `macqueen`  — MacQueen     (mirrors `_kmeans_macqueen`).
-//!
-//! All float reductions (per-point distance, centroid accumulation, WSS) are
-//! kept SEQUENTIAL in the same order as the C/Fortran/Python, so parity is
-//! 0-ulp. Lloyd's assignment phase (independent per point, `argmin` only — no
-//! cross-point float reduction) is parallelized with rayon (parallel == serial
-//! bit-for-bit); HW and MacQueen's incremental refinement are inherently serial.
-//! Empty clusters divide by zero → ±inf/NaN exactly as the numpy path (IEEE).
-
 use crate::nmath::util::rfma;
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::prelude::*;
@@ -21,11 +6,6 @@ use rayon::prelude::*;
 const KM_PAR_MIN: usize = 256;
 const BIG: f64 = 1.0e30; // Hartigan-Wong "infinity" sentinel (matches _kmns)
 
-/// Σ (a−b)² over equal-length contiguous rows, accumulated SEQUENTIALLY (same
-/// order as the C/Fortran/Python `for j: dd += (x-c)^2`) → 0-ulp. Slices give the
-/// compiler the length, so no per-element index math / bounds check, and the
-/// row-major access is contiguous (cache-friendlier than R's column-major
-/// `X(I,J)` strided-by-M access).
 #[inline]
 fn sqdist(a: &[f64], b: &[f64]) -> f64 {
     let mut s = 0.0;
@@ -36,10 +16,6 @@ fn sqdist(a: &[f64], b: &[f64]) -> f64 {
     s
 }
 
-/// The two closest centres (1-based, `ic1`/`ic2` with `dt[ic1] <= dt[ic2]`) to
-/// 0-based point `i0` — the Hartigan-Wong initial assignment. Independent per
-/// point (reads x, cen; no shared state), so the init map is rayon-parallel
-/// while staying 0-ulp.
 #[inline]
 fn two_closest(x: &[f64], cen: &[f64], p: usize, k: usize, i0: usize) -> (usize, usize) {
     let xrow = &x[i0 * p..i0 * p + p];
@@ -78,8 +54,6 @@ fn two_closest(x: &[f64], cen: &[f64], p: usize, k: usize, i0: usize) -> (usize,
     (ic1, ic2)
 }
 
-/// 0-based index of the nearest centre to point `i` (ties → smallest index,
-/// matching the strict `dd < best` in the C/Python).
 #[inline]
 fn nearest(x: &[f64], cen: &[f64], p: usize, k: usize, i: usize) -> usize {
     let mut best = f64::INFINITY;
@@ -100,8 +74,6 @@ fn nearest(x: &[f64], cen: &[f64], p: usize, k: usize, i: usize) -> usize {
     inew
 }
 
-/// Per-cluster within sum-of-squares (`_kmeans_wss`): sequential over points
-/// (i-order) and dims (c-order) to match the pure-Python accumulation.
 fn wss_of(x: &[f64], cen: &[f64], cl: &[i64], n: usize, p: usize, k: usize) -> Vec<f64> {
     let mut wss = vec![0.0f64; k];
     for i in 0..n {
@@ -110,15 +82,12 @@ fn wss_of(x: &[f64], cen: &[f64], cl: &[i64], n: usize, p: usize, k: usize) -> V
         let ci = &cen[it * p..it * p + p];
         for c in 0..p {
             let tmp = xi[c] - ci[c];
-            // R fuses `wss += d*d` to fmadd on arm64; `rfma` mirrors per-arch.
             wss[it] = rfma(tmp, tmp, wss[it]);
         }
     }
     wss
 }
 
-/// Recompute centres as cluster means (the Lloyd / MacQueen-init step): zero,
-/// accumulate points in i-order, divide. Sequential accumulation (0-ulp).
 fn recompute_centres(
     x: &[f64],
     cen: &mut [f64],
@@ -186,7 +155,6 @@ fn finish<'py>(
     )
 }
 
-/// Lloyd's algorithm. Returns `(cl, cen_flat, nc, wss, iter)`.
 #[pyfunction]
 #[pyo3(name = "lloyd", signature = (x, centers, k, maxiter))]
 pub fn lloyd<'py>(
@@ -226,7 +194,6 @@ pub fn lloyd<'py>(
     finish(py, cl, cen, nc, wss, c_iter as i64 + 1)
 }
 
-/// MacQueen's algorithm. Returns `(cl, cen_flat, nc, wss, iter)`.
 #[pyfunction]
 #[pyo3(name = "macqueen", signature = (x, centers, k, maxiter))]
 pub fn macqueen<'py>(
@@ -242,12 +209,10 @@ pub fn macqueen<'py>(
     let mut cen = centers.as_slice().unwrap().to_vec();
     let mut nc = vec![0i64; k];
 
-    // initial nearest-centre assignment + centroids
     let init = assign_all(py, xs, &cen, n, p, k);
     let mut cl: Vec<i64> = init.iter().map(|&j| j as i64 + 1).collect();
     recompute_centres(xs, &mut cen, &mut nc, &cl, n, p, k);
 
-    // incremental refinement (inherently sequential: each transfer shifts cen)
     let mut broke = false;
     let mut iteration = 0usize;
     for it in 0..maxiter {
@@ -287,9 +252,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-// --------------------------------------------------------------------------- #
-// Hartigan-Wong (kmns.f) — consolidated here from the former kmns.rs.
-// --------------------------------------------------------------------------- #
 struct Hw<'a> {
     x: &'a [f64], // m*p, row-major: x(i,j) = x[(i-1)*p + (j-1)]
     m: usize,
@@ -322,7 +284,6 @@ impl<'a> Hw<'a> {
         self.cen[(ell - 1) * self.p + (j - 1)] = v;
     }
 
-    /// OPTRA — optimal-transfer stage. Returns the updated `indx`.
     fn optra(&mut self, mut indx: usize) -> usize {
         let (m, p, k) = (self.m, self.p, self.k);
         for ell in 1..=k {
@@ -411,7 +372,6 @@ impl<'a> Hw<'a> {
         indx
     }
 
-    /// QTRAN — quick-transfer stage. Returns the updated `indx`.
     fn qtran(&mut self, mut indx: usize) -> usize {
         let (m, p) = (self.m, self.p);
         let mut icoun: usize = 0;
@@ -481,12 +441,10 @@ impl<'a> Hw<'a> {
                     return indx;
                 }
             }
-            // GO TO 10: repeat the sweep
         }
     }
 }
 
-/// Hartigan-Wong k-means for data `x` (`m x p`) and initial `centers` (`k x p`).
 #[pyfunction]
 #[pyo3(name = "kmns", signature = (x, centers, k, iter_max))]
 #[allow(clippy::type_complexity)]
@@ -535,9 +493,6 @@ pub fn kmns<'py>(
             imaxqtr: (50 * m as i64).min(2147483647),
         };
 
-        // two closest centres IC1, IC2 for each point. Independent per point, so
-        // the map is rayon-parallel (the one parallelizable HW phase; OPTRA/QTRAN
-        // below are inherently serial). Parallel == serial bit-for-bit (0-ulp).
         let pairs: Vec<(usize, usize)> = if m >= KM_PAR_MIN {
             (0..m)
                 .into_par_iter()
@@ -553,7 +508,6 @@ pub fn kmns<'py>(
             hw.ic2[i] = pairs[i - 1].1;
         }
 
-        // update centres to cluster means; sizes NC; an1/an2
         for ell in 1..=k {
             hw.nc[ell] = 0;
             for j in 1..=p {
@@ -586,7 +540,6 @@ pub fn kmns<'py>(
             hw.ncp[ell] = -1;
         }
 
-        // OPTRA / QTRAN iterations
         let mut indx = 0usize;
         let mut iter_ret = iter_max + 1;
         let mut ifault = 2i64;
@@ -613,7 +566,6 @@ pub fn kmns<'py>(
             }
         }
 
-        // within-cluster sum of squares (recompute centres as the means)
         let mut wss = vec![0.0f64; k + 1];
         for ell in 1..=k {
             for j in 1..=p {

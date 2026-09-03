@@ -19,25 +19,16 @@ AST shape is evaluated as an expression.
 
 from __future__ import annotations
 
-# Canonical names use British spellings. American aliases canonicalise on
-# input so internal code can assume one spelling. Matches ggplot2.
 _AES_ALIASES = {
     "color": "colour",
     "gray": "grey",
     "outlier_color": "outlier_colour",
 }
 
-# Positional aes args bind to these names in order: aes("wt", "mpg") ⇒ aes(x="wt", y="mpg").
 _POSITIONAL_AES = ("x", "y")
 
-# Every kwarg name that the layer factories should treat as an aesthetic
-# (route to ``Layer.aes_params``) rather than a geom param. Build-time
-# promotion (``_promote_string_aes_params``) then resolves string values
-# against the data: column match → MAP, otherwise SET. Includes American
-# aliases so ``geom_point(color=...)`` is recognised as an aesthetic.
 _ALL_AES_NAMES = frozenset(
     {
-        # Positional
         "x",
         "y",
         "z",
@@ -51,7 +42,6 @@ _ALL_AES_NAMES = frozenset(
         "yintercept",
         "slope",
         "intercept",
-        # Style
         "colour",
         "color",
         "fill",
@@ -61,7 +51,6 @@ _ALL_AES_NAMES = frozenset(
         "linetype",
         "linewidth",
         "stroke",
-        # Text
         "label",
         "family",
         "fontface",
@@ -69,10 +58,8 @@ _ALL_AES_NAMES = frozenset(
         "vjust",
         "angle",
         "lineheight",
-        # Structural
         "group",
         "weight",
-        # Boxplot/violin extras
         "lower",
         "middle",
         "upper",
@@ -85,10 +72,8 @@ _ALL_AES_NAMES = frozenset(
         "outlier_size",
         "outlier_stroke",
         "outlier_alpha",
-        # Per-row geometry (rect/tile/raster, errorbar, stat_summary)
         "width",
         "height",
-        # geom_curve
         "curvature",
     }
 )

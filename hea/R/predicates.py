@@ -14,8 +14,6 @@ def is_na(x):
     if isinstance(x, (pl.Expr, pl.Series)):
         return x.is_null()
     if isinstance(x, pl.DataFrame):
-        # polars DataFrame has no top-level .is_null(); per-column is the
-        # idiom. Result is a same-shape DataFrame of booleans.
         return x.select(pl.all().is_null())
     arr = np.asarray(x)
     if arr.dtype.kind in "fc":

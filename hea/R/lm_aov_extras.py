@@ -44,9 +44,6 @@ __all__ = [
 ]
 
 
-# --------------------------------------------------------------------------
-# Model accessors: sigma / cov2cor / weighted.residuals
-# --------------------------------------------------------------------------
 def cov2cor(V):
     """R: ``cov2cor(V)`` — covariance matrix → correlation matrix.
 
@@ -129,9 +126,6 @@ def weighted_residuals(obj, drop0=True):
     return r
 
 
-# --------------------------------------------------------------------------
-# covratio + influence.measures
-# --------------------------------------------------------------------------
 def covratio(model, infl=None, res=None):
     """R: ``covratio(model)`` (``lm.influence.R``) — covariance ratio ``COVRATIO_i``.
 
@@ -155,20 +149,12 @@ def covratio(model, infl=None, res=None):
 
 
 def _abbreviate(names, minlength=4):
-    """base R ``abbreviate(names, minlength)`` (default ``use.classes=TRUE``).
-
-    Removes, working from the right and never the first char of a word,
-    lower-case vowels, then lower-case consonants, then other characters, until
-    each string is ``≤ minlength``. Ports the ``stripchars`` letter-class order
-    used for ``influence.measures`` column labels; only names longer than
-    ``minlength`` are touched (short design-column names are returned verbatim).
-    """
+    """base R ``abbreviate(names, minlength)`` (default ``use.classes=TRUE``)."""
 
     def strip_one(s):
         if len(s) <= minlength:
             return s
         chars = list(s)
-        # word-initial positions (start of string / after a space) are protected
         protected = {0}
         for i in range(1, len(chars)):
             if chars[i - 1] == " ":
@@ -186,7 +172,6 @@ def _abbreviate(names, minlength=4):
                 if target is None:
                     return
                 del chars[target]
-                # recompute protected positions after deletion
                 protected.clear()
                 protected.add(0)
                 for i in range(1, len(chars)):
@@ -245,7 +230,6 @@ def influence_measures(model, infl=None):
     from .model_generics import df_residual
 
     s = float(np.sqrt(np.sum(e**2) / df_residual(model)))
-    # (X'X)^-1 — hea's lm caches this as XtXinv (chol2inv of the fit's R factor)
     xxi = np.asarray(model.XtXinv, dtype=float)
     si = np.asarray(infl["sigma"], dtype=float)
     h = np.asarray(infl["hat"], dtype=float)
@@ -294,9 +278,6 @@ def influence_measures(model, infl=None):
     return Infl(infmat, is_inf, call)
 
 
-# --------------------------------------------------------------------------
-# lsfit / ls.diag / ls.print  (standalone QR least squares)
-# --------------------------------------------------------------------------
 def _as_matrix(a) -> np.ndarray:
     a = np.asarray(a, dtype=float)
     if a.ndim == 1:
@@ -326,7 +307,6 @@ def lsfit(x, y, wt=None, intercept=True, tolerance=1e-7, yname=None):
     if yname is None and y.shape[1] > 1:
         yname = [f"Y{i + 1}" for i in range(y.shape[1])]
 
-    # complete.cases over x, y, wt
     good = np.all(np.isfinite(x), axis=1) & np.all(np.isfinite(y), axis=1)
     if wt is not None:
         wt = np.asarray(wt, dtype=float)
@@ -364,7 +344,6 @@ def lsfit(x, y, wt=None, intercept=True, tolerance=1e-7, yname=None):
         y = y * wtmult[:, None]
         invmult = 1.0 / np.where(wt == 0, 1.0, wtmult)
 
-    # Cdqrls handles a matrix y column-by-column (R passes y as a matrix).
     coefs = np.zeros((ncx, ncy))
     resid_w = np.zeros((nry, ncy))
     z = None
@@ -386,7 +365,6 @@ def lsfit(x, y, wt=None, intercept=True, tolerance=1e-7, yname=None):
         resid_w = resid_w * invmult[:, None]
     resids[good, :] = resid_w
 
-    # unpivot coefficient order back to xnames order (R keeps xnames order)
     coef_names = list(xnames)
     if dimy[1] == 1 and yname is None:
         resids = resids.reshape(-1)
@@ -485,7 +463,6 @@ def ls_diag(ls_out):
     hatdiag = np.full(d0[0], np.nan)
     ncy = resids.shape[1]
 
-    # hat diagonals: q = qr.qy(qr, rbind(diag(p), 0)); rowSums(q^2)
     e_basis = np.zeros((qr_obj["qr"].shape[0], p))
     e_basis[:p, :] = np.eye(p)
     q = _qr_qy_matrix(qr_obj, e_basis)
@@ -506,7 +483,6 @@ def ls_diag(ls_out):
     dfits[good] = np.sqrt(hg / (1 - hg))[:, None] * studres[good]
     cooks[good] = ((sr**2 * hg[:, None]) / p) / (1 - hg)[:, None]
 
-    # unscaled coefficient covariance: tcrossprod(solve(R))
     R = np.asarray(qr_obj["qr"], dtype=float)[:p, :p].copy()
     R[np.tril_indices(p, -1)] = 0.0
     Rinv = np.linalg.solve(R, np.eye(p))
@@ -631,9 +607,6 @@ def ls_print(ls_out, digits=4, print_it=True):
     }
 
 
-# --------------------------------------------------------------------------
-# replications  (design-balance counts; no fitted model needed)
-# --------------------------------------------------------------------------
 def replications(formula, data):
     """R: ``replications(formula, data)`` (``model.tables.R``).
 
@@ -650,29 +623,22 @@ def replications(formula, data):
     terms = [t for t in ef.terms if t.atoms]  # drop intercept
     labels = [t.label for t in terms]
 
-    # which columns are factors (Enum/categorical/string ⇒ factor)
     def is_factor(colname):
         if colname not in data.columns:
             return False
         dt = data.schema[colname]
         return dt in (pl.Categorical, pl.String, pl.Utf8) or isinstance(dt, pl.Enum)
 
-    # R unlists to a named vector when every term is balanced, else returns a
-    # list mixing scalars (balanced terms) and count tables (unbalanced). hea
-    # encodes both in one dict: an int per balanced term, a count dict per
-    # unbalanced one.
     z = {}
     for term, label in zip(terms, labels):
         if label.startswith("Error"):
             continue
-        # variables in this term (main-effect names), in appearance order
         select = []
         for a in term.atoms:
             if isinstance(a, Name):
                 if a.ident not in select:
                     select.append(a.ident)
             else:
-                # non-Name atom (e.g. a transform) — treat as non-factor
                 select = None
                 break
         if select is None:
@@ -684,8 +650,6 @@ def replications(formula, data):
         if select:
             tble = data.group_by(select).agg(pl.len().alias("__n__"))
             counts = tble["__n__"].to_numpy()
-            # R turns character columns into factors (levels sorted); enumerate
-            # the full grid of level combinations so missing cells read as 0.
             level_sets = [sorted(data[v].unique().to_list()) for v in select]
             ncell = int(np.prod([len(s) for s in level_sets]))
             nrep = np.unique(counts)
@@ -700,11 +664,7 @@ def replications(formula, data):
 
 
 def _fill_grid(level_sets, prefix, grid, *, single):
-    """Enumerate the full factor-combination grid (counts, 0-filled).
-
-    Single-factor terms are keyed by the level; interactions by the tuple of
-    levels — both in R's sorted factor-level order.
-    """
+    """Enumerate the full factor-combination grid (counts, 0-filled)."""
     out = {}
 
     def rec(remaining, pre):

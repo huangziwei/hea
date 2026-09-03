@@ -22,31 +22,7 @@ from ...R import nmath as _nmath
 from .._util import to_numeric_aes
 from .stat import Stat
 
-# Rust+rayon LOESS kernel (None when the extension is absent or HEA_NO_RS=1);
-# the fit and predict share it so they agree bit-for-bit at common points.
 _rs_loess = rs_fn("loess_eval")
-
-
-# ---------------------------------------------------------------------------
-# Local polynomial regression — port of R's ``stats::loess``.
-#
-# Cleveland's LOWESS (1979) and LOESS (1988): fit a low-degree polynomial
-# locally around each query point, weighted by the tricube of distance.
-# ``family="symmetric"`` adds Tukey-biweight robustness iterations.
-#
-# Scope (used only by :class:`StatSmooth` for now):
-#   * univariate predictor (``x``);
-#   * ``span``, ``degree`` (1 or 2), ``family`` ("gaussian" or "symmetric"),
-#     ``iterations`` for the robustness M-step;
-#   * direct neighbour lookup at each query point — no kd-tree interpolation
-#     surface (R's ``loess.control(surface="interpolate")``, which is its
-#     default). For n < ~1000 this is fast; geom_smooth defaults to GAM
-#     above that anyway.
-#   * standard errors at any prediction grid via the WLS variance formula.
-#
-# Reference: Cleveland WS, Devlin SJ. "Locally Weighted Regression: An
-# Approach to Regression Analysis by Local Fitting", JASA 1988.
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -122,17 +98,12 @@ def loess(
         if family != "symmetric":
             break
 
-        # Tukey biweight M-step: down-weight large residuals.
         s = np.median(np.abs(residuals))
         if s == 0:
             break
         u = residuals / (6.0 * s)
         robust_w = np.where(np.abs(u) < 1, (1 - u**2) ** 2, 0.0)
 
-    # Approximate trace(S) by summing per-point leverages times the local
-    # weight at the query point — an underestimate but in the right order
-    # of magnitude. R's loess computes this via a more involved formula
-    # (the ``enp`` field). Refine when oracle parity matters.
     eff_p = max(degree + 1, np.sum(leverages))
     df_residual = max(n - eff_p, 1.0)
     sigma = float(np.sqrt(np.sum(residuals**2 * robust_w) / df_residual))
@@ -172,9 +143,6 @@ def _loess_local_fit(
 
     d = np.abs(x - x_query)
     if k >= n:
-        # Use everything; bandwidth is the max distance. When span > 1
-        # R loess (loessc.c) stretches the bandwidth proportionally; we
-        # use the simple max-distance bound here.
         h = d.max()
     else:
         h = np.partition(d, k - 1)[k - 1]
@@ -213,13 +181,7 @@ def _loess_local_fit(
 
 
 def _loess_eval(xq, x, y, span, degree, extra_w, want_var):
-    """Per-query local fits at ``xq`` against data ``(x, y)``.
-
-    Rust+rayon when the extension is present (the fit and predict both call this,
-    so they agree bit-for-bit at shared query points), else the pure-Python loop
-    over :func:`_loess_local_fit` (unchanged behaviour under ``HEA_NO_RS=1``).
-    Returns ``(fitted, var00)`` arrays aligned with ``xq``.
-    """
+    """Per-query local fits at ``xq`` against data ``(x, y)``."""
     xq = np.asarray(xq, dtype=float)
     if _rs_loess is not None:
         fitted, var = _rs_loess(
@@ -255,9 +217,6 @@ class StatSmooth(Stat):
     family: object = None  # for glm — Family instance or name; default Gaussian
 
     def compute_group(self, data, params):
-        # Factor / string columns flow through as integer codes (1..N),
-        # matching ggplot2's ``mapped_discrete`` so binary-factor responses
-        # like ``y="use"`` work with no upstream coercion.
         x = to_numeric_aes(data["x"])
         y = to_numeric_aes(data["y"])
 
@@ -324,8 +283,6 @@ def _fit_predict(
         fml = formula or "y ~ x"
         fit = lm(fml, pl.DataFrame({"x": x, "y": y}))
         new = pl.DataFrame({"x": grid})
-        # `predict(interval="confidence")` returns columns ("fit", "lwr",
-        # "upr"). Back out the standard error from the CI half-width.
         pred = fit.predict(newdata=new, interval="confidence", alpha=0.05)
         yhat = pred["fit"].to_numpy()
         ci_lo = pred["lwr"].to_numpy()
@@ -365,12 +322,7 @@ def _fit_predict(
 
 
 def _resolve_family(family):
-    """Coerce ``family`` to a :class:`hea.family.Family` instance.
-
-    Accepts None (defaults to Gaussian — equivalent to OLS, matching
-    R's ``glm()`` default), a Family instance, or a name string in
-    R's lowercase convention (``"gaussian"``, ``"binomial"``, …).
-    """
+    """Coerce ``family`` to a :class:`hea.family.Family` instance."""
     from ...family import Family, gaussian
 
     if family is None:
@@ -378,8 +330,6 @@ def _resolve_family(family):
     if isinstance(family, Family):
         return family
     if callable(family):
-        # User passed `binomial` (the class) instead of `binomial()` —
-        # instantiate with default link.
         result = family()
         if isinstance(result, Family):
             return result

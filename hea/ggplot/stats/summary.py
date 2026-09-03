@@ -24,10 +24,6 @@ from ...R import distributions as _dist
 from ..aes import split_layer_kwargs
 from .stat import Stat
 
-# ---------------------------------------------------------------------------
-# Built-in summary helpers
-# ---------------------------------------------------------------------------
-
 
 def mean_se(x: np.ndarray, mult: float = 1.0) -> dict:
     n = len(x)
@@ -104,10 +100,6 @@ def _resolve_fun(f, *, default=None):
     raise TypeError(f"expected callable or string, got {type(f).__name__}")
 
 
-# ---------------------------------------------------------------------------
-# StatSummary
-# ---------------------------------------------------------------------------
-
 _DISCRETE_DTYPES = (pl.Enum, pl.Categorical, pl.Utf8)
 
 
@@ -118,9 +110,6 @@ class StatSummary(Stat):
     fun_min: Callable | str | None = None
     fun_max: Callable | str | None = None
     fun_args: dict = field(default_factory=dict)
-    # ``"x"`` (default ggplot2 behavior — group by x, summarize y),
-    # ``"y"`` (transposed: group by y, summarize x), or ``"auto"`` — pick
-    # ``"y"`` when y is discrete and x isn't, else ``"x"``.
     orientation: str = "auto"
 
     def _summary_fn(self) -> Callable[[np.ndarray], dict]:
@@ -151,7 +140,6 @@ class StatSummary(Stat):
                 }
 
             return _componentwise
-        # ggplot2's default.
         return mean_se
 
     def _resolve_orientation(self, data) -> str:
@@ -173,10 +161,6 @@ class StatSummary(Stat):
             return data
 
         orient = self._resolve_orientation(data)
-        # ``orient`` names the axis we summarize *along*: orient="x" means
-        # "x is the discrete axis; group by x and reduce y" (ggplot2's
-        # historic default). orient="y" transposes — reduce x within each
-        # y group and emit (y, x, xmin, xmax).
         if orient == "y":
             group_col, summary_col = "y", "x"
             out_centre, out_min, out_max = "x", "xmin", "xmax"
@@ -189,7 +173,6 @@ class StatSummary(Stat):
         for keys, sub in data.group_by(group_col, maintain_order=True):
             grp_val = keys[0] if isinstance(keys, tuple) else keys
             arr = sub[summary_col].drop_nulls().to_numpy()
-            # Strip NaNs (drop_nulls only catches polars-null, not float-NaN).
             if arr.dtype.kind == "f":
                 arr = arr[~np.isnan(arr)]
             if len(arr) == 0:
@@ -209,26 +192,8 @@ class StatSummary(Stat):
         return pl.DataFrame(rows).sort(group_col)
 
 
-# ---------------------------------------------------------------------------
-# Factory
-# ---------------------------------------------------------------------------
-
-
 def _resolve_summary_geom(geom):
-    """Map a ggplot2-style geom name to an instantiated :class:`Geom`.
-
-    ggplot2's :func:`stat_summary` resolves ``geom=`` through the global
-    geom registry, so any geom that consumes ``(x, y[, ymin, ymax])``
-    works. hea has no central registry, so we enumerate the geoms whose
-    required aesthetics are satisfied by ``StatSummary``'s output:
-
-    ``y``-only geoms — ``"point"``, ``"line"``, ``"path"``, ``"step"``;
-    range geoms (``ymin``/``ymax``) — ``"pointrange"``, ``"errorbar"``,
-    ``"linerange"``, ``"crossbar"``, ``"ribbon"``, ``"area"``, ``"smooth"``;
-    plus ``"bar"`` (uses ``y`` as the column height).
-
-    Pass an already-built ``Geom`` instance to bypass the lookup.
-    """
+    """Map a ggplot2-style geom name to an instantiated :class:`Geom`."""
     from ..geoms.bar import GeomBar
     from ..geoms.errorbar import (
         GeomCrossbar,
@@ -241,9 +206,6 @@ def _resolve_summary_geom(geom):
     from ..geoms.ribbon import GeomArea, GeomRibbon
     from ..geoms.smooth import GeomSmooth
 
-    # Factory dict — values are zero-arg callables so we can instantiate
-    # with constructor params where the geom needs them
-    # (``geom_line`` = ``GeomPath(sort_by_x=True)``, etc.).
     geom_map = {
         "pointrange": GeomPointrange,
         "errorbar": GeomErrorbar,

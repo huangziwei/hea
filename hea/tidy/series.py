@@ -73,21 +73,12 @@ class Series(pl.Series):
         return DataFrame._from_pydf(super().hist(*args, **kwargs)._df)
 
     def is_close(self, *args: Any, **kwargs: Any) -> Series:
-        # Bypasses self._from_pyseries; rewrap.
         out = super().is_close(*args, **kwargs)
         return type(self)._from_pyseries(out._s)
 
     def _is_ordered_factor(self) -> bool:
         """True when this Series should print levels with ``<`` separators
         (R's ordered-factor display). Two sources, in order:
-
-        1. Local marker set by ``factor(..., ordered=True)`` /
-           ``ordered()`` — covers unnamed Series (bare-list inputs).
-           Lost on derived ops; that's fine since this is a print-time
-           cosmetic.
-        2. The ``_ORDERED_COLS_CV`` contextvar — covers named columns
-           registered for poly contrasts in model fitting, so the same
-           ordered-ness flows to ``df["col"]`` views.
         """
         if getattr(self, "_hea_ordered", False):
             return True
@@ -116,8 +107,6 @@ class Series(pl.Series):
                 return stripped[: -len("</div>")] + levels_html + "</div>"
             return base + levels_html
         return base
-
-    # ---- ggplot entry point -------------------------------------------
 
     def ggplot(self, mapping=None, **aes_kwargs):
         """Start a ggplot from this Series.
@@ -160,9 +149,6 @@ class Series(pl.Series):
 def _install_series_subclass_overrides() -> None:
     """Install hea.Series-aware wrappers for every method on pl.Series that
     bypasses ``self._from_pyseries`` (i.e. routes through ``wrap_s``).
-
-    Runs once at module-import time. Picks up future polars expr-dispatched
-    additions automatically — no maintenance treadmill on version bumps.
     """
     from polars.series.utils import _is_empty_method, _undecorated
 
@@ -180,7 +166,6 @@ def _install_series_subclass_overrides() -> None:
         wrapper.__doc__ = pl_method.__doc__
         return wrapper
 
-    # All expr-dispatched methods (auto-discovered).
     leaky_names: list[str] = []
     for name in dir(pl.Series):
         if name.startswith("_"):
@@ -191,7 +176,6 @@ def _install_series_subclass_overrides() -> None:
         if _is_empty_method(_undecorated(attr)):
             leaky_names.append(name)
 
-    # Plus the two explicit wrap_s sites in polars/series/series.py.
     leaky_names += ["set", "shrink_dtype"]
 
     for name in leaky_names:
@@ -201,8 +185,6 @@ def _install_series_subclass_overrides() -> None:
 _install_series_subclass_overrides()
 
 
-# DataFrame methods that return ``pl.Series``. Re-wrap as ``hea.Series`` so
-# chains like ``df.get_column("x").to_frame()`` stay in hea-land.
 _DF_SERIES_RETURNING = (
     "drop_in_place",
     "fold",
@@ -237,8 +219,6 @@ def _install_df_series_overrides() -> None:
     for name in _DF_SERIES_RETURNING:
         setattr(DataFrame, name, _make(name))
 
-    # ``__getitem__`` is polymorphic (Series for str key, DataFrame for slice,
-    # row tuple for int) — handle each branch.
     pl_getitem = pl.DataFrame.__getitem__
 
     def __getitem__(self, item):
@@ -259,20 +239,6 @@ _install_df_series_overrides()
 def _install_is_in_mixed_list_support() -> None:
     """Teach ``pl.Expr.is_in`` to accept Python lists that mix literals
     and ``Expr`` values.
-
-    Polars' built-in ``is_in`` tries to coerce the ``other`` list into a
-    homogeneous ``Series``; a list like ``[1, col("r").max()]`` errors
-    with ``failed to determine supertype of i64 and object``. The
-    dplyr-faithful translation of ``r %in% c(1, max(r))`` is
-    ``col("r").is_in([1, col("r").max()])``, so we patch ``is_in``:
-    when ``other`` contains any ``pl.Expr``, we expand into an OR-chain
-    (``(self == v0) | (self == v1) | …``), which polars evaluates row-
-    wise without dtype headaches. All-literal lists pass through to the
-    original ``is_in`` unchanged.
-
-    Series-side eager ``is_in`` is left alone — mixing an Expr into an
-    eager membership test has no column to bind against, so polars'
-    original error is the right answer there.
     """
     _orig_expr_is_in = pl.Expr.is_in
 
@@ -305,11 +271,6 @@ _install_is_in_mixed_list_support()
 def _install_expr_is_na_alias() -> None:
     """Alias ``pl.Expr.is_na`` to ``is_null`` so R-translated code that
     emits ``col("x").is_na()`` works.
-
-    Polars named its null-check ``is_null`` (``is_nan`` is the float-NaN
-    one); the R-to-Python translator emits the R spelling. Without this
-    alias, ``Expr`` raises ``AttributeError: 'Expr' object has no
-    attribute 'is_na'``.
     """
     if not hasattr(pl.Expr, "is_na"):
         pl.Expr.is_na = pl.Expr.is_null
@@ -319,14 +280,7 @@ _install_expr_is_na_alias()
 
 
 def _install_expr_r_aliases() -> None:
-    """Alias R/dplyr spellings of cumulative ops on ``pl.Expr``.
-
-    Polars renamed ``cumsum`` → ``cum_sum``, ``cummax`` → ``cum_max``,
-    ``cummin`` → ``cum_min``, ``cumprod`` → ``cum_prod`` somewhere
-    around v1.0. R / dplyr keep the un-underscored spellings; the
-    R-to-Python translator emits R names. Without these aliases,
-    ``col('x').cumsum()`` raises AttributeError on current polars.
-    """
+    """Alias R/dplyr spellings of cumulative ops on ``pl.Expr``."""
     aliases = {
         "cumsum": "cum_sum",
         "cummax": "cum_max",
@@ -358,23 +312,7 @@ class LazyFrame(pl.LazyFrame):
         return type(self)._from_pyldf(lf._ldf)
 
     def _collect_eager(self, **kwargs: Any) -> DataFrame:
-        """Re-wrap the terminal call of polars' eager-via-lazy round-trip.
-
-        ``pl.DataFrame`` implements ``select`` / ``filter`` / ``sort`` /
-        ``with_columns`` / ``join`` / ~40 more as
-        ``self.lazy().<op>(...)._collect_eager(...)``. The middle of that
-        chain is a ``hea.LazyFrame`` (``DataFrame.lazy`` is overridden, and
-        lazy ops route through ``_from_pyldf``), but ``_collect_eager``
-        itself dispatches to the in-memory engine, which builds its result
-        with ``wrap_df`` — hardcoded ``pl.DataFrame``. Without this hop the
-        whole eager verb surface returns bare polars and the tidyverse
-        methods vanish from the result.
-
-        The subclass is not recoverable here: a LazyFrame does not know
-        which ``DataFrame`` subclass it came from, so a user subclass of
-        ``hea.DataFrame`` collapses to ``hea.DataFrame`` across an eager
-        verb. That is a property of the round-trip, not of this override.
-        """
+        """Re-wrap the terminal call of polars' eager-via-lazy round-trip."""
         out = super()._collect_eager(**kwargs)
         if isinstance(out, pl.DataFrame) and not isinstance(out, DataFrame):
             return DataFrame._from_pydf(out._df)
@@ -384,9 +322,6 @@ class LazyFrame(pl.LazyFrame):
         out = super().collect(*args, **kwargs)
         if isinstance(out, pl.DataFrame):
             return DataFrame._from_pydf(out._df)
-        # background=True path — polars returns InProcessQuery whose
-        # .fetch() / .fetch_blocking() still uses pl.DataFrame. Rare
-        # enough to leave un-wrapped for now (allowlisted).
         return out
 
     def collect_batches(self, *args: Any, **kwargs: Any):
@@ -404,7 +339,6 @@ class LazyFrame(pl.LazyFrame):
                 yield batch
 
     def describe(self, *args: Any, **kwargs: Any) -> DataFrame:
-        # Despite living on LazyFrame, describe() materializes — returns DataFrame.
         return DataFrame._from_pydf(super().describe(*args, **kwargs)._df)
 
     def match_to_schema(self, *args: Any, **kwargs: Any) -> LazyFrame:

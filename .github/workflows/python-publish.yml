@@ -42,12 +42,6 @@
 name: Publish to PyPI
 
 on:
-  # A pull request is a **dry run**: the five build jobs run, `publish` cannot
-  # (it requires `github.event_name == 'release'`). Gated on the word `wheels`
-  # in the commit message, because four platforms is not something to spend on
-  # every push — same switch as `bench` in python-package.yml, and for the same
-  # reason `workflow_dispatch` is not enough: its button is read off the default
-  # branch, so on a feature branch it is a trigger that does not exist.
   pull_request:
     branches: [ "main" ]
   release:
@@ -58,12 +52,6 @@ permissions:
   contents: read
 
 jobs:
-  # Decides whether the four platform builds run. Five seconds, against jobs
-  # that are minutes each on four runners.
-  #
-  # A release or a manual dispatch always builds. A pull request builds only if
-  # the head commit's message says `wheels` — the message is not in a
-  # `pull_request` payload (that is `push`-only), hence the API call.
   wheels-gate:
     name: "wheels 1/2 — build them?"
     runs-on: ubuntu-latest
@@ -94,19 +82,6 @@ jobs:
   linux:
     needs: wheels-gate
     if: needs.wheels-gate.outputs.run == 'true'
-    # **Both arches build natively; neither is cross-compiled.** Keep it that
-    # way. Cross-compiling aarch64 in an x86_64 `manylinux2014-cross` container
-    # does not work with a vendored BLAS: pip resolves the host-arch OpenBLAS
-    # for the target link, and maturin's repair step then resolves the wheel's
-    # `DT_NEEDED` against an ELF the host loader cannot read, reporting
-    # `libscipy_openblas.so => not found` regardless of rpath or
-    # `LD_LIBRARY_PATH`.
-    #
-    # A native ARM runner deletes the whole class: pip resolves for the machine
-    # it is on, auditwheel resolves against its own architecture, and — the part
-    # that is a coverage gain rather than a fix — the wheel can be *imported*,
-    # so the "carries OpenBLAS" assertion runs on aarch64 too instead of being
-    # skipped. Free for public repositories.
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -125,56 +100,16 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          # `blas-required`: fail rather than silently ship the portable
-          # kernels — see the header. auditwheel (run by maturin for manylinux)
-          # vendors libscipy_openblas into the wheel and rewrites the rpath
-          # build.rs emitted, so the wheel needs nothing from the user's system.
           args: --release --out dist --features blas-required
           manylinux: auto          # manylinux2014 container → glibc 2.17
           sccache: "true"
-          # Runs INSIDE the container, so the OpenBLAS has to be installed
-          # there rather than on the runner — a path from the runner's own
-          # site-packages would not exist in the container. `HEA_BLAS_LIB_DIR`
-          # is read by rust/build.rs.
-          #
-          # `export` only, and the belt-and-braces version of this is what broke
-          # the first run this job ever had. `$GITHUB_ENV` names a path on the
-          # *runner* that is not mounted in the container, so appending to it is
-          # not merely useless here — it fails with "No such file or directory",
-          # and the action's script runs under `set -e`, so docker exits 1 and
-          # the wheel never builds. Hedging between two mechanisms is only free
-          # when the wrong one is inert.
-          #
-          # A plain install now that the container matches the target: pip picks
-          # the right wheel because it is resolving for the machine it is on.
-          # The `--platform`/`--target` version this replaced existed only to
-          # hand a cross-compiler the foreign-arch library, and it could not
-          # help the repair step regardless.
           before-script-linux: |
             python3 -m pip install scipy-openblas32
             HEA_BLAS_LIB_DIR=$(python3 -c 'import scipy_openblas32 as s; print(s.get_lib_dir())')
             export HEA_BLAS_LIB_DIR
       - name: Assert the wheel carries OpenBLAS
-        # A wheel that took the fallback passes every test and is 2.4x more CPU
-        # on a large factorization. This is the only place that shows.
-        #
-        # Runs on **both** arches now that neither is cross-compiled. It used
-        # to be x86_64-only because an aarch64 wheel built here could not be
-        # imported here, which left the arch with only `blas-required`'s
-        # build-time check — and that would not catch a `build.rs` emitting the
-        # link flags but not the cfg.
-        # **Run from outside the checkout.** `python -c` puts the cwd first on
-        # `sys.path`, so at the repo root the *source* `hea/` shadows the
-        # installed wheel and the import dies on `No module named 'hea._rs'` —
-        # which is what happened, and what a local rehearsal missed because a
-        # dev checkout has a built `_rs` sitting in it.
         working-directory: ${{ runner.temp }}
         run: |
-          # `--no-deps` matters: `--no-index` pins the *wheel* to the one just
-          # built, which is the point, but it also blocks hea's own
-          # dependencies, and a run of this step died on "No matching
-          # distribution found for matplotlib". Deps from the index, artifact
-          # from `dist`.
           python -m pip install numpy scipy
           python -m pip install --no-index --no-deps --find-links ${{ github.workspace }}/dist hea
           python -c "
@@ -201,17 +136,6 @@ jobs:
         with:
           python-version: "3.x"
       - name: Build wheels (musllinux / Alpine)
-        # NOT `blas-required`: build.rs takes the portable-kernel fallback here,
-        # so the Alpine wheel is the one platform without a vendor BLAS —
-        # correct, tested, and slower on large sparse factorizations.
-        #
-        # **The reason given for that is now out of date.** It read "scipy-
-        # openblas32 publishes no musllinux wheel"; as of 2026-08-13 it
-        # publishes `musllinux_1_2_x86_64` and `musllinux_1_2_aarch64`, and has
-        # since 0.3.31.22.1. So this is now a choice rather than a constraint,
-        # and the choice is only still here because turning it on is a change to
-        # what Alpine users get and belongs in its own dry run, not bundled into
-        # one verifying other fixes.
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
@@ -226,11 +150,6 @@ jobs:
   macos:
     needs: wheels-gate
     if: needs.wheels-gate.outputs.run == 'true'
-    # GitHub retired the macos-13 (Intel) runners, so build BOTH mac arches on
-    # the Apple-Silicon runner: the macOS toolchain is universal, so x86_64
-    # cross-compiles cleanly. The wheel is identical to a native Intel build —
-    # `rfma` keys off target_arch, so an x86_64 target gets the plain a*b+c
-    # branch regardless of the build host.
     runs-on: macos-14
     strategy:
       fail-fast: false
@@ -245,25 +164,12 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          # Accelerate is a system framework on both mac arches, so
-          # `blas-required` can never fail here and there is nothing to vendor.
           args: --release --out dist --features blas-required
           sccache: "true"
       - name: Assert the wheel carries Accelerate
-        # Native arch only — the x86_64 wheel is cross-compiled on this runner.
         if: matrix.target == 'aarch64'
-        # **Run from outside the checkout.** `python -c` puts the cwd first on
-        # `sys.path`, so at the repo root the *source* `hea/` shadows the
-        # installed wheel and the import dies on `No module named 'hea._rs'` —
-        # which is what happened, and what a local rehearsal missed because a
-        # dev checkout has a built `_rs` sitting in it.
         working-directory: ${{ runner.temp }}
         run: |
-          # `--no-deps` matters: `--no-index` pins the *wheel* to the one just
-          # built, which is the point, but it also blocks hea's own
-          # dependencies, and a run of this step died on "No matching
-          # distribution found for matplotlib". Deps from the index, artifact
-          # from `dist`.
           python -m pip install numpy scipy
           python -m pip install --no-index --no-deps --find-links ${{ github.workspace }}/dist hea
           python -c "
@@ -291,8 +197,6 @@ jobs:
           python-version: "3.x"
           architecture: ${{ matrix.target }}
       - name: Install OpenBLAS
-        # Runs on the runner itself here, not in a container — maturin-action
-        # builds Windows natively.
         run: |
           python -m pip install --upgrade pip delvewheel scipy-openblas32
           python -c "import scipy_openblas32 as s, os; open(os.environ['GITHUB_ENV'],'a').write('HEA_BLAS_LIB_DIR=' + s.get_lib_dir() + '\n')"
@@ -303,11 +207,6 @@ jobs:
           args: --release --out dist --features blas-required
           sccache: "true"
       - name: Vendor the OpenBLAS DLL into the wheel
-        # build.rs deliberately emits no rpath on Windows (link.exe rejects it)
-        # and maturin runs no repair step there, so the wheel would link at
-        # build time and fail to load on a machine without scipy_openblas32.
-        # delvewheel copies the DLL in and patches the import table — the
-        # Windows equivalent of what auditwheel does for us on Linux.
         shell: bash
         run: |
           mkdir -p repaired
@@ -316,22 +215,9 @@ jobs:
           done
           rm -f dist/*.whl && mv repaired/*.whl dist/
       - name: Assert the wheel carries OpenBLAS and loads without it on PATH
-        # Loading is the half that matters here: a wheel whose DLL was not
-        # vendored imports fine on THIS machine, because scipy_openblas32 is
-        # installed. Uninstall it first so the check is about the wheel.
-        #
-        # **Run from outside the checkout**, like the other two: `python -c`
-        # puts the cwd first on `sys.path`, so at the repo root the source
-        # `hea/` shadows the installed wheel and the import dies on
-        # `No module named 'hea._rs'`.
         working-directory: ${{ runner.temp }}
         run: |
           python -m pip uninstall -y scipy-openblas32
-          # `--no-deps` matters: `--no-index` pins the *wheel* to the one just
-          # built, which is the point, but it also blocks hea's own
-          # dependencies, and a run of this step died on "No matching
-          # distribution found for matplotlib". Deps from the index, artifact
-          # from `dist`.
           python -m pip install numpy scipy
           python -m pip install --no-index --no-deps --find-links ${{ github.workspace }}/dist hea
           python -c "
@@ -363,7 +249,6 @@ jobs:
   publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    # Only publish for a real release; workflow_dispatch is a build-only dry run.
     if: github.event_name == 'release'
     needs: [linux, musllinux, macos, windows, sdist]
     permissions:

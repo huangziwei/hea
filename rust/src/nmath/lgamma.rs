@@ -1,8 +1,3 @@
-//! `lgammafn` / `gammafn` and helpers — R's gamma.c / lgamma.c / lgammacor.c /
-//! chebyshev.c / cospi.c (Fullerton/Chebyshev). Mirror of `hea/R/nmath.py`.
-//!
-//! scipy.special.gammaln is NOT bit-exact to R's lgammafn at small args, which
-//! leaks into stirlerr/lgamma1p/pgamma — hence the port.
 #![allow(dead_code)]
 
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
@@ -17,7 +12,6 @@ use super::util::rfma;
 
 const PI: f64 = std::f64::consts::PI;
 
-/// R's `chebyshev_eval(x, a, n)` — n-term Chebyshev series at x.
 pub fn chebyshev_eval(x: f64, a: &[f64], n: usize) -> f64 {
     if n < 1 || n > 1000 {
         return f64::NAN;
@@ -32,13 +26,11 @@ pub fn chebyshev_eval(x: f64, a: &[f64], n: usize) -> f64 {
     for i in 1..=n {
         b2 = b1;
         b1 = b0;
-        // C `twox*b1 - b2 + a[..]` → clang fuses the mul-sub to fmsub on arm64.
         b0 = rfma(twox, b1, -b2) + a[n - i];
     }
     (b0 - b2) * 0.5
 }
 
-/// R's `lgammacor(x)` — log-gamma correction term, x >= 10.
 pub fn lgammacor(x: f64) -> f64 {
     if x < 10.0 {
         return f64::NAN;
@@ -50,10 +42,6 @@ pub fn lgammacor(x: f64) -> f64 {
     1.0 / (x * 12.0)
 }
 
-/// R's `sinpi(x) = sin(pi*x)` (cospi.c). R's configure finds the BSD/macOS
-/// libm `__sinpi` (HAVE___SINPI) and defines `sinpi(x) = __sinpi(x)` verbatim;
-/// the portable fmod+sin fallback is only compiled elsewhere (Linux). Mirror
-/// that per-platform, like `rfma` mirrors the FMA-contraction decision.
 #[cfg(target_os = "macos")]
 pub fn sinpi(x: f64) -> f64 {
     extern "C" {
@@ -62,7 +50,6 @@ pub fn sinpi(x: f64) -> f64 {
     unsafe { __sinpi(x) }
 }
 
-/// R's portable `sinpi(x)` fallback (cospi.c non-darwin branch).
 #[cfg(not(target_os = "macos"))]
 pub fn sinpi(x: f64) -> f64 {
     if x.is_nan() {
@@ -89,18 +76,15 @@ pub fn sinpi(x: f64) -> f64 {
     (PI * x).sin()
 }
 
-/// R's `gammafn(x)` (gamma.c, Fullerton), bit-exact.
 pub fn gammafn(x: f64) -> f64 {
     if x.is_nan() {
         return x;
     }
-    // x == 0, or negative integer → NaN
     if x == 0.0 || (x < 0.0 && x == x.trunc()) {
         return f64::NAN;
     }
     let y = x.abs();
     if y <= 10.0 {
-        // n = int(x) (toward zero); if x<0 n-=1; frac = x-n; n-=1
         let mut n = x as i32;
         if x < 0.0 {
             n -= 1;
@@ -130,7 +114,6 @@ pub fn gammafn(x: f64) -> f64 {
         }
         return value;
     }
-    // y = |x| > 10
     if x > GAM_XMAX {
         return f64::INFINITY;
     }
@@ -165,7 +148,6 @@ pub fn gammafn(x: f64) -> f64 {
     -PI / (y * sinpiy * value)
 }
 
-/// R's `lgammafn(x) = log|gamma(x)|` (lgamma.c), bit-exact.
 pub fn lgammafn(x: f64) -> f64 {
     if x.is_nan() {
         return x;
@@ -194,8 +176,6 @@ pub fn lgammafn(x: f64) -> f64 {
     let sinpiy = sinpi(y).abs();
     rfma(x - 0.5, y.ln(), M_LN_SQRT_PId2) - x - sinpiy.ln() - lgammacor(y)
 }
-
-// === PyO3 wrappers ===========================================================
 
 #[pyfunction]
 #[pyo3(name = "lgammafn")]

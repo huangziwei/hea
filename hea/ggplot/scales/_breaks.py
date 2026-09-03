@@ -110,16 +110,10 @@ def extended_breaks(
     return best_lmin + best_lstep * np.arange(n)
 
 
-# ---------------------------------------------------------------------------
-# scoring components — direct ports of labeling::extended internals
-# ---------------------------------------------------------------------------
-
-
 def _simplicity(
     qi: int, n_Q: int, j: int, lmin: float, lmax: float, lstep: float
 ) -> float:
     eps = 1e-10
-    # +1 if zero is inside the labeled range and the break grid passes through it
     v = (
         1.0
         if (abs(lmin - lstep * np.round(lmin / lstep)) < eps and lmin <= 0 <= lmax)
