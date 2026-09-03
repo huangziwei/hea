@@ -64,12 +64,6 @@ def _polygamma(deriv, x):
     return _nmath.psigamma_vec(x, deriv)
 
 
-# The GLM/GLMM aic hooks evaluate the saddlepoint log-density primitives
-# (_dpois_raw / _dbinom_raw) on n-vectors every objective eval. Route them to the
-# Rust kernels when present (bit-identical to the pure-Python ones — verified by
-# the T1 parity gate — so the cumsum reduction stays bit-for-bit); the scalar
-# Python path was a measured hot spot (≈16% of a cbpp glmer fit via _bd0/
-# _stirlerr).
 _rs_dbinom_raw = _rs_fn("dbinom_raw")
 _rs_dpois_raw = _rs_fn("dpois_raw")
 # mgcv coxlpl (coxph.c:141) single-pass risk-set sweeps (deriv 0 → l/lb/lbb,
@@ -91,8 +85,6 @@ _rs_tweedie_series = _rs_fn("tweedie_series")
 # oracle (also row/col-consistent). None when the extension is absent.
 _rs_gamlss_xwx = _rs_fn("gamlss_xwx")
 
-# When set (by `deterministic_xwx()`), gamlss_gH assembles its Hessian blocks
-# with the fixed-order `_xwx` reduction instead of numpy `@` — see gamlss_gH.
 _GAMLSS_XWX_DETERMINISTIC = False
 
 
@@ -145,11 +137,6 @@ def _dpois_raw_disp(x, lam, give_log=True):
     return np.asarray(_rs_dpois_raw(bx, bl, give_log)).reshape(shape)
 
 
-# ---------------------------------------------------------------------------
-# Links
-# ---------------------------------------------------------------------------
-
-
 class Link:
     """Base class. Subclasses must implement ``link``, ``linkinv``,
     ``mu_eta``, ``d2link``, ``d3link``, ``d4link``."""
@@ -174,11 +161,6 @@ class Link:
     def d4link(self, mu: np.ndarray) -> np.ndarray:
         raise NotImplementedError
 
-    # Grouped link-derivative accessors for the REML weight-derivative chain
-    # (_dw_deta / _d2w_deta2). The default just calls the individual methods;
-    # links whose derivatives share an expensive transcantal (probit: η=Φ⁻¹(μ)
-    # and φ(η)) override to compute it ONCE — bit-identical to the separate
-    # calls, only the recomputed qnorm/dnorm are saved.
     def d23link(self, mu: np.ndarray):
         return self.d2link(mu), self.d3link(mu)
 
@@ -188,12 +170,6 @@ class Link:
     def valideta(self, eta: np.ndarray) -> bool:
         return True
 
-    # mgcv ``link$g2g``, ``g3g``, ``g4g`` (R/efam.r): higher-order link
-    # curvature ratios needed by ``Family.dDeta`` for extended families
-    # under non-identity links. ``g2g(μ) = g″(μ)/g′(μ) · μ_η`` etc; we
-    # use the equivalent form ``g″(μ)·μ_η = g2g`` direct from mgcv's
-    # source. Identity link has all-zero curvature → IdentityLink
-    # overrides to return zeros without computing.
     def g2g(self, mu: np.ndarray) -> np.ndarray:
         raise NotImplementedError(
             f"{type(self).__name__}.g2g() is not implemented; needed for "
@@ -251,23 +227,15 @@ class LogLink(Link):
     name = "log"
 
     def link(self, mu):
-        # R's log(0) is a silent -Inf (only negatives warn) — numpy's
-        # divide RuntimeWarning has no R counterpart. Live at the η start
-        # for censored count families, whose mustart may contain exact
-        # zeros (cpois initialize's pmax(y, min(y>0)) quirk).
         with np.errstate(divide="ignore"):
             return np.log(np.asarray(mu, dtype=float))
 
     def linkinv(self, eta):
-        # mgcv clamps to .Machine$double.eps to avoid 0 — replicate so divisions
-        # by μ in PIRLS / V'(μ) etc. don't blow up at extreme negative η.
         return np.maximum(np.exp(np.asarray(eta, dtype=float)), np.finfo(float).eps)
 
     def mu_eta(self, eta):
         return np.maximum(np.exp(np.asarray(eta, dtype=float)), np.finfo(float).eps)
 
-    # R-level ^ is R_pow (sequential multiplies for ^2/^3/^4 at |μ|≤11,
-    # not numpy **) — last-ulp parity for the μ-derivative tables.
     def d2link(self, mu):
         return -1.0 / _rpow_int(np.asarray(mu, dtype=float), 2)
 
@@ -388,7 +356,6 @@ class PowerLink(Link):
 
     def __init__(self, lam: float):
         self.lam = float(lam)
-        # R: link name is paste0("mu^", round(lambda, 3)).
         self.name = f"mu^{round(self.lam, 3):g}"
 
     def link(self, mu):
@@ -513,8 +480,6 @@ class LogitLink(Link):
 
 
 def _dnorm(x):
-    # R's dnorm (nmath/dnorm.c) — bit-exact, incl. the |x|>=5 split path that
-    # the naive exp(-x²/2)/√(2π) misses when probit η drifts into the tail.
     return _nmath.dnorm5_vec(np.asarray(x, dtype=float))
 
 
@@ -527,13 +492,11 @@ class ProbitLink(Link):
         return _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
 
     def linkinv(self, eta):
-        # R: clamp η to ±qnorm(eps); pnorm of clamped η.
         eta = np.asarray(eta, dtype=float)
         thresh = -_nmath.qnorm5(np.finfo(float).eps)
         return _nmath.pnorm5_vec(np.clip(eta, -thresh, thresh))
 
     def mu_eta(self, eta):
-        # dnorm(η), lower-clamped.
         eps = np.finfo(float).eps
         return np.maximum(_dnorm(np.asarray(eta, dtype=float)), eps)
 
@@ -553,8 +516,6 @@ class ProbitLink(Link):
         return (7.0 * eta + 6.0 * eta**3) / d**4
 
     def d23link(self, mu):
-        # η=Φ⁻¹(μ) and φ(η) computed once, shared by d2/d3 — bit-identical to
-        # d2link(mu), d3link(mu) (same η, same d, same expressions).
         eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
         d = np.maximum(_dnorm(eta), np.finfo(float).eps)
         return eta / d**2, (1.0 + 2.0 * eta * eta) / d**3
@@ -596,7 +557,6 @@ class CauchitLink(Link):
         return np.tan(np.pi * (mu - 0.5))
 
     def linkinv(self, eta):
-        # R: clamp η to ±qcauchy(eps); pcauchy(η) = ½ + atan(η)/π.
         eps = np.finfo(float).eps
         thresh = -np.tan(np.pi * (eps - 0.5))
         eta_c = np.clip(np.asarray(eta, dtype=float), -thresh, thresh)
@@ -647,14 +607,11 @@ class CloglogLink(Link):
         return np.log(-np.log1p(-np.asarray(mu, dtype=float)))
 
     def linkinv(self, eta):
-        # 1 - exp(-exp(η)), clamped to [eps, 1-eps] (R: avoid mu=0,1 boundary).
         eps = np.finfo(float).eps
         eta = np.asarray(eta, dtype=float)
         return np.clip(-np.expm1(-np.exp(eta)), eps, 1.0 - eps)
 
     def mu_eta(self, eta):
-        # exp(η - exp(η)); R clamps η at 700 (to keep exp(η) finite) and
-        # lower-clamps the result at eps.
         eps = np.finfo(float).eps
         eta = np.minimum(np.asarray(eta, dtype=float), 700.0)
         return np.maximum(np.exp(eta) * np.exp(-np.exp(eta)), eps)
@@ -701,11 +658,6 @@ class InverseSquareLink(Link):
         return 1.0 / np.asarray(mu, dtype=float) ** 2
 
     def linkinv(self, eta):
-        # PIRLS step-halving may transiently call us with eta<0 entries;
-        # the caller checks valideta() and rejects them. Silence the
-        # sqrt-of-negative warning so strict warning modes (pytest's
-        # `np.errstate(invalid="raise")`) don't trip over a recoverable
-        # halving step.
         with np.errstate(invalid="ignore"):
             return 1.0 / np.sqrt(np.asarray(eta, dtype=float))
 
@@ -752,19 +704,15 @@ class SoftplusLink(Link):
     name = "softplus"
 
     def link(self, mu):
-        # g(μ) = log(e^μ − 1); expm1 keeps small-μ accurate.
         mu = np.maximum(np.asarray(mu, dtype=float), np.finfo(float).eps)
         return np.log(np.expm1(mu))
 
     def linkinv(self, eta):
-        # μ = log1p(e^η) = logaddexp(0, η); eps-floored like LogLink so μ>0
-        # feeds V(μ) / divisions safely at extreme negative η.
         return np.maximum(
             np.logaddexp(0.0, np.asarray(eta, dtype=float)), np.finfo(float).eps
         )
 
     def mu_eta(self, eta):
-        # dμ/dη = σ(η); expit is the stable logistic. Lower-clamp like mgcv.
         return np.maximum(expit(np.asarray(eta, dtype=float)), np.finfo(float).eps)
 
     def _u_s(self, mu):
@@ -821,7 +769,6 @@ def _resolve_link(link, default: str) -> Link:
         if link not in _LINKS:
             raise ValueError(f"unknown link {link!r}; supported: {list(_LINKS)}")
         return _LINKS[link]()
-    # Allow `link=log` (the function reference) the way R's `Gamma(link=log)` does.
     name = getattr(link, "__name__", None)
     if name in _LINKS:
         return _LINKS[name]()
@@ -863,11 +810,9 @@ def _brent_fmin(f, ax: float, bx: float, tol: float) -> tuple[float, float]:
             r = e
             e = d
         if abs(p) >= abs(q * 0.5 * r) or p <= q * (a - x) or p >= q * (b - x):
-            # golden-section step
             e = (b - x) if x < xm else (a - x)
             d = c * e
         else:
-            # parabolic-interpolation step
             d = p / q
             u = x + d
             if u - a < t2 or b - u < t2:
@@ -920,8 +865,6 @@ def find_null_dev(family: Family, y, eta, offset, weights) -> float:
     link = family.link
 
     def fnull(gamma: float) -> float:
-        # 3-arg dev.resids like mgcv's fnull — extended families read
-        # their current θ when ``theta=None``.
         mu = link.linkinv(gamma + offset)
         return float(np.sum(family.dev_resids(y, mu, weights)))
 
@@ -938,36 +881,14 @@ def find_null_dev(family: Family, y, eta, offset, weights) -> float:
         deta *= 2.0
 
 
-# ---------------------------------------------------------------------------
-# Families
-# ---------------------------------------------------------------------------
-
-
 class Family:
     """Base class for GLM families."""
 
     name: str
     canonical_link_name: str
     scale_known: bool
-    # Number of "extra" family parameters that the GAM outer Newton should
-    # estimate jointly with (ρ, log φ). Default 0 (Gaussian, Gamma, Poisson,
-    # Binomial, IG, Quasi); ``tw`` overrides to 1 (its θ_tw → p
-    # reparametrisation). The GAM hooks read ``n_theta`` to size the outer
-    # vector and call ``set_theta(values)`` before each criterion eval; they
-    # call ``dscore_extra(...)`` to obtain the score-side ∂(2·V_R)/∂θ_extra
-    # contributions for the gradient.
     n_theta: int = 0
-    # Mirrors mgcv ``inherits(family, "extended.family")``. Standard
-    # exponential families (Gaussian, Poisson, ...) leave it ``False``;
-    # extended families (Scat, ziP, ocat, gevlss, ...) flip to ``True``
-    # so the bam(discrete=TRUE) PIRLS path uses the ``Dd → dDeta`` Newton
-    # weights (``w = Deta2/2``, ``z = (η-off) - Deta/Deta2``) instead of
-    # the standard Fisher weights ``w = w_prior · μ_η²/V(μ)``.
     is_extended: bool = False
-    # Whether the bam outer loop should call ``_estimate_theta`` between
-    # PIRLS iters. Set ``True`` only on extended families with free θ
-    # (Scat with both θ free, nb with k free, etc). Standard families and
-    # extended families with all θ user-locked leave it ``False``.
     estimate_theta_callback: bool = False
 
     # mgcv's canonical link for PIRLS's full-Newton/Fisher switch
@@ -1027,7 +948,6 @@ class Family:
         """
         raise NotImplementedError
 
-    # ----- extended-family hooks (no-ops for standard families) ---------
     def Dd(self, y, mu, theta, wt, level: int = 0) -> dict:
         """Mirrors mgcv ``family$Dd``. Returns a dict of derivatives of
         ``-logL`` wrt μ and θ at fixed (y, μ, θ, w):
@@ -1115,9 +1035,6 @@ class Family:
         ig12 = ig1 * ig1
 
         def _cb(a, v):
-            # R recycles a length-n vector down the columns of an (n, k)
-            # θ-derivative matrix (gfam's D*th blocks; single-θ families
-            # keep 1-D arrays where * is already elementwise).
             a = np.asarray(a, dtype=float)
             return a * (v[:, None] if a.ndim == 2 else v)
 
@@ -1135,8 +1052,6 @@ class Family:
             d["Deta.EDeta2"] = r["Dmu"] / (r["EDmu2"] * ig1)
         if level > 0:
             ig13 = ig12 * ig1
-            # θ keys: R NULL semantics for parameter-free families
-            # (cpois) — see the identity-branch note.
             has_th = r.get("Dth") is not None
             d["Dth"] = r.get("Dth")
             g3g = link.g3g(mu)
@@ -1277,13 +1192,7 @@ class Family:
 
     def _aic_dev1(self, dev, scale, wt) -> float:
         """The ``dev1`` argument that ``aic(y, μ, dev1, wt, n)`` consumes.
-
         Mirrors ``gam.fit3.r:848-849``. For unknown-scale non-Gaussian families
-        (Gamma, IG) and scale-known families (Poisson, binomial), this is
-        ``scale · Σwt`` so the AIC uses the Pearson/REML scale estimator (or
-        the fixed scale=1). Gaussian overrides this to return ``dev`` directly
-        because the MLE σ² = dev/n has a closed form and mgcv prefers it
-        over the moment estimator for the AIC.
         """
         return float(scale) * float(np.sum(np.asarray(wt, dtype=float)))
 
@@ -1348,12 +1257,6 @@ class Gaussian(Family):
         return wt * (y - mu) ** 2
 
     def aic(self, y, mu, dev, wt, n, theta=None):
-        # R's gaussian()$aic verbatim: nobs·(log(2π·dev/nobs)+1) + 2
-        # − Σ log(wt), with nobs = length(y) (NOT Σwt — prior weights are
-        # precision multipliers on σ², not extra observations; they enter
-        # through the −Σlog(wt) Jacobian term instead). A zero weight makes
-        # this Inf, exactly as in R. The +2 is the "+1 family df"
-        # placeholder; downstream adds 2·edf for the model.
         wt = np.asarray(wt, dtype=float)
         nobs = float(np.asarray(y).shape[0])
         sigma2 = dev / nobs
@@ -1368,11 +1271,6 @@ class Gaussian(Family):
         return float(dev)
 
     def ls(self, y, wt, scale):
-        # mgcv: ls = -½·nobs·log(2π·φ) + ½·Σ log w[w>0]
-        # so d/d(log φ) = -nobs/2, d²/d(log φ²) = 0. (Same algebraic shape
-        # as InverseGaussian — neither family has a y-term involving φ.)
-        # `nobs` here is the *count* of w>0 obs, not Σw — mgcv weights act
-        # as a precision multiplier on σ², not as a sample-size multiplier.
         wt = np.asarray(wt, dtype=float)
         good = wt > 0
         nobs = int(np.sum(good))
@@ -1407,8 +1305,6 @@ class Gamma(Family):
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
-        # mgcv: -2 wt (log(y/μ) - (y-μ)/μ); use ifelse(y==0, 1, y/μ) so
-        # log(0) doesn't propagate when an observation is exactly zero.
         ratio = np.where(y == 0, 1.0, y / mu)
         return -2.0 * wt * (np.log(ratio) - (y - mu) / mu)
 
@@ -1426,8 +1322,6 @@ class Gamma(Family):
         wt = np.asarray(wt, dtype=float)
         n_eff = float(wt.sum())
         disp = dev / n_eff
-        # R's Gamma()$aic: -2·Σ wt·log dgamma(y; 1/disp, scale=μ·disp) + 2.
-        # +2 mirrors mgcv (one "extra" df for the dispersion).
         with np.errstate(divide="ignore", invalid="ignore"):
             logp = _nmath._disp(
                 "dgamma",
@@ -1438,35 +1332,22 @@ class Gamma(Family):
         return -2.0 * float(np.sum(logp * wt)) + 2.0
 
     def ls(self, y, wt, scale):
-        # Direct port of mgcv:::fix.family.ls's Gamma branch (raw d/dφ form),
-        # then a log-scale chain rule to match the hea convention:
-        #   d/dlogφ  = φ · d/dφ
-        #   d²/dlogφ² = φ · d/dφ + φ² · d²/dφ²
         y = np.asarray(y, dtype=float)
         wt = np.asarray(wt, dtype=float)
         good = wt > 0
         y = y[good]
         w = wt[good]
         sw = scale / w  # per-obs scale
-        # k1/k2/k3 depend on the observation only through sw, and lgamma/digamma/
-        # trigamma(1/sw) (trigamma=zeta is the gamma-REML hot spot) are the cost.
-        # With constant prior weights (the usual case) sw is constant, so
-        # evaluate those on the UNIQUE sw values and index back: byte-identical
-        # to the per-obs form (each k·[i] = the same scalar ops on sw[i]) but
-        # O(unique) special-function calls instead of O(n).
         usw, inv = np.unique(sw, return_inverse=True)
         isw = 1.0 / usw
         lsw = np.log(usw)
         u_lg = gammaln(isw)
         u_dg = digamma(isw)
         u_tg = polygamma(1, isw)
-        # k1 = -lgamma(1/sw) - log(sw)/sw - 1/sw
         k1 = (-u_lg - lsw / usw - isw)[inv]
         ls0 = float(np.sum(k1 - np.log(y)))
-        # k2 = (digamma(1/sw) + log(sw)) / sw²       (mgcv's d/dφ)
         k2 = ((u_dg + lsw) / (usw * usw))[inv]
         d1_phi = float(np.sum(k2 / w))
-        # k3 = (-trigamma(1/sw)/sw + 1 - 2 log(sw) - 2 digamma(1/sw)) / sw³
         k3 = ((-u_tg / usw + 1.0 - 2.0 * lsw - 2.0 * u_dg) / (usw**3))[inv]
         d2_phi = float(np.sum(k3 / (w * w)))  # mgcv's d²/dφ²
         d1 = scale * d1_phi
@@ -1474,8 +1355,6 @@ class Gamma(Family):
         return np.array([ls0, d1, d2], dtype=float)
 
     def qf(self, p, mu, wt, scale):
-        # mgcv fix.family.qf: qgamma(p, shape=1/scale, scale=mu*scale) —
-        # prior weights are ignored (as in mgcv).
         sc = np.asarray(mu, dtype=float) * scale
         return _nmath._disp(
             "qgamma", _nmath.qgamma, [p, 1.0 / scale, sc], (True, False)
@@ -1506,14 +1385,10 @@ class Poisson(Family):
         return np.zeros_like(np.asarray(mu, dtype=float))
 
     def dev_resids(self, y, mu, wt, theta=None):
-        # mgcv: 2 wt (y log(y/μ) - (y-μ)); with the convention 0·log(0/μ) = 0
-        # so a y=0 row contributes 2 wt μ.
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         positive = y > 0
-        # avoid log(0) on y=0 rows by substituting μ inside the log (the
-        # whole y·log term is then masked to 0 anyway).
         ratio = np.where(positive, y / np.where(positive, mu, 1.0), 1.0)
         contrib = np.where(positive, wt * (y * np.log(ratio) - (y - mu)), wt * mu)
         return 2.0 * contrib
@@ -1522,7 +1397,6 @@ class Poisson(Family):
         y = np.asarray(y, dtype=float)
         if np.any(y < 0):
             raise ValueError("negative values not allowed for the 'Poisson' family")
-        # mgcv/R: mustart = y + 0.1 to keep log(μ) finite when y=0.
         return y + 0.1
 
     def validmu(self, mu):
@@ -1530,10 +1404,6 @@ class Poisson(Family):
         return bool(np.all(np.isfinite(mu)) and np.all(mu > 0))
 
     def aic(self, y, mu, dev, wt, n, theta=None):
-        # Port of lme4's ``PoissonDist::aic`` (glmFamily.cpp:321-326):
-        # ``-2 · Σ wt[i] · Rf_dpois(y[i], mu[i], TRUE)`` with sequential
-        # reduction. :func:`_dpois_raw` is vectorized; the final sum uses
-        # ``np.cumsum(...)[-1]`` for sequential bit-match to Eigen3.
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
@@ -1541,8 +1411,6 @@ class Poisson(Family):
         return -2.0 * float(np.cumsum(logp * wt)[-1])
 
     def ls(self, y, wt, scale):
-        # Saturated log-lik at μ=y; scale-known so d/dlogφ = d²/dlogφ² = 0.
-        # mgcv: sum(dpois(y, y, log=TRUE) · w).
         y = np.asarray(y, dtype=float)
         wt = np.asarray(wt, dtype=float)
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -1590,15 +1458,11 @@ class Binomial(Family):
         return np.zeros_like(np.asarray(mu, dtype=float))
 
     def dev_resids(self, y, mu, wt, theta=None):
-        # mgcv (C_binomial_dev_resids): 2 wt [ y_log_y(y, μ) + y_log_y(1-y, 1-μ) ]
-        # where y_log_y(y, μ) = y log(y/μ) for y>0, else 0.
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
 
         def yly(a, b):
-            # 0·log(0/0) := 0; mask both arguments inside the log so numpy
-            # doesn't evaluate log(0) on the dead branch and emit warnings.
             pos = a > 0
             safe_a = np.where(pos, a, 1.0)
             safe_b = np.where(pos, b, 1.0)
@@ -1612,26 +1476,14 @@ class Binomial(Family):
         if np.any(y < 0) or np.any(y > 1):
             raise ValueError("y values must be 0 <= y <= 1 for the 'binomial' family")
         if n is not None:
-            # R binomial initialize, NCOL(y)==2 branch: mustart =
-            # (n·y + 0.5)/(n + 1) — the trials vector, NOT the (possibly
-            # prior-weight-scaled) wt. Only the starting point differs;
-            # the converged fit is identical either way. (That branch's
-            # non-integer-counts warning fired at the cbind intake.)
             n = np.asarray(n, dtype=float)
             return (n * y + 0.5) / (n + 1.0)
-        # R's NCOL(y)==1 branch: m = weights·y must be integral counts.
-        # The warning is gated on the family template being literally
-        # "binomial" (quasibinomial's initialize is the same expression
-        # with %s = "quasibinomial", so its guard is false → silent;
-        # QuasiBinomial delegates here with warn_non_integer=False).
         if warn_non_integer:
             m = wt * y
             if np.any(np.abs(m - np.rint(m)) > 0.001):
                 import warnings as _w
 
                 _w.warn("non-integer #successes in a binomial glm!", stacklevel=2)
-        # mgcv/R: mustart = (wt·y + 0.5) / (wt + 1) keeps μ in (0,1) so the
-        # logit link starts finite even when y is exactly 0 or 1.
         return (wt * y + 0.5) / (wt + 1.0)
 
     def validmu(self, mu):
@@ -1639,19 +1491,9 @@ class Binomial(Family):
         return bool(np.all(np.isfinite(mu)) and np.all(mu > 0) and np.all(mu < 1))
 
     def aic(self, y, mu, dev, wt, n, theta=None):
-        # Port of lme4's ``binomialDist::aic`` (glmFamily.cpp:204-213):
-        # ``-2 · Σ (wt[i]/m[i]) · Rf_dbinom(round(m·y), round(m), μ, TRUE)``
-        # with sequential reduction. :func:`_dbinom_raw` is vectorized;
-        # final sum uses ``np.cumsum(...)[-1]`` for bit-match to Eigen3.
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
-        # R binomial()$aic: ``m <- if (any(n > 1)) n else wt`` — with a
-        # cbind(succ, fail) response, ``n`` is the trials vector kept by
-        # initialize and ``wt`` carries any extra prior weights on top
-        # (wt = pw·n), so the density is evaluated at the true counts
-        # with coefficient wt/m = pw. Callers passing a scalar n (nobs)
-        # or ones keep the historical wt-only path bit-for-bit.
         n_arr = None if n is None else np.asarray(n, dtype=float)
         if (
             n_arr is not None
@@ -1667,7 +1509,6 @@ class Binomial(Family):
             terms = np.where(good & np.isfinite(logp), weight * logp, 0.0)
             return -2.0 * float(np.cumsum(terms)[-1])
         m = np.rint(wt)
-        # Mask out m<=0; for those, contribution is 0.
         good = m > 0
         if not np.any(good):
             return 0.0
@@ -1675,9 +1516,6 @@ class Binomial(Family):
         weight = np.where(good, wt / np.where(good, m, 1.0), 0.0)
         logp = _dbinom_raw_disp(s_arr, m, mu, 1.0 - mu, True)
         terms = weight * logp
-        # Replace -inf entries (oob) by 0 so they don't contaminate the
-        # sum (lme4 filters via the m<=0 branch which sets contribution
-        # to 0; oob cases shouldn't occur for valid data anyway).
         terms = np.where(good & np.isfinite(logp), terms, 0.0)
         return -2.0 * float(np.cumsum(terms)[-1])
 
@@ -1689,8 +1527,6 @@ class Binomial(Family):
         return np.array([ls0, 0.0, 0.0], dtype=float)
 
     def qf(self, p, mu, wt, scale):
-        # mgcv fix.family.qf: ceiling non-integer denominators with a
-        # warning; qbinom(p, wt, mu)/(wt + (wt==0)).
         wt = np.asarray(wt, dtype=float)
         if not np.allclose(wt, np.ceil(wt)):
             wt = np.ceil(wt)
@@ -1732,7 +1568,6 @@ class InverseGaussian(Family):
         return np.full_like(np.asarray(mu, dtype=float), 6.0)
 
     def dev_resids(self, y, mu, wt, theta=None):
-        # mgcv: wt · (y - μ)² / (y · μ²).
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
@@ -1747,11 +1582,9 @@ class InverseGaussian(Family):
         return y.copy()
 
     def validmu(self, mu):
-        # R/stats: TRUE — boundary handling is via the link's valideta.
         return bool(np.all(np.isfinite(np.asarray(mu, dtype=float))))
 
     def aic(self, y, mu, dev, wt, n, theta=None):
-        # mgcv: sum(wt) · (1 + log(dev/sum(wt) · 2π)) + 3 · Σ wt · log(y) + 2.
         y = np.asarray(y, dtype=float)
         wt = np.asarray(wt, dtype=float)
         sw = float(wt.sum())
@@ -1762,11 +1595,6 @@ class InverseGaussian(Family):
         )
 
     def ls(self, y, wt, scale):
-        # mgcv (raw φ form):
-        #   ls0 = -½ · Σ log(2π φ y³) + ½ · Σ log w[w>0]
-        #   d/dφ ls = -nobs/(2φ),  d²/dφ² ls = +nobs/(2φ²)
-        # Chain rule to log-scale: d/dlogφ = -nobs/2, d²/dlogφ² = 0
-        # (same algebraic cancellation as Gaussian — the y³ term has no φ).
         y = np.asarray(y, dtype=float)
         wt = np.asarray(wt, dtype=float)
         good = wt > 0
@@ -1777,9 +1605,6 @@ class InverseGaussian(Family):
         return np.array([ls0, -0.5 * nobs, 0.0], dtype=float)
 
     def rd(self, rng, mu, wt, scale):
-        # mgcv rig(n, mu, scale) (Michael-Schucany-Haas): inverse Gaussian with
-        # variance scale·μ³, drawn as n rnorm (squared) then n runif — that draw
-        # order makes it bit-exact to R's rig on the hea.R.rng stream.
         mu = np.asarray(mu, dtype=float)
         n = mu.shape[0]
         y = np.asarray(rng.normal(size=n)) ** 2
@@ -1793,13 +1618,6 @@ class InverseGaussian(Family):
         swap = np.asarray(rng.uniform(size=n)) > mu / (mu + x)
         x[swap] = mu[swap] ** 2 / x[swap]
         return x
-
-
-# ---------------------------------------------------------------------------
-# Quasi: pure quasi-likelihood (no full likelihood, dispersion always
-# estimated). Variance functions and deviances coincide with the matching
-# parametric families, so we delegate to them rather than re-derive.
-# ---------------------------------------------------------------------------
 
 
 _QUASI_VARIANCE_FAMILIES = {
@@ -1859,10 +1677,6 @@ class Quasi(Family):
         return self._shadow.dev_resids(y, mu, wt)
 
     def initialize(self, y, wt):
-        # R's quasi(variance='mu(1-mu)') initialize is
-        # ``pmax(0.001, pmin(0.999, y))`` — clip y into the open
-        # interval (0, 1). Different from binomial's
-        # ``(wt·y + 0.5) / (wt + 1)`` smoothing.
         if self.variance_name == "mu(1-mu)":
             y = np.asarray(y, dtype=float)
             if np.any(y < 0) or np.any(y > 1):
@@ -1922,7 +1736,6 @@ class QuasiPoisson(Quasi):
         super().__init__(link=link, variance="mu")
 
     def initialize(self, y, wt):
-        # R quasipoisson shares poisson's initialize verbatim.
         return self._shadow.initialize(y, wt)
 
     __repr__ = Family.__repr__
@@ -1946,62 +1759,18 @@ class QuasiBinomial(Quasi):
         super().__init__(link=link, variance="mu(1-mu)")
 
     def initialize(self, y, wt, n=None):
-        # R quasibinomial shares binomial's initialize verbatim (incl.
-        # the n-form mustart for cbind responses) — minus the
-        # non-integer-#successes warning, whose template guard
-        # ("quasibinomial" == "binomial") is false in R.
         return self._shadow.initialize(y, wt, n=n, warn_non_integer=False)
 
     __repr__ = Family.__repr__
 
 
-# ---------------------------------------------------------------------------
-# Tweedie / tw — Dunn-Smyth (2005) series implementation.
-#
-# Tweedie EDF for ``1 < p < 2`` is the compound Poisson-Gamma: a Poisson(λ)
-# count of Gamma jumps. Mean μ, variance ``φ·μ^p``; the density mixes a
-# point mass at 0 with a continuous part on ``y > 0``. With ``α = (2-p)/(1-p)``
-# (negative for 1<p<2):
-#
-#     y = 0:  log f(0; μ, φ, p) = -μ^(2-p) / (φ·(2-p))
-#     y > 0:  log f(y; μ, φ, p) = -log y + log a(y, φ, p)
-#                                + y·μ^(1-p)/(φ·(1-p)) - μ^(2-p)/(φ·(2-p))
-#
-# where ``a(y, φ, p) = Σ_{j≥1} W_j``,
-#
-#     log W_j = j·log z - log Γ(j+1) - log Γ(-j·α),
-#     log z   = -α·log y + α·log(p-1) - (1-α)·log φ - log(2-p).
-#
-# We sum log-W_j outward from the dominant index ``j*`` (where d_j log W_j = 0)
-# until terms drop ``≥ ld_eps`` below the running max, then log-sum-exp. The
-# moments E_p[j] and Var_p[j] under ``p_j = W_j / Σ W_k`` give the φ-derivatives
-# of log a:  d/dlog φ  log a = -(1-α)·E[j] ;  d²/dlog φ² log a = (1-α)²·Var[j].
-# Direct port of mgcv's ``tweedious.c`` / ``ldTweedie``.
-# ---------------------------------------------------------------------------
-
-
-# Series tail tolerance: terms log W_j < log W_max - LD_EPS are dropped. mgcv
-# uses ~36 (≈ -log(eps^½)); a touch tighter than the .Machine$double.eps
-# threshold used in tweedious.c, but well past where summands matter.
 _LD_EPS = 36.0
-# Hard cap on series length to bound worst-case latency at extreme (y, φ, p).
-# In practice the series is centred near j* with width ~√j*, so the loop
-# exits via the LD_EPS gate long before this; the cap is purely a safety net.
 _LD_J_MAX = 100000
 
 
 def _tweedie_log_a_one(y_i: float, phi_i: float, p: float):
     """Series approximation log a(y, φ, p) = log Σ_{j≥1} W_j for one y > 0.
-
-    Per-row reference for :func:`_tweedie_log_a_vec`. Returns
-    ``(log_a, j_bar, j_var, j_psi_bar, m_wp1, m_comb, m_dwpp)`` under
-    ``p_j = W_j/Σ W_k``: E[j], Var[j], E[j·ψ(-j·α)], and mgcv's three
-    p-parameterisation working-derivative accumulators E[∂logW/∂p],
-    E[(∂logW/∂p)²+∂²logW/∂p²], E[∂logW/∂p·j/(1−p)+∂²logW/∂p∂logφ]
     (tweedious, misc.c:346-503). The first two feed the φ-derivatives of
-    log a; E[jψ] the p-derivative (Tweedie.dls_dp); the last three the
-    p-second-derivatives (Tweedie._d2ls_dp). nmath (R's Rmath) special
-    functions; ``wp1²+wp2`` combined per term (no moment-split cancellation).
     """
     om1 = 1.0 - p  # negative
     onep2 = om1 * om1
@@ -2012,7 +1781,6 @@ def _tweedie_log_a_one(y_i: float, phi_i: float, p: float):
 
     ly = np.log(y_i)
     rho = np.log(phi_i)
-    # log W_j = j·log_z - lgamma(j+1) - lgamma(-j·α).
     log_z = -alpha * ly + alpha * np.log(p - 1.0) - one_minus_alpha * rho - np.log(tm)
     log_neg = np.log(-om1) + rho
     wp_base = log_neg / onep2 - alpha / om1 + 1.0 / tm
@@ -2025,7 +1793,6 @@ def _tweedie_log_a_one(y_i: float, phi_i: float, p: float):
     def _lw(j):
         return j * log_z - _nmath._lgammafn(j + 1.0) - _nmath._lgammafn(-j * alpha)
 
-    # Walk outward from j_int both ways (mgcv pure-eps break, no `near` band).
     log_max = _lw(j_int)
     j_list = [float(j_int)]
     lw_list = [log_max]
@@ -2057,7 +1824,6 @@ def _tweedie_log_a_one(y_i: float, phi_i: float, p: float):
     p_w = weights / sum_w
     j_bar = float(np.sum(p_w * j_arr))
     j_var = float(np.sum(p_w * j_arr * j_arr) - j_bar * j_bar)
-    # ψ(-j·α) well-defined for α<0, j≥1 (so -j·α > 0); same j-grid as the sum.
     psi_arr = _nmath.psigamma_vec(-j_arr * alpha, 0.0)
     trig_arr = _nmath.psigamma_vec(-j_arr * alpha, 1.0)
     j_psi_bar = float(np.sum(p_w * j_arr * psi_arr))
@@ -2077,21 +1843,12 @@ def _tweedie_log_a_one(y_i: float, phi_i: float, p: float):
 
 
 def _tweedie_series_rs(ly, j_int, alpha, w_base, wp_base, wp2_base, onep, J):
-    """Rust ``tweedious`` sweep for the scalar-p saturated-likelihood series.
-
-    The rust kernel builds the shared length-``J`` nmath (R's Rmath) tables
-    internally (α constant) and accumulates the moments + mgcv's working
-    derivatives; this wrapper just verifies ``J`` covers every row's eps window
-    (a cheap O(n) right-edge check via the nmath lgamma at the boundary and each
-    row's peak — never the n×J matrix), growing it if needed. Returns the seven
-    ``(n_active,)`` arrays ``(log_a, E[j], Var[j], E[jψ], m_wp1, m_comb,
-    m_dwpp)`` in :func:`_tweedie_log_a_vec`'s order."""
+    """Rust ``tweedious`` sweep for the scalar-p saturated-likelihood series."""
     ly = np.ascontiguousarray(np.asarray(ly, dtype=float))
     j_int = np.ascontiguousarray(np.asarray(j_int, dtype=np.int64))
     log_z = w_base - alpha * ly  # lw at j=1 base (only for the J-coverage check)
     J = int(J)
     while J < _LD_J_MAX:
-        # eps-window right-edge check: lw at j=J vs each row's integer peak.
         lw_right = J * log_z - _nmath._lgammafn(J + 1.0) - _nmath._lgammafn(-J * alpha)
         lw_peak = (
             j_int * log_z
@@ -2128,13 +1885,6 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     the ~1e-11 catastrophic cancellation in the 2nd derivatives. Entries with
     y==0 are 0 (the y=0 row uses the closed-form point mass, not the series).
     Per-obs phi handles weights via ``φ_i = φ/wt_i``.
-
-    Builds a fixed ``j`` grid wide enough to cover every active row's
-    eps-truncated series tail, then evaluates the (n_active, J) matrix
-    of ``log W_j`` and reduces along ``j`` in one pass. ``J`` is sized
-    so the eps gate fires within the grid for every row — agrees with
-    the per-row :func:`_tweedie_log_a_one` walk to ~1e-13 absolute on
-    log_a / moments (well below mgcv-oracle test tolerances).
     """
     y = np.asarray(y, dtype=float)
     phi_arr = np.broadcast_to(np.asarray(phi, dtype=float), y.shape).astype(
@@ -2204,9 +1954,6 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
     J = min(max(right, j_int_max + 1), _LD_J_MAX)
 
     if _rs_tweedie_series is not None:
-        # Rust per-row sweep (mgcv tweedious): builds the shared length-J nmath
-        # tables internally (α constant) and accumulates the moments + mgcv's
-        # working derivatives. Python passes the p-bases; J sizes the table.
         (out_la, out_jb, out_jv, out_jpb, out_m1, out_mc, out_md) = _tweedie_series_rs(
             ly, j_int, alpha, w_base, wp_base, wp2_base, om1, J
         )
@@ -2220,14 +1967,11 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
         out_md = np.empty(n_active)
         while True:
             j_grid = np.arange(1, J + 1, dtype=float)
-            # nmath (R's Rmath) special functions — NOT scipy — so the series
-            # matches the arm64 R build to the libm floor.
             lgamma_jp1 = _nmath._lgammafn_arr(j_grid + 1.0)
             lgamma_neg_ja = _nmath._lgammafn_arr(-j_grid * alpha)
             psi_arr = _nmath.psigamma_vec(-j_grid * alpha, 0.0)
             trig_arr = _nmath.psigamma_vec(-j_grid * alpha, 1.0)
 
-            # Chunk on the n_active axis to bound the (chunk, J) working set.
             chunk = max(1, _chunk_bytes // (48 * J))
             grow = False
             for s in range(0, n_active, chunk):
@@ -2240,9 +1984,6 @@ def _tweedie_log_a_vec(y, phi, p, _chunk_bytes: int = 256 * 1024 * 1024):
                 )
                 log_max = np.max(lw, axis=1)
                 above_eps = lw >= (log_max[:, None] - _LD_EPS)
-                # Right boundary still carrying weight ⇒ the eps-window extends
-                # past J for some row ⇒ grow and recompute (rare — the analytic
-                # width above covers it first-try in practice).
                 if J < _LD_J_MAX and above_eps[:, -1].any():
                     grow = True
                     break
@@ -2301,20 +2042,6 @@ _TWEEDIOUS_LOG_EPS = math.log(_TWEEDIOUS_EPS)
 def _tweedious_work_scalar_py(y, rho, p, dpth1, dpth2):
     """Faithful port of mgcv's C ``tweedious`` (misc.c:170-510), scalar-p
     (``buffer=TRUE``) path — the reference twin of the rust kernel.
-
-    For each ``y > 0`` it locates the Dunn-Smyth series peak ``j_max``, sweeps
-    UP from it to convergence then DOWN, applying the θ-chain PER TERM and
-    accumulating ``wi/w1i/w2i/wdlogwdp/wdW2d2W/dWpp`` in that exact order with
-    the ``wj < wmax + log(eps)`` break (``eps = double.eps²``, ``wmax`` fixed at
-    ``j_max`` — not a running max). Returns the ``(n, 6)`` array of working-
-    parameter log-density derivatives ``[w, w1, w2, w1p, w2p, w2pp]`` =
-    ``[logW, dρ, dρρ, dθ, dθθ, dθρ]`` (the C's outputs), which
-    :func:`_ld_tweedie_work` adds to the saddle part.
-
-    ``rho`` is scalar (single φ, as the C dereferences ``*rho``); ``p`` and its
-    θ-derivatives ``dpth1``/``dpth2`` are scalars computed identically upstream.
-    Terms are computed per-``j`` rather than from a shared buffer — bit-identical
-    to the C's buffered ``wb[j]`` values (same expressions), just recomputed.
     """
     y = np.ascontiguousarray(np.asarray(y, dtype=float))
     n = y.size
@@ -2433,14 +2160,7 @@ def _tweedious_work_scalar_py(y, rho, p, dpth1, dpth2):
 def _tweedious_work_pv_py(y, rho, p, dpth1, dpth2):
     """Faithful port of mgcv's C ``tweedious2`` (misc.c:513-661), vector-p
     (``buffer=FALSE``) path — the reference twin of the rust kernel.
-
-    Same per-row up/down sweep and per-term θ-chain as
-    :func:`_tweedious_work_scalar_py`, but ``rho``/``p``/``dpth1``/``dpth2`` vary
-    by row (recomputed per row), so no shared table. ``lgamma(j+1)`` is built by
-    RECURSION along the sweep (``+= log(j)`` up, ``-= log(j+1)`` down) from a
-    fresh ``lgamma`` at each sweep's start — exactly mgcv's ``lgammaj1`` recursion
     (misc.c:596-644), which drifts from a fresh per-term ``lgamma`` at the last
-    ulp. Returns ``(n, 6)`` = ``[logW, dρ, dρρ, dθ, dθθ, dθρ]``.
     """
     y = np.ascontiguousarray(np.asarray(y, dtype=float))
     n = y.size
@@ -2534,8 +2254,6 @@ def _tweedious_work_pv_py(y, rho, p, dpth1, dpth2):
     return out
 
 
-# Rust twins of the tweedious series kernels (fast path); fall back to the
-# faithful Python ports above when the extension is unbuilt.
 _rs_tweedious_work = _rs_fn("tweedious_work")
 _rs_tweedious_work_pv = _rs_fn("tweedious_work_pv")
 
@@ -2587,16 +2305,7 @@ def _ld_tweedie_work(
     ``all.derivs=TRUE`` (gam.fit3.r:2838-3035): log Tweedie density and
     derivatives for vector ``mu``/``theta``/``rho``, with
     p = (a + b·e^θ)/(1 + e^θ) ∈ (a, b) and φ = e^ρ.
-
-    Returns the (n, 10) array in mgcv's column order
-    ``[l, ρ, ρρ, θ, θθ, θρ, μ, μμ, μθ, μρ]`` — exactly what twlss's ll
     consumes (gamlss.r:2575-2580). The closed-form saddle/zero parts
-    and the (p, φ) → (θ, ρ) chain are line-by-line ports; the series
-    part is a faithful port of the C ``tweedious``/``tweedious2``
-    (:func:`_tweedious_work_scalar`/:func:`_tweedious_work_pv`) — the
-    per-row up-then-down sweep from the located peak with the θ-chain
-    applied PER TERM, returning the six working-parameter derivatives
-    ``[logW, dρ, dρρ, dθ, dθθ, dθρ]`` directly, which are ADDED to the
     saddle columns (gam.fit3.r:3013-3020).
     """
     y = np.asarray(y, dtype=float)
@@ -2614,10 +2323,6 @@ def _ld_tweedie_work(
     pos = theta > 0
     eth = np.exp(-np.abs(theta))
     p = np.where(pos, (b + a * eth) / (1.0 + eth), (b * eth + a) / (eth + 1.0))
-    # R-level ^ is R_pow per element: ^2 → x·x (numpy's **2 square fast
-    # path matches) but ^3 → SEQUENTIAL x·x·x for |x|≤11 — numpy **3
-    # takes the libm-pow loop and drifts the last ulp (receipt:
-    # 26k/100k elements differ on the (1,2] range).
     d1eth = 1.0 + eth
     d3 = d1eth * d1eth * d1eth
     dpth1 = eth * (b - a) / (d1eth * d1eth)
@@ -2758,27 +2463,9 @@ def _tw_null_fit(y, a: float = 1.001, b: float = 1.999):
         ld = _ld_tweedie_work(
             y, np.exp(t[0]) * ones, t[1] * ones, t[2] * ones, a=a, b=b
         )
-        # mgcv reduces ldTweedie with R's colSums, which accumulates in LDOUBLE
-        # (80-bit on x86). Near the flat MLE the step-halving accept test
-        # `Σl(θ₁) < Σl(θ)` resolves a ~1e-9 change inside a ~1e3 sum; a plain
-        # float64 reduction's ~1e-10 noise stalls the Newton (gradient frozen
-        # ~3e-5, well above the 1e-9·|l| break ⇒ all 50 iters × deep halving,
-        # ~1200 evals vs mgcv's ~60). Accumulate in long double to match R's
-        # colSums precision, then round to float64. (On ARM np.longdouble ≡
-        # float64 — same as R's LDOUBLE there, so the parity is preserved.)
         return ld.sum(axis=0, dtype=np.longdouble).astype(np.float64)
 
     lds = _ld_sums(th)
-    # The log-μ Hessian uses mgcv's approximate chain (no g·∂²μ term), so the
-    # Newton converges only LINEARLY near the flat MLE — the μ-gradient drops
-    # one ~0.4 ratio per step, oscillating in sign. mgcv reaches its 1e-9·|l|
-    # gradient break before the step it accepts shrinks to FP noise; whether it
-    # does is decided by sub-1e-9 likelihood comparisons (hence the LDOUBLE
-    # colSums above). For datasets where the residual numpy-vs-R summation
-    # difference freezes the gradient just shy of the break, detect the stall
-    # (max|g| no longer falling) and stop — the (μ,p,φ) there already matches
-    # mgcv to ~6 sig figs. Without it the loop burns all 50 iters at ~20
-    # halvings each (~1000 evals vs mgcv's ~60-130).
     gmag_prev = float("inf")
     n_stall = 0
     for _ in range(50):
@@ -2810,10 +2497,6 @@ def _tw_null_fit(y, a: float = 1.001, b: float = 1.999):
         ms = float(np.max(np.abs(step)))
         if ms > 3.0:
             step = step * 3.0 / ms
-        # Bounded step-halving (mgcv's tw.null.fit uses an unbounded while, but
-        # relies on the gradient break firing first; cap it so the flat-MLE
-        # stall can't spin — 40 halvings ⇒ a 1e-12 step, deep past any useful
-        # move).
         accepted = False
         for _h in range(40):
             th1 = th - step
@@ -4128,10 +3811,6 @@ class Tweedie(Family):
         if not (1.0 < p < 2.0):
             raise ValueError(f"Tweedie requires 1 < p < 2; got p={p!r}")
         self.p = float(p)
-        # (φ, p, y-fingerprint) → 7-moment Dunn-Smyth bundle. The saturated
-        # series a(y, φ, p) is μ-INDEPENDENT, so ls/dls_dp/_d2ls_dp at one
-        # (φ, p) point — and every PIRLS iter / repeated outer eval at that
-        # point — recompute the same arrays. See _saturated_series.
         self._sat_series_cache: dict = {}
         super().__init__(link=link)
 
@@ -4153,10 +3832,6 @@ class Tweedie(Family):
         )
 
     def dev_resids(self, y, mu, wt, theta=None):
-        # 1<p<2 form (Jorgensen 1987):
-        #   y > 0:  d_i = 2·[ y·(y^(1-p) - μ^(1-p))/(1-p) - (y^(2-p) - μ^(2-p))/(2-p) ]
-        #   y = 0:  d_i = 2·μ^(2-p)/(2-p)
-        # Both pieces are non-negative for 1<p<2, μ>0, y≥0; minimised at y=μ.
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
@@ -4164,7 +3839,6 @@ class Tweedie(Family):
         om1 = 1.0 - p
         tm = 2.0 - p
         zero = y == 0.0
-        # Mask y inside the y^(...) so y=0 rows don't generate spurious 0**neg.
         y_safe = np.where(zero, 1.0, y)
         d_pos = 2.0 * (y * (y_safe**om1 - mu**om1) / om1 - (y_safe**tm - mu**tm) / tm)
         d_zero = 2.0 * mu**tm / tm
@@ -4205,8 +3879,6 @@ class Tweedie(Family):
         om1 = 1.0 - p
         tm = 2.0 - p
         zero = y == 0.0
-        # cumulant_i = y_i·μ_i^(1-p)/(1-p) - μ_i^(2-p)/(2-p) (the y-only term
-        # vanishes at y=0; the rest is the y=0 closed form's exponent).
         cumulant = y * mu**om1 / om1 - mu**tm / tm
         out = np.empty_like(y)
         out[zero] = cumulant[zero] / phi_i[zero]
@@ -4230,18 +3902,7 @@ class Tweedie(Family):
         return -2.0 * float(np.sum(log_f * wt)) + 2.0
 
     def _saturated_series(self, y_nz, phi_nz):
-        """Memoised :func:`_tweedie_log_a_vec` at the saturated point (μ = y).
-
-        ``ls``/``dls_dp``/``_d2ls_dp`` each evaluate the Dunn-Smyth series at
-        the SAME ``(y, φ=scale, p)`` and extract different moments; the series
-        is μ-independent, so within a score-eval (and wherever the joint outer
-        Newton revisits a ``(φ, p)``) it is otherwise recomputed redundantly
-        (a cliff fit makes 189 calls at only 33 distinct ``(φ, p)`` — 5.7×).
-        Mirrors mgcv's ``buffer=TRUE`` reuse in ``ldTweedie``. Bit-identical:
-        returns the very arrays ``_tweedie_log_a_vec`` would (the callers only
-        read them). Keyed on ``(φ, p)`` + a cheap y fingerprint (size/ends/sum
-        — exact within a fit, collision-proof across datasets); ``self.p`` is
-        the live power so a ``tw`` p-update invalidates stale entries."""
+        """Memoised :func:`_tweedie_log_a_vec` at the saturated point (μ = y)."""
         p = self.p
         scale = float(phi_nz[0]) if y_nz.size else 0.0
         key = (
@@ -4297,17 +3958,12 @@ class Tweedie(Family):
         p = self.p
         om1 = 1.0 - p
         tm = 2.0 - p
-        # one_minus_alpha = 1 - (2-p)/(1-p) = -1/(1-p) = 1/(p-1)
         one_minus_alpha = 1.0 / (p - 1.0)
 
         zero = y_g == 0.0
         y_safe = np.where(zero, 1.0, y_g)
-        # Saturated cumulant c_i = y^(2-p)/((1-p)(2-p)) for y>0; 0 at y=0.
         cum = np.where(zero, 0.0, y_safe**tm / (om1 * tm))
 
-        # Series moments at μ=y; only computed for y>0 rows. ``ls`` only
-        # needs (log a, E[j], Var[j]); the j_psi_bar moment is consumed by
-        # ``dls_dp`` for the p-derivative path.
         log_a = np.zeros_like(y_g)
         j_bar = np.zeros_like(y_g)
         j_var = np.zeros_like(y_g)
@@ -4317,7 +3973,6 @@ class Tweedie(Family):
             j_bar[~zero] = jb_
             j_var[~zero] = jv_
 
-        # log f_sat per observation; y=0 row is 0 by the closed form.
         log_f_sat = np.where(zero, 0.0, -np.log(y_safe) + log_a + cum / phi_i)
         ls0 = float(np.sum(w_g * log_f_sat))
 
@@ -4328,8 +3983,6 @@ class Tweedie(Family):
         d1 = float(np.sum(w_g * d1_per))
         d2 = float(np.sum(w_g * d2_per))
         return np.array([ls0, d1, d2], dtype=float)
-
-    # ---- analytical p-derivatives (used by joint outer Newton in tw()) ----
 
     def dvar_dp(self, mu):
         """``∂V(μ)/∂p = log(μ)·μ^p`` (since V = μ^p ⇒ log V = p·log μ)."""
@@ -4357,27 +4010,19 @@ class Tweedie(Family):
         tm = 2.0 - p
         zero = y == 0.0
         log_mu = np.log(mu)
-        # y_safe is only used inside masked branches; log_y substitutes 0 for
-        # y=0 so y·log y = 0 (limit of y·log y as y→0⁺).
         y_safe = np.where(zero, 1.0, y)
         log_y = np.where(zero, 0.0, np.log(y_safe))
 
-        # y > 0 branch
         y_om1 = y_safe**om1
         mu_om1 = mu**om1
         y_tm = y_safe**tm
         mu_tm = mu**tm
         u = y_om1 - mu_om1
         v = y_tm - mu_tm
-        # ∂[y·u/om1]/∂p:  y·∂u/∂p / om1 + y·u/om1²
-        #   ∂u/∂p = -y^om1·log y + μ^om1·log μ
         dA1 = y * (mu_om1 * log_mu - y_om1 * log_y) / om1 + y * u / (om1 * om1)
-        # ∂[v/tm]/∂p:    ∂v/∂p / tm + v/tm²
-        #   ∂v/∂p = -y^tm·log y + μ^tm·log μ
         dA2 = (mu_tm * log_mu - y_tm * log_y) / tm + v / (tm * tm)
         d_dp_pos = 2.0 * (dA1 - dA2)
 
-        # y = 0 branch
         d_dp_zero = 2.0 * mu_tm * (1.0 / (tm * tm) - log_mu / tm)
 
         return float(np.sum(wt * np.where(zero, d_dp_zero, d_dp_pos)))
@@ -4412,7 +4057,6 @@ class Tweedie(Family):
             return 0.0
         y_g = y[good]
         w_g = wt[good]
-        # Same mgcv convention as ``ls``: weight outside, φ unmodified.
         phi_i = np.full_like(w_g, float(scale))
         p = self.p
         om1 = 1.0 - p
@@ -4424,21 +4068,17 @@ class Tweedie(Family):
         log_y = np.where(zero, 0.0, np.log(y_safe))
         log_phi = np.log(phi_i)
 
-        # ∂cum_sat/∂p (per-obs)
         y_tm = y_safe**tm
         dcum_dp = np.where(
             zero, 0.0, y_tm * ((3.0 - 2.0 * p) - log_y * om1_tm) / (om1_tm * om1_tm)
         )
 
-        # ∂log a/∂p via series moments. Need (j_bar, j_psi_bar) over y>0 rows.
         j_bar = np.zeros_like(y_g)
         j_psi_bar = np.zeros_like(y_g)
         if np.any(~zero):
             _, jb_, _, jpb_, *_rest2 = self._saturated_series(y_g[~zero], phi_i[~zero])
             j_bar[~zero] = jb_
             j_psi_bar[~zero] = jpb_
-        # K_const_i = log φ_i + log(p-1) - log y_i - (2-p)
-        # E[j·K_j] = j_bar · K_const + j_psi_bar (since ψ has E[j·ψ(-jα)])
         K_const = log_phi + np.log(p - 1.0) - log_y - tm
         E_jK = j_bar * K_const + j_psi_bar
         dlog_a_dp = np.where(zero, 0.0, E_jK / (om1 * om1) + j_bar / tm)
@@ -4451,31 +4091,7 @@ class Tweedie(Family):
         p-space second derivatives behind tw's analytic ``lsth2``
         (ldTweedie's columns 5/6 in the (θ,ρ) form before the p(θ)
         chain: gam.fit3.r:2802-2806 density part + the C_tweedious
-        series part; family-review B4).
-
-        Density part at μ = y (mgcv's ld[,5]/ld[,6] closed forms with
-        θ_y·y = y^(2−p)/(1−p), k_y = y^(2−p)/(2−p), L = log y):
-
-            d²/dp²   = [θ_y·y(L² − 2L/(1−p) + 2/(1−p)²)
-                        − k_y(L² − 2L/(2−p) + 2/(2−p)²)]/φ
-            d²/dp∂φ  = −x/φ  ⇒  d²/dp∂logφ = −x   (x = density ∂/∂p)
-
-        Series part via Dunn-Smyth moments of log a = log Σ_j W_j with
-        log W_j = j·log z − lgamma(j+1) − lgamma(−jα), α = (2−p)/(1−p),
-        α′ = 1/(1−p)², α″ = 2/(1−p)³, K_j = C + ψ(−jα),
-        C = log φ + log(p−1) − log y − (2−p):
-
-            ∂logW_j/∂p       = j·α′·K_j + j/(2−p)              (=: G_j)
-            ∂²logW_j/∂p²     = j[α″K_j + α′(1/(p−1) + 1
-                                − jα′ψ′(−jα)) + 1/(2−p)²]
-            ∂²logW_j/∂p∂logφ = j·α′
-
-            ∂²log a/∂p²      = E[∂²logW/∂p²] + Var[G]
-            ∂²log a/∂p∂logφ  = α′E[j] − (1/(p−1))·[(α′C + 1/(2−p))Var[j]
-                                + α′(E[j²ψ] − E[jψ]E[j])]
-
-        y = 0 rows contribute nothing (log f_sat ≡ 0 there, matching
-        ldTweedie(y, y)'s all-zero rows at y = 0).
+        series part).
         """
         y = np.asarray(y, dtype=float)
         wt = np.asarray(wt, dtype=float)
@@ -4493,7 +4109,6 @@ class Tweedie(Family):
         y_safe = np.where(zero, 1.0, y_g)
         L = np.where(zero, 0.0, np.log(y_safe))
 
-        # --- density part (μ = y) ---------------------------------------
         y_tm = y_safe**tm
         th_y = y_tm / om1  # θ_y·y = y^(2-p)/(1-p)
         k_y = y_tm / tm
@@ -4504,7 +4119,6 @@ class Tweedie(Family):
         ) / phi_i
         cross_dens = -x_dens  # already in log φ form
 
-        # --- series part -------------------------------------------------
         d2p_ser = np.zeros_like(y_g)
         cross_ser = np.zeros_like(y_g)
         if np.any(~zero):
@@ -4563,15 +4177,12 @@ class tw(Tweedie):
         self.a = float(a)
         self.b = float(b)
         if theta is None:
-            # mgcv's tw() starts at p=1.5; θ such that p(θ)=1.5 is
-            # θ = log((1.5 - a)/(b - 1.5)).
             p_init = 1.5
             theta_init = float(np.log((p_init - self.a) / (self.b - p_init)))
         else:
             theta_init = float(theta)
             p_init = self._p_of_theta(theta_init)
         self.theta = theta_init
-        # Tweedie.__init__ validates 1 < p < 2 and sets p, link.
         super().__init__(p=p_init, link=link)
         if self.link.name not in self._OK_LINKS:
             raise ValueError(
@@ -4599,11 +4210,6 @@ class tw(Tweedie):
         return (b * e + a) / (e + 1.0)
 
     def dev_resids(self, y, mu, wt, theta=None):
-        # mgcv tw dev.resids (efam.r tw:58-66): unlike the fixed-p
-        # parent, a passed working θ is honored by mapping it to p —
-        # estimate.theta probes the deviance at trial θ without
-        # touching the family state. theta=None reads the state
-        # (mgcv's get(".Theta")).
         if theta is None:
             p = self.p
         else:
@@ -4612,9 +4218,6 @@ class tw(Tweedie):
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
-        # y1 <- y + (y==0); theta/kappa algebra with the p==1/p==2
-        # branches structurally unreachable (1 < a ≤ p ≤ b < 2), and
-        # mgcv's pmax(…, 0) clamp on rounding negatives.
         y1 = y + (y == 0.0)
         om1 = 1.0 - p
         tm = 2.0 - p
@@ -4715,8 +4318,7 @@ class tw(Tweedie):
         ∂/∂θ = (∂/∂p)·p′, ∂²/∂θ² = (∂²/∂p²)·p′² + (∂/∂p)·p″,
         ∂²/∂θ∂logφ = (∂²/∂p∂logφ)·p′ — exactly ldTweedie's work.param
         transform (gam.fit3.r:2808-2814). The p-space second
-        derivatives come from :meth:`Tweedie._d2ls_dp` (family-review
-        B4; previously NaN-poisoned).
+        derivatives come from :meth:`Tweedie._d2ls_dp`.
 
         ``lsth2`` feeds the analytic θ rows/cols of the REML Hessian
         (gam.py ``_reml_hessian``): the ``−2·lsth2/γ`` ``ls2`` block for
@@ -4726,12 +4328,6 @@ class tw(Tweedie):
         saved = None
         if theta is not None:
             th = np.asarray(theta, dtype=float).reshape(-1)
-            # Skip the set/restore only on a bit-identical θ. An
-            # approximate (allclose) skip evaluated the chain rule at a
-            # θ up to ~1e-5 away from the one requested — Dd and
-            # dev_resids honor the passed θ exactly, and that
-            # g-vs-deviance inconsistency stalled estimate.theta's
-            # Newton endgame (step halved to nothing at the optimum).
             if not np.array_equal(th, self.get_theta()):
                 saved = self.get_theta().copy()
                 self.set_theta(th)
@@ -4777,9 +4373,6 @@ class tw(Tweedie):
         wt = np.asarray(wt, dtype=float)
         th = float(np.asarray(theta, dtype=float).ravel()[0])
         a, b = self.a, self.b
-        # R-level ^2/^3 on these scalars is R_pow's sequential multiply
-        # (|x| ≤ 11), NOT libm pow — pow(x,3.0) drifted dpth2 by an ulp
-        # at θ>0, which every level-2 θ² row inherits.
         if th > 0:
             p = (b + a * np.exp(-th)) / (1 + np.exp(-th))
             d1 = 1 + np.exp(-th)
@@ -4794,8 +4387,6 @@ class tw(Tweedie):
             dpth2 = ((a - b) * np.exp(2 * th) + (b - a) * np.exp(th)) / (d2 * d2 * d2)
         mu1p = mu ** (1 - p)
         mup = mu**p
-        # mu**(-1-p) == mu**(-p-1) bit-for-bit (commutative exponent add); the
-        # mgcv source recomputes it as `mup1` at level>0 — share the one pow.
         mupm1 = mu ** (-1 - p)
         r = {}
         ymupi = y / mup
@@ -4806,9 +4397,6 @@ class tw(Tweedie):
             i1p = 1 / (1 - p)
             y1 = y + (y == 0)
             logmu = np.log(mu)
-            # Hoist sub-expressions the verbatim mgcv source recomputes (R's
-            # `^`/`log` re-evaluate each time): y**(2-p), log(y1), their product,
-            # and mu**(-p-1) — all byte-identical to the inline forms, just once.
             logy1 = np.log(y1)
             y2p = y ** (2 - p)
             y2plogy = y2p * logy1
@@ -4843,11 +4431,6 @@ class tw(Tweedie):
             mup2 = mup1 / mu
             r["Dmu4"] = 2 * wt * mup2 * p * (p + 1) * (y * (p + 2) / mu + 1 - p)
             y2plog2y = y2plogy * logy1
-            # R_pow scalars: (2-p)^2/^3, (1-p)^2/^3, dpth1^2 are all
-            # sequential multiplies in R; and mgcv's parenthesization
-            # multiplies the 6-term sum by dpth1² BEFORE 2·wt —
-            # `2*wt*((…)*dpth1^2)` — the association order matters at
-            # the last ulp.
             tm2 = (2 - p) * (2 - p)
             tm3 = tm2 * (2 - p)
             om2 = (1 - p) * (1 - p)
@@ -4904,11 +4487,6 @@ class tw(Tweedie):
         return f"tw(p={self.p:.4g}, link={self.link.name}, a={self.a!r}, b={self.b!r})"
 
 
-# ---------------------------------------------------------------------------
-# Scaled-t — mgcv's ``scat()`` extended family
-# ---------------------------------------------------------------------------
-
-
 class Scat(Family):
     """Scaled-t extended family — direct port of mgcv ``scat()``
     (efam.r:3552-3768).
@@ -4934,10 +4512,6 @@ class Scat(Family):
     name = "scat"
     canonical_link_name = "identity"
     _newton_canonical = "none"  # efam.r:2641 (canonical=""); extended
-    # path is always full Newton anyway.
-    # mgcv treats scat as a fixed-scale family (``family$scale = 1``):
-    # σ is in θ, not in φ. The bam/gam outer Newton therefore has no
-    # log-φ slot for scat.
     scale_known = True
     is_extended = True
     n_theta = 2
@@ -4979,14 +4553,11 @@ class Scat(Family):
                 n_theta = 0
         else:
             ini = np.array([-2.0, -1.0], dtype=float)
-        # Apply the actual instance settings.
         self.n_theta = int(n_theta)
         self.estimate_theta_callback = bool(n_theta > 0)
         self._min_df = float(min_df)
         self._theta = ini.copy()
         super().__init__(link=link)
-
-    # ----- θ accessors (mgcv getTheta/putTheta) -------------------------
 
     def set_theta(self, values) -> None:
         v = np.asarray(values, dtype=float)
@@ -5011,10 +4582,7 @@ class Scat(Family):
     def min_df(self) -> float:
         return self._min_df
 
-    # ----- variance / dev_resids / aic / ls -----------------------------
-
     def variance(self, mu):
-        # Marginal var of σ·T(ν): σ²·ν/(ν-2). Used for sp init / Pearson.
         nu = np.float64(np.exp(self._theta[0]) + self._min_df)
         sig = np.float64(np.exp(self._theta[1]))
         return np.full(np.shape(mu), sig * sig * nu / max(nu - 2.0, 1e-10), dtype=float)
@@ -5091,19 +4659,11 @@ class Scat(Family):
         nu2 = nu - self._min_df  # = exp(th[0])
         nu2nu = nu2 / nu
         nu12 = (nu + 1.0) / 2.0
-        # ls_i = lgamma((ν+1)/2) - lgamma(ν/2) - log(σ·sqrt(π·ν))
         term0 = gammaln(nu12) - gammaln(nu / 2.0) - np.log(sig * np.sqrt(np.pi * nu))
         ls0 = float(np.sum(term0 * w))
-        # First derivatives (per-obs, then summed):
-        #   ∂ls/∂θ₀ per-obs = nu2 · ψ((ν+1)/2)/2 − nu2 · ψ(ν/2)/2 − 0.5·nu2nu
-        #   ∂ls/∂θ₁ per-obs = -1   (constant)
         col0 = nu2 * digamma(nu12) / 2.0 - nu2 * digamma(nu / 2.0) / 2.0 - 0.5 * nu2nu
         LSTH = np.column_stack([w * col0, -1.0 * w])
         lsth = LSTH.sum(axis=0)
-        # Hessian (only [1,1] is nonzero per mgcv's ls):
-        #   ∂²ls/∂θ₀² per-obs = nu2² · ψ′((ν+1)/2)/4 + nu2 · ψ((ν+1)/2)/2
-        #                       − nu2² · ψ′(ν/2)/4 − nu2 · ψ(ν/2)/2
-        #                       + 0.5·nu2nu² − 0.5·nu2nu
         d11 = (
             nu2 * nu2 * polygamma(1, nu12) / 4.0
             + nu2 * digamma(nu12) / 2.0
@@ -5146,16 +4706,6 @@ class Scat(Family):
     # ----- Dd: μ- and θ-derivatives of −logL  (mgcv efam.r:3616-3687) ---
 
     def Dd(self, y, mu, theta, wt, level: int = 0) -> dict:
-        # Direct line-by-line port of mgcv ``scat$Dd``. Every variable
-        # name and bracketing matches the source so future diffs against
-        # mgcv stay mechanical.
-        #
-        # Note: nu/sig are kept as ``np.float64`` (not Python ``float``)
-        # so divisions by zero in the σ→0 / ν→∞ extremes propagate as
-        # ``inf``/``nan`` instead of raising ``ZeroDivisionError``. The
-        # ``_estimate_theta`` Newton then sees a non-finite ``nll1`` and
-        # step-halves naturally — mirroring mgcv R, which silently
-        # produces ``Inf`` here.
         min_df = self._min_df
         th = np.asarray(theta, dtype=float)
         nu = np.float64(np.exp(th[0]) + min_df)
@@ -5165,8 +4715,6 @@ class Scat(Family):
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         w = np.asarray(wt, dtype=float)
-        # mgcv broadcasts ``wt`` if scalar; when w is scalar, multiply
-        # against length-n arrays via numpy broadcasting (works as-is).
         ym = y - mu
         a = 1.0 + (ym / sig) ** 2 / nu
         nu1ym = nu1 * ym
@@ -5179,8 +4727,6 @@ class Scat(Family):
         oo: dict = {}
         oo["Dmu"] = -2.0 * w * f
         oo["Dmu2"] = 2.0 * w * nu1 * (1.0 / nusig2a - 2.0 * f1**2)
-        # E[Dmu2] is the Fisher information per-obs at expected (y-μ)²:
-        # 2·(ν+1) / (σ²·(ν+3)). Vectorised to length n.
         EDmu2_scalar = 2.0 * nu1 / (sig * sig) / (nu + 3.0)
         oo["EDmu2"] = np.full(n, EDmu2_scalar, dtype=float)
 
@@ -5434,8 +4980,6 @@ class nb(Family):
         self._theta = np.array([ini], dtype=float)
         super().__init__(link=link)
 
-    # ----- θ accessors ---------------------------------------------------
-
     def set_theta(self, values) -> None:
         v = np.asarray(values, dtype=float).reshape(-1)
         if v.shape != (1,):
@@ -5448,8 +4992,6 @@ class nb(Family):
         if trans:
             return np.exp(self._theta).copy()
         return self._theta.copy()
-
-    # ----- variance ------------------------------------------------------
 
     def variance(self, mu):
         Th = float(np.exp(self._theta[0]))
@@ -5466,8 +5008,6 @@ class nb(Family):
 
     def d3var(self, mu):
         return np.zeros_like(np.asarray(mu, dtype=float))
-
-    # ----- deviance / likelihood ----------------------------------------
 
     def dev_resids(self, y, mu, wt, theta=None):
         # mgcv (efam.r:199-205): 2·wt·[y·log(max(1,y)/μ)
@@ -5501,9 +5041,6 @@ class nb(Family):
         if level > 0:
             r["Dth"] = -2.0 * wt * Th * (np.log(yth / muth) + (1.0 - yth / muth))
             r["Dmuth"] = 2.0 * wt * Th * (1.0 - yth / muth) / muth
-            # mu^3/mu^4 are R_pow: sequential multiplies for |x|≤11,
-            # libm pow above — numpy ** takes the pow loop everywhere
-            # and drifts the last ulp (`_rpow_int` is the port).
             r["Dmu3"] = 4.0 * wt * (yth / _rpow_int(muth, 3) - y / _rpow_int(mu, 3))
             r["Dmu2th"] = 2.0 * wt * Th * (2.0 * yth / muth - 1.0) / muth**2
             r["EDmu2th"] = 2.0 * wt / muth**2
@@ -5567,10 +5104,6 @@ class nb(Family):
         Th = float(np.exp(th0))
         y = np.asarray(y, dtype=float)
         w = np.asarray(wt, dtype=float)
-        # The REML grad/Hessian/score each evaluate this saturated-likelihood
-        # at the SAME (θ, scale) within an outer step (profiled 17 calls / 5
-        # distinct = 71% redundant). It's a pure function of (y, wt, θ); memoise
-        # like Tweedie._saturated_series (bit-identical — callers only read).
         cache = getattr(self, "_ls_cache", None)
         if cache is None:
             cache = self._ls_cache = {}
@@ -5586,9 +5119,6 @@ class nb(Family):
         hit = cache.get(key)
         if hit is not None:
             return hit
-        # R-level lgamma/digamma are nmath lgammafn/dpsifn — scipy's
-        # gammaln/digamma drift the last ulp (the nb rows of the audit-2
-        # B14 census residue).
         ylogy = np.where(y > 0, y * np.log(np.maximum(y, 1e-300)), 0.0)
         term = (
             (y + Th) * np.log(y + Th)
@@ -5598,7 +5128,6 @@ class nb(Family):
             + _nmath._lgammafn(Th)
             - _lgammafn_arr(Th + y)
         )
-        # R sum() accumulates left-to-right in double on arm64 — _rsum.
         ls0 = -float(_rsum(term * w))
         yth = y + Th
         lyth = np.log(yth)
@@ -5632,15 +5161,8 @@ class nb(Family):
         return res
 
     def ls(self, y, wt, scale):
-        # Standard 3-slot saturated log-lik (the shared REML criterion /
-        # Hessian tail's signature): value from the extended ls at the
-        # family's current θ; nb's φ is fixed at 1 (mgcv nb()$scale is
-        # NULL), so the log φ derivative slots are 0 — the same adapter
-        # shape as the other scale-known extended families (cnorm etc.).
         ls0 = float(self.ls_extended(y, wt, scale=scale)["ls"])
         return np.array([ls0, 0.0, 0.0], dtype=float)
-
-    # ----- initialization / validity -------------------------------------
 
     def initialize(self, y, wt):
         y = np.asarray(y, dtype=float)
@@ -5648,7 +5170,6 @@ class nb(Family):
             raise ValueError(
                 "negative values not allowed for the negative binomial family"
             )
-        # mgcv: mustart <- y + (y == 0)/6
         return y + (y == 0.0) / 6.0
 
     def validmu(self, mu) -> bool:
@@ -5675,9 +5196,6 @@ class nb(Family):
     def rd(self, rng, mu, wt, scale):
         Th = float(self.get_theta(trans=True)[0])
         mu = np.asarray(mu, dtype=float)
-        # R's rnbinom(n, size=Θ, mu): per-element rpois(rgamma(Θ, μ/Θ)),
-        # interleaved (gamma then poisson per draw, not block) so the draw
-        # order matches R's stream — required for set.seed bit-exactness.
         out = np.empty(mu.shape[0])
         for i in range(mu.shape[0]):
             out[i] = rng.poisson(rng.gamma(shape=Th, scale=mu[i] / Th))
@@ -5724,8 +5242,6 @@ class negbin(Family):
 
     def __init__(self, theta=None, link: str = "log"):
         if theta is None:
-            # mgcv: theta = stop("'theta' must be specified") — the lazy
-            # default fires on first access (assign(".Theta", theta, env)).
             raise ValueError("'theta' must be specified")
         th = np.asarray(theta, dtype=float).reshape(-1)
         if th.size < 1 or not np.all(np.isfinite(th)) or np.any(th <= 0):
@@ -5733,8 +5249,6 @@ class negbin(Family):
                 "negbin theta must be positive and finite; use nb() to estimate theta"
             )
         self._theta_all = th.copy()
-        # famname: paste("Negative Binomial(", format(round(theta,3)), ")")
-        # — a VECTOR in R for multi-θ; mgcv only ever reads family[1].
         self.name = f"Negative Binomial({np.round(th[0], 3):g})"
         super().__init__(link=link)
 
@@ -5766,7 +5280,6 @@ class negbin(Family):
     # ----- deviance / likelihood (gam.fit3.r:2599-2617) ------------------
 
     def dev_resids(self, y, mu, wt, theta=None):
-        # 2·wt·[y·log(pmax(1,y)/μ) − (y+Θ)·log((y+Θ)/(μ+Θ))]
         Th = self._th
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
@@ -5781,8 +5294,6 @@ class negbin(Family):
         )
 
     def aic(self, y, mu, dev, wt, n, theta=None):
-        # (y+Θ)·log(μ+Θ) − y·log(μ) + lΓ(y+1) − Θ·log(Θ) + lΓ(Θ) − lΓ(Θ+y);
-        # 2·Σ term·wt. ``dev`` is unused (Θ-form direct).
         Th = self._th
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
@@ -5798,12 +5309,9 @@ class negbin(Family):
         return 2.0 * float(np.sum(term * wt))
 
     def ls(self, y, wt, scale):
-        # Saturated log-lik at μ=y; scale plays no role (φ ≡ 1), so both
-        # log-φ derivatives are 0 — mgcv returns c(-sum(term*w), 0, 0).
         Th = self._th
         y = np.asarray(y, dtype=float)
         wt = np.asarray(wt, dtype=float)
-        # ylogy <- y; ylogy[y>0] <- y·log(y)  (y=0 row keeps 0).
         ylogy = np.where(y > 0, y * np.log(np.maximum(y, 1e-300)), y)
         term = (
             (y + Th) * np.log(y + Th)
@@ -5823,7 +5331,6 @@ class negbin(Family):
             raise ValueError(
                 "negative values not allowed for the negative binomial family"
             )
-        # mustart <- y + (y == 0)/6
         return y + (y == 0.0) / 6.0
 
     def validmu(self, mu) -> bool:
@@ -5833,7 +5340,6 @@ class negbin(Family):
     # ----- qq hooks (gam.fit3.r:2624-2632) --------------------------------
 
     def qf(self, p, mu, wt, scale):
-        # qnbinom(p, size=Θ, mu=μ) — R dispatches the mu-parametrization.
         return _nmath._disp(
             "qnbinom_mu",
             _nmath.qnbinom_mu,
@@ -5842,8 +5348,6 @@ class negbin(Family):
         )
 
     def rd(self, rng, mu, wt, scale):
-        # rnbinom(n=length(mu), size=Θ, mu=μ): per-element
-        # rpois(rgamma(Θ, μ/Θ)), interleaved to match R's stream order.
         Th = self._th
         mu = np.asarray(mu, dtype=float)
         out = np.empty(mu.shape[0])
@@ -5908,11 +5412,8 @@ class betar(Family):
             ini = 0.0
         self.n_theta = int(n_theta)
         self._theta = np.array([ini], dtype=float)
-        # mgcv default eps = .Machine$double.eps*100
         self._eps = float(np.finfo(float).eps * 100) if eps is None else float(eps)
         super().__init__(link=link)
-
-    # ----- θ accessors ---------------------------------------------------
 
     def set_theta(self, values) -> None:
         v = np.asarray(values, dtype=float).reshape(-1)
@@ -5926,8 +5427,6 @@ class betar(Family):
         if trans:
             return np.exp(self._theta).copy()
         return self._theta.copy()
-
-    # ----- variance ------------------------------------------------------
 
     def variance(self, mu):
         th = float(self._theta[0])
@@ -5944,8 +5443,6 @@ class betar(Family):
 
     def d3var(self, mu):
         return np.zeros_like(np.asarray(mu, dtype=float))
-
-    # ----- deviance (−2logLik) / Dd / aic --------------------------------
 
     def dev_resids(self, y, mu, wt, theta=None):
         # mgcv betar dev.resids (efam.r:3316-3324): −2logLik per datum
@@ -6068,8 +5565,6 @@ class betar(Family):
     def ls(self, y, wt, scale):
         return np.array([0.0, 0.0, 0.0], dtype=float)
 
-    # ----- saturated likelihood (Newton) ---------------------------------
-
     def saturated_ll(self, y, wt, theta):
         """Saturated log-lik by per-datum Newton — mgcv ``saturated.ll``
         (efam.r:3393-3462). ``theta`` is the precision φ (already
@@ -6176,8 +5671,6 @@ class betar(Family):
             warnings.warn("saturated likelihood may be inaccurate", stacklevel=2)
         return {"f": float(np.sum(wt * LS)), "term": LS, "mu": muout}
 
-    # ----- initialization / validity -------------------------------------
-
     def preinitialize(self, y) -> dict | None:
         # mgcv betar preinitialize (efam.r:3387-3391): clamp y into
         # (eps, 1−eps) so the log-lik is finite at the boundaries.
@@ -6188,7 +5681,6 @@ class betar(Family):
         return {"y": y}
 
     def initialize(self, y, wt):
-        # mgcv: mustart <- y
         return np.asarray(y, dtype=float).copy()
 
     def validmu(self, mu) -> bool:
@@ -6624,8 +6116,6 @@ class ocat(Family):
         self._theta = np.asarray(ini, dtype=float).reshape(-1)
         super().__init__(link=link)
 
-    # ----- θ accessors ---------------------------------------------------
-
     def set_theta(self, values) -> None:
         v = np.asarray(values, dtype=float).reshape(-1)
         if v.shape[0] != self._R - 2:
@@ -6639,15 +6129,12 @@ class ocat(Family):
         th = self._theta.copy()
         if not trans:
             return th
-        # Finite cut points (R−1 of them): [−1, −1+cumsum(e^θ)].
         R = th.shape[0] + 2
         alpha = np.zeros(R - 1)
         alpha[0] = -1.0
         if R > 2:
             alpha[1:] = alpha[0] + np.cumsum(np.exp(th))
         return alpha
-
-    # ----- deviance / Dd / aic -------------------------------------------
 
     def dev_resids(self, y, mu, wt, theta=None):
         th = self._theta if theta is None else np.asarray(theta, dtype=float)
@@ -6682,10 +6169,7 @@ class ocat(Family):
         }
 
     def ls(self, y, wt, scale):
-        # Scale-known: the log-φ ls path is never taken; provide the stub.
         return np.array([0.0, 0.0, 0.0], dtype=float)
-
-    # ----- initialization / validity -------------------------------------
 
     def preinitialize(self, y) -> dict | None:
         # mgcv ocat preinitialize (efam.r:2926-2945): integer-class check +
@@ -6769,7 +6253,6 @@ class ocat(Family):
                 se_v = np.sqrt(np.maximum(0.0, np.einsum("ij,jk,ik->i", X, Vb, X)))
             prob, sep = _ocat_prob(cuts, mu, se_v)
             return {"fit": prob, "se_fit": sep} if se else {"fit": prob}
-        # Category implied by the latent η (mean of the latent variable).
         eta = np.asarray(eta, dtype=float)
         alpha = np.concatenate([[-np.inf], cuts, [np.inf]])
         fv = np.zeros(eta.shape[0], dtype=float)
@@ -6899,7 +6382,6 @@ def _zip_Dd(y, mu, theta, wt, b, level: int = 0) -> dict:
         pllth, plllth = g["p_llth"], g["p_lllth"]
         pth2, plth2, pllth2 = g["p_th2"], g["p_lth2"], g["p_llth2"]
         plll, pllll = g["p_lll"], g["p_llll"]
-        # p.thth, p.lthth, p.lthlth, p.llthth (ordered th1th1, th1th2, th2th2)
         pthth = np.zeros((y.shape[0], 3))
         pthth[:, 0] = pth[:, 0] ** 2
         pthth[:, 1] = pth[:, 0] * pth[:, 1]
@@ -7023,8 +6505,6 @@ class ziP(Family):
         self._theta = ini.astype(float)
         super().__init__(link=link)
 
-    # ----- θ accessors ---------------------------------------------------
-
     def set_theta(self, values) -> None:
         v = np.asarray(values, dtype=float).reshape(-1)
         if v.shape[0] != 2:
@@ -7038,8 +6518,6 @@ class ziP(Family):
         if trans:
             th[1] = self._b + np.exp(th[1])
         return th
-
-    # ----- deviance / Dd / aic -------------------------------------------
 
     def _presence_lp(self, mu, theta):
         return theta[0] + (self._b + np.exp(theta[1])) * np.asarray(mu, dtype=float)
@@ -7084,8 +6562,6 @@ class ziP(Family):
     def ls(self, y, wt, scale):
         return np.array([0.0, 0.0, 0.0], dtype=float)
 
-    # ----- saturated likelihood (Newton over the latent log-mean) --------
-
     def saturated_ll(self, y, wt):
         """mgcv ``saturated.ll`` (efam.r:4032-4068): per-datum Newton
         minimization of the ZIP deviance over the latent log-mean μ (only
@@ -7129,8 +6605,6 @@ class ziP(Family):
         out[pind] = l
         return out
 
-    # ----- initialization / validity -------------------------------------
-
     def initialize(self, y, wt):
         # mgcv ziP initialize (efam.r:3970-3978).
         y = np.asarray(y, dtype=float)
@@ -7146,8 +6620,6 @@ class ziP(Family):
 
     def validmu(self, mu) -> bool:
         return bool(np.all(np.isfinite(np.asarray(mu))))
-
-    # ----- E(y), postproc, residuals, predict ----------------------------
 
     def _expected_y(self, gamma):
         """E(y) = p·E(y | present): p the presence prob, E(y|present) the
@@ -7341,7 +6813,6 @@ def _cnorm_ddnorm(x0, x1, a0=0.0, a1=0.0, s0=1.0, s1=1.0):
         p0 = _dnorm_log(x0) + a0
         p1 = _dnorm_log(x1) + a1
     dp = p0.copy()
-    # sign of c (computed on the original, pre-swap p0/p1)
     sgn = np.ones(shape)
     flip = (
         ((s1 < 0) & (s0 > 0))
@@ -7349,7 +6820,6 @@ def _cnorm_ddnorm(x0, x1, a0=0.0, a1=0.0, s0=1.0, s1=1.0):
         | ((s1 < 0) & (s0 < 0) & (p1 > p0))
     )
     sgn[flip] = -1.0
-    # swap so p0 ≤ p1 (keeps the logexm1/logexp1 arguments well-signed)
     swap = p0 > p1
     tmp = p1[swap].copy()
     p1[swap] = p0[swap]
@@ -7358,7 +6828,6 @@ def _cnorm_ddnorm(x0, x1, a0=0.0, a1=0.0, s0=1.0, s1=1.0):
     dp[same] = p0[same] + _logexm1(p1[same] - p0[same])
     opp = (s0 * s1) < 0
     dp[opp] = p0[opp] + _cnorm_logexp1(p1[opp] - p0[opp])
-    # s0/s1 == 0 edges (unreachable for continuous z; ported for fidelity)
     z0m = s0 == 0
     if np.any(z0m):
         sgn[z0m] = s1[z0m]
@@ -7814,8 +7283,6 @@ class cnorm(Family):
         self._censorfull = None
         super().__init__(link=link)
 
-    # ----- θ accessors / censoring bound ---------------------------------
-
     def set_theta(self, values) -> None:
         v = np.asarray(values, dtype=float).reshape(-1)
         if v.shape[0] != 1:
@@ -7851,8 +7318,6 @@ class cnorm(Family):
             if ind is None
             else self._censorfull[np.asarray(ind, dtype=int)]
         )
-
-    # ----- deviance / Dd / aic -------------------------------------------
 
     def dev_resids(self, y, mu, wt, theta=None):
         th = float(
@@ -7892,8 +7357,6 @@ class cnorm(Family):
         ls = _cnorm_ls_val(y, wt, float(self._theta[0]), self._censor)
         return np.array([ls, 0.0, 0.0], dtype=float)
 
-    # ----- initialization / validity -------------------------------------
-
     def initialize(self, y, wt):
         # mgcv cnorm initialize (efam.r:1117-1124): the matrix split has
         # already happened at intake; mustart = y (identity) or
@@ -7909,8 +7372,6 @@ class cnorm(Family):
         if self.link.name == "identity":
             return bool(np.all(np.isfinite(mu)))
         return bool(np.all(mu > 0))
-
-    # ----- postproc ------------------------------------------------------
 
     def postproc(
         self, y, prior_weights, fitted, linear_predictors, offset, intercept
@@ -7957,7 +7418,6 @@ def _rpow_int(x, k):
         return seq
 
     def _pow1(v):
-        # C pow overflows to ±Inf silently; math.pow raises instead.
         try:
             return math.pow(v, float(k))
         except OverflowError:
@@ -8037,7 +7497,6 @@ def _dppois(y0, y1, mu, log_p=True):
         ii = ~i1 & ~i0 & free  # both upper tail
         p[ii] = p1[ii] + _logexm1(p0[ii] - p1[ii])
         free[ii] = False
-        # remainder are opposite tails — no problem with cancellation
         ii = ~i1 & i0 & free  # p1 upper p0 lower (converse impossible)
         p[ii] = np.log(1.0 - np.exp(p1[ii]) - np.exp(p0[ii]))
     return p if log_p else np.exp(p)
@@ -8137,7 +7596,6 @@ def _cpois_Dd(y, mu, censor, level=0):
                 if level > 1:
                     f4[idx] = np.exp(_cpois_ppois_log(yil - 4.0, mil, lt) - lf)
 
-    # ^ sites through _rpow_int — R_pow, not numpy ** (see its docstring).
     r = {"Dmu": -2.0 * (f1 - 1.0), "Dmu2": -2.0 * (f2 - _rpow_int(f1, 2))}
     r["EDmu2"] = r["Dmu2"]
     if level > 0:
@@ -8245,14 +7703,10 @@ class cpois(Family):
         self._censorfull = None
         super().__init__(link=link)
 
-    # ----- θ accessors / censoring bound ---------------------------------
-
     def set_theta(self, values) -> None:
-        # mgcv putTheta is an empty function — accept and ignore.
         pass
 
     def get_theta(self, trans: bool = False) -> np.ndarray:
-        # mgcv getTheta has an empty body (returns NULL) — no parameters.
         return np.zeros(0)
 
     def set_censor(self, censor) -> None:
@@ -8279,8 +7733,6 @@ class cpois(Family):
             else self._censorfull[np.asarray(ind, dtype=int)]
         )
 
-    # ----- deviance / Dd / aic -------------------------------------------
-
     def dev_resids(self, y, mu, wt, theta=None):
         return _cpois_dev_resids(y, mu, self._censor)
 
@@ -8304,8 +7756,6 @@ class cpois(Family):
     def ls(self, y, wt, scale):
         return np.array([_cpois_ls_val(y, self._censor), 0.0, 0.0])
 
-    # ----- initialization / validity -------------------------------------
-
     def initialize(self, y, wt):
         # mgcv cpois initialize (efam.r:493-500): the matrix split happens
         # at intake; mustart = y (identity) or pmax(y, min(y>0)) — min of
@@ -8323,8 +7773,6 @@ class cpois(Family):
         if self.link.name == "log":
             return bool(np.all(mu > 0))
         return bool(np.all(mu >= 0))
-
-    # ----- postproc ------------------------------------------------------
 
     def postproc(
         self, y, prior_weights, fitted, linear_predictors, offset, intercept
@@ -8850,8 +8298,6 @@ class clog(Family):
         self._censorfull = None
         super().__init__(link=link)
 
-    # ----- θ accessors / censoring bound ---------------------------------
-
     def set_theta(self, values) -> None:
         v = np.asarray(values, dtype=float).reshape(-1)
         if v.shape[0] != 1:
@@ -8882,8 +8328,6 @@ class clog(Family):
             if ind is None
             else self._censorfull[np.asarray(ind, dtype=int)]
         )
-
-    # ----- deviance / Dd / aic -------------------------------------------
 
     def dev_resids(self, y, mu, wt, theta=None):
         th = float(
@@ -8922,8 +8366,6 @@ class clog(Family):
         ls0, _, _, _ = _clog_ls(y, wt, float(self._theta[0]), self._censor)
         return np.array([ls0, 0.0, 0.0])
 
-    # ----- initialization / validity -------------------------------------
-
     def initialize(self, y, wt):
         # mgcv clog initialize (efam.r:2566-2573): mustart = y (identity)
         # or pmax(y, min(y>0)) — the LOGICAL min, as in cnorm/cpois.
@@ -8937,8 +8379,6 @@ class clog(Family):
         if self.link.name == "identity":
             return bool(np.all(np.isfinite(mu)))
         return bool(np.all(mu > 0))
-
-    # ----- postproc ------------------------------------------------------
 
     def postproc(
         self, y, prior_weights, fitted, linear_predictors, offset, intercept
@@ -9049,8 +8489,6 @@ def _bcg_bc_z(y, la, ls_variant=False):
             z = np.where(nina, ylly - yl2 * la / 2.0 + yl2 * logy * (la * la) / 6.0, z)
         else:
             z = np.where(nina, (_rpow(y, la) - 1.0) / la, z)
-        # (y==Inf & l<0)|(y==0 & l>0): mgcv computes z[ii]-1/l[ii] and
-        # discards it — nothing to do.
         z[nina & (y == np.inf) & (la >= 0.0)] = np.inf
         low = (y <= 0.0) if ls_variant else (y == 0.0)
         z[nina & low & (la <= 0.0)] = -np.inf
@@ -9919,11 +9357,8 @@ class bcg(Family):
             if t.shape[0] != 2:
                 raise ValueError("theta should be length 2")
             if t[1] <= 0:
-                # initial values: mgcv keeps the RAW pair (its
-                # log(-theta[2]) line runs after iniTheta was taken).
                 ini = t.copy()
             else:
-                # fixed: mgcv's c(theta[1], log(theta)) — length 3.
                 with np.errstate(invalid="ignore", divide="ignore"):
                     ini = np.concatenate([t[:1], np.log(t)])
                 self.n_theta = 0
@@ -9940,10 +9375,7 @@ class bcg(Family):
         self._censorfull = None
         super().__init__(link=link)
 
-    # ----- θ accessors / censoring bound ---------------------------------
-
     def set_theta(self, values) -> None:
-        # mgcv putTheta stores whatever it is handed (no validation).
         self._theta = np.asarray(values, dtype=float).reshape(-1).copy()
 
     def get_theta(self, trans: bool = False) -> np.ndarray:
@@ -9970,8 +9402,6 @@ class bcg(Family):
             else self._censorfull[np.asarray(ind, dtype=int)]
         )
 
-    # ----- deviance / Dd / aic -------------------------------------------
-
     def dev_resids(self, y, mu, wt, theta=None):
         th = (
             self._theta if theta is None else np.asarray(theta, dtype=float).reshape(-1)
@@ -9995,7 +9425,6 @@ class bcg(Family):
         )
         ls = _bcg_ls(y, wt, th, self._censor)
         n = np.asarray(y).shape[0]
-        # mgcv: lsth1 = c(0,0), LSTH1 = matrix(0,n,2), lsth2 = 2×2 zeros.
         return {
             "ls": ls,
             "lsth1": np.zeros(2),
@@ -10005,8 +9434,6 @@ class bcg(Family):
 
     def ls(self, y, wt, scale):
         return np.array([_bcg_ls(y, wt, self._theta, self._censor), 0.0, 0.0])
-
-    # ----- residuals ------------------------------------------------------
 
     def residuals_extended(self, y, mu, wt, type: str = "deviance"):
         """Deviance residuals with mgcv's ``attr(d,"sign")`` — the sign
@@ -10023,8 +9450,6 @@ class bcg(Family):
         )
         return np.sqrt(np.maximum(d, 0.0)) * sgn
 
-    # ----- initialization / validity -------------------------------------
-
     def initialize(self, y, wt):
         # mgcv bcg initialize (efam.r:2127-2134): negative responses
         # stop; mustart = y (identity) or pmax(y, min(y>0)).
@@ -10040,8 +9465,6 @@ class bcg(Family):
         if self.link.name == "identity":
             return bool(np.all(np.isfinite(mu)))
         return bool(np.all(mu > 0))
-
-    # ----- postproc ------------------------------------------------------
 
     def postproc(
         self, y, prior_weights, fitted, linear_predictors, offset, intercept
@@ -10099,9 +9522,6 @@ def _gfam_exp_ls(fam, y, w, scale):
             logp = _nmath._disp("dpois", _nmath.dpois, [y, y], (True,))
         return np.array([_rsum(logp * w), 0.0, 0.0])
     if name == "binomial":
-        # -binomial()$aic(y, n=1, mu=y, wt=w, dev=0)/2 with stats::
-        # binomial's aic: m <- wt (n all 1);
-        # -2·Σ ifelse(m>0, wt/m, 0)·dbinom(round(m·y), round(m), y, TRUE)
         m = w
         good = m > 0
         weight = np.where(good, w / np.where(good, m, 1.0), 0.0)
@@ -10115,8 +9535,6 @@ def _gfam_exp_ls(fam, y, w, scale):
         sw = scale / w
         isw = 1.0 / sw
         lsw = np.log(sw)
-        # R-level lgamma/digamma/trigamma are nmath's (NOT scipy's) —
-        # lgammafn and psigamma(·, 0/1).
         k1 = -_lgammafn_arr(isw) - lsw / sw - isw
         ls0 = _rsum(k1 - np.log(y))
         k2 = (_nmath.psigamma_vec(isw, 0) + lsw) / (sw * sw)
@@ -10128,7 +9546,6 @@ def _gfam_exp_ls(fam, y, w, scale):
         d2 = _rsum(k3 / _rpow_int(w, 2))
         return np.array([ls0, d1, d2])
     if name in ("quasi", "quasipoisson", "quasibinomial"):
-        # extended quasi-likelihood form
         good = w > 0
         nobs = float(np.sum(good))
         with np.errstate(divide="ignore"):
@@ -10177,7 +9594,6 @@ def _gfam_filth(n, j, nth):
     θ² vector (n total θs, row-major upper triangle), of the θ²-block of
     a family whose ``nth`` θs start at 1-based position ``j``. Order
     matches the family's own packed Dth2 columns."""
-    # a = A[A <= t(A)[, nth:1]] column-major = 1..nth, 1..nth-1, ..., 1
     a = np.concatenate([np.arange(1, nth - c + 1) for c in range(nth)])
     reps = np.repeat(_gfam_kj(np.arange(nth), n - j + 1), np.arange(nth, 0, -1))
     return (reps + a + _gfam_kj(j - 1, n)) - 1
@@ -10361,8 +9777,6 @@ class gfam(Family):
             return -1.0 if isinstance(f, tw) else 1.0
         return 1.0 if f.name in ("poisson", "binomial") else -1.0
 
-    # ----- family-index plumbing -----------------------------------------
-
     def set_fi(self, fi) -> None:
         """Stash the family-index column (the ``attr(fl,"fi")`` write in
         gfam's preinitialize, gfam.r:391). Called by the gam intake once
@@ -10434,8 +9848,6 @@ class gfam(Family):
             if f.n_theta > 0:
                 f.set_theta(v[i0 : i0 + f.n_theta])
             i0 += nth
-
-    # ----- deviance and its derivatives ------------------------------------
 
     def dev_resids(self, y, mu, wt, theta=None) -> np.ndarray:
         """gfam.r:88-109: member deviances, each divided by its
@@ -10668,8 +10080,6 @@ class gfam(Family):
                 aic += float(f.aic(y[ii], mu[ii], dev_i, wt[ii], n1[ii]))
         return aic
 
-    # ----- pre/post hooks ---------------------------------------------------
-
     def preinitialize(self, y) -> dict | None:
         """gfam.r:380-418: validate the family index, run member
         preinitializes (may modify y and θ), assemble the initial θ.
@@ -10773,8 +10183,6 @@ class gfam(Family):
             else np.asarray(prior_weights, dtype=float)
         )
         if type == "working":
-            # mgcv returns the fit's stored working residuals; hea
-            # computes them as its standard working path does.
             eta = self.link.link(fitted)
             return (y - fitted) / self.link.mu_eta(eta)
         rsd = y.copy()
@@ -10965,27 +10373,6 @@ _GFAM_MEMBER_NAMES.update(
 )
 
 
-# ---------------------------------------------------------------------------
-# General-family seam — mgcv gamlss.r authoring kit (§5.3 prerequisite 5).
-#
-# General families (gam.fit5: multiple linear predictors, likelihood
-# supplied as ``ll`` instead of a deviance) are authored from per-datum
-# derivative arrays of the log-likelihood w.r.t. the distribution
-# parameters (μ₁..μ_K), packed in upper-triangular order. The kit:
-#   * trind_generator — symmetric index lookups into the packed arrays
-#   * gamlss_etamu    — chain rule μ-derivatives → η-derivatives through
-#                        the per-LP link derivatives
-#   * gamlss_gH       — assemble the coefficient-space gradient/Hessian/
-#                        ∂H/∂ρ/tr(H⁻¹∂²H) that gam.fit5 consumes
-# A custom family supplies l1..l4 + links; everything downstream is
-# generic. Ported complete-array/dense paths
-# only — out of scope (absent, never silent): the "remap" dropped-zero-
-# column optimization (multinom-scale K), discrete (bam) X lists,
-# sandwich, bootstrap deriv<0, the non-linear g.index corrections.
-# Index convention: everything 0-based (R's 1-based m and dims shifted).
-# ---------------------------------------------------------------------------
-
-
 def trind_generator(
     K: int = 2, ifunc: bool = False, reverse: bool | None = None
 ) -> dict:
@@ -11008,7 +10395,7 @@ def trind_generator(
     if reverse is None:
         reverse = not ifunc
     if ifunc:
-        # mgcv's closed forms (1-based); wrap for 0-based i/o.
+
         def i2(i: int, j: int) -> int:
             i, j = sorted((i + 1, j + 1))
             return round((i - 1) * (2 * K + 2 - i) / 2 + j - i + 1) - 1
@@ -11553,8 +10940,6 @@ def gamlss_gH(
             Hinv = V @ (dvals[:, None] * V.T)
             Xe_solved = (D[:, None] * (Hinv @ (D[:, None] * Xe.T))).T
         else:
-            # fh: pivoted upper-Cholesky (R chol(...,pivot=TRUE) analog)
-            # with pivot vector in fh[1]; D the diagonal preconditioner.
             R_f, piv = fh
             DXt = (D[:, None] * Xe.T)[piv, :]
             tmp = solve_triangular(R_f, DXt, lower=False, trans="T")
@@ -11597,8 +10982,6 @@ def _pen_reg(x: np.ndarray, e: np.ndarray, y: np.ndarray) -> np.ndarray:
     (0.85·rank(x), rank(x) − 0.1·re]. Used by general-family
     ``initialize`` when E arrives without mgcv's ``use.unscaled``
     attribute (the initial.spg path)."""
-    # local import: hea.models.gam imports this module at load time,
-    # so the reverse import must be deferred to call time.
     from .models.gam import _R_rank
 
     x = np.asarray(x, dtype=float)
@@ -11781,8 +11164,6 @@ class GeneralFamily(Family):
 
     def __init__(self, links: list[Link]):
         self.links = links
-        # Family base wires a single .link; point it at LP1's for the
-        # odd shared code path that asks (residual helpers etc.).
         self.link = links[0]
 
     def ll(
@@ -11828,23 +11209,6 @@ class GeneralFamily(Family):
     def _apply_prior_weights(wt, l1, l2, l3=None, l4=None):
         """Scale the packed per-datum derivative blocks by ``wt`` for a
         *weighted* log-likelihood (``Σ wt_i·l0_i``).
-
-        A weighted log-likelihood scales every per-observation
-        derivative row by ``wt_i``. :func:`gamlss_etamu` and
-        :func:`gamlss_gH` are linear, row by row, in ``(l1, l2, l3,
-        l4)`` — ``gamlss_gH`` assembles the gradient ``lb`` and Hessian
-        ``lbb`` as plain sums over observations — so scaling these
-        inputs by ``wt`` yields exactly the weighted-MLE
-        gradient/Hessian. Absent derivative orders (``None``) pass
-        through unchanged. ``wt`` is the (n,) weight vector; ``l0``
-        itself is never scaled (the per-observation log-density is
-        reported raw).
-
-        Unlike mgcv's own gamlss families — which drop prior weights —
-        hea's general families honour them here as a weighted
-        likelihood. At unit weights the scaling is the identity, so
-        unweighted fits are bit-for-bit unchanged; weighting a row by
-        integer ``w`` is equivalent to duplicating that row ``w`` times.
         """
         w = wt[:, None]
         l1 = l1 * w
@@ -11970,18 +11334,15 @@ class gaulss(GeneralFamily):
             return ret
 
         l1 = np.column_stack([tau2 * ymu, 1.0 / tau - tau * ymu2])
-        # second derivatives, packed (mm, ms, ss)
         l2 = np.column_stack([-tau2, 2.0 * l1[:, 0] / tau, -ymu2 - 1.0 / tau2])
         ig1 = np.column_stack([self.links[0].mu_eta(eta), self.links[1].mu_eta(eta1)])
         g2 = np.column_stack([self.links[0].d2link(mu), self.links[1].d2link(tau)])
         l3 = l4 = g3 = g4 = None
         if deriv > 1:
-            # third derivatives, packed (mmm, mms, mss, sss)
             zeros = np.zeros(n)
             l3 = np.column_stack([zeros, -2.0 * tau, 2.0 * ymu, 2.0 / tau**3])
             g3 = np.column_stack([self.links[0].d3link(mu), self.links[1].d3link(tau)])
         if deriv > 3:
-            # fourth derivatives, packed (mmmm, mmms, mmss, msss, ssss)
             zeros = np.zeros(n)
             l4 = np.column_stack(
                 [zeros, zeros, np.full(n, -2.0), zeros, -6.0 / (tau2 * tau2)]
@@ -13361,7 +12722,6 @@ class gumbls(GeneralFamily):
         start[jj[1]] = _DiscreteLPSolve(
             design, lpid[1], E[:, jj[1]], ones_n
         ).solve_target(lres1)
-        # pass 2 at the mean parameter (:3228-3235)
         eta2 = _Xbd(design, start, lt=lpid[1])
         if offset is not None and len(offset) > 1 and offset[1] is not None:
             eta2 = eta2 + offset[1]
@@ -14047,11 +13407,6 @@ class gevlss(GeneralFamily):
         rho = self.links[1].linkinv(etar)
         xi = self._clamp_xi(self.links[2].linkinv(etax))
 
-        # The GEV support is parameter-dependent: 1 + ξ(y−μ)/σ ≤ 0 makes
-        # the log-density −∞ (NaN from log1p/power). That is the EXPECTED
-        # signal gam.fit5 step-rejects on — mgcv warns "NaNs produced"
-        # there too — so the invalid-value warnings are silenced; the
-        # non-finite values still propagate to the fitter.
         with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
             l0, l1, l2, l3, l4 = _gevlss_derivs(y, mu, rho, xi, deriv)
         wt = np.ones(y.shape[0]) if wt is None else np.asarray(wt, dtype=float).ravel()
@@ -14168,7 +13523,6 @@ class gevlss(GeneralFamily):
         lres1 = np.log(np.abs(y - self.links[0].linkinv(X[:, jj[0]] @ start[jj[0]])))
         start[jj[1]] = _reg(jj[1], lres1)
 
-        # LP3: plain LS of the constant g₃(1e-3) target, then line-search.
         x1 = X[:, jj[2]]
         yt3 = np.full(x1.shape[0], self.links[2].link(np.array(1e-3)))
 
@@ -14236,8 +13590,6 @@ class gevlss(GeneralFamily):
             _DiscreteLPSolve(design, lpid[1], E[:, jj[1]], ones_n), lres1
         )
 
-        # LP3 (:2348-2363): constant g₃(1e-3) target, factor kept for
-        # the line-search's re-solves on Xty·m.
         yt3 = np.full(y.shape[0], self.links[2].link(np.array(1e-3)))
         lp3 = _DiscreteLPSolve(design, lpid[2], E[:, jj[2]], ones_n)
         Xty3 = lp3.xty(yt3)
@@ -14368,29 +13720,13 @@ def _coxlpl(eta, X, d, time, deriv, d1b=None, d2b=None, D=None, eigen=None):
     """mgcv's ``coxlpl`` C kernel (src/coxph.c:141-394): the Cox log
     PARTIAL likelihood (Peto/Breslow tie handling) and its coefficient-
     and smoothing-parameter derivatives, in pure numpy.
-
-    ``deriv`` is the C-level code (= the engine's ll deriv minus one):
-      0 → ``l``, ``lb`` (= g), ``lbb`` (= H);
-      1,2 → + ``d1H`` the per-ρ ∂H/∂ρ matrices (original basis);
-      3 → + ``trHid2H`` = tr(Hp⁻¹ ∂²H/∂ρ∂ρ'), computed in the
-          eigenbasis of the (raw) penalized Hessian — ``eigen`` is
-          ``{"values","vectors"}`` and ``D`` the preconditioner, exactly
-          mgcv's ``X<-X%*%(ev$vectors*D); d1b<-t(V)%*%(d1b/D)`` step.
-
-    Rows need NOT be pre-sorted: risk sets are formed by descending
-    ``time`` internally, and every return is coefficient-space (so it is
-    invariant to the row storage order)."""
+    """
     eta = np.asarray(eta, float)
     X = np.asarray(X, float)
     time = np.asarray(time, float)
     d = np.asarray(d, int)
     n, p = X.shape
     M = 0 if d1b is None else d1b.shape[1]
-    # risk sets are cumulative in DESCENDING time; sort rows internally so the
-    # engine may pass them in any order (l/lb/lbb/d1H/trHid2H are all
-    # coefficient-space, hence invariant to the row permutation). The sort
-    # structure is cached (fixed across a fit); only eta changes per call.
-    # d1b/d2b are coefficient-space and stay put.
     order, r, nt, X, d = _cox_sort(X, d, time, n, p)
     eta = np.ascontiguousarray(eta[order])
     if _rs_cox_l is not None and deriv < 0:  # the many line-search l evals
@@ -14408,8 +13744,6 @@ def _coxlpl(eta, X, d, time, deriv, d1b=None, d2b=None, D=None, eigen=None):
             d1gamma = np.ascontiguousarray((X @ d1b) * gamma[:, None])
             lpl, g, H, d1H = _rs_cox_lpl_d1(eta, X, d, r, int(nt), d1gamma)
             return {"l": float(lpl), "lb": g, "lbb": H, "d1H": d1H}
-        # deriv == 3: + trHid2H in the eigenbasis (reuse original-basis l/g/H);
-        # the eigenbasis transform is cheap BLAS, the sweep is rust (cox_d2h).
         val = np.asarray(eigen["values"], float)
         vec = np.asarray(eigen["vectors"], float)
         dvec = np.where(val > 0, 1.0 / np.where(val > 0, val, 1.0), 0.0)
@@ -14492,7 +13826,6 @@ def _coxlpl(eta, X, d, time, deriv, d1b=None, d2b=None, D=None, eigen=None):
         out["d1H"] = d1H
         return out
 
-    # deriv == 3: trHid2H in the eigenbasis (recompute risk sums there)
     val = np.asarray(eigen["values"], float)
     vec = np.asarray(eigen["vectors"], float)
     dvec = np.where(val > 0, 1.0 / np.where(val > 0, val, 1.0), 0.0)
@@ -14698,7 +14031,6 @@ class cox_ph(GeneralFamily):
             elif deriv == 3:  # d1H as a matrix list
                 out["d1H"] = [res["d1H"][:, :, m] for m in range(res["d1H"].shape[2])]
             return out
-        # deriv == 4 → trHid2H: rebuild eigen(raw Hp) from fh=(L,piv)+D
         eigen = self._eigen_from_fh(fh, D, X.shape[1])
         res = _coxlpl(
             eta, X, d, y, 3, d1b=d1b, d2b=d2b, D=np.asarray(D, float), eigen=eigen
@@ -14759,7 +14091,6 @@ class cox_ph(GeneralFamily):
         Xc = ctx["X"] if ctx is not None else np.zeros((y.size, 0))
         hz = _coxpp(eta, Xc, d, y)
         self._cox_data = hz
-        # baseline survival of the NULL (no-covariate) model
         hz0 = _coxpp(np.zeros_like(eta), np.zeros((y.size, 0)), d, y)
         s0 = np.exp(-hz0["h"][hz0["r"]])
         s0 = np.minimum(s0, 1.0 - 2.0 * eps)
@@ -14840,7 +14171,6 @@ def _l1ee(x):
     x = np.asarray(x, dtype=float)
     eps = np.finfo(float).eps
     xmax = np.finfo(float).max
-    # divide: log(1-e^{-e^x})→-inf for very negative x, overwritten below.
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         ex = np.exp(x)
         l = np.log(1.0 - np.exp(-ex))
@@ -14857,7 +14187,6 @@ def _lee1(x):
     x = np.asarray(x, dtype=float)
     eps = np.finfo(float).eps
     xmax = np.finfo(float).max
-    # divide: log(e^{e^x}-1)→-inf for very negative x, overwritten below.
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         ex = np.exp(x)
         l = np.log(np.exp(ex) - 1.0)
@@ -15231,16 +14560,12 @@ class ziplss(GeneralFamily):
                 return b
             return _pen_reg(xx, E[:, cols], target)
 
-        # LP2: binarized response on the presence design.
         yt = (y != 0).astype(float)
         b2 = _reg(X[:, jj[1]], jj[1], yt)
         start[jj[1]] = b2
         pres = X[:, jj[1]] @ b2
         w = np.ones(n)
         w[(y == 0) & (pres < 0.5)] = 0.1
-        # LP1: log|y| (presence-conditional Poisson log-mean) under w; the
-        # data rows are w-scaled, the penalty root E1 is not (mgcv stacks
-        # rbind(w·X1, E1)).
         yt2 = self.links[0].link(np.log(np.abs(y) + (y == 0) * 0.2)) * w
         x1 = w[:, None] * X[:, jj[0]]
         start[jj[0]] = _reg(x1, jj[0], yt2)
@@ -15421,10 +14746,6 @@ def _multinom_derivs(y, eta, tri, deriv):
     ee = np.exp(eta)  # (n, K) = exp of the real LPs
     beta = 1.0 + ee.sum(axis=1)  # normalizer 1 + Σ exp(η_j)
     alpha = np.log(beta)
-    # mgcv pads eta with a dummy first column of 1's (eta[,1] <- 1): for a
-    # y=0 datum l0 gathers that 1, NOT 0 — a constant +1 per reference-class
-    # datum baked into mgcv's reported log-lik (it cancels from grad/Hess).
-    # Reproduced bug-for-bug so the REML value matches mgcv.
     eta_full = np.column_stack([np.ones(n), eta])
     l0 = eta_full[np.arange(n), y] - alpha
     out = {"l0": l0, "l": float(np.sum(l0))}
@@ -15434,7 +14755,6 @@ def _multinom_derivs(y, eta, tri, deriv):
     i3 = tri["i3"]
     b2 = beta * beta
     alpha1 = ee / beta[:, None]  # ee_i / beta
-    # second derivatives (packed i<=j) — built while l1 still holds alpha1.
     l2 = np.zeros((n, K * (K + 1) // 2))
     for i in range(K):
         for j in range(i, K):
@@ -15443,7 +14763,6 @@ def _multinom_derivs(y, eta, tri, deriv):
                 l2[:, col] = -alpha1[:, i] + ee[:, i] ** 2 / b2
             else:
                 l2[:, col] = ee[:, i] * ee[:, j] / b2
-    # first derivatives: (y == category i+1) − ee_i/beta.
     l1 = np.zeros((n, K))
     for i in range(K):
         l1[:, i] = (y == i + 1).astype(float) - alpha1[:, i]
@@ -15789,23 +15108,6 @@ class multinom(GeneralFamily):
 def _mvn_ll(y, X, coef, lpi, m, *, deriv=0, d1b=None, fh=None) -> dict:
     """Multivariate-normal log-likelihood + derivatives — a numpy port of
     mgcv's C kernel ``mvn_ll`` (src/mvn.c).
-
-    Model: each row ``y_i`` (m-dimensional) is ``N(μ_i, Σ)`` with a shared
-    precision ``Σ⁻¹ = RᵀR``; ``R`` is the m×m upper-triangular Choleski
-    factor whose ``d(d+1)/2`` parameters ``θ`` are the trailing coefs
-    (diagonal stored as ``log R_ii``, off-diagonals stored directly).
-    ``coef = [β (the m mean-LP blocks), θ]``; ``lpi[k]`` indexes LP k's
-    (contiguous) mean columns. The trailing ``X`` columns for ``θ`` are
-    structural zeros (mgcv's dummy columns).
-
-        ll = −½ Σ_i ‖R(y_i−μ_i)‖² + n·log|R|.
-
-    ``deriv`` follows mgcv's mvn codes (NOT the gamlss_gH shift): 0 → l;
-    1 → +grad ``lb`` / Hessian ``lbb``; 2 → +``d1H`` = the per-ρ traces
-    ``tr(fh·∂H/∂ρ)`` given ``fh = H_p⁻¹`` and ``d1b = ∂coef/∂ρ``; 3 →
-    +``d1H`` as the list of ``∂H/∂ρ`` matrices. ``XX`` is recomputed from
-    the supplied (already-reparameterized) mean columns each call —
-    self-consistent with mgcv's ``Sl.repara``-d ``attr(X,"XX")``.
     """
     y = np.asarray(y, dtype=float)
     X = np.asarray(X, dtype=float)
@@ -15815,7 +15117,6 @@ def _mvn_ll(y, X, coef, lpi, m, *, deriv=0, d1b=None, fh=None) -> dict:
     nb = coef.size
     ncoef = nb - ntheta
     theta = coef[ncoef:nb]
-    # build R (upper-tri), the θ→(row,col) maps, and dR_ii/dθ = R_ii (1 off-diag)
     R = np.zeros((m, m))
     rri = np.zeros(ntheta, int)
     rci = np.zeros(ntheta, int)
@@ -15849,7 +15150,6 @@ def _mvn_ll(y, X, coef, lpi, m, *, deriv=0, d1b=None, fh=None) -> dict:
     din = np.zeros(ncoef, int)
     for l in range(m):
         din[jj[l]] = l
-    # ---- gradient ----
     lb = np.zeros(nb)
     Me = e @ P
     for l in range(m):
@@ -15860,7 +15160,6 @@ def _mvn_ll(y, X, coef, lpi, m, *, deriv=0, d1b=None, fh=None) -> dict:
         lb[ncoef + kk] = (
             n - dth[kk] * Ree_diag[i] if i == j else -float(np.dot(Re[:, i], e[:, j]))
         )
-    # ---- Hessian ----
     lbb = np.zeros((nb, nb))
     lbb[:ncoef, :ncoef] = -XX * P[np.ix_(din, din)]
     Xe = Xm.T @ e
@@ -15889,7 +15188,6 @@ def _mvn_ll(y, X, coef, lpi, m, *, deriv=0, d1b=None, fh=None) -> dict:
     out = {"l": ll, "lb": lb, "lbb": lbb}
     if deriv == 1:
         return out
-    # ---- ∂H/∂ρ (mvn.c lines 168-262), given d1b = ∂coef/∂ρ ----
     nsp = d1b.shape[1]
     yX = Xe.T  # (m, ncoef)
     yRX = XRe.T
@@ -15900,7 +15198,6 @@ def _mvn_ll(y, X, coef, lpi, m, *, deriv=0, d1b=None, fh=None) -> dict:
         dtheta = db[ncoef:]
         dbq = db[:ncoef]
         dH = np.zeros((nb, nb))
-        # mean-coef block: dH[i,j] = -XX[i,j]·C[din[i],din[j]]
         C = np.zeros((m, m))
         for q in range(ntheta):
             ri_q, rj_q, w = rri[q], rci[q], dth[q] * dtheta[q]
@@ -16028,8 +15325,6 @@ class mvn(GeneralFamily):
         rotation convention (R ``eigen``/dsyevr vs numpy ``eigh``/dsyevd),
         which no consistent-gauge quantity ever sees — so the seed can
         differ from mgcv's while every fitted quantity still pins."""
-        # local import: hea.models.gam imports this module at load time,
-        # so the reverse import must be deferred to call time.
         from types import SimpleNamespace
 
         from .models.gam import _magic_gcv
@@ -16190,18 +15485,6 @@ class mvn(GeneralFamily):
 def _coerce_response(y_series: pl.Series, family: Family) -> np.ndarray:
     """Cast the response column to a numeric float array, with R's
     factor-response convention for :class:`Binomial`.
-
-    R's ``glm(y ~ x, family=binomial)`` accepts a 2-level factor on the
-    LHS: level 1 → 0 (failure), level 2 → 1 (success). Boolean is the
-    same shape (FALSE → 0, TRUE → 1). For other families and numeric y
-    we just float-cast.
-
-    Unused factor levels are dropped before the 2-level check — matches
-    R's ``glm()``, which calls ``model.frame(..., drop.unused.levels=
-    TRUE)`` so a 3-level Enum filtered down to 2 actually-present
-    levels still fits cleanly. The filter preserves the declared order
-    of the surviving levels, so ``levels[0]`` (the "failure" reference)
-    matches what R would pick after ``droplevels()``.
     """
     dt = y_series.dtype
     if isinstance(family, (Binomial, QuasiBinomial)):
@@ -16211,8 +15494,6 @@ def _coerce_response(y_series: pl.Series, family: Family) -> np.ndarray:
             if isinstance(dt, pl.Enum):
                 declared = list(dt.categories)
             else:
-                # No declared order — fall back to alphabetical, which is
-                # R's ``factor()`` default when ``levels=`` is unspecified.
                 declared = sorted(y_series.drop_nulls().unique().to_list())
             present = set(y_series.drop_nulls().unique().to_list())
             levels = [lvl for lvl in declared if lvl in present]
@@ -16225,8 +15506,6 @@ def _coerce_response(y_series: pl.Series, family: Family) -> np.ndarray:
     return y_series.to_numpy().astype(float).flatten()
 
 
-# Convenience exports — mirror R's lowercase/CapCase convention so user code
-# reads almost identically: ``gam(..., family=Gamma(link='log'))``.
 gaussian = Gaussian
 poisson = Poisson
 binomial = Binomial

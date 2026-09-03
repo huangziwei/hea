@@ -14,11 +14,10 @@ use super::ws::CscError;
 /// `Common->metis_nswitch` / `metis_dswitch`
 /// (`Utility/t_cholmod_defaults.c:51-52`).
 ///
-/// The comment at `cholmod_metis.c:719-733` is worth keeping: METIS 4.0.1 seg
-/// faulted on one matrix of order 3005 with 66% density, and the workaround is
-/// to return the identity for anything that dense. It has never been retested
-/// against 5.1.0, and it fires before `METIS_NodeND` is ever called, so it is
-/// part of the ordering CHOLMOD produces whether or not the bug still exists.
+/// Per `cholmod_metis.c:719-733`, CHOLMOD returns the identity for anything at
+/// or above this order and density rather than calling METIS. The guard fires
+/// before `METIS_NodeND` is reached, so it is part of the ordering CHOLMOD
+/// produces and has to be mirrored to stay bit-identical.
 const METIS_NSWITCH: i64 = 3000;
 const METIS_DSWITCH: f64 = 0.66;
 
@@ -72,16 +71,11 @@ pub fn cholmod_metis(
     let anz = (nz / 2 + n) as f64;
 
     let identity = if nz == 0 {
-        // "The matrix has no off-diagonal entries. METIS_NodeND fails in this
-        // case, so avoid using it. The best permutation is identity anyway."
         true
     } else {
         let d = nz as f64 / (n as f64 * n as f64);
         n as i64 > METIS_NSWITCH && d > METIS_DSWITCH
     };
-    // `metis_memory_ok` is the third workaround and it is a no-op at the
-    // default `Common->metis_memory = 0.0`, which returns TRUE without
-    // attempting anything (`cholmod_metis.c:...`).
 
     if identity {
         return Ok(((0..n as i64).collect(), anz));

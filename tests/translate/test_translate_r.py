@@ -1,4 +1,4 @@
-"""Tests for hea.translate.r_to_py — Phase 1+2 acceptance.
+"""Tests for hea.translate.r_to_py.
 
 Each test parses an R snippet, runs the translator, and asserts on the
 emitted Python source. We use string equality on the canonical
@@ -15,12 +15,7 @@ from hea.translate.r_to_py import translate
 
 
 def _tr(src: str) -> str:
-    """Translate and strip the auto-emitted import + dataset-load preamble.
-
-    Most forward tests care about the body, not the preamble.
-    :class:`TestForwardAutoload` exercises preamble emission directly via
-    ``_tr_full``, which only strips imports.
-    """
+    """Translate and strip the auto-emitted import + dataset-load preamble."""
     return _strip_autoload_preamble(_strip_imports(translate(src))).strip()
 
 
@@ -63,22 +58,14 @@ def _compiles(src: str) -> bool:
     return True
 
 
-# ---------------------------------------------------------------------------
-# Atoms
-# ---------------------------------------------------------------------------
-
-
 class TestAtoms:
     def test_int_literal(self):
-        # ``42L`` → Python int 42
         assert _tr("42L") == "42"
 
     def test_num_literal(self):
         assert _tr("3.14") == "3.14"
 
     def test_string_literal(self):
-        # Wrap with assignment — a bare top-level string would be unparsed
-        # as a triple-quoted docstring, which is correct but noisy here.
         assert _tr('x <- "hello"') == "x = 'hello'"
 
     def test_bool_literal(self):
@@ -89,22 +76,14 @@ class TestAtoms:
         assert _tr("NULL") == "None"
 
     def test_identifier(self):
-        # Bare identifier outside any verb is a Python name.
         assert _tr("x") == "x"
 
     def test_dotted_identifier(self):
-        # ``data.frame`` becomes ``data_frame`` outside verb context.
         assert _tr("data.frame") == "data_frame"
-
-
-# ---------------------------------------------------------------------------
-# Operators
-# ---------------------------------------------------------------------------
 
 
 class TestOperators:
     def test_arithmetic(self):
-        # Whole-number doubles render as ints (matches hand-written hea idiom).
         assert _tr("1 + 2") == "1 + 2"
         assert _tr("2 * 3 + 1") == "2 * 3 + 1"
 
@@ -112,39 +91,25 @@ class TestOperators:
         assert _tr("1.5 + 0.5") == "1.5 + 0.5"
 
     def test_power_to_pow(self):
-        # R's ``^`` → Python ``**``.
         assert _tr("2 ^ 10") == "2 ** 10"
 
     def test_modulo_floor_div(self):
-        # R's ``%%`` is just %infix% with value %%; same for %/%.
         assert _tr("7 %% 3") == "7 % 3"
         assert _tr("7 %/% 3") == "7 // 3"
 
     def test_comparison_emits_ast_compare(self):
-        # ``a == b`` → ``a == b`` (single comparison).
-        # Outside any slot, ``a`` and ``b`` are Python names.
         assert _tr("a == b") == "a == b"
 
     def test_unary_neg(self):
         assert _tr("-x") == "-x"
 
     def test_unary_not_outside_slot(self):
-        # ``!x`` outside slot is logical ``not``.
         assert _tr("!x") == "not x"
 
     def test_sequence_default_to_seq(self):
-        # Standalone ``a:b`` → ``seq(a, b)`` keeps R's integer-sequence
-        # values. Special contexts (for-iter, subscript) shift to 0-based
-        # via dedicated handlers — see test_for_loop /
-        # test_subscript_one_based_range.
         assert _tr("1:5") == "seq(1, 5)"
         assert _tr("0:5") == "seq(0, 5)"
         assert _tr("2:7") == "seq(2, 7)"
-
-
-# ---------------------------------------------------------------------------
-# Assignment
-# ---------------------------------------------------------------------------
 
 
 class TestAssignment:
@@ -152,87 +117,58 @@ class TestAssignment:
         assert _tr("x <- 1") == "x = 1"
 
     def test_right_arrow_flipped(self):
-        # ``1 -> x`` parses as ``x <- 1`` and emits as ``x = 1``.
         assert _tr("1 -> x") == "x = 1"
 
     def test_eq_assign(self):
         assert _tr("x = 1") == "x = 1"
 
 
-# ---------------------------------------------------------------------------
-# c() to list
-# ---------------------------------------------------------------------------
-
-
 class TestC:
     def test_c_numeric_to_np_array(self):
-        # All-numeric c(...) becomes np.array so R's elementwise
-        # arithmetic (``primes * 2``, ``primes - 1``) carries over.
         assert _tr("c(1, 2, 3)") == "import numpy as np\nnp.array([1, 2, 3])"
 
     def test_c_of_strings(self):
         assert _tr('c("a", "b")') == "['a', 'b']"
 
     def test_c_mixed_falls_back_to_list(self):
-        # Anything non-numeric in the vector → Python list, no np.array.
         assert _tr('c(1, "a")') == "[1, 'a']"
 
     def test_c_with_unary_minus_still_numeric(self):
-        # Unary minus is part of the numeric literal — still np.array.
         assert _tr("c(-1, 2, -3)") == "import numpy as np\nnp.array([-1, 2, -3])"
-
-
-# ---------------------------------------------------------------------------
-# Pipe rewriting
-# ---------------------------------------------------------------------------
 
 
 class TestPipes:
     def test_native_pipe_unknown_func(self):
-        # ``x |> f(y)`` with unknown f → ``f(x, y)`` (function form).
         assert _tr("x |> f(y)") == "f(x, y)"
 
     def test_native_pipe_to_verb(self):
-        # ``x |> filter(cond)`` becomes ``x.filter(...)`` with NSE on cond.
-        # ``cond`` is a bare name inside filter's EXPR slot → col("cond").
         assert _tr("x |> filter(cond)") == "x.filter(col('cond'))"
 
     def test_magrittr_pipe(self):
         assert _tr("x %>% filter(a == 1)") == "x.filter(col('a') == 1)"
 
     def test_magrittr_placeholder(self):
-        # ``x %>% f(., y)`` → ``f(x, y)`` (unknown f, function form).
         assert _tr("x %>% f(., y)") == "f(x, y)"
 
     def test_chained_pipe(self):
-        # Method chain on the result of a pipe chain.
         out = _tr("x |> filter(a == 1) |> select(b, c)")
         assert out == "x.filter(col('a') == 1).select('b', 'c')"
 
 
-# ---------------------------------------------------------------------------
-# Verb dispatch & NSE
-# ---------------------------------------------------------------------------
-
-
 class TestVerbs:
     def test_filter_expr_slot(self):
-        # Inside filter: bare ``dest`` → col("dest"); literal "IAH" stays.
         out = _tr('filter(flights, dest == "IAH")')
         assert out == "flights.filter(col('dest') == 'IAH')"
 
     def test_filter_and_chain_uses_bitand(self):
-        # In EXPR slot, ``&`` becomes bitwise ``&`` (polars-Expr-friendly).
         out = _tr("filter(flights, month == 1 & day == 1)")
         assert out == "flights.filter((col('month') == 1) & (col('day') == 1))"
 
     def test_select_column_name_slot(self):
-        # Bare names in select become strings.
         out = _tr("select(flights, year, month, day)")
         assert out == "flights.select('year', 'month', 'day')"
 
     def test_select_with_rename(self):
-        # Named arg in select: ``new = old`` — value is also a column name.
         out = _tr("select(flights, tail_num = tailnum)")
         assert out == "flights.select(tail_num='tailnum')"
 
@@ -249,10 +185,6 @@ class TestVerbs:
         assert out == "flights.summarize(avg=col('dep_delay').mean())"
 
     def test_summarize_with_na_rm_kwarg(self):
-        # ``na.rm = TRUE`` is dropped — polars ``Expr.mean()`` always skips
-        # nulls (the equivalent of R's ``na.rm = TRUE``) and doesn't accept
-        # the kwarg. Without this filter the translated code would
-        # TypeError at runtime.
         out = _tr("summarize(flights, avg = mean(dep_delay, na.rm = TRUE))")
         assert out == "flights.summarize(avg=col('dep_delay').mean())"
 
@@ -265,27 +197,22 @@ class TestVerbs:
         assert out == "flights.distinct('origin', 'dest')"
 
     def test_n_helper(self):
-        # ``n()`` is a function helper, no NSE on its (empty) args.
         out = _tr("summarize(flights, total = n())")
         assert out == "flights.summarize(total=n())"
 
     def test_slice_positional_keep(self):
-        # dplyr positional slice: R 1-based c(1,3,5) → hea 0-based [0,2,4].
         assert _tr("slice(flights, c(1, 3, 5))") == "flights.slice([0, 2, 4])"
         assert _tr("flights |> slice(c(1, 3, 5))") == "flights.slice([0, 2, 4])"
 
     def test_slice_range(self):
-        # R a:b (1-based, inclusive) → 0-based range; 1:b collapses to range(b).
         assert _tr("slice(flights, 1:3)") == "flights.slice(range(3))"
         assert _tr("slice(flights, 2:4)") == "flights.slice(range(1, 4))"
 
     def test_slice_single_and_n(self):
         assert _tr("slice(flights, 5)") == "flights.slice([4])"
-        # ``n()`` inside slice = the last row.
         assert _tr("slice(flights, n())") == "flights.slice([-1])"
 
     def test_slice_negative_is_drop(self):
-        # R's negative slice (drop) → hea's drop(...) marker.
         assert _tr("slice(flights, -c(1, 2))") == "flights.slice(drop([0, 1]))"
         assert _tr("slice(flights, -(1:2))") == "flights.slice(drop(range(2)))"
 
@@ -294,14 +221,7 @@ class TestVerbs:
         assert "from hea.tidy import drop" in full
 
     def test_slice_bare_variable_falls_through(self):
-        # Unknown-sign runtime index can't be statically shifted — left as a
-        # plain call (the runtime gap signal), not silently mis-shifted.
         assert _tr("slice(flights, idx)") == "slice(flights, idx)"
-
-
-# ---------------------------------------------------------------------------
-# Helpers — function-form translation
-# ---------------------------------------------------------------------------
 
 
 class TestHelpers:
@@ -315,14 +235,7 @@ class TestHelpers:
 
     def test_unknown_function_passes_through(self):
         out = _tr("filter(flights, my_custom_fn(x) > 0)")
-        # Unknown ``my_custom_fn`` is emitted as a function call; the bare
-        # ``x`` inside is still NSE-wrapped because filter's slot is active.
         assert out == "flights.filter(my_custom_fn(col('x')) > 0)"
-
-
-# ---------------------------------------------------------------------------
-# End-to-end: canonical r4ds pipeline
-# ---------------------------------------------------------------------------
 
 
 class TestForwardAutoload:
@@ -333,24 +246,18 @@ class TestForwardAutoload:
     ``hea.data('X', ...)``."""
 
     def test_library_then_bare_ref(self):
-        # ``library(palmerpenguins)`` disambiguates a bare-name ref that
-        # would otherwise be skipped (penguins is in 2 packages).
         out = _tr_full(
             "library(palmerpenguins)\n"
             "penguins |> ggplot(aes(x = flipper_length_mm)) + geom_point()"
         )
         assert "penguins = data('penguins', package='palmerpenguins')" in out
-        # The library() call itself is dropped from the body.
         assert "library(" not in out
 
     def test_standalone_data_call_becomes_assignment(self):
-        # R's ``data("X", package="Y")`` is side-effectful — translate to
-        # ``X = data(...)`` so the Python script can use ``X`` after.
         out = _tr_full(
             'data("flights", package = "nycflights13")\nflights |> filter(dest == "IAH")'
         )
         assert "flights = data('flights', package='nycflights13')" in out
-        # The data-assign must come before any use of ``flights`` below it.
         lines = out.splitlines()
         assign_at = next(
             i for i, ln in enumerate(lines) if ln.startswith("flights = data(")
@@ -363,35 +270,24 @@ class TestForwardAutoload:
         assert assign_at < use_at
 
     def test_autoload_for_unique_dataset(self):
-        # No library() and no data() — bare ref to a uniquely-named
-        # rdatasets entry. Emit autoload load.
         out = _tr_full('flights |> filter(dest == "IAH")')
         assert "flights = data('flights', package='nycflights13')" in out
 
     def test_ambiguous_bare_ref_skipped(self):
-        # No library() to disambiguate ``penguins`` — skip the autoload.
-        # User will need to disambiguate themselves or it'll error at runtime.
         out = _tr_full("penguins |> ggplot(aes(x = flipper_length_mm))")
         assert "data('penguins'" not in out
 
     def test_locally_defined_name_not_autoloaded(self):
-        # ``flights <- read_csv(...)`` defines the name; no autoload needed.
         out = _tr_full(
             'flights <- read_csv("my_file.csv")\nflights |> filter(dest == "IAH")'
         )
-        # The forward translator currently doesn't strip the autoload from
-        # this case — but the local definition should win. Confirm there's
-        # NO ``flights = data(...)`` line.
         assert "flights = data('flights'" not in out
 
     def test_r_default_package_skipped(self):
-        # ``mtcars`` lives in R's ``datasets`` package which is auto-loaded
-        # in R — no explicit data() load needed.
         out = _tr_full("mtcars |> filter(mpg > 20)")
         assert "mtcars = data(" not in out
 
     def test_library_call_dropped_from_body(self):
-        # library() lines never make it into the Python body.
         out = _tr_full(
             'library(dplyr)\nlibrary(ggplot2)\nflights |> filter(dest == "IAH")'
         )
@@ -399,8 +295,6 @@ class TestForwardAutoload:
         assert "dplyr" not in out
 
     def test_explicit_data_with_loaded_lib_disambiguates(self):
-        # User loaded modeldata but the dataset call says palmerpenguins —
-        # explicit form wins.
         out = _tr_full(
             "library(modeldata)\n"
             'data("penguins", package = "palmerpenguins")\n'
@@ -417,9 +311,6 @@ flights |>
   summarize(arr_delay = mean(arr_delay, na.rm = TRUE))
 """
     out = _tr(src)
-    # ``na.rm = TRUE`` is dropped — polars Expr method form has it as the
-    # implicit default. See test_summarize_with_na_rm_kwarg for the
-    # underlying rule.
     expected = (
         "flights.filter(col('dest') == 'IAH')"
         ".group_by('year', 'month', 'day')"
@@ -439,7 +330,6 @@ flights |>
 
 
 def test_translate_output_is_valid_python():
-    # A grab-bag of inputs — every translated output should parse cleanly.
     inputs = [
         "x <- 1",
         '"hello"',
@@ -454,18 +344,10 @@ def test_translate_output_is_valid_python():
         assert _compiles(src), f"failed to compile output of: {src!r}"
 
 
-# ---------------------------------------------------------------------------
-# Control flow
-# ---------------------------------------------------------------------------
-
-
 class TestMutateSummarize:
-    """Phase 3 — mutate / summarize NSE and dplyr's dot-prefixed kwargs."""
+    """mutate / summarize NSE and dplyr's dot-prefixed kwargs."""
 
     def test_mutate_sequential_columns(self):
-        # Sequential evaluation is hea's runtime concern — the translator
-        # just emits both kwargs in order; hea.mutate evaluates them
-        # sequentially so the second can see the first.
         out = _tr(
             "mutate(flights, hours = air_time / 60, gain_per_hour = gain / hours)"
         )
@@ -475,7 +357,6 @@ class TestMutateSummarize:
         )
 
     def test_mutate_dot_by_to_underscore_by_as_string(self):
-        # ``.by = origin`` — the column name slot, not the EXPR slot.
         out = _tr("mutate(flights, gain = dep_delay - arr_delay, .by = origin)")
         assert (
             out
@@ -506,7 +387,6 @@ class TestMutateSummarize:
         )
 
     def test_mutate_dot_keep_string_literal(self):
-        # ``.keep`` takes a literal string — should NOT become col("used").
         out = _tr('mutate(flights, x = a + b, .keep = "used")')
         assert out == "flights.mutate(x=col('a') + col('b'), _keep='used')"
 
@@ -518,7 +398,6 @@ class TestMutateSummarize:
         )
 
     def test_transmute_user_keep_wins(self):
-        # Explicit ``.keep`` from the user overrides the auto-injected default.
         out = _tr('transmute(flights, gain = dep_delay - arr_delay, .keep = "all")')
         assert (
             out
@@ -540,23 +419,17 @@ class TestMutateSummarize:
         )
 
     def test_mutate_with_nested_aggregator(self):
-        # ``mutate(rank = min_rank(desc(arr_delay)))`` — desc() takes
-        # COLUMN_NAME slot, min_rank() is method-form on its arg.
         out = _tr("mutate(flights, rank = min_rank(desc(arr_delay)))")
-        # desc("arr_delay") is a function call producing a polars Expr;
-        # min_rank is method form, so it becomes .min_rank() on whatever
-        # desc returns. Since desc returns an Expr, we get desc('...').min_rank().
         assert out == "flights.mutate(rank=desc('arr_delay').min_rank())"
 
 
 class TestJoins:
-    """Phase 4 — every dplyr join, plus the `by = c("a" = "b")` named-vec."""
+    """every dplyr join, plus the `by = c("a" = "b")` named-vec."""
 
     def test_string_by(self):
         assert _tr('inner_join(x, y, by = "id")') == "x.inner_join(y, by='id')"
 
     def test_natural_join_no_by(self):
-        # No ``by`` → polars' natural join.
         assert _tr("left_join(flights, planes)") == "flights.left_join(planes)"
 
     def test_unnamed_vec_by(self):
@@ -572,7 +445,6 @@ class TestJoins:
         assert out == "x.inner_join(y, by={'a': 'x', 'b': 'y'})"
 
     def test_all_join_kinds(self):
-        # Every join kind goes through the same machinery — smoke each.
         for verb, method in [
             ("inner_join", "inner_join"),
             ("left_join", "left_join"),
@@ -591,7 +463,7 @@ class TestJoins:
 
 
 class TestCaseWhen:
-    """Phase 4 — case_when's tilde syntax → tuple-pair form."""
+    """case_when's tilde syntax → tuple-pair form."""
 
     def test_basic(self):
         out = _tr('case_when(x > 0 ~ "pos", x < 0 ~ "neg", .default = "zero")')
@@ -618,20 +490,18 @@ class TestCaseWhen:
         assert out == "case_when((col('x') > 0, 'pos'))"
 
     def test_unary_tilde_as_default(self):
-        # The degenerate ``~ value`` form is treated as the default branch.
         out = _tr('case_when(x > 0 ~ "pos", ~ "fallback")')
         assert out == "case_when((col('x') > 0, 'pos'), default='fallback')"
 
 
 class TestExpressionHelpers:
-    """Phase 4 — if_else, coalesce, na_if, between, near."""
+    """if_else, coalesce, na_if, between, near."""
 
     def test_if_else(self):
         out = _tr('mutate(df, status = if_else(x > 0, "pos", "neg"))')
         assert out == "df.mutate(status=if_else(col('x') > 0, 'pos', 'neg'))"
 
     def test_ifelse_alias_to_if_else(self):
-        # R's base ``ifelse`` aliases to the same hea helper.
         out = _tr('mutate(df, status = ifelse(x > 0, "pos", "neg"))')
         assert out == "df.mutate(status=if_else(col('x') > 0, 'pos', 'neg'))"
 
@@ -653,7 +523,7 @@ class TestExpressionHelpers:
 
 
 class TestPivot:
-    """Phase 4 — pivot_longer / pivot_wider full kwarg coverage."""
+    """pivot_longer / pivot_wider full kwarg coverage."""
 
     def test_pivot_longer_simple(self):
         out = _tr(
@@ -678,7 +548,6 @@ class TestPivot:
             "pivot_longer(df, c(x_a, x_b), "
             'names_to = c("prefix", "key"), names_sep = "_")'
         )
-        # ``names_to = c("prefix", "key")`` becomes a list.
         assert "names_to=['prefix', 'key']" in out
         assert "names_sep='_'" in out
 
@@ -702,7 +571,7 @@ class TestPivot:
 
 
 class TestAcross:
-    """Phase 4 — across() expansion at translate time."""
+    """across() expansion at translate time."""
 
     def test_single_col_single_fn(self):
         out = _tr("mutate(df, across(x, mean))")
@@ -713,8 +582,6 @@ class TestAcross:
         assert out == "df.mutate(a=col('a').mean(), b=col('b').mean())"
 
     def test_with_lambda(self):
-        # ``na.rm = TRUE`` from the lambda body drops at the method-form
-        # site (same rule as test_summarize_with_na_rm_kwarg).
         out = _tr("mutate(df, across(c(a, b), \\(x) mean(x, na.rm = TRUE)))")
         assert out == "df.mutate(a=col('a').mean(), b=col('b').mean())"
 
@@ -732,7 +599,6 @@ class TestAcross:
         )
 
     def test_names_kwarg_raises(self):
-        # .names glue templating is deferred — translator should fail loudly.
         from hea.translate.r_to_py import RTranslateError
 
         with pytest.raises(RTranslateError):
@@ -746,10 +612,8 @@ class TestAcross:
 
 
 class TestGgplot:
-    """Phase 5 — ``ggplot(df, aes(...)) + geom_*()`` chain detection,
+    """``ggplot(df, aes(...)) + geom_*()`` chain detection,
     aes() unwrapping, facet formulas, and patchwork operators."""
-
-    # ----- ggplot root + simplest chains -----
 
     def test_ggplot_with_named_aes(self):
         out = _tr(
@@ -761,7 +625,6 @@ class TestGgplot:
         )
 
     def test_positional_aes_maps_to_x_y(self):
-        # R convention: aes(x, y) — first positional is x, second is y.
         out = _tr("ggplot(d, aes(x, y)) + geom_point()")
         assert out == "d.ggplot(x='x', y='y').geom_point()"
 
@@ -770,11 +633,8 @@ class TestGgplot:
         assert out == "d.ggplot(x='x', y='y', color='z').geom_point()"
 
     def test_no_aes(self):
-        # ``ggplot(df)`` with no aes — produces empty kwargs.
         out = _tr("ggplot(d) + geom_blank()")
         assert out == "d.ggplot().geom_blank()"
-
-    # ----- aes inside geoms -----
 
     def test_aes_unwraps_inside_geom(self):
         out = _tr(
@@ -783,17 +643,12 @@ class TestGgplot:
         assert out == ("d.ggplot(x='a').geom_point(color='species', shape='species')")
 
     def test_geom_with_mixed_aes_and_literal_kwarg(self):
-        # ``geom_point(aes(color = z), alpha = 0.5)`` — aesthetic kwargs
-        # from aes unwrap; literal ``alpha`` is a regular kwarg.
         out = _tr("ggplot(d, aes(x, y)) + geom_point(aes(color = z), alpha = 0.5)")
         assert out == "d.ggplot(x='x', y='y').geom_point(color='z', alpha=0.5)"
 
     def test_aes_with_expression(self):
-        # ``aes(x = log(weight))`` — value is a polars Expr in hea.
         out = _tr("ggplot(d, aes(x = log(weight), y = height)) + geom_point()")
         assert out == "d.ggplot(x=col('weight').log(), y='height').geom_point()"
-
-    # ----- full chain -----
 
     def test_full_chain(self):
         out = _tr(
@@ -823,8 +678,6 @@ class TestGgplot:
         out = _tr("ggplot(d, aes(x = species)) + geom_bar() + coord_polar()")
         assert out == "d.ggplot(x='species').geom_bar().coord_polar()"
 
-    # ----- facets -----
-
     def test_facet_wrap_formula(self):
         out = _tr("ggplot(d, aes(x, y)) + geom_point() + facet_wrap(~island)")
         assert out == "d.ggplot(x='x', y='y').geom_point().facet_wrap('~island')"
@@ -833,15 +686,11 @@ class TestGgplot:
         out = _tr("ggplot(d, aes(x, y)) + geom_point() + facet_grid(year ~ month)")
         assert out == ("d.ggplot(x='x', y='y').geom_point().facet_grid('year ~ month')")
 
-    # ----- theme + element_* -----
-
     def test_theme_with_element_text(self):
         out = _tr(
             "ggplot(d, aes(x, y)) + geom_point() "
             "+ theme(axis.text = element_text(size = 10))"
         )
-        # ``axis.text`` becomes ``axis_text`` via the dot→underscore rule;
-        # element_text is a regular function call (no special unwrap).
         assert "axis_text=element_text(size=10)" in out
         assert ".theme(" in out
 
@@ -849,10 +698,7 @@ class TestGgplot:
         out = _tr('ggplot(d) + theme_bw() + theme(legend.position = "none")')
         assert out == "d.ggplot().theme_bw().theme(legend_position='none')"
 
-    # ----- patchwork operators -----
-
     def test_patchwork_pipe(self):
-        # ``p1 | p2`` — neither is a chain extension, so ``|`` stays as ``|``.
         assert _tr("p1 | p2") == "p1 | p2"
 
     def test_patchwork_stack(self):
@@ -862,30 +708,21 @@ class TestGgplot:
         assert _tr("(p1 | p2) / p3") == "(p1 | p2) / p3"
 
     def test_patchwork_plus_with_bare_name(self):
-        # ``p1 + p2`` — RHS isn't a ggplot extension call, so stays as ``+``.
         assert _tr("p1 + p2") == "p1 + p2"
 
     def test_patchwork_with_plot_annotation(self):
-        # ``plot_annotation`` IS a chain extension — gets method-call form.
         out = _tr('(p1 | p2) + plot_annotation(title = "title")')
         assert out == "(p1 | p2).plot_annotation(title='title')"
 
-    # ----- aes with c(name = value) for renamed mappings -----
-
     def test_aes_with_string_value(self):
-        # ``aes(x = "y_column")`` — string literal value.
         out = _tr('ggplot(d, aes(x = "weight")) + geom_point()')
         assert out == "d.ggplot(x='weight').geom_point()"
 
-    # ----- arithmetic on plot expressions remains arithmetic -----
-
     def test_plus_with_geom_does_chain(self):
-        # Sanity: a ``+`` with a geom RHS is a chain — even when LHS is bare.
         out = _tr("p + geom_point()")
         assert out == "p.geom_point()"
 
     def test_plus_with_non_chain_rhs_stays_arithmetic(self):
-        # ``p + 1`` — RHS is a number, not a chain extension.
         assert _tr("p + 1") == "p + 1"
 
 
@@ -895,14 +732,11 @@ class TestControlFlow:
         assert out == "a if x > 0 else b"
 
     def test_for_loop(self):
-        # R ``1:5`` as a for-loop iterator translates to ``range(5)``
-        # so the loop counter is 0-based (matches hea's 0-based indexing).
         out = _tr("for (i in 1:5) print(i)")
         assert "for i in range(5)" in out
 
     def test_lambda_shorthand(self):
         out = _tr("f <- \\(x) x + 1")
-        # Body bare ``x`` is outside any verb slot (Slot.NONE) — emits as ``x``.
         assert out == "f = lambda x: x + 1"
 
 
@@ -911,7 +745,6 @@ class TestMixedModels:
     ``gmm`` class (it dispatches on ``family`` internally)."""
 
     def test_lmer_maps_to_gmm(self):
-        # ``translate`` keeps the import preamble (``_tr``/``_tr_full`` strip it).
         out = translate("lmer(y ~ x + (1|g), data=d)")
         assert "from hea.models import gmm" in out
         assert "gmm(" in out
@@ -931,8 +764,6 @@ class TestMixedModels:
         assert "hea.tidy.DataFrame(" in out
 
     def test_random_effect_bar_keeps_parens_not_floated(self):
-        # lme4's ``(1|g)`` must serialize as ``(1 | g)`` — parens restored
-        # (the parser drops them), and ``1`` stays ``1`` not ``1.0``.
         out = translate("lmer(y ~ x + (1|g), data=d)")
         assert "(1 | g)" in out
         assert "1.0" not in out

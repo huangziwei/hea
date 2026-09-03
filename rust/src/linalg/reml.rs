@@ -56,8 +56,6 @@ pub fn reml_pmmult<'py>(
             for kk in 0..k {
                 let aik = if at { av[[kk, i]] } else { av[[i, kk]] };
                 let bkj = if bt { bv[[j, kk]] } else { bv[[kk, j]] };
-                // separate multiply + add, strictly in k-order: no BLAS
-                // reduction reorder, no FMA contraction → cross-platform stable.
                 acc += aik * bkj;
             }
             c[i * n + j] = acc;

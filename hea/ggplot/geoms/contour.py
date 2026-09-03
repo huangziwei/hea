@@ -35,7 +35,6 @@ def _reshape_grid(data):
             f"got {len(x)} rows but {len(xs)} × {len(ys)} = "
             f"{len(xs) * len(ys)} cells"
         )
-    # Sort by (y, x) so the reshaped grid is row-major in y.
     Z = np.zeros((len(ys), len(xs)))
     x_idx = np.searchsorted(xs, x)
     y_idx = np.searchsorted(ys, y)
@@ -46,9 +45,6 @@ def _reshape_grid(data):
 
 @dataclass
 class GeomContour(Geom):
-    # Mirrors ggplot2's ``GeomContour$default_aes`` (R/geom-contour.R):
-    # ``colour = accent = "#3366FF"`` — the same blue ``geom_smooth``
-    # uses, NOT pure black.
     default_aes: dict = field(
         default_factory=lambda: {
             "colour": "#3366FF",

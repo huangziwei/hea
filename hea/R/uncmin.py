@@ -110,7 +110,6 @@ def _mvmltu(n, a, x, y):
     column from the diagonal (routed through the R-linked BLAS
     emulation)."""
     for i in range(n):
-        # ddot(length=n-i, &a[i + i*nr] stride 1 = down column i, &x[i])
         y[i] = _ddot(n - i, a[:, i], x, ox=i, oy=i)
 
 
@@ -246,7 +245,6 @@ def _tregup(
     dltf = fpls - f
     slp = _ddot(n, g, sc)
     if iretcd == 3 and (fpls >= fplsp or dltf > slp * 1e-4):
-        # reset xpls to xplsp and terminate global step
         iretcd = 0
         for i in range(n):
             xpls[i] = float(xplsp[i])
@@ -254,7 +252,6 @@ def _tregup(
         dlt *= 0.5
     else:
         if dltf > slp * 1e-4:
-            # fpls too large
             rln = 0.0
             for i in range(n):
                 temp1 = abs(float(sc[i])) / _fmax2(
@@ -262,7 +259,6 @@ def _tregup(
                 )
                 rln = max(rln, temp1)
             if rln < steptl:
-                # cannot find satisfactory xpls distinct from x
                 iretcd = 1
             else:
                 iretcd = 2
@@ -272,7 +268,6 @@ def _tregup(
                 else:
                     dlt = dltmp
         else:
-            # fpls sufficiently small
             dltfp = 0.0
             if method == 2:
                 for i in range(n):
@@ -294,14 +289,12 @@ def _tregup(
                 and nwtake
                 and dlt <= stepmx * 0.99
             ):
-                # double trust region and continue global step
                 iretcd = 3
                 for i in range(n):
                     xplsp[i] = float(xpls[i])
                 fplsp = fpls
                 dlt = _fmin2(dlt * 2.0, stepmx)
             else:
-                # accept xpls as next iterate; choose new trust region
                 iretcd = 0
                 if dlt > stepmx * 0.99:
                     mxtake = True
@@ -325,7 +318,6 @@ def _lnsrch(n, x, f, g, p, xpls, fcn, stepmx, steptl, sx):
         temp1 = _rfma(float(sx[i]) * float(sx[i]) * float(p[i]), float(p[i]), temp1)
     sln = math.sqrt(temp1)
     if sln > stepmx:
-        # newton step longer than maximum allowed
         _dscal(n, stepmx / sln, p)
         sln = stepmx
     slp = _ddot(n, g, p)
@@ -343,13 +335,11 @@ def _lnsrch(n, x, f, g, p, xpls, fcn, stepmx, steptl, sx):
             xpls[i] = _rfma(lam, float(p[i]), float(x[i]))
         fpls = fcn(xpls)
         if fpls <= _rfma(slp * 1e-4, lam, f):
-            # solution found
             iretcd = 0
             if lam == 1.0 and sln > stepmx * 0.99:
                 mxtake = True
             return fpls, iretcd, mxtake
         if lam < rmnlmb:
-            # no satisfactory xpls found sufficiently distinct from x
             iretcd = 1
             return fpls, iretcd, mxtake
         if fpls >= _DBL_MAX:
@@ -357,11 +347,9 @@ def _lnsrch(n, x, f, g, p, xpls, fcn, stepmx, steptl, sx):
             firstback = True
         else:
             if firstback:
-                # first backtrack: quadratic fit
                 tlmbda = -lam * slp / ((fpls - f - slp) * 2.0)
                 firstback = False
             else:
-                # subsequent backtracks: cubic fit
                 t1 = _rfma(-lam, slp, fpls - f)
                 t2 = _rfma(-plmbda, slp, pfpls - f)
                 t3 = 1.0 / (lam - plmbda)
@@ -369,12 +357,10 @@ def _lnsrch(n, x, f, g, p, xpls, fcn, stepmx, steptl, sx):
                 b = t3 * (t2 * lam / (plmbda * plmbda) - t1 * plmbda / (lam * lam))
                 disc = _rfma(b, b, -(a3 * slp))
                 if disc > b * b:
-                    # only one positive critical point: the minimum
                     tlmbda = (
                         -b + (-math.sqrt(disc) if a3 < 0 else math.sqrt(disc))
                     ) / a3
                 else:
-                    # both critical points positive, first is minimum
                     tlmbda = (
                         -b + (math.sqrt(disc) if a3 < 0 else -math.sqrt(disc))
                     ) / a3
@@ -400,7 +386,6 @@ def _dog_1step(
         dlt = rnwtln
         return dlt, nwtake, fstdog, cln, eta
     if fstdog:
-        # calculate double dogleg curve (ssd)
         fstdog = False
         alpha = 0.0
         for i in range(n):
@@ -420,15 +405,12 @@ def _dog_1step(
         if dlt == -1.0:
             dlt = _fmin2(cln, stepmx)
     if eta * rnwtln <= dlt:
-        # partial step in newton direction
         for i in range(n):
             sc[i] = dlt / rnwtln * float(p[i])
     elif cln >= dlt:
-        # step in steepest descent direction
         for i in range(n):
             sc[i] = dlt / cln * float(ssd[i]) / float(sx[i])
     else:
-        # convex combination of ssd and eta*p with scaled length dlt
         dot1 = _ddot(n, v, ssd)
         dot2 = _ddot(n, v, v)
         alam = (-dot1 + math.sqrt(dot1 * dot1 - dot2 * (cln * cln - dlt * dlt))) / dot2
@@ -504,7 +486,6 @@ def _hook_1step(
     if fstime:
         for i in range(n):
             wrk0[i] = float(sx[i]) * float(sx[i]) * float(p[i])
-        # solve l*y = (sx**2)*p
         _dtrsl(a, n, wrk0, 0)
         temp1 = _dnrm2(n, wrk0)
         phip0 = -(temp1 * temp1) / rnwtln
@@ -518,13 +499,11 @@ def _hook_1step(
     while True:
         if amu < amulo or amu > amuup:
             amu = _fmax2(math.sqrt(amulo * amuup), amuup * 0.001)
-        # h <- h + amu*(sx**2) copied into the lower triangle
         for i in range(n):
             a[i, i] = float(udiag[i]) + amu * float(sx[i]) * float(sx[i])
             for j in range(i):
                 a[i, j] = float(a[j, i])
         _choldc(n, a, 0.0, math.sqrt(epsm))
-        # solve h*p = l(l+)*sc = -g
         for i in range(n):
             wrk0[i] = -float(g[i])
         _lltslv(n, a, sc, wrk0)
@@ -539,9 +518,7 @@ def _hook_1step(
         temp1 = _dnrm2(n, wrk0)
         phip = -(temp1 * temp1) / stepln
         if (alo * dlt <= stepln <= hi * dlt) or (amuup - amulo > 0.0):
-            # sc is acceptable hookstep
             break
-        # select new amu
         temp1 = (amu - phi) / phip
         amulo = _fmax2(amulo, temp1)
         if phi < 0.0:
@@ -649,7 +626,6 @@ def _secunf(n, x, g, a, udiag, xpls, gpls, epsm, itncnt, rnf, iagflg, noupdt):
     s = np.zeros(n)
     y = np.zeros(n)
     t = np.zeros(n)
-    # copy hessian in upper triangle/udiag to lower triangle/diagonal
     for i in range(n):
         a[i, i] = float(udiag[i])
         for j in range(i):
@@ -666,7 +642,6 @@ def _secunf(n, x, g, a, udiag, xpls, gpls, epsm, itncnt, rnf, iagflg, noupdt):
     _mvmlts(n, a, s, t)
     den2 = _ddot(n, s, t)
     if noupdt:
-        # h <- [(s+)y/(s+)hs]h
         gam = den1 / den2
         den2 *= gam
         for j in range(n):
@@ -684,7 +659,6 @@ def _secunf(n, x, g, a, udiag, xpls, gpls, epsm, itncnt, rnf, iagflg, noupdt):
             break
     if skpupd:
         return noupdt
-    # bfgs update
     for j in range(n):
         for i in range(j, n):
             a[i, j] = (
@@ -713,7 +687,6 @@ def _secfac(n, x, g, a, xpls, gpls, epsm, itncnt, rnf, iagflg, noupdt):
         return noupdt
     _mvmltu(n, a, s, u)
     den2 = _ddot(n, u, u)
-    # l <- sqrt(den1/den2)*l
     alp = math.sqrt(den1 / den2)
     if noupdt:
         for j in range(n):
@@ -723,7 +696,6 @@ def _secfac(n, x, g, a, xpls, gpls, epsm, itncnt, rnf, iagflg, noupdt):
         noupdt = False
         den2 = den1
         alp = 1.0
-    # w = l(l+)s = hs
     _mvmltl(n, a, u, w)
     reltol = math.sqrt(rnf) if iagflg == 0 else rnf
     skpupd = True
@@ -735,21 +707,16 @@ def _secfac(n, x, g, a, xpls, gpls, epsm, itncnt, rnf, iagflg, noupdt):
             break
     if skpupd:
         return noupdt
-    # w = y - alp*l(l+)s
     for i in range(n):
         w[i] = _rfma(-alp, float(w[i]), float(y[i]))
-    # alp = 1/sqrt(den1*den2)
     alp /= den1
     for i in range(n):
         u[i] = float(u[i]) * alp
-    # copy l into upper triangular part; zero l
     for i in range(1, n):
         for j in range(i):
             a[j, i] = float(a[i, j])
             a[i, j] = 0.0
-    # find q, (l+) such that q(l+) = (l+) + u(w+)
     _qrupdt(n, a, u, w)
-    # copy updated factor back to the lower triangle
     for i in range(1, n):
         for j in range(i):
             a[i, j] = float(a[j, i])
@@ -760,7 +727,6 @@ def _chlhsn(n, a, epsm, sx, udiag):
     """uncmin.c ``chlhsn`` (:1361): scaled, safely-positive-definite
     LL' of the model Hessian. Mutates a (L in lower triangle, Hessian
     in upper) and udiag."""
-    # scale hessian: pre-/post-multiply by inv(sx)
     for j in range(n):
         for i in range(j, n):
             a[i, j] = float(a[i, j]) / (float(sx[i]) * float(sx[j]))
@@ -776,30 +742,25 @@ def _chlhsn(n, a, epsm, sx, udiag):
     if diagmn <= posmax * tol:
         amu = _rfma(tol, posmax - diagmn, -diagmn)
         if amu == 0.0:
-            # largest off-diagonal element of a
             offmax = 0.0
             for i in range(1, n):
                 for j in range(i):
                     tmp = abs(float(a[i, j]))
                     offmax = max(offmax, tmp)
             amu = 1.0 if offmax == 0.0 else offmax * (tol + 1.0)
-        # a = a + mu*i
         for i in range(n):
             a[i, i] = float(a[i, i]) + amu
         diagmx += amu
-    # copy lower triangle to upper, diagonal to udiag
     for i in range(n):
         udiag[i] = float(a[i, i])
         for j in range(i):
             a[j, i] = float(a[i, j])
     addmax = _choldc(n, a, diagmx, tol)
     if addmax > 0.0:
-        # restore original a (lower triangular part and diagonal)
         for i in range(n):
             a[i, i] = float(udiag[i])
             for j in range(i):
                 a[i, j] = float(a[j, i])
-        # find sdd such that a+sdd*i is safely positive definite
         evmin = 0.0
         evmax = float(a[0, 0])
         for i in range(n):
@@ -813,13 +774,11 @@ def _chlhsn(n, a, epsm, sx, udiag):
             tmp = float(a[i, i]) + offrow
             evmax = max(evmax, tmp)
         sdd = _rfma(tol, evmax - evmin, -evmin)
-        # perturb a and decompose again
         amu = _fmin2(sdd, addmax)
         for i in range(n):
             a[i, i] = float(a[i, i]) + amu
             udiag[i] = float(a[i, i])
         _choldc(n, a, 0.0, tol)
-    # unscale hessian and cholesky decomposition matrix
     for j in range(n):
         for i in range(j, n):
             a[i, j] = float(a[i, j]) * float(sx[i])
@@ -851,7 +810,6 @@ def _fstofd(m, n, xpls, fcn_vec, fpls, a, sx, rnoise, icase):
         for i in range(m):
             a[i, j] = (float(fhat[i]) - float(fpls[i])) / stepsz
     if icase == 3 and n > 1:
-        # if computing hessian, a must be symmetric
         for i in range(1, m):
             for j in range(i):
                 a[i, j] = (float(a[i, j]) + float(a[j, i])) / 2.0
@@ -935,7 +893,6 @@ def _heschk(n, x, fcn, d1fcn, d2fcn, f, g, a, typsiz, sx, rnf, analtl, iagflg, m
         _fstofd(n, n, x, d1fcn, g, a, sx, rnf, 3)
     else:
         _sndofd(n, x, fcn, f, a, sx, rnf)
-    # lower triangle -> upper, diagonal -> udiag
     for j in range(n):
         udiag[j] = float(a[j, j])
         for i in range(j + 1, n):
@@ -1046,14 +1003,12 @@ def _optchk(
         return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -1
     if n == 1 and msg % 2 == 0:
         return fscale, itnlim, ndigit, dlt, method, iexp, iagflg, iahflg, stepmx, -2
-    # compute scale matrix
     for i in range(n):
         if float(typsiz[i]) == 0.0:
             typsiz[i] = 1.0
         elif float(typsiz[i]) < 0.0:
             typsiz[i] = -float(typsiz[i])
         sx[i] = 1.0 / float(typsiz[i])
-    # default maximum step size if not provided
     if stepmx <= 0.0:
         stpsiz = 0.0
         for i in range(n):
@@ -1061,7 +1016,6 @@ def _optchk(
                 float(x[i]) * float(x[i]) * float(sx[i]), float(sx[i]), stpsiz
             )
         stepmx = 1000.0 * _fmax2(math.sqrt(stpsiz), 1.0)
-    # check function scale
     if fscale == 0.0:
         fscale = 1.0
     elif fscale < 0.0:
@@ -1152,9 +1106,7 @@ def optdrv(
         return 0.0, 0, itncnt, msg
     rnf = _fmax2(10.0 ** (-float(ndigit)), epsm)
     analtl = _fmax2(0.1, math.sqrt(rnf))
-    # evaluate fcn(x)
     f = fcn(x)
-    # analytic or finite-difference gradient (+ optional check)
     if not iagflg:
         _fstofd(
             1,
@@ -1178,7 +1130,6 @@ def optdrv(
         n, x, f, g, wrk1, itncnt, 0, gradtl, steptl, sx, fscale, itnlim, iretcd, False
     )
     if itrmcd != 0:
-        # immediate convergence: optdrv_end with the itrmcd-3 reset
         fpls = f
         for i in range(n):
             xpls[i] = float(x[i])
@@ -1187,7 +1138,6 @@ def optdrv(
             _prt_result(n, xpls, fpls, gpls, p, itncnt, 0)
         return fpls, itrmcd, itncnt, 0
     if iexp:
-        # expensive fcn: hessian by secant updates; initial hessian
         _hsnint(n, a, sx, method)
     else:
         if not iahflg:
@@ -1225,15 +1175,11 @@ def optdrv(
     noupdt = False
     dltsav = dlpsav = phisav = amusav = phpsav = 0.0
     dltp = phi = phip0 = amu = 0.0
-    # THE iterations
     while True:
         itncnt += 1
-        # L103 (chlhsn) skipped when line search/dogleg with secant
-        # updates keep the factored form current
         if not (iexp and method != 3):
             _chlhsn(n, a, epsm, sx, udiag)
         while True:
-            # L105: solve for newton step ap = -g
             for i in range(n):
                 wrk1[i] = -float(g[i])
             _lltslv(n, a, p, wrk1)
@@ -1274,8 +1220,6 @@ def optdrv(
                     epsm,
                     itncnt,
                 )
-            # if the step failed on a forward-difference gradient,
-            # retry with central differences
             if iretcd == 1 and iagflg == 0:
                 iagflg = -1
                 _fstocd(n, x, fcn, sx, rnf, g)
@@ -1291,10 +1235,8 @@ def optdrv(
                 _chlhsn(n, a, epsm, sx, udiag)  # goto L103
                 continue
             break
-        # calculate step for output
         for i in range(n):
             p[i] = float(xpls[i]) - float(x[i])
-        # calculate gradient at xpls
         if iagflg == -1:
             _fstocd(n, xpls, fcn, sx, rnf, gpls)
         elif iagflg == 0:
@@ -1311,7 +1253,6 @@ def optdrv(
             )
         else:
             gpls[:] = d1fcn(xpls)
-        # check whether stopping criteria satisfied
         itrmcd, icscmx = _opt_stop(
             n,
             xpls,
@@ -1330,7 +1271,6 @@ def optdrv(
         )
         if itrmcd != 0:
             break
-        # evaluate hessian at xpls
         if iexp:
             if method == 3:
                 noupdt = _secunf(
@@ -1350,12 +1290,10 @@ def optdrv(
                 d2fcn(xpls, a)
         if (msg // 16) % 2 == 1:
             _prt_result(n, xpls, fpls, gpls, p, itncnt, 1)
-        # x <- xpls, g <- gpls, f <- fpls
         f = fpls
         for i in range(n):
             x[i] = float(xpls[i])
             g[i] = float(gpls[i])
-    # optdrv_end
     if itrmcd == 3:
         fpls = f
         for i in range(n):

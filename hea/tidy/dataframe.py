@@ -6,12 +6,15 @@ tidyverse-named methods (``filter`` / ``arrange`` / ``distinct`` /
 
 Closed under polars operations: every method that returns a
 DataFrame / LazyFrame / Series returns the corresponding hea subclass.
-Native polars methods propagate via ``self._from_pydf(...)``; the
-operations that bypass that route (``describe``, ``corr``, ``unstack``,
-``sql``, ``match_to_schema``, plus the lazy round-trip via ``lazy()`` /
-``collect()``) are explicitly re-wrapped. Series-returning methods
-(``get_column``, ``__getitem__``, the ``*_horizontal`` family, …) are
-wrapped via the install hooks in :mod:`hea.tidy.series`.
+Most native polars methods (``select``, ``with_columns``, ``sort``,
+``join``, …) are implemented upstream as an eager-via-lazy round-trip,
+and propagate because both ends of it are overridden — ``lazy()`` here
+and ``_collect_eager`` on :class:`hea.tidy.series.LazyFrame`. The
+operations that build a frame by some other route (``describe``,
+``corr``, ``unstack``, ``sql``, ``match_to_schema``) are explicitly
+re-wrapped below. Series-returning methods (``get_column``,
+``__getitem__``, the ``*_horizontal`` family, …) are wrapped via the
+install hooks in :mod:`hea.tidy.series`.
 """
 
 from __future__ import annotations
@@ -54,17 +57,16 @@ class DataFrame(pl.DataFrame):
 
     Closed under polars operations: every method that returns a
     DataFrame/LazyFrame/Series returns the corresponding hea subclass.
-    Native polars methods (``with_columns``, ``sort``, ``join``, …)
-    propagate the subclass through ``self._from_pydf(...)`` automatically;
-    the few methods that bypass that route (``describe``, ``corr``,
-    ``unstack``, ``sql``, ``match_to_schema``, plus the lazy round-trip
-    via ``lazy()`` / ``collect()``) are explicitly re-wrapped below.
+    Native polars methods (``with_columns``, ``sort``, ``join``, …) are
+    an eager-via-lazy round-trip upstream, and propagate because both
+    ends of it are overridden: :meth:`lazy` here and ``_collect_eager``
+    on :class:`hea.tidy.series.LazyFrame`. The few that build a frame by
+    another route (``describe``, ``corr``, ``unstack``, ``sql``,
+    ``match_to_schema``) are explicitly re-wrapped below.
     Series-returning methods (``get_column``, ``__getitem__``, the
     ``*_horizontal`` family, …) are wrapped via
     :func:`_install_df_series_overrides`.
     """
-
-    # ---- internal -----------------------------------------------------
 
     def _wrap(self, df: pl.DataFrame) -> DataFrame:
         """Re-wrap a polars result as the same subclass as ``self``."""
@@ -78,8 +80,6 @@ class DataFrame(pl.DataFrame):
         uses ``~`` for selector negation.
         """
         return pl.exclude(self.columns)
-
-    # ---- repr ---------------------------------------------------------
 
     def __repr__(self) -> str:
         base = super().__repr__()
@@ -102,8 +102,6 @@ class DataFrame(pl.DataFrame):
             return base
         return _format_ts_header_html(m) + base
 
-    # ---- row verbs ----------------------------------------------------
-
     def filter(self, *predicates: Any, **constraints: Any) -> DataFrame:
         """Keep rows matching ``predicates``. Polars ``filter`` semantics."""
         return super().filter(*predicates, **constraints)
@@ -117,10 +115,6 @@ class DataFrame(pl.DataFrame):
         NaN at the top). Use ``df.sort(...)`` for the polars default.
         """
         names, desc_flags = _split_arrange(cols)
-        # NaN-as-largest is what makes polars diverge from dplyr; coerce
-        # NaN → null per-column so ``nulls_last=True`` covers both.
-        # Done as a sort-key expression so the underlying values aren't
-        # actually rewritten in the output frame.
         keys: list[Any] = []
         for n in names:
             dtype = self.schema.get(n)
@@ -146,8 +140,6 @@ class DataFrame(pl.DataFrame):
         if not keep_all:
             out = out.select(subset)
         return self._wrap(out)
-
-    # ---- column verbs -------------------------------------------------
 
     def mutate(
         self,
@@ -195,15 +187,10 @@ class DataFrame(pl.DataFrame):
             by = [_by] if isinstance(_by, str) else list(_by)
             exprs = [e.over(by) for e in exprs]
 
-        # dplyr mutate is *sequential* — later expressions see earlier ones.
-        # Polars' ``with_columns(*exprs)`` evaluates in parallel, so we
-        # chain one expression at a time. For typical mutate calls (a
-        # handful of exprs) the overhead is negligible.
         out: pl.DataFrame = self
         for e in exprs:
             out = pl.DataFrame.with_columns(out, e)
 
-        # Names of newly produced columns (last alias wins, matching with_columns).
         new_names: list[str] = []
         for e in exprs:
             try:
@@ -218,11 +205,8 @@ class DataFrame(pl.DataFrame):
             originals = list(self.columns)  # before with_columns
             new_set = set(new_names)
             if _keep == "used" or _keep == "unused":
-                # Find originals referenced by any new expression.
                 referenced: set[str] = set()
                 for e in exprs:
-                    # Some expressions (e.g., literals) may not expose
-                    # root_names; treat as referencing nothing.
                     with contextlib.suppress(Exception):
                         for r in e.meta.root_names():
                             if r in originals and r not in new_set:
@@ -312,9 +296,6 @@ class DataFrame(pl.DataFrame):
             elif isinstance(c, pl.Series):
                 flat.append(c.name)
             elif isinstance(c, _TidyRange):
-                # dplyr's ``select(year:day)`` column range — translator
-                # emits ``cols_between('year', 'day')``. ``~cols_between``
-                # gives the complement (``select(!(a:b))``).
                 flat.extend(c.resolve(self))
             else:
                 flat.append(c)
@@ -370,7 +351,6 @@ class DataFrame(pl.DataFrame):
             raise ValueError("rename(): pass either a dict or kwargs, not both.")
         if mapping is not None:
             return super().rename(mapping)
-        # kwargs: new=old → {old: new}
         return super().rename({old: new for new, old in kwargs.items()})
 
     def clean_names(self) -> DataFrame:
@@ -422,7 +402,6 @@ class DataFrame(pl.DataFrame):
             elif isinstance(c, pl.Series):
                 moving.append(c.name)
             elif isinstance(c, _TidyRange):
-                # dplyr's ``relocate(year:dep_time, ...)`` column-range.
                 moving.extend(c.resolve(self))
             elif cs.is_selector(c):
                 moving.extend(cs.expand_selector(self, c))
@@ -431,7 +410,6 @@ class DataFrame(pl.DataFrame):
                     f"relocate(): unsupported argument {type(c).__name__}; "
                     "pass column names, lists of names, or polars selectors."
                 )
-        # Dedupe while preserving first-seen order — selectors can overlap.
         seen: set[str] = set()
         moving = [c for c in moving if not (c in seen or seen.add(c))]
         if not moving:
@@ -439,9 +417,6 @@ class DataFrame(pl.DataFrame):
         for c in moving:
             if c not in self.columns:
                 raise ValueError(f"relocate(): column {c!r} not in frame.")
-        # Preserve the columns' original frame order, not the input order
-        # (dplyr behavior: ``relocate(c, a)`` moves them but keeps a-before-c
-        # if that's how they appear in the frame).
         moving = [c for c in self.columns if c in moving]
         rest = [c for c in self.columns if c not in moving]
         if _before is None and _after is None:
@@ -455,8 +430,6 @@ class DataFrame(pl.DataFrame):
             )
             ordered = rest[:idx] + moving + rest[idx:]
         return super().select(ordered)
-
-    # ---- groups -------------------------------------------------------
 
     def group_by(self, *cols: Any, **kwargs: Any) -> GroupBy:
         """Begin a grouped operation. Returns a :class:`GroupBy` wrapper.
@@ -473,9 +446,6 @@ class DataFrame(pl.DataFrame):
         """
         pl_kwargs: dict[str, Any] = {}
         derived: dict[str, Any] = {}
-        # _maintain_order is the explicit option (escape hatch); when
-        # passed, bare ``maintain_order`` is reclaimed as a derived
-        # column name.
         if "_maintain_order" in kwargs:
             pl_kwargs["maintain_order"] = kwargs["_maintain_order"]
             derived = {k: v for k, v in kwargs.items() if k != "_maintain_order"}
@@ -531,7 +501,6 @@ class DataFrame(pl.DataFrame):
         _check_groups(_groups)
         exprs = _kwargs_to_exprs(args, kwargs)
         if _by is None:
-            # Single row from the whole frame — no groups to operate on.
             if _groups not in ("drop", "drop_last"):
                 raise ValueError(
                     f"summarize(_groups={_groups!r}): no groups to "
@@ -569,9 +538,6 @@ class DataFrame(pl.DataFrame):
         columns — R's dplyr style ``count(length = str_length(name), wt = n)``
         passes the kwargs through as the additional mutate-then-group.
         """
-        # ``count(name=value)`` in R/dplyr is a mutate-then-count: each kwarg
-        # adds a derived column to group by. We accept that shape but only
-        # for kwargs whose value is an Expr or a string column reference.
         derived: dict[str, Any] = {}
         for k, v in kwargs.items():
             derived[k] = v
@@ -601,8 +567,6 @@ class DataFrame(pl.DataFrame):
         if sort:
             out = out.sort(name, descending=True)
         return self._wrap(out)
-
-    # ---- slice family (ungrouped; grouped versions live on GroupBy) ---
 
     def slice(self, offset, length=None):
         """Positional row selection — dplyr's ``slice()`` *and* polars' ``slice``.
@@ -650,13 +614,10 @@ class DataFrame(pl.DataFrame):
         n = self.height
         keep = [p for p in (int(i) for i in positions) if -n <= p < n]
         if drop:
-            # Map any from-end negatives to absolute indices, then remove.
             targets = [p % n for p in keep]
             return self._wrap(
                 pl.DataFrame.remove(self, pl.int_range(pl.len()).is_in(targets))
             )
-        # Keep: ``gather`` is 0-based, handles from-end negatives, and
-        # preserves duplicates / reordering — exactly dplyr's slice().
         return self._wrap(pl.DataFrame.gather(self, keep))
 
     def slice_head(self, n: int = 1) -> DataFrame:
@@ -697,19 +658,9 @@ class DataFrame(pl.DataFrame):
         *,
         descending: bool,
     ) -> DataFrame:
-        """Shared implementation for slice_min / slice_max.
-
-        Sort by ``col`` (NAs last regardless of direction), then take
-        the first ``n`` rows. If ``with_ties``, also keep any rows tied
-        with the n-th value, using null-aware equality so an all-NA
-        group still keeps its NA rows.
-        """
+        """Shared implementation for slice_min / slice_max."""
         sorted_df = super().sort(col, descending=descending, nulls_last=True)
         if with_ties and sorted_df.height:
-            # n-th value (1-indexed). ``slice(n-1, 1).first()`` returns
-            # null if the group has < n rows, which makes the
-            # eq_missing comparison correctly include nulls only when
-            # they're tied with the cutoff.
             nth = pl.col(col).slice(n - 1, 1).first()
             pos = pl.int_range(0, pl.len())
             out = sorted_df.filter((pos < n) | pl.col(col).eq_missing(nth))
@@ -738,8 +689,6 @@ class DataFrame(pl.DataFrame):
         return self._wrap(
             super().sample(n=n, fraction=prop, with_replacement=replace, seed=seed)
         )
-
-    # ---- joins (chapter 19) ------------------------------------------
 
     def inner_join(
         self,
@@ -879,8 +828,6 @@ class DataFrame(pl.DataFrame):
             na_matches="na",
         )
 
-    # ---- join internals -----------------------------------------------
-
     def _do_join(
         self,
         other: pl.DataFrame,
@@ -914,9 +861,6 @@ class DataFrame(pl.DataFrame):
                     "No shared column names to join on. Pass by= or "
                     "join_by(...) to specify keys."
                 )
-            # Mirror dplyr's natural-join info message so it's obvious
-            # when the chosen key set isn't the one the user wanted
-            # (e.g. accidentally joining flights to planes on year).
             _emit_natural_join_message(shared)
             return _JoinBy(equi_left=list(shared), equi_right=list(shared))
         if isinstance(by, _JoinBy):
@@ -946,12 +890,7 @@ class DataFrame(pl.DataFrame):
         na_matches: str,
     ) -> DataFrame:
         nulls_equal = na_matches == "na"
-        # Use a placeholder suffix polars won't collide with, then rename
-        # to dplyr's two-sided convention.
         polars_suffix = "__hea_r__"
-        # ``coalesce`` mirrors dplyr's ``keep``: keep=False merges shared
-        # keys, keep=True leaves both. polars' default behaves differently
-        # across how= variants, so we pin it explicitly.
         coalesce = not keep
 
         if how == "cross":
@@ -963,9 +902,6 @@ class DataFrame(pl.DataFrame):
             )
             return self._apply_dplyr_suffix(out, suffix, polars_suffix)
 
-        # Coerce numeric type mismatches on key columns to a common
-        # supertype (matches dplyr's implicit coercion). Polars would
-        # otherwise raise SchemaError on i64-vs-f64 keys, etc.
         left_aligned, right_aligned = _align_equi_key_types(
             self, other, spec.equi_left, spec.equi_right
         )
@@ -1013,11 +949,6 @@ class DataFrame(pl.DataFrame):
                 "polars' join_where backs only inner joins. Use inner_join "
                 "or open an issue for left/right/full non-equi support."
             )
-        # Rename right-side columns that collide with the left so polars'
-        # name resolution inside the predicate is unambiguous. We rewrite
-        # inequalities to point at the renamed names; free-form exprs
-        # (overlaps / within / between) are passed through and rely on
-        # non-colliding names (true for every r4ds ch19 example).
         polars_suffix = "__hea_r__"
         rename_map = {
             c: f"{c}{polars_suffix}" for c in other.columns if c in self.columns
@@ -1027,8 +958,6 @@ class DataFrame(pl.DataFrame):
         for op, L, R in spec.ineqs:
             R_renamed = rename_map.get(R, R)
             preds.append(_INEQ_BUILDERS[op](pl.col(L), pl.col(R_renamed)))
-        # Equi conditions inside an otherwise non-equi join also go via
-        # join_where (it accepts equality predicates too).
         for L, R in zip(spec.equi_left, spec.equi_right):
             R_renamed = rename_map.get(R, R)
             preds.append(pl.col(L) == pl.col(R_renamed))
@@ -1059,17 +988,11 @@ class DataFrame(pl.DataFrame):
             )
         polars_suffix = "__hea_r__"
         strategy = _CLOSEST_STRATEGY[spec.asof.op]
-        # Coerce numeric type mismatches on the asof key and any equi
-        # grouping keys (same rule as the equi-join path).
         asof_keys_left = list(spec.equi_left) + [spec.asof.left]
         asof_keys_right = list(spec.equi_right) + [spec.asof.right]
         left_aligned, right_aligned = _align_equi_key_types(
             self, other, asof_keys_left, asof_keys_right
         )
-        # polars' join_asof requires both frames sorted on the asof key
-        # (and by the equi-grouping keys, if any). dplyr preserves left
-        # row order on the way out — we tag rows, sort, asof, then
-        # restore the original order. Equi keys map to by_left/by_right.
         idx_col = "__hea_idx__"
         left_sorted = pl.DataFrame.with_row_index(left_aligned, idx_col)
         left_sorted = left_sorted.sort(asof_keys_left)
@@ -1084,15 +1007,9 @@ class DataFrame(pl.DataFrame):
         if spec.equi_left:
             kwargs["by_left"] = spec.equi_left
             kwargs["by_right"] = spec.equi_right
-            # polars can't verify sortedness once `by` groups are
-            # involved; we already sorted, so skip the check.
             kwargs["check_sortedness"] = False
         out = pl.DataFrame.join_asof(left_sorted, right_sorted, **kwargs)
-        # asof always returns one row per left row (left-join shape);
-        # the asof key column on the right tells us whether each row
-        # matched (null = no match found).
         right_key_col = spec.asof.right
-        # ``coalesce`` collapsed the right key into the left when ``not keep``.
         match_marker = (
             spec.asof.right
             if right_key_col in out.columns
@@ -1105,7 +1022,6 @@ class DataFrame(pl.DataFrame):
         if how == "inner":
             out = out.filter(pl.col(match_marker).is_not_null())
         elif how == "anti":
-            # Keep only unmatched left rows; project back to left's columns.
             out = out.filter(pl.col(match_marker).is_null())
             out = out.select(
                 [c for c in out.columns if c in self.columns or c == idx_col]
@@ -1115,7 +1031,6 @@ class DataFrame(pl.DataFrame):
             out = out.select(
                 [c for c in out.columns if c in self.columns or c == idx_col]
             )
-        # Restore left's original row order and drop the index tag.
         out = out.sort(idx_col).drop(idx_col)
         return self._apply_dplyr_suffix(out, suffix, polars_suffix)
 
@@ -1125,47 +1040,27 @@ class DataFrame(pl.DataFrame):
         suffix: tuple[str, str],
         polars_suffix: str,
     ) -> DataFrame:
-        """Rewrite polars' single-sided ``suffix`` into dplyr's two-sided form.
-
-        Polars adds ``polars_suffix`` only to right-side columns that
-        collide. dplyr renames both: the left column gets ``suffix[0]``
-        and the right column gets ``suffix[1]``. We translate one to the
-        other; if both suffix elements are empty no renaming happens.
-        """
+        """Rewrite polars' single-sided ``suffix`` into dplyr's two-sided form."""
         ls, rs = suffix
         rename: dict[str, str] = {}
         for name in out.columns:
             if name.endswith(polars_suffix):
                 base = name[: -len(polars_suffix)]
-                # The corresponding un-suffixed left column should exist;
-                # rename both sides.
                 if base in out.columns:
                     if ls:
                         rename[base] = f"{base}{ls}"
                     if rs:
                         rename[name] = f"{base}{rs}"
                     elif ls:
-                        # No right suffix: strip the polars marker so the
-                        # right col becomes ``base`` — but ``base`` is the
-                        # left col, so we'd collide. Skip in this edge case.
                         pass
                 else:
-                    # Right-only — just strip the polars marker.
                     rename[name] = base
         if rename:
             out = out.rename(rename)
         return self._wrap(out)
 
-    # ---- pivots / pull (chapter 5) -----------------------------------
-
     def _resolve_cols(self, cols: Any) -> list[str]:
-        """Turn a ``cols`` argument into a flat list of existing column names.
-
-        Accepts: a string (single name), a list/tuple of strings /
-        selectors / exprs, a polars selector, a polars expression
-        (e.g. ``pl.exclude("a")`` — resolved against the frame), or
-        ``None`` (returns ``[]``).
-        """
+        """Turn a ``cols`` argument into a flat list of existing column names."""
         import polars.selectors as cs
 
         def expand_one(c: Any) -> list[str]:
@@ -1180,8 +1075,6 @@ class DataFrame(pl.DataFrame):
             if isinstance(c, _TidyRange):
                 return c.resolve(self)
             if isinstance(c, pl.Expr):
-                # ``pl.exclude(...)`` and similar non-selector exprs:
-                # resolve by asking polars which columns they cover.
                 return list(pl.DataFrame.select(self, c).columns)
             raise TypeError(f"unsupported cols element: {type(c).__name__}")
 
@@ -1210,7 +1103,6 @@ class DataFrame(pl.DataFrame):
         ``"up"`` (backward), ``"downup"`` (forward then backward to
         cover leading NAs), ``"updown"``.
         """
-        # No cols → everything.
         names = self._resolve_cols(list(cols)) if cols else list(self.columns)
         if direction == "down":
             strategies = ("forward",)
@@ -1282,14 +1174,9 @@ class DataFrame(pl.DataFrame):
             raise ValueError("pivot_longer(): cols resolved to no columns.")
         index = [c for c in self.columns if c not in on]
 
-        # Tag each input row with its original position so we can sort
-        # the result back into row-major order (dplyr's default — all
-        # weeks of song 1, then all of song 2, …). Polars' ``unpivot``
-        # outputs column-major (all rows of wk1, then all of wk2, …).
         ROW_IDX = "__pivot_longer_row_idx__"
         with_idx = pl.DataFrame.with_row_index(self, name=ROW_IDX)
 
-        # Step 1: unpivot to (index..., ROW_IDX, __name__, __value__).
         long = pl.DataFrame.unpivot(
             with_idx,
             on=on,
@@ -1298,20 +1185,16 @@ class DataFrame(pl.DataFrame):
             value_name="__value__",
         )
 
-        # Step 2: drop padding nulls if requested.
         if values_drop_na:
             long = long.filter(pl.col("__value__").is_not_null())
 
-        # Step 3: strip prefix.
         if names_prefix is not None:
             long = long.with_columns(
                 pl.col("__name__").str.replace(f"^{names_prefix}", "")
             )
 
-        # Normalize names_to.
         names_to_list = [names_to] if isinstance(names_to, str) else list(names_to)
 
-        # Step 4: simple (single-name, no .value) case — just rename.
         if len(names_to_list) == 1 and names_to_list[0] != ".value":
             out = (
                 long.rename({"__name__": names_to_list[0], "__value__": values_to})
@@ -1320,7 +1203,6 @@ class DataFrame(pl.DataFrame):
             )
             return self._wrap(out)
 
-        # Step 5: split __name__ into pieces.
         if names_sep is not None and names_pattern is not None:
             raise ValueError(
                 "pivot_longer(): pass either names_sep or names_pattern, not both."
@@ -1345,7 +1227,6 @@ class DataFrame(pl.DataFrame):
 
         long = long.drop("__name__")
 
-        # Identify the piece columns (everything new) and rename them.
         kept = set(index) | {"__value__", ROW_IDX}
         piece_cols = [c for c in long.columns if c not in kept]
         if len(piece_cols) != n_pieces:
@@ -1356,7 +1237,6 @@ class DataFrame(pl.DataFrame):
             )
         long = long.rename(dict(zip(piece_cols, names_to_list)))
 
-        # Step 6: handle the .value sentinel — pivot wider on that piece.
         if ".value" in names_to_list:
             non_value = [n for n in names_to_list if n != ".value"]
             out = long.pivot(
@@ -1425,9 +1305,6 @@ class DataFrame(pl.DataFrame):
                 separator=names_sep,
             )
         except pl.exceptions.ComputeError as e:
-            # Duplicates in ``names_from`` × ``id_cols`` — tidyr defaults
-            # to producing list-columns + a warning in this case. Match
-            # that behavior instead of halting the script.
             if "expected no or a single value" not in str(e):
                 raise
             import warnings
@@ -1470,8 +1347,6 @@ class DataFrame(pl.DataFrame):
             return self.to_series(idx)
         return self.get_column(col)
 
-    # ---- ggplot entry point -------------------------------------------
-
     def ggplot(self, mapping=None, **aes_kwargs):
         """Start a ggplot from this frame.
 
@@ -1491,20 +1366,11 @@ class DataFrame(pl.DataFrame):
         called via this wrapper. See ``hea/ggplot/core.py:ggplot.__init__``
         for why.
         """
-        # Lazy import: ggplot package depends on dataframe.py at module load,
-        # so importing it at top-level would create a cycle.
         import inspect
 
         from hea.ggplot.core import ggplot as _ggplot
         from hea.plot.dispatch import _frame_env
 
-        # ts-marked frame: default x=value (single-vector default,
-        # matching ``hist(Nile)``). Users targeting the time-axis line
-        # plot pass aes explicitly: ``Nile.ggplot(x="time", y="value")``
-        # — same explicitness ggplot2 in R requires for any chart.
-        # Driven by the explicit ``_ts_meta`` flag, never by column-name
-        # inference, so user-built ``DataFrame({"time": …, "value": …})``
-        # is not affected.
         if getattr(self, "_ts_meta", None) is not None:
             mapped_x = ("x" in aes_kwargs) or (mapping is not None and "x" in mapping)
             if not mapped_x:
@@ -1513,24 +1379,18 @@ class DataFrame(pl.DataFrame):
         env = _frame_env(inspect.currentframe().f_back)
         return _ggplot(self, mapping, _env=env, **aes_kwargs)
 
-    # ---- lazy frame ---------------------------------------------------
-
     def lazy(self) -> LazyFrame:
         """Start a lazy query; returns a hea.LazyFrame.
 
-        Overrides ``pl.DataFrame.lazy`` (which would return ``pl.LazyFrame``
-        via ``wrap_ldf`` and lose subclass identity through the eager-via-lazy
-        round-trip used by ``with_columns``/``sort``/``join``/etc.).
+        Overrides ``pl.DataFrame.lazy``, which returns ``pl.LazyFrame`` via
+        ``wrap_ldf``. This is the entry half of the eager-via-lazy round-trip
+        that ``with_columns`` / ``sort`` / ``join`` / etc. are built on; the
+        exit half is ``LazyFrame._collect_eager``. Both hops are needed —
+        either one missing drops the subclass for the whole eager surface.
         """
         from .series import LazyFrame
 
         return LazyFrame._from_pyldf(self._df.lazy())
-
-    # ---- subclass-preserving overrides --------------------------------
-    #
-    # The methods below build a fresh ``pl.DataFrame`` internally rather than
-    # routing through ``self._from_pydf``. We override each to re-wrap so the
-    # subclass is preserved.
 
     def describe(self, *args: Any, **kwargs: Any) -> DataFrame:
         return self._wrap(super().describe(*args, **kwargs))
@@ -1546,8 +1406,6 @@ class DataFrame(pl.DataFrame):
 
     def match_to_schema(self, *args: Any, **kwargs: Any) -> DataFrame:
         return self._wrap(super().match_to_schema(*args, **kwargs))
-
-    # ---- summary ------------------------------------------------------
 
     def summary(
         self,
@@ -1595,13 +1453,6 @@ class DataFrame(pl.DataFrame):
         """
         from .summary import Summary, _summary_block, _SummaryBlock
 
-        # ts-marked frame: hea.data() and hea.R.ts() set ``_ts_meta`` on
-        # frames that R would classify as ``ts``. R's ``summary(Nile)``
-        # (via the ts class) summarizes only the values; we mirror that
-        # by summarizing just the ``value`` column and skipping the
-        # year-index ``time``. Never inferred from column names — a
-        # user-built ``DataFrame({"time": …, "value": …})`` falls through
-        # to the normal per-column path.
         if getattr(self, "_ts_meta", None) is not None:
             cols_to_summarize = ["value"]
         else:
@@ -1612,8 +1463,6 @@ class DataFrame(pl.DataFrame):
                 _summary_block(col, self.get_column(col), maxsum=maxsum, digits=digits)
             )
         return Summary(blocks, width=width)
-
-    # ---- time series --------------------------------------------------
 
     def as_ts(self, *, start: float | None = None, frequency: float = 1.0) -> DataFrame:
         """Mark this frame as a time series (R's ``as.ts()``).

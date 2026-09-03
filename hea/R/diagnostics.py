@@ -50,19 +50,7 @@ def rstandard(model, type=None):
 
 
 def _loo_sigma_lm(model) -> np.ndarray:
-    """Leave-one-out σ estimates ``σ_(-i)`` for ``lm`` (weighted-aware).
-
-    Uses the closed form
-    ``σ_(-i)^2 = (RSS_w - w_i · e_i^2 / (1 - h_i)) / (n - p - 1)``,
-    with ``RSS_w = Σ w_i · e_i^2`` (the weighted residual sum of squares
-    R's ``summary.lm`` uses for ``deviance(m)``). For unweighted lm,
-    ``w_i = 1`` and this reduces to the standard ``(RSS - e_i^2 /
-    (1-h_i)) / (n-p-1)``. Raises if ``n - p - 1 ≤ 0``.
-
-    Note: hea's ``m.rss`` is the *unweighted* sum of squared residuals
-    even for weighted fits, so we compute ``RSS_w`` from primitives here
-    instead of using ``m.rss``.
-    """
+    """Leave-one-out σ estimates ``σ_(-i)`` for ``lm`` (weighted-aware)."""
     e = model.residuals.to_series().to_numpy()
     h = np.asarray(model.leverage)
     n = int(model.n)
@@ -91,11 +79,7 @@ def _lm_weights_array(model) -> np.ndarray:
 
 
 def _xtwxinv_glm_gam(model) -> np.ndarray:
-    """Return the cached ``(X'WX + S)^-1`` for glm/gam/bam (penalty included).
-
-    Derived from the model's vcov: ``V_bhat = dispersion · (X'WX)^-1`` for
-    glm; ``Vp = scale · (X'WX + S)^-1`` for gam/bam.
-    """
+    """Return the cached ``(X'WX + S)^-1`` for glm/gam/bam (penalty included)."""
     if hasattr(model, "Vp"):  # gam / bam
         return np.asarray(model.Vp) / float(model.scale)
     if hasattr(model, "V_bhat"):  # glm
@@ -106,15 +90,7 @@ def _xtwxinv_glm_gam(model) -> np.ndarray:
 
 
 def _loo_sigma_glm_gam(model) -> np.ndarray:
-    """Leave-one-out σ estimates for glm/gam/bam.
-
-    Known-scale families (Binomial, Poisson, …) return ``ones`` since
-    R's ``influence.glm`` fixes σ at 1. Unknown-scale families use the
-    same closed form as ``lm``, swapping RSS for total deviance:
-    ``σ_(-i)^2 = (deviance - d_i^2 / (1 - h_i)) / (n - p - 1)`` where
-    ``d_i`` is the raw deviance residual (so ``d_i^2`` equals the per-
-    observation deviance contribution).
-    """
+    """Leave-one-out σ estimates for glm/gam/bam."""
     h = np.asarray(model.leverage)
     if model.family.scale_known:
         return np.ones_like(h)
@@ -130,31 +106,14 @@ def _loo_sigma_glm_gam(model) -> np.ndarray:
 
 
 def _design_full(model) -> np.ndarray:
-    """Return the full design matrix as an ndarray.
-
-    For ``gam`` / ``bam``, ``model.X`` only carries the parametric
-    columns; the full penalised design (parametric + spline bases) is
-    stashed privately as ``_X_full``.
-    """
+    """Return the full design matrix as an ndarray."""
     if hasattr(model, "_X_full"):
         return np.asarray(model._X_full, dtype=float)
     return model.X.to_numpy().astype(float)
 
 
 def _irls_inputs(model) -> dict:
-    """Inputs for closed-form glm/gam jackknife diagnostics.
-
-    Returns a dict with:
-
-    * ``X`` — full design matrix (``n × p``) as ndarray
-    * ``XtWXinv`` — penalised cross-product inverse, ``Vp/scale`` or
-      ``V_bhat/dispersion``
-    * ``w_irls`` — IRLS working weights, recovered from leverage via
-      ``h_i = w_i · x_i' (X'WX)^{-1} x_i``
-    * ``working_resid`` — ``(y - μ) / g'(μ)`` (R's ``glm$residuals``)
-    * ``h`` — leverage diagonal
-    * ``sigma_loo`` — leave-one-out σ
-    """
+    """Inputs for closed-form glm/gam jackknife diagnostics."""
     h = np.asarray(model.leverage)
     X = _design_full(model)
     XtWXinv = _xtwxinv_glm_gam(model)
@@ -202,8 +161,6 @@ def rstudent(model):
     """
     if model.__class__.__name__ == "gmm":  # mixed model
         return np.asarray(model.rstudent())
-    # lm path — direct formula ``e_i · √w_i / (σ_(-i) · √(1-h_i))``
-    # (equivalent to the closed form for unweighted lm; weighted-aware).
     if hasattr(model, "std_residuals"):
         e = model.residuals.to_series().to_numpy()
         h = np.asarray(model.leverage)
@@ -212,7 +169,6 @@ def rstudent(model):
         one_minus_h = np.clip(1 - h, 1e-12, None)
         return e * sqrt_w / (sigma_loo * np.sqrt(one_minus_h))
 
-    # glm / gam / bam path — Williams' likelihood residual
     if not hasattr(model, "residuals_of"):
         raise TypeError(f"rstudent(): {model.__class__.__name__} not supported")
     h = np.asarray(model.leverage)
@@ -234,8 +190,6 @@ def cooks_distance(model):
     uses ``model.p``; ``cooks.distance.glm`` uses ``sum(hat)`` — we
     follow that split to match R numerically.
     """
-    # gmm (mixed model) and the Influence deletion object carry their own
-    # lme4-exact cooks.distance — dispatch to it.
     if model.__class__.__name__ in ("gmm", "Influence"):
         return np.asarray(model.cooks_distance())
     h = hatvalues(model)
@@ -262,8 +216,6 @@ def dffits(model):
     the raw response-scale Pearson residual.
     """
     if hasattr(model, "std_residuals"):  # lm
-        # ``DFFITS_i = e_i · √w_i · √h_i / (σ_(-i) · (1 - h_i))``
-        # (equivalent to ``rstudent · √(h/(1-h))`` and weighted-aware).
         e = model.residuals.to_series().to_numpy()
         h = np.asarray(model.leverage)
         sigma_loo = _loo_sigma_lm(model)
@@ -294,9 +246,6 @@ def dfbetas(model):
     """
     if model.__class__.__name__ == "Influence":  # deletion object
         return model.dfbetas()
-    # lm path — closed form
-    # β̂ - β̂_(-i) = (X'WX)^{-1} · X_i · w_i · e_i / (1 - h_i)
-    # (XtXinv stores (X'WX)^{-1} in hea's weighted lm.)
     if hasattr(model, "XtXinv"):
         X = model.X.to_numpy().astype(float)
         XtXinv = np.asarray(model.XtXinv)
@@ -313,7 +262,6 @@ def dfbetas(model):
             {col: out[:, i] for i, col in enumerate(model.column_names)}
         )
 
-    # glm / gam / bam path — IRLS closed form
     if not hasattr(model, "residuals_of"):
         raise TypeError(f"dfbetas(): {model.__class__.__name__} not supported")
     inputs = _irls_inputs(model)
@@ -324,9 +272,6 @@ def dfbetas(model):
     sigma_loo = inputs["sigma_loo"]
     one_minus_h = np.clip(1 - h, 1e-12, None)
 
-    # IRLS leave-one-out:
-    # β̂ - β̂_(-i) = (X'WX)^{-1} · X_i · w_i · z_i / (1 - h_i)
-    # where z_i is the working residual.
     delta = (X @ XtWXinv) * (w_irls * working_resid / one_minus_h)[:, None]
     sd_j = np.sqrt(np.diag(XtWXinv))
     sd_j = np.where(sd_j > 0, sd_j, 1.0)
@@ -392,7 +337,6 @@ def influence(model, groups=None, **kwargs):
     """
     if model.__class__.__name__ == "gmm":  # → Influence object
         return model.influence(groups=groups, **kwargs)
-    # lm path
     if hasattr(model, "XtXinv"):
         X = model.X.to_numpy().astype(float)
         XtXinv = np.asarray(model.XtXinv)
@@ -410,7 +354,6 @@ def influence(model, groups=None, **kwargs):
             "residuals": e,
         }
 
-    # glm / gam / bam path — IRLS closed form
     if not hasattr(model, "residuals_of"):
         raise TypeError(f"influence(): {model.__class__.__name__} not supported")
     inputs = _irls_inputs(model)

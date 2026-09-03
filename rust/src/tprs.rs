@@ -53,10 +53,6 @@ fn fast_eta(m: usize, d: usize, rsq: f64, f0: f64) -> f64 {
     f
 }
 
-/// Build the (n, nu+M) radial+polynomial matrix `b` for the tp kernel-eval path.
-/// `x_c` is (n, d) centred covariates, `xu` the (nu, d) knot grid, `poly_powers`
-/// the (M, d) null-space exponents (`_tp_gen_poly_powers`). Returns `b`; the
-/// caller does `b @ UZ`.
 #[pyfunction]
 #[pyo3(name = "tp_eval_b")]
 fn tp_eval_b<'py>(
@@ -76,8 +72,6 @@ fn tp_eval_b<'py>(
     let mm = pp.shape()[0]; // M = null-space polynomial columns
     let ncol = nu + mm;
 
-    // Logical-order (row-major) flat copies → contiguous inner loops regardless
-    // of the caller's array layout (callers pass ascontiguousarray anyway).
     let x_flat: Vec<f64> = x.iter().copied().collect(); // (n, d)
     let xu_flat: Vec<f64> = u.iter().copied().collect(); // (nu, d)
     let pp_flat: Vec<i64> = pp.iter().copied().collect(); // (M, d)
@@ -108,8 +102,6 @@ fn tp_eval_b<'py>(
         }
     };
 
-    // Element-wise independent ⇒ parallel == serial bit-for-bit. Small n stays
-    // serial (rayon split/join isn't worth it).
     if n >= 256 {
         py.allow_threads(|| {
             out.par_chunks_mut(ncol)

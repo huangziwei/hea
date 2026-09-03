@@ -62,8 +62,7 @@ def _to_numeric_axis(arr):
     representation so they can sit in the same numpy array as numeric
     coordinates — needed by ``LineCollection`` / ``column_stack``, which
     require a uniform dtype.
-
-    Numeric dtypes pass through unchanged."""
+    """
     kind = getattr(arr.dtype, "kind", None)
     if kind == "M":  # datetime64
         from matplotlib.dates import date2num
@@ -79,11 +78,6 @@ def _update_lims(ax, xs, ys):
         [(float(np.min(xs)), float(np.min(ys))), (float(np.max(xs)), float(np.max(ys)))]
     )
     ax.autoscale_view()
-
-
-# ---------------------------------------------------------------------------
-# arrow() — grid::arrow() port for geom_segment / geom_curve / annotate
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -136,9 +130,6 @@ def _arrow_to_style(arrow_spec):
         style = f"{tail}-{head}"
     else:
         style = f"-{head}"
-    # ``mutation_scale`` sets the arrow-head size in points. Map R's
-    # ``length`` (inches) → points so 0.25" → 18 pt — matches grid's
-    # default arrow visually at typical figure sizes.
     mutation_scale = arrow_spec.length * 72.0
     return (style, mutation_scale)
 
@@ -155,9 +146,6 @@ class GeomSegment(Geom):
     )
     required_aes: tuple = ("x", "y", "xend", "yend")
     key_glyph: str = "path"
-    # ``arrow=arrow(...)`` (or matplotlib arrowstyle string). When set,
-    # we render via per-row FancyArrowPatch so the head can draw;
-    # otherwise we use the fast LineCollection path.
     arrow: object = None
 
     def draw_panel(self, data, ax) -> None:
@@ -172,7 +160,6 @@ class GeomSegment(Geom):
         yend = _to_numeric_axis(data["yend"].to_numpy())
 
         if self.arrow is None:
-            # Fast path: no arrowhead → one LineCollection for all rows.
             segments = np.stack(
                 [np.column_stack([x, y]), np.column_stack([xend, yend])],
                 axis=1,
@@ -186,8 +173,6 @@ class GeomSegment(Geom):
             )
             ax.add_collection(coll)
         else:
-            # Arrow needed → per-row FancyArrowPatch (each can carry its
-            # own colour / size / linestyle, like ggplot2's behaviour).
             n = len(data)
             colours = (
                 data["colour"].to_list() if "colour" in data.columns else ["black"] * n
@@ -293,11 +278,6 @@ class GeomCurve(Geom):
             ax.add_patch(patch)
 
         _update_lims(ax, np.concatenate([x, xend]), np.concatenate([y, yend]))
-
-
-# ---------------------------------------------------------------------------
-# Factories
-# ---------------------------------------------------------------------------
 
 
 def _make_layer(geom, mapping, data, stat, position, kwargs):

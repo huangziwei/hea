@@ -19,11 +19,6 @@ from .transformed import IdentityTrans, Trans
 @dataclass
 class ScaleContinuous(Scale):
     transform: Trans = field(default_factory=IdentityTrans)
-    # Trained data range — used for break computation so ticks reflect
-    # *data* extent, not the (expanded) axis view limit. Without this,
-    # bars at gear ∈ {3, 4, 5} get axis xlim ≈ [2, 6] (bar widths +
-    # margins), and matplotlib's auto-locator yields ticks at 2..6
-    # rather than R's preferred 3..5.
     range_: list | None = field(default=None, init=False, repr=False)
 
     def train(self, data) -> None:
@@ -43,19 +38,8 @@ class ScaleContinuous(Scale):
             self.range_[1] = max(self.range_[1], hi)
 
     def apply_to_axis(self, ax, axis: str, view_limits=None) -> None:
-        # The matplotlib axis stays LINEAR for ``ScaleContinuous``.
-        # ``scale_x_log10()`` etc. pre-transform the data in build.py
-        # (matches ggplot2 — stat sees transformed values), so calling
-        # ``set_xscale("log")`` here would log a second time and break
-        # the display. ``Trans.matplotlib_scale()`` is reserved for
-        # ``coord_trans()`` (display-only transform, data untouched).
 
         if view_limits is not None:
-            # ``coord_cartesian(xlim=/ylim=)`` zoom — set limits to match
-            # the coord view so break filtering further down sees the
-            # right window. Coord's ``apply_to_axes`` will run again
-            # later but is now a no-op (idempotent set_xlim with the
-            # same value).
             if axis == "x":
                 ax.set_xlim(view_limits)
             else:
@@ -66,12 +50,8 @@ class ScaleContinuous(Scale):
             else:
                 ax.set_ylim(self.limits)
         else:
-            # Honour an Expansion's symmetric multiplicative padding via
-            # matplotlib's margins (asymmetric / additive is polish).
             self._apply_expansion(ax, axis)
 
-        # Reverse: flip after any other limits are settled. matplotlib
-        # treats lo>hi as an inverted axis automatically.
         if self.transform.reversed():
             if axis == "x":
                 lo, hi = ax.get_xlim()
@@ -87,15 +67,6 @@ class ScaleContinuous(Scale):
                 ax.set_yticks([])
             return
 
-        # When a non-linear transform is in play and the user didn't ask
-        # for explicit breaks, ask the transform for nice ticks at
-        # original-units values (e.g. 10/100/1000 for log10) mapped to
-        # the transformed positions of the data. The matplotlib axis is
-        # linear (data is pre-transformed in build); we just place ticks
-        # at the right positions and label them with the inverse-mapped
-        # values. Without this, a log10-transformed axis would get
-        # MaxNLocator's linear ticks (e.g. 1, 2, 3 on a log axis labeled
-        # as 10, 100, 1000) — wrong.
         if isinstance(self.breaks, str) and self.breaks == "default":
             tick_spec = self.transform.tick_positions_and_labels(
                 *(
@@ -116,42 +87,14 @@ class ScaleContinuous(Scale):
                     ax.set_yticklabels(labels)
                 return
 
-        # Compute breaks against the EXPANDED data range — matches
-        # ggplot2's ``scales::breaks_extended``, which works on the
-        # post-expansion view limits, not the raw data range. Without
-        # this, a density y in ``[4e-5, 1.1e-3]`` gets breaks at
-        # ``2.5e-4`` increments instead of ``3e-4``, and the labels
-        # don't switch to scientific the way R does. We then trim
-        # breaks back inside the expanded range so out-of-view ticks
-        # don't get drawn as labels.
-        #
-        # We DON'T fall back to ``ax.get_xlim()`` here even when
-        # untrained — matplotlib's autoscaled view bakes in artist
-        # extents (bar widths, ribbon padding) that would push the
-        # break range past the data, e.g. bars at ``gear ∈ {3, 4, 5}``
-        # would yield ``[2, 3, 4, 5, 6]`` instead of the expected
-        # ``[3, 4, 5]``.
         if view_limits is not None:
-            # Compute breaks against the coord-zoomed view so e.g.
-            # ``coord_cartesian(ylim=(0, 50))`` on a histogram whose
-            # raw counts reach ~10k yields ticks at 0/10/.../50, not
-            # 0/2500/.../10000 (almost all of which would land outside
-            # the visible window and disappear).
             break_range = tuple(view_limits)
         elif self.range_ is not None:
             break_range = self._expanded_break_range()
         else:
             break_range = ax.get_xlim() if axis == "x" else ax.get_ylim()
         breaks = self._compute_breaks(break_range)
-        # Labels reflect the user-supplied (raw-units) break values, not
-        # the transformed positions — so ``breaks=[100,200,400]`` on a
-        # ``scale_x_log10()`` axis still labels as 100/200/400 even
-        # though the underlying tick positions are 2/2.30/2.60.
         labels = self._compute_labels(breaks)
-        # When the data was pre-transformed (scale_x_log10 etc.), the
-        # axis lives in transformed space. User-supplied breaks are in
-        # raw units, so map them through ``transform`` before placing
-        # on the axis. The labels stay in raw units (above).
         if self.transform.name != "identity":
             try:
                 tick_positions = np.asarray(self.transform.transform(breaks))
@@ -181,7 +124,6 @@ class ScaleContinuous(Scale):
         exp = self.expand
         if isinstance(exp, Expansion):
             m_lo, m_hi, _a_lo, _a_hi = exp.split()
-            # Symmetric in matplotlib's margins API.
             mult = max(m_lo, m_hi)
         elif isinstance(exp, (list, tuple)) and len(exp) >= 1:
             mult = float(exp[0])
@@ -195,12 +137,7 @@ class ScaleContinuous(Scale):
             ax.margins(y=mult)
 
     def _expanded_break_range(self) -> tuple[float, float]:
-        """Trained data range padded by this scale's ``expand`` factor.
-
-        Mirrors ggplot2's call to ``breaks_extended`` on the expanded
-        view limits. Reads ``expand`` in either ``Expansion`` or legacy
-        ``(mult, add)`` form.
-        """
+        """Trained data range padded by this scale's ``expand`` factor."""
         from ..expansion import Expansion
 
         lo, hi = self.range_
@@ -228,18 +165,12 @@ class ScaleContinuous(Scale):
 
     def _compute_labels(self, breaks):
         if isinstance(self.labels, str) and self.labels == "default":
-            # Per-axis (vector) format choice: scientific only when its
-            # max width strictly beats fixed, matching R's ``format()``.
             return format_breaks(breaks)
         if self.labels is None:
-            # ggplot2 / R: ``labels = NULL`` suppresses tick labels.
             return ["" for _ in breaks]
         if callable(self.labels):
             return list(self.labels(breaks))
         if isinstance(self.labels, dict):
-            # Dict lookup keyed by the break value — falls back to the
-            # break itself when missing (matches ggplot2's named-vector
-            # treatment in ``scale_*_continuous(labels = c(...))``).
             return [str(self.labels.get(b, b)) for b in breaks]
         return [str(x) for x in self.labels]
 

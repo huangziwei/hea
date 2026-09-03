@@ -1,15 +1,7 @@
-//! cutree — flat cluster labels from cutting an `hclust` tree into `which[j]`
-//! groups. A 1:1 mirror of `hea/R/clustering.py::_cutree_c` (port of `C_cutree`,
-//! `src/library/stats/src/hclust-utils.c`). Pure integer work (no float), so the
-//! result is bit-identical to the pure-Python path on every platform.
-
 use numpy::ndarray::Array2;
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 
-/// `merge` is the R `(n-1, 2)` matrix; `which` the requested group counts.
-/// Returns the `(n, nw)` label matrix (column `j` = labels for `which[j]`
-/// clusters).
 #[pyfunction]
 #[pyo3(name = "cutree", signature = (merge, which))]
 pub fn cutree<'py>(
@@ -25,7 +17,6 @@ pub fn cutree<'py>(
     let col1: Vec<i64> = (0..n1).map(|i| m[[i, 0]]).collect();
     let col2: Vec<i64> = (0..n1).map(|i| m[[i, 1]]).collect();
 
-    // ans row-major: ans[(obs-1)*nw + j]
     let mut ans = vec![0i64; n * nw];
     let mut sing = vec![true; n + 1]; // is k-th obs still alone?
     let mut m_nr = vec![0i64; n + 1]; // last merge step containing k-th obs
@@ -47,7 +38,6 @@ pub fn cutree<'py>(
             } else {
                 ((-m2_0) as usize, m1_0)
             };
-            // slice-iterate the O(n) relabel scan (no bounds check; vectorizable)
             for v in m_nr[1..=n].iter_mut() {
                 if *v == m1 {
                     *v = kk;
@@ -63,7 +53,6 @@ pub fn cutree<'py>(
             }
         }
 
-        // does this merge leave a requested number of groups (n - k)?
         let mut found_j = false;
         for j in 0..nw {
             if which[j] == (n - k) as i64 {

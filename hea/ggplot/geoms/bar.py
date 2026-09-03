@@ -20,8 +20,6 @@ import numpy as np
 from ..aes import split_layer_kwargs
 from .geom import Geom
 
-# ggplot2 ``size`` is in mm. matplotlib's ``linewidth`` is in pt
-# (TeX convention: 72.27 pt/inch, 25.4 mm/inch).
 _PT_PER_MM = 72.27 / 25.4
 
 
@@ -34,14 +32,6 @@ class GeomBar(Geom):
             "size": 0.5,
             "linetype": "solid",
             "alpha": 1.0,
-            # ggplot2's GeomBar/GeomCol default. Realized as a per-row
-            # column so polar's ``rescale_theta`` reaches it — without
-            # the column, ``draw_panel``'s scalar fallback (0.9) goes
-            # straight to ``ax.bar(width=0.9)`` and matplotlib polar
-            # interprets that as 0.9 RADIANS per bar (e.g. 60 bars × 0.9
-            # rad = ~8.6 full circles' worth of overlap). With the
-            # column, ``rescale_theta`` multiplies by ``2π / x_range``
-            # so 0.9 ends up as 0.9 × slot-width per bar.
             "width": 0.9,
         }
     )
@@ -49,13 +39,6 @@ class GeomBar(Geom):
     key_glyph: str = "polygon"
 
     def setup_data(self, data):
-        # Expose the bar baseline (y = 0) as ymin/ymax columns so the y
-        # scale trains on it. Without this, ``geom_col`` (default
-        # ``position="identity"``) trains the y scale only on raw y values
-        # like [70, 150], and the auto-computed ticks miss 0. ``position
-        # =stack``/``fill`` already inject ymin/ymax — preserve those.
-        # ``pmin/pmax`` (not just ``ymin=0, ymax=y``) so negative-y bars
-        # hang correctly from 0.
         import polars as pl
 
         if (
@@ -88,21 +71,11 @@ class GeomBar(Geom):
         else:
             width = 0.9
 
-        # Per-row fill / edge: scalar when uniform, list when varied
-        # (matplotlib's ``ax.bar`` accepts either). Lets dodge / stack /
-        # ``aes(colour=class)`` colour each bar individually.
         fill = _row_colour(data, "fill", when_all_none="none", when_missing="grey35")
         edge = _row_colour(data, "colour", when_all_none="none", when_missing="none")
         alpha = float(_scalar(data, "alpha", default=1.0))
-        # Border thickness — the layer's ``size`` aes is ggplot2-style mm;
-        # matplotlib wants pt. Default ``size=0.5 mm`` becomes ~1.42 pt,
-        # matching ggplot2's bar borders.
         linewidth = float(_scalar(data, "size", default=0.5)) * _PT_PER_MM
 
-        # Under coord_flip the data has already been x↔y swapped by render:
-        # ``data["x"]`` now holds the *values* (originally y) and
-        # ``data["y"]`` (== ``height`` here) holds the *positions* (originally
-        # x). Use ax.barh so bars extend along the visible x axis.
         if getattr(ax, "_hea_coord_flipped", False):
             ax.barh(
                 height,
@@ -137,27 +110,13 @@ def _scalar(df, col, *, default):
 
 
 def _row_colour(df, col, *, when_all_none, when_missing):
-    """Resolve a per-row colour-like aesthetic into a matplotlib value.
-
-    ``when_missing`` — column not in df at all (geom default applies).
-    ``when_all_none`` — column is all-None, i.e. user explicitly wrote
-    ``fill=None`` / ``colour=None`` (matches R's ``fill=NA`` /
-    ``colour=NA`` → transparent / no edge). ``"none"`` is matplotlib's
-    transparent literal.
-
-    Returns:
-      * scalar matplotlib colour when the column is missing, all-None,
-        or uniform across rows;
-      * list of per-row colours when values vary, with any None entries
-        rewritten to ``"none"`` so matplotlib doesn't reject the array.
-    """
+    """Resolve a per-row colour-like aesthetic into a matplotlib value."""
     from .._util import r_color
 
     if col not in df.columns or len(df) == 0:
         return r_color(when_missing) if when_missing != "none" else "none"
     vals = df[col].to_list()
 
-    # Treat NaN floats the same as None — matches R's ``NA_real_``.
     def _is_na(v):
         if v is None:
             return True

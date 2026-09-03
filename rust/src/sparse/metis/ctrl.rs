@@ -122,7 +122,6 @@ pub struct Ctrl {
     pub pijbm: Vec<Real>,
     pub cfactor: Real,
 
-    /// `random.c`'s `mt`/`mti`, moved in here. See the module docstring.
     pub rng: Rng,
 }
 
@@ -142,28 +141,18 @@ impl Ctrl {
         let ufactor = getoption(options, Opt::Ufactor, OMETIS_DEFAULT_UFACTOR);
         let compress = getoption(options, Opt::Compress, 1);
         let ccorder = getoption(options, Opt::Ccorder, 0);
-        // `0.1 * GETOPTION (..., METIS_OPTION_PFACTOR, 0)` in double, then
-        // stored into a `real_t`.
         let pfactor = (0.1 * getoption(options, Opt::Pfactor, 0) as f64) as Real;
 
         let coarsen_to = 100;
 
-        // common options
         let ctype = getoption(options, Opt::Ctype, METIS_CTYPE_SHEM);
         let no2hop = getoption(options, Opt::No2hop, 0);
         let seed = getoption(options, Opt::Seed, -1);
         let dbglvl = getoption(options, Opt::Dbglvl, 0);
         let numflag = getoption(options, Opt::Numbering, 0);
 
-        // `ctrl->tpwgts = rsmalloc (2, .5, ...)` for OMETIS: two halves, "to
-        // allow the pijbm to be defined properly for the edge-based refinement
-        // during initial partitioning".
         let tpwgts = vec![0.5 as Real; 2];
 
-        // `rsmalloc (ncon, I2RUBFACTOR (ufactor))` rounds the double
-        // `1.0 + 0.001 * ufactor` to `real_t` on the way in; the `+= 0.0000499`
-        // then promotes back to double and rounds again. Both roundings are
-        // observable, so both are spelled out.
         let ub = (1.0 + 0.001 * ufactor as f64) as Real;
         let ubfactors = vec![(ub as f64 + 0.0000499) as Real; ncon.max(0) as usize];
 

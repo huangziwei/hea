@@ -62,12 +62,7 @@ __all__ = ["PatternPlan"]
 
 
 def _as_sorted_csc(M):
-    """``M`` as a CSC matrix with sorted indices.
-
-    ``csc_array`` of an already-CSC input shares its arrays rather than copying
-    them, so an unsorted input is copied before being sorted — otherwise this
-    would reorder the caller's own matrix as a side effect of reading it.
-    """
+    """``M`` as a CSC matrix with sorted indices."""
     if not issparse(M):
         M = csc_array(np.asarray(M, dtype=np.float64))
     M = csc_array(M)
@@ -80,13 +75,7 @@ def _as_sorted_csc(M):
 
 
 def _ones_like_pattern(M):
-    """``M``'s pattern carrying 1.0 in every stored slot.
-
-    Products and sums of these cannot cancel and cannot produce a zero for
-    scipy to prune, so a pattern computed through them is the structural
-    answer. ``abs(M)`` is *nearly* the same trick and is not quite enough: an
-    explicitly stored zero survives ``abs`` as a zero and is pruned back out.
-    """
+    """``M``'s pattern carrying 1.0 in every stored slot."""
     M = _as_sorted_csc(M)
     return csc_array((np.ones(M.nnz), M.indices, M.indptr), shape=M.shape)
 

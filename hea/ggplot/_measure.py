@@ -17,9 +17,6 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.text import Text
 
-# Internal measurement figure. Lazily created on first call. Its dpi is
-# fixed; we always convert pixel extents to inches before returning, so
-# the chosen value doesn't leak.
 _MEASURE_DPI = 100.0
 _measure_fig: Figure | None = None
 
@@ -33,10 +30,6 @@ def _figure() -> Figure:
     return _measure_fig
 
 
-# ---- ggplot2 theme_grey font sizes (in points) ----------------------------
-# We mirror the ggplot2 defaults so measured sizes match the rendered
-# ones. Callers that override the theme should pass an explicit fontsize.
-
 BASE_SIZE_PT = 11.0
 TITLE_SIZE_PT = BASE_SIZE_PT * 1.2  # plot.title — bold, 1.2× base
 SUBTITLE_SIZE_PT = BASE_SIZE_PT  # plot.subtitle — base size, regular weight
@@ -46,9 +39,6 @@ CAPTION_SIZE_PT = BASE_SIZE_PT * 0.8  # plot.caption
 LEGEND_TITLE_SIZE_PT = BASE_SIZE_PT
 LEGEND_TEXT_SIZE_PT = BASE_SIZE_PT * 0.8
 STRIP_TEXT_SIZE_PT = BASE_SIZE_PT * 0.8  # facet strip
-
-
-# ---- Primitive: measure a single text artist ------------------------------
 
 
 def text_size_in(
@@ -81,9 +71,6 @@ def text_size_in(
     )
     bbox = artist.get_window_extent(renderer=renderer)
     return (bbox.width / fig.dpi, bbox.height / fig.dpi)
-
-
-# ---- Aggregates -----------------------------------------------------------
 
 
 def text_block_size_in(
@@ -142,29 +129,18 @@ def max_label_height_in(
     )
 
 
-# ---- Compound decorations -------------------------------------------------
-# These are sized empirically to match R/patchwork's spacing. Tweak if a
-# diff catalog item points at a specific decoration.
-
-# Vertical colorbar: bar itself + small pad + tick labels.
 COLORBAR_BAR_WIDTH_IN = 0.20
 COLORBAR_BAR_PAD_IN = 0.10
-# Whitespace reserved between the panel's right edge and the colorbar.
-# Prevents the bar from kissing the panel — matches R/ggplot2's
-# generous gap (more than the typical legend ``COL_GAP_IN``).
 COLORBAR_PANEL_PAD_IN = 0.25
 
-# Legend (right of plot): key glyph + key->text pad + text + outer pad.
 LEGEND_KEY_WIDTH_IN = 0.22
 LEGEND_KEY_HEIGHT_IN = 0.18
 LEGEND_KEY_PAD_IN = 0.08
 LEGEND_BOX_PAD_IN = 0.10
 LEGEND_LINE_SPACING = 1.15
 
-# Strip (facet label) padding above/below text.
 STRIP_PAD_IN = 0.06
 
-# Cell padding between rows (e.g. between title and panel).
 ROW_GAP_IN = 0.04
 COL_GAP_IN = 0.04
 
@@ -236,7 +212,6 @@ def legend_cell_size_horizontal_in(
     width = keys_w + 2 * LEGEND_BOX_PAD_IN
     if title:
         title_w, title_h = text_size_in(title, fontsize=title_fontsize, weight="bold")
-        # Title sits inline to the left of the keys for horizontal legends.
         width += title_w + LEGEND_KEY_PAD_IN
         height = max(height, title_h + 2 * LEGEND_BOX_PAD_IN)
     return (width, height)
@@ -263,6 +238,4 @@ def strip_cell_width_in(
     if not label:
         return 0.0
     _, h = text_size_in(label, fontsize=fontsize, rotation=90.0)
-    # When rotated 90°, the rendered "height" of the artist is the
-    # column width we need.
     return h + 2 * STRIP_PAD_IN

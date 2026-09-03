@@ -34,8 +34,6 @@ class StatEcdf(Stat):
         x_sorted = np.sort(x)
         n = len(x_sorted)
         if self.n is None:
-            # Evaluate at the unique sorted x values: produces an honest
-            # step plot with one point per data observation (right-continuous).
             xs = x_sorted
             ys = (np.arange(1, n + 1)) / n
         else:

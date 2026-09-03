@@ -59,7 +59,6 @@ impl SuperSolveWork {
         SuperSolveWork::default()
     }
 
-    /// `cholmod_ensure_dense` — grow to hold both, never shrink.
     fn ensure(&mut self, ylen: usize, elen: usize) -> (&mut [f64], &mut [f64]) {
         if self.y.len() < ylen {
             self.y.resize(ylen, 0.0);
@@ -188,7 +187,6 @@ pub fn ltsolve(l: &SuperFactor, x: &mut [f64], nrhs: usize, d: usize, e: &mut [f
     }
 }
 
-/// `Ex [ii] = Xx [Ls [ps2 + ii]]`, one right-hand side.
 #[inline]
 fn gather1(ls: &[i64], ps2: usize, nsrow2: usize, x: &[f64], e: &mut [f64]) {
     let (ls, x) = (Ws::new_ref(ls), Ws::new_ref(x));
@@ -198,7 +196,6 @@ fn gather1(ls: &[i64], ps2: usize, nsrow2: usize, x: &[f64], e: &mut [f64]) {
     }
 }
 
-/// `Xx [Ls [ps2 + ii]] = Ex [ii]`, one right-hand side.
 #[inline]
 fn scatter1(ls: &[i64], ps2: usize, nsrow2: usize, e: &[f64], x: &mut [f64]) {
     let (ls, e) = (Ws::new_ref(ls), Ws::new_ref(e));
@@ -232,10 +229,6 @@ fn gather(ls: &[i64], ps2: usize, nsrow2: usize, nrhs: usize, d: usize, x: &[f64
     }
 }
 
-/// `Xx [i + j*d] = Ex [ii + j*nsrow2]`.
-///
-/// Interchanged for the reason [`gather`] gives, with the contiguous side now
-/// the read.
 #[inline]
 fn scatter(ls: &[i64], ps2: usize, nsrow2: usize, nrhs: usize, d: usize, e: &[f64], x: &mut [f64]) {
     let (ls, e) = (Ws::new_ref(ls), Ws::new_ref(e));
@@ -318,8 +311,6 @@ mod tests {
     use super::super::ws::{columns_are_sorted, Work};
     use super::*;
 
-    /// A corpus matrix, factorized supernodally the way `mod.rs` does it, with
-    /// the triangle it was built from kept for the residual check.
     fn factor(
         n: usize,
         edges: &[(usize, usize)],
@@ -354,7 +345,6 @@ mod tests {
         (l, a)
     }
 
-    /// `A * x` from the stored upper triangle, mirrored across the diagonal.
     fn matvec(a: &Sparse, x: &[f64], nrhs: usize) -> Vec<f64> {
         let n = a.n;
         let mut out = vec![0.0; n * nrhs];
@@ -372,9 +362,6 @@ mod tests {
         out
     }
 
-    /// The whole corpus, both orderings, `nrhs = 1..=5` — which is what puts
-    /// both the vector kernels and the matrix kernels under the live `Ws` bound
-    /// check, since upstream splits on `nrhs == 1`.
     #[test]
     fn the_solve_reproduces_the_right_hand_side() {
         for (name, n, edges) in corpus() {
@@ -404,8 +391,6 @@ mod tests {
         }
     }
 
-    /// `L` then `L'` is the same as `A` in one call, entry for entry — the two
-    /// halves compose exactly, since `A` is those two calls and nothing else.
     #[test]
     fn the_two_halves_compose_into_the_whole_solve() {
         for (name, n, edges) in corpus() {
@@ -433,8 +418,6 @@ mod tests {
         }
     }
 
-    /// `D` is the identity on a supernodal factor, which is `LL'` by
-    /// construction — the permutation still applies and cancels.
     #[test]
     fn d_is_the_identity_for_a_supernodal_factor() {
         let c = corpus();

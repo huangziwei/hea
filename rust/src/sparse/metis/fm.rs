@@ -1,12 +1,3 @@
-//! `libmetis/fm.c` — Fiduccia-Mattheyses refinement of an edge bisection.
-//!
-//! `FM_Mc2WayCutRefine` and `SelectQueue` are the multi-constraint arms;
-//! `ncon == 1` here (see `coarsen.rs`), so they are unreachable.
-//!
-//! Every key handed to the queue is an `idx_t` gain converted to `real_t` at
-//! the call, because `rpqInsert`/`rpqUpdate` take a `real_t` — so gains beyond
-//! 2^24 round, and the port has to round them the same way.
-
 use super::super::ws::Ws;
 use super::ctrl::Ctrl;
 use super::graph::{bnd_delete, bnd_insert, Graph};
@@ -21,9 +12,6 @@ pub fn fm_2way_refine(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2], n
 
 /// `FM_2WayCutRefine` (`fm.c:31-235`).
 pub fn fm_2way_cut_refine(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2], niter: Idx) {
-    // The C's prologue, taken through `Ws` — `xadj = graph->xadj; ...`. Every
-    // subscript below is one the algorithm produced itself, so the bound is
-    // walked in `cargo test` and elided here (`sparse::ws`, `metis::tests`).
     let Graph {
         xadj,
         adjncy,
@@ -55,13 +43,10 @@ pub fn fm_2way_cut_refine(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2
     let mut swaps = iwspacemalloc(nvtxs);
     let mut perm = iwspacemalloc(nvtxs);
 
-    // `tvwgt[0]*ntpwgts[0]` is idx_t * real_t, so the product is a float.
     let mut tpwgts = [0 as Idx; 2];
     tpwgts[0] = (graph.tvwgt[0] as Real * ntpwgts[0]) as Idx;
     tpwgts[1] = graph.tvwgt[0] - tpwgts[0];
 
-    // `gk_min (gk_max (0.01*nvtxs, 15), 100)` — the macros keep this in double
-    // until the store to `idx_t`.
     let limit = (0.01 * nvtxs as f64).clamp(15.0, 100.0) as Idx;
     let psum: Idx = pwgts[0] + pwgts[1];
     let avgvwgt = Idx::min(psum / 20, 2 * psum / nvtxs);
@@ -83,7 +68,6 @@ pub fn fm_2way_cut_refine(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2
         let mut newcut = *g_mincut;
         let mut mindiff = iabs(tpwgts[0] - pwgts[0]);
 
-        // Insert boundary nodes in the priority queues
         let mut nbnd = *g_nbnd;
         ctrl.rng.irand_array_permute(nbnd, &mut perm, nbnd, 1);
         for ii in 0..nbnd as usize {
@@ -118,10 +102,6 @@ pub fn fm_2way_cut_refine(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2
                 mindiff = iabs(tpwgts[0] - pwgts[0]);
                 mincutorder = nswaps;
             } else if nswaps - mincutorder > limit {
-                // Hit the limit: undo the last move and stop. `newcut` is dead
-                // after this upstream too -- the next pass reinitialises it
-                // from `graph->mincut` -- but the undo is written out in full
-                // because it is the mirror of the move above.
                 #[allow(unused_assignments)]
                 {
                     newcut += ed[higain] - id[higain];
@@ -135,7 +115,6 @@ pub fn fm_2way_cut_refine(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2
             moved[higain] = nswaps;
             swaps[nswaps as usize] = higain as Idx;
 
-            // SWAP (id[higain], ed[higain], tmp)
             std::mem::swap(&mut id[higain], &mut ed[higain]);
             if ed[higain] == 0 && xadj[higain] < xadj[higain + 1] {
                 bnd_delete(&mut nbnd, bndind, bndptr, higain);
@@ -172,7 +151,6 @@ pub fn fm_2way_cut_refine(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2
             nswaps += 1;
         }
 
-        // Roll back to the best cut seen.
         for i in 0..nswaps as usize {
             moved[swaps[i] as usize] = -1;
         }
@@ -182,7 +160,6 @@ pub fn fm_2way_cut_refine(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2
 
             let to = (r#where[higain] + 1) % 2;
             r#where[higain] = to;
-            // SWAP (id[higain], ed[higain], tmp)
             std::mem::swap(&mut id[higain], &mut ed[higain]);
             if ed[higain] == 0 && bndptr[higain] != -1 && xadj[higain] < xadj[higain + 1] {
                 bnd_delete(&mut nbnd, bndind, bndptr, higain);

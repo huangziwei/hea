@@ -49,10 +49,6 @@ class GuideArea:
     the cell exists in the layout but renders no content).
     """
 
-    # ``eq=False`` keeps each instance distinct even though there are no
-    # fields — avoids accidental dedup if the same ``guide_area()`` shows up
-    # twice in a composition.
-
     def __or__(self, other):
         from .core import ggplot
 
@@ -87,21 +83,10 @@ class PlotGrid:
     nrow: int | None = None
     ncol: int | None = None
     byrow: bool = True
-    # Relative widths per column / heights per row. Length must match the
-    # rendered ``ncol`` / ``nrow`` (matplotlib enforces). Either left None
-    # uses equal sizing.
     widths: list | None = None
     heights: list | None = None
-    # Top-level title/subtitle/caption + per-leaf tags via plot_annotation().
     annotation: PlotAnnotation | None = None
-    # ``"collect"`` deduplicates legends across leaf plots (by aes_source +
-    # levels + key glyph) and renders one merged legend. ``None`` / ``"keep"``
-    # keep per-plot legends. Set via ``plot_layout(guides=...)``.
     guides: str | None = None
-
-    # ------------------------------------------------------------------
-    # Composition operators
-    # ------------------------------------------------------------------
 
     def __or__(self, other):
         from .core import ggplot
@@ -140,9 +125,6 @@ class PlotGrid:
             return self._with_layout(other)
         if isinstance(other, PlotAnnotation):
             return self._with_annotation(other)
-        # Patchwork's `+`-to-last-plot semantics: anything else
-        # (Theme/Layer/Scale/Labels/Coord/Facet/...) gets applied to the
-        # rightmost leaf plot. ``&`` broadcasts to every leaf instead.
         try:
             return self._apply_to_last_plot(other)
         except TypeError:
@@ -225,7 +207,6 @@ class PlotGrid:
 
         if not self.children:
             raise TypeError("can't apply to last plot of an empty PlotGrid")
-        # Find the rightmost non-GuideArea child.
         idx = len(self.children) - 1
         while idx >= 0 and isinstance(self.children[idx], GuideArea):
             idx -= 1
@@ -255,10 +236,6 @@ class PlotGrid:
             guides=self.guides,
         )
 
-    # ------------------------------------------------------------------
-    # Layout introspection
-    # ------------------------------------------------------------------
-
     def _dims(self) -> tuple[int, int]:
         n = len(self.children)
         if n == 0:
@@ -267,7 +244,6 @@ class PlotGrid:
             return (1, n)
         if self.direction == _DIRECTION_V:
             return (n, 1)
-        # grid
         nrow, ncol = self.nrow, self.ncol
         if nrow is not None and ncol is not None:
             return (nrow, ncol)
@@ -286,10 +262,6 @@ class PlotGrid:
         if self.byrow:
             return (idx // ncol, idx % ncol)
         return (idx % nrow, idx // nrow)
-
-    # ------------------------------------------------------------------
-    # Rendering
-    # ------------------------------------------------------------------
 
     def draw(self, *, width=None, height=None, units="in", figsize=None):
         """Build the figure and render the whole tree into it.
@@ -401,18 +373,8 @@ class PlotGrid:
         return buf.read()
 
 
-# ---------------------------------------------------------------------------
-# Combination helpers — flatten consecutive same-direction grids, nest on
-# direction switch.
-# ---------------------------------------------------------------------------
-
-
 def _as_children(thing) -> tuple[list, str]:
-    """Return ``(children_list, direction_or_None)`` for combining.
-
-    ``direction_or_None`` is the operand's direction if it's a flat
-    ``PlotGrid`` of the same kind we're about to combine into; ``None``
-    means "treat as a single unit (nest if needed)"."""
+    """Return ``(children_list, direction_or_None)`` for combining."""
     if isinstance(thing, PlotGrid):
         return list(thing.children), thing.direction
     return [thing], None
@@ -469,11 +431,6 @@ def _grid_combine(a, b):
     return PlotGrid(children=out_children, direction=_DIRECTION_GRID)
 
 
-# ---------------------------------------------------------------------------
-# Factories
-# ---------------------------------------------------------------------------
-
-
 def wrap_plots(
     plots: list,
     *,
@@ -502,11 +459,6 @@ def wrap_plots(
     )
 
 
-# ---------------------------------------------------------------------------
-# plot_layout — patchwork-style "+ plot_layout(widths=[1, 2])" config
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class PlotLayout:
     """Layout overrides for a :class:`PlotGrid`. Added via ``+`` on a
@@ -519,10 +471,6 @@ class PlotLayout:
     nrow: int | None = None
     ncol: int | None = None
     byrow: bool | None = None
-    # ``"collect"`` deduplicates legends across leaves and renders one merged
-    # legend (in the :func:`guide_area` slot if present, otherwise placed by
-    # ``theme(legend.position)`` at the grid level). ``"keep"`` (or ``None``)
-    # leaves per-plot legends as-is.
     guides: str | None = None
 
 
@@ -549,11 +497,6 @@ def plot_layout(
         byrow=byrow,
         guides=guides,
     )
-
-
-# ---------------------------------------------------------------------------
-# plot_annotation — title/subtitle/caption + per-leaf tags
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -607,14 +550,6 @@ def plot_annotation(
 def _wrap_dims(n: int) -> tuple[int, int]:
     """Port of ggplot2's ``wrap_dims(n)`` default — which calls R's
     ``grDevices::n2mfrow`` and transposes so the result is ``(nrow, ncol)``.
-
-    Special cases for small n preferred in R (more aesthetically balanced
-    than blind ``ceil(sqrt)``):
-
-    * n ≤ 3 → ``(1, n)`` (single row)
-    * 4 ≤ n ≤ 6 → ``(2, ceil(n/2))``
-    * 7 ≤ n ≤ 12 → ``(3, ceil(n/3))``
-    * n > 12 → ``(ceil(sqrt(n)), ceil(sqrt(n)))``
     """
     if n <= 3:
         return (1, n)

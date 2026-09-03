@@ -24,7 +24,6 @@ from hea.formula import _harmonic_basis
 from hea.models import gam, lm
 from hea.R import fitted
 
-# --- shared deterministic dataset (mirrored exactly in the R reference) ------
 _X = np.arange(36, dtype=float)
 _P = 12.0
 _Y = (
@@ -37,8 +36,6 @@ _Y = (
 )
 _DF = pl.DataFrame({"x": _X, "y": _Y})
 
-# lm(y ~ cos1 + sin1 + cos2 + sin2), R 4.6.0.
-# coef order: (Intercept), cos1, sin1, cos2, sin2
 _R_COEF = np.array([10.25, 2.7, -3.11961524227, 1.2, -0.01961524227])
 _R_SIGMA = 3.207784437
 _R_PRED_X = [36.0, 42.5, 50.0]  # fresh x, incl. non-integer
@@ -46,7 +43,6 @@ _R_PRED = [14.15, 9.478838971, 8.281346652]
 
 
 def test_harmonic_basis_helper_values_and_order():
-    # cos-first interleaved, exact trig values, 2K columns.
     x = np.array([0.0, 1.0, 3.0, 7.5])
     cols, suffixes = _harmonic_basis(x, 3, 12.0)
     assert suffixes == ["cos1", "sin1", "cos2", "sin2", "cos3", "sin3"]
@@ -64,8 +60,6 @@ def test_harmonic_lm_coef_parity_R():
 
 
 def test_harmonic_coef_labels_carry_suffixes():
-    # downstream consumers read (harmonic index, cos|sin) from the suffix,
-    # so no coefficient-name regex is needed.
     m = lm("y ~ harmonic(x, 2, period=12)", _DF)
     names = list(m.bhat.columns)
     assert names[0] == "(Intercept)"
@@ -73,16 +67,12 @@ def test_harmonic_coef_labels_carry_suffixes():
 
 
 def test_harmonic_predict_is_stateless_R():
-    # period is a formula literal -> the basis is a pure function of
-    # (x, K, period); re-evaluating on fresh x reproduces R's predictions.
     m = lm("y ~ harmonic(x, 2, period=12)", _DF)
     pred = m.predict(newdata=pl.DataFrame({"x": _R_PRED_X}))
     np.testing.assert_allclose(np.asarray(pred["fit"]), _R_PRED, atol=1e-6)
 
 
 def test_harmonic_equals_explicit_cos_sin_terms():
-    # spans the same column space as the hand-written cos/sin formula ->
-    # identical fitted values (the classic cos+sin regression baseline).
     m_h = lm("y ~ harmonic(x, 2, period=12)", _DF)
     m_e = lm(
         "y ~ cos(2*pi*x/12) + sin(2*pi*x/12) + cos(2*pi*2*x/12) + sin(2*pi*2*x/12)",
@@ -94,8 +84,6 @@ def test_harmonic_equals_explicit_cos_sin_terms():
 
 
 def test_harmonic_positional_and_keyword_forms_agree():
-    # the count keyword accepts both `k` (canonical) and `K`
-    # (forecast spelling); all forms give the same fit.
     a = lm("y ~ harmonic(x, 2, 12)", _DF)  # all positional
     for f in (
         "y ~ harmonic(x, 2, period=12)",  # period keyword
@@ -106,8 +94,6 @@ def test_harmonic_positional_and_keyword_forms_agree():
 
 
 def test_harmonic_period_2pi_angular():
-    # angular predictor with period=2*pi (parses `pi`),
-    # no `ts` involved. Exact 2-harmonic signal -> recovered coefficients.
     th = np.linspace(0.0, 2 * np.pi, 40, endpoint=False)
     yy = 1.0 + 0.8 * np.cos(th) - 0.5 * np.sin(th) + 0.3 * np.cos(2 * th)
     m = lm("y ~ harmonic(theta, 2, period=2*pi)", pl.DataFrame({"theta": th, "y": yy}))

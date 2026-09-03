@@ -70,15 +70,10 @@ impl Default for Relax {
     }
 }
 
-/// Why a supernodal analysis could not be performed.
 #[derive(Debug)]
 pub enum SuperError {
-    /// Upstream's own `CHOLMOD_INVALID` (`:192`).
     Invalid(&'static str),
-    /// `A->stype == 0`: upstream would analyze `A*F`, which this port does not
-    /// build.
     Unsymmetric,
-    /// `L->ssize` or `L->xsize` would not fit in an `Int` (`:674-677`).
     TooLarge,
 }
 
@@ -96,58 +91,20 @@ impl core::fmt::Display for SuperError {
     }
 }
 
-/// The supernodal part of a `cholmod_factor`, as `cholmod_super_symbolic`
-/// leaves it: `L->nsuper`, `L->super`, `L->pi`, `L->px`, `L->s`, `L->maxcsize`
-/// and `L->maxesize`.
-///
-/// The numeric part (`L->x`, `L->xsize` doubles) is not allocated here, which
-/// is the point of the split: one symbolic analysis is reused across every
-/// factorization of a matrix with the same pattern.
 #[derive(Debug, Clone)]
 pub struct SuperSymbolic {
     pub n: usize,
-    /// `L->nsuper`, the number of supernodes after relaxed amalgamation.
     pub nsuper: usize,
-    /// `L->super`, size `nsuper+1`. Supernode `s` holds columns
-    /// `super[s] .. super[s+1]-1` of `L`.
     pub sup: Vec<i64>,
-    /// `L->pi`, size `nsuper+1`. The row indices of supernode `s` are
-    /// `s[pi[s] .. pi[s+1]-1]`, in increasing order, the first `nscol` of them
-    /// being the supernode's own columns.
     pub pi: Vec<i64>,
-    /// `L->px`, size `nsuper+1`. Supernode `s` occupies `x[px[s] .. px[s+1]-1]`
-    /// as an `nsrow`-by-`nscol` dense column-major block.
     pub px: Vec<i64>,
-    /// `L->s`, size [`SuperSymbolic::ssize`].
     pub s: Vec<i64>,
-    /// `L->ssize` and `L->xsize` — `s.len()`, and the number of doubles the
-    /// numeric factorization will need. Both are at least 1, as upstream
-    /// forces (`:675-676`).
     pub ssize: usize,
     pub xsize: usize,
-    /// `L->maxcsize`, the largest update block any supernode contributes to an
-    /// ancestor: how big the numeric factorization's `C` workspace has to be.
     pub maxcsize: usize,
-    /// `L->maxesize`, the largest number of row indices a supernode has outside
-    /// its own columns: the column dimension of the supernodal solve's `E`
-    /// workspace.
     pub maxesize: usize,
 }
 
-/// Traverse the kth row subtree from the nonzeros in `A (0:k1-1,k)` and add the
-/// new entries found to the pattern of the kth row of `L`. The current
-/// supernode `s` contains the diagonal block `k1:k2-1`, so it can be skipped.
-///
-/// If `A` is sorted, then the total time taken by this function is proportional
-/// to the number of nonzeros in the strictly block upper triangular part of
-/// `A`, plus the number of entries in the strictly block lower triangular part
-/// of the supernodal part of `L`.
-///
-/// Only adds column indices corresponding to the leading columns of each
-/// relaxed supernode.
-///
-/// Upstream takes `j` and `k` separately because the unsymmetric case calls it
-/// once per nonzero `F(j,k)`; in the symmetric case `j == k` always (`:80`).
 #[allow(clippy::too_many_arguments)]
 #[inline]
 fn subtree(
@@ -213,10 +170,6 @@ pub fn super_symbolic(
     relax: &Relax,
     work: &mut Work,
 ) -> Result<SuperSymbolic, SuperError> {
-    //--------------------------------------------------------------------------
-    // check inputs
-    //--------------------------------------------------------------------------
-
     if a.stype < 0 {
         /* invalid symmetry; symmetric lower form not supported */
         return Err(SuperError::Invalid("symmetric lower not supported"));
@@ -227,10 +180,6 @@ pub fn super_symbolic(
         return Err(SuperError::Unsymmetric);
     }
 
-    //--------------------------------------------------------------------------
-    // get inputs
-    //--------------------------------------------------------------------------
-
     let n = a.nrow;
     let ap = Ws::new_ref(&a.p);
     let ai = Ws::new_ref(&a.i);
@@ -239,10 +188,6 @@ pub fn super_symbolic(
 
     let [nrelax0, nrelax1, nrelax2] = relax.nrelax;
     let [zrelax0, zrelax1, zrelax2] = relax.zrelax.map(|z| if z.is_nan() { 0.0 } else { z });
-
-    //--------------------------------------------------------------------------
-    // get workspace
-    //--------------------------------------------------------------------------
 
     /* Sparent, Snz, and Merged could be allocated later, of size nfsuper */
     let Work {
@@ -260,10 +205,6 @@ pub fn super_symbolic(
     let (sparent, snz, merged) = (Ws::new(sparent), Ws::new(snz), Ws::new(merged));
     let flag = Ws::new(flag); /* size n */
     let head: &mut [i64] = head; /* size n+1 */
-
-    //--------------------------------------------------------------------------
-    // find the fundamental supernodes
-    //--------------------------------------------------------------------------
 
     /* count the number of children of each node, using Wi [ */
     wi.fill(0);
@@ -299,10 +240,6 @@ pub fn super_symbolic(
 
     let nscol = &mut *wi; /* use Wi as size-nfsuper workspace for Nscol [ */
 
-    //--------------------------------------------------------------------------
-    // find the mapping of fundamental nodes to supernodes
-    //--------------------------------------------------------------------------
-
     let supermap = &mut *wj; /* use Wj as workspace for SuperMap [ */
 
     /* SuperMap [k] = s if column k is contained in supernode s */
@@ -311,10 +248,6 @@ pub fn super_symbolic(
             supermap[k] = s;
         }
     }
-
-    //--------------------------------------------------------------------------
-    // construct the fundamental supernodal etree
-    //--------------------------------------------------------------------------
 
     for s in 0..nfsuper {
         let j = fsuper[s + 1] - 1; /* last node in supernode s */
@@ -326,10 +259,6 @@ pub fn super_symbolic(
      * SuperMap will be recomputed below, for the relaxed supernodes. */
 
     let zeros = &mut *wj; /* use Wj for Zeros, workspace of size nfsuper [ */
-
-    //--------------------------------------------------------------------------
-    // relaxed amalgamation
-    //--------------------------------------------------------------------------
 
     for s in 0..nfsuper {
         merged[s] = EMPTY; /* s not merged into another */
@@ -423,10 +352,6 @@ pub fn super_symbolic(
      * contents of Wi no longer needed for Nscol ]
      * contents of Sparent no longer needed (recomputed below) */
 
-    //--------------------------------------------------------------------------
-    // construct the relaxed supernode list
-    //--------------------------------------------------------------------------
-
     let mut nsuper: i64 = 0;
     for s in 0..nfsuper {
         if merged[s] == EMPTY {
@@ -441,10 +366,6 @@ pub fn super_symbolic(
 
     /* Merged no longer needed ] */
 
-    //--------------------------------------------------------------------------
-    // find the mapping of relaxed nodes to supernodes
-    //--------------------------------------------------------------------------
-
     let supermap = &mut *wj; /* use Wj as workspace for SuperMap { */
 
     /* SuperMap [k] = s if column k is contained in supernode s */
@@ -454,19 +375,11 @@ pub fn super_symbolic(
         }
     }
 
-    //--------------------------------------------------------------------------
-    // construct the relaxed supernodal etree
-    //--------------------------------------------------------------------------
-
     for s in 0..nsuper {
         let j = fsuper[s + 1] - 1; /* last node in supernode s */
         let p = parent[j]; /* parent of last node */
         sparent[s] = if p == EMPTY { EMPTY } else { supermap[p] };
     }
-
-    //--------------------------------------------------------------------------
-    // determine the size of L->s and L->x
-    //--------------------------------------------------------------------------
 
     /* do the computations in 64-bits to guard against integer overflow.
      * Upstream threads an `ok` flag through `add_size_t`/`mult_uint64_t` and
@@ -489,10 +402,6 @@ pub fn super_symbolic(
     let ssize = ssize.max(1) as usize;
     let xsize = xsize.max(1) as usize;
 
-    //--------------------------------------------------------------------------
-    // allocate L (all except real part L->x)
-    //--------------------------------------------------------------------------
-
     let mut lsuper = vec![0i64; nsuper + 1];
     let mut lpi = vec![0i64; nsuper + 1];
     let mut lpx = vec![0i64; nsuper + 1];
@@ -511,10 +420,6 @@ pub fn super_symbolic(
         let sup = Ws::new_ref(&lsuper);
         let (lpi, lpx, ls) = (Ws::new(&mut lpi), Ws::new(&mut lpx), Ws::new(&mut ls));
 
-        //----------------------------------------------------------------------
-        // construct column pointers of relaxed supernodal pattern (L->pi)
-        //----------------------------------------------------------------------
-
         let mut p: i64 = 0;
         for s in 0..nsuper {
             lpi[s] = p;
@@ -522,10 +427,6 @@ pub fn super_symbolic(
         }
         lpi[nsuper] = p;
         debug_assert_eq!(ssize, p.max(1) as usize);
-
-        //----------------------------------------------------------------------
-        // construct pointers for supernodal values (L->px)
-        //----------------------------------------------------------------------
 
         /* `Lpx [0] = 123456`, upstream's "ignore Lpx" marker for
          * `cholmod_check_factor`, is the non-GPU QR case only (`:735-742`) */
@@ -540,10 +441,6 @@ pub fn super_symbolic(
         debug_assert_eq!(xsize, p.max(1) as usize);
 
         /* Snz no longer needed ] */
-
-        //----------------------------------------------------------------------
-        // symbolic analysis to construct the relaxed supernodal pattern (L->s)
-        //----------------------------------------------------------------------
 
         let lpi2 = &mut *wi; /* copy Lpi into Lpi2, using Wi as workspace for Lpi2 [ */
         for s in 0..nsuper {
@@ -598,10 +495,6 @@ pub fn super_symbolic(
         /* contents of Wi no longer needed for Lpi2 ]
          * Sparent no longer needed ] */
 
-        //----------------------------------------------------------------------
-        // determine the largest update matrix (L->maxcsize)
-        //----------------------------------------------------------------------
-
         /* The csize for a supernode is the size of its largest contribution to
          * a subsequent ancestor supernode; maxcsize is the largest of those
          * over the whole matrix. maxesize is the largest number of row indices
@@ -639,10 +532,6 @@ pub fn super_symbolic(
         maxesize = mesize as usize;
     }
 
-    //--------------------------------------------------------------------------
-    // supernodal symbolic factorization is complete
-    //--------------------------------------------------------------------------
-
     /* FREE_WORKSPACE */
     clear_flag(flag, mark);
     head[..=nfsuper as usize].fill(EMPTY);
@@ -669,8 +558,6 @@ mod tests {
     use crate::sparse::testcorpus::{corpus, triangle_csc};
     use crate::sparse::ws::Work;
 
-    /// The corpus, analyzed and then handed to [`super_symbolic`] exactly as
-    /// `cholmod_analyze`'s supernodal branch would (`:892-898`).
     fn analyses() -> Vec<(String, Symbolic, SuperSymbolic)> {
         let mut out = Vec::new();
         for (name, n, edges) in corpus() {
@@ -707,10 +594,6 @@ mod tests {
         out
     }
 
-    /// The debug-build sweep the [`Ws`] contract asks for: every index this
-    /// kernel computes from data is bounds-checked under `cargo test`, so
-    /// walking the whole corpus here is what licenses the unchecked accesses in
-    /// release.
     #[test]
     fn the_supernodal_pattern_is_self_consistent() {
         for (tag, _, ss) in analyses() {
@@ -757,10 +640,6 @@ mod tests {
         }
     }
 
-    /// The property that makes a dense block valid at all: every column the
-    /// supernode holds has its simplicial pattern inside the supernode's row
-    /// list. Relaxed amalgamation only ever *adds* rows, so `ColCount` bounds
-    /// what is left after the leading `k - k1` rows are skipped.
     #[test]
     fn each_supernode_covers_the_columns_it_holds() {
         for (tag, s, ss) in analyses() {
@@ -777,11 +656,6 @@ mod tests {
         }
     }
 
-    /// The workspace is left as every kernel in this module promises to leave
-    /// it — `Flag` cleared and `Head` all `EMPTY` — so the next user of the
-    /// same [`Work`] sees what `cholmod_allocate_work` would have given it.
-    /// That is `FREE_WORKSPACE` (`:130-139`), and the numeric factorization
-    /// takes the same `Work` straight after.
     #[test]
     fn the_workspace_is_restored() {
         let (name, n, edges) = corpus().into_iter().find(|c| c.0 == "arrow-300").unwrap();
@@ -816,8 +690,6 @@ mod tests {
         assert!(work.is_pristine(), "{name}: super_symbolic left it dirty");
     }
 
-    /// A lower-triangular `A` is upstream's own `CHOLMOD_INVALID` (`:189-194`);
-    /// `stype == 0` is this port's scope boundary.
     #[test]
     fn the_wrong_stype_is_rejected() {
         for stype in [-1i32, 0] {
@@ -840,8 +712,6 @@ mod tests {
         }
     }
 
-    /// `n == 0`: `nfsuper` and `nsuper` are both 0, and the two sizes are
-    /// floored at 1 rather than left empty (`:675-676`).
     #[test]
     fn an_empty_matrix_analyzes_to_no_supernodes() {
         let a = Sparse {
@@ -862,8 +732,6 @@ mod tests {
         assert_eq!((ss.maxcsize, ss.maxesize), (1, 1));
     }
 
-    /// `Common->supernodal == CHOLMOD_AUTO`'s predicate, at both ends and at
-    /// the switch itself.
     #[test]
     fn the_auto_switch_is_the_flops_per_entry_ratio() {
         let sw = DEFAULT_SUPERNODAL_SWITCH;

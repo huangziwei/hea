@@ -14,10 +14,6 @@ import hea
 from hea.R import factor
 from hea.tidy import DataFrame, GroupBy, desc, drop, tbl
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
 
 @pytest.fixture
 def df():
@@ -35,11 +31,6 @@ def df():
 def tied():
     """Frame with ties in ``x`` for slice_min/max with_ties tests."""
     return DataFrame({"g": ["a", "a", "a", "b"], "x": [1, 1, 2, 5]})
-
-
-# ---------------------------------------------------------------------------
-# Class identity / IS-A
-# ---------------------------------------------------------------------------
 
 
 def test_is_pl_dataframe_subclass(df):
@@ -67,10 +58,8 @@ def test_data_returns_subclass():
 
 def test_tbl_rewraps_plain_dataframe(df):
     plain = pl.DataFrame.with_columns(df, q=pl.col("x") + 100)
-    # Native polars dropped the subclass; tbl() restores it.
     rewrapped = tbl(plain)
     assert isinstance(rewrapped, DataFrame)
-    # tbl() on an already-wrapped frame is a no-op.
     assert tbl(rewrapped) is rewrapped
 
 
@@ -86,11 +75,6 @@ def test_methods_preserve_subclass(df):
         .relocate("z")
     )
     assert isinstance(out, DataFrame)
-
-
-# ---------------------------------------------------------------------------
-# Row verbs
-# ---------------------------------------------------------------------------
 
 
 def test_filter_passthrough(df):
@@ -117,11 +101,8 @@ def test_desc_negates_list():
 
     out = desc([1, 5, 5, 17, 22, None])
     assert isinstance(out, np.ndarray)
-    # NaN propagates through negation
     assert np.array_equal(out[:5], np.array([-1.0, -5.0, -5.0, -17.0, -22.0]))
     assert np.isnan(out[5])
-    # The motivating use case — descending min_rank. hea is 0-based,
-    # so R's [5, 3, 3, 2, 1] becomes [4, 2, 2, 1, 0].
     ranks = min_rank(desc([1, 5, 5, 17, 22, None]))
     assert ranks[:5].tolist() == [4.0, 2.0, 2.0, 1.0, 0.0]
     assert np.isnan(ranks[5])
@@ -142,11 +123,7 @@ def test_arrange_multi_with_desc(df):
 
 
 def test_arrange_puts_nulls_last():
-    """dplyr semantics: NAs sort to the end regardless of direction.
-
-    Polars' default puts nulls first; ``arrange`` overrides to match
-    dplyr so the rows you actually want to look at land at the head.
-    """
+    """dplyr semantics: NAs sort to the end regardless of direction."""
     df = DataFrame({"x": [3, None, 1, 2, None]})
     asc = df.arrange("x")
     assert asc["x"].to_list() == [1, 2, 3, None, None]
@@ -172,11 +149,6 @@ def test_distinct_subset_keep_all_true(df):
     out = df.distinct("g", keep_all=True)
     assert out.height == 2
     assert set(out.columns) == {"g", "x", "y"}
-
-
-# ---------------------------------------------------------------------------
-# Column verbs
-# ---------------------------------------------------------------------------
 
 
 def test_mutate_kwargs_auto_alias(df):
@@ -214,7 +186,6 @@ def test_mutate_before_position_int(df):
 
 def test_mutate_after_position_int(df):
     out = df.mutate(z=pl.col("x") + 1, _after=2)
-    # _after=2 → after the 2nd column (x), position 2.
     assert out.columns == ["g", "x", "z", "y"]
 
 
@@ -283,7 +254,6 @@ def test_mutate_keep_unused_drops_referenced():
         gain=pl.col("dep_delay") - pl.col("arr_delay"),
         _keep="unused",
     )
-    # dep_delay, arr_delay are dropped (referenced); air_time and extra survive.
     assert out.columns == ["air_time", "extra", "gain"]
 
 
@@ -299,11 +269,8 @@ def test_cols_between():
     """dplyr's ``year:day`` slice syntax via list helper."""
     d = DataFrame({"a": [1], "b": [2], "c": [3], "d": [4]})
     assert d.cols_between("a", "c") == ["a", "b", "c"]
-    # Order-insensitive: end before start still yields the same range.
     assert d.cols_between("c", "a") == ["a", "b", "c"]
-    # Splat into select.
     assert d.select(d.cols_between("a", "c")).columns == ["a", "b", "c"]
-    # Negate via pl.exclude.
     assert d.select(pl.exclude(d.cols_between("a", "c"))).columns == ["d"]
 
 
@@ -358,10 +325,7 @@ def test_relocate_after(df):
 
 
 def test_relocate_position_int(df):
-    """Positional anchors apply to the columns *after* the moves are removed.
-
-    ``_before=1`` of the remaining columns (g, x) → at the very front.
-    """
+    """Positional anchors apply to the columns *after* the moves are removed."""
     out = df.relocate("y", _before=1)
     assert out.columns == ["y", "g", "x"]
     out2 = df.relocate("y", _after=2)
@@ -381,14 +345,12 @@ def test_relocate_accepts_selector():
 
     d = DataFrame({"arr_a": [1], "arr_b": [2], "dep_a": [3], "x": [4]})
     out = d.relocate(cs.starts_with("arr"), _before="x")
-    # arr columns moved to right before x; dep_a stays where it was.
     assert out.columns == ["dep_a", "arr_a", "arr_b", "x"]
 
 
 def test_relocate_preserves_frame_order_of_movers():
     """dplyr behavior: movers retain their original relative order."""
     d = DataFrame({"a": [1], "b": [2], "c": [3], "d": [4]})
-    # Specified b,a but original order is a,b — result should be a,b,c,d.
     out = d.relocate("b", "a")
     assert out.columns == ["a", "b", "c", "d"]
 
@@ -401,11 +363,6 @@ def test_relocate_anchor_must_exist(df):
 def test_relocate_anchor_cannot_be_moving(df):
     with pytest.raises(ValueError):
         df.relocate("y", _before="y")
-
-
-# ---------------------------------------------------------------------------
-# Groups
-# ---------------------------------------------------------------------------
 
 
 def test_group_by_returns_groupby(df):
@@ -462,8 +419,6 @@ def test_group_by_maintain_order_option_still_works():
     """Backwards compat: bare ``maintain_order=`` is treated as a polars option,
     not a derived column."""
     df = DataFrame({"g": ["b", "a", "b", "a"], "x": [1, 2, 3, 4]})
-    # maintain_order=False relaxes the order guarantee — just check the
-    # grouping still works and "maintain_order" did not become a column.
     out = df.group_by("g", maintain_order=False).summarize(n=pl.len())
     assert set(out.columns) == {"g", "n"}
     assert sorted(out["g"].to_list()) == ["a", "b"]
@@ -536,11 +491,8 @@ def test_summarize_groups_drop_last_drops_one_level():
     out = d.group_by("g", "h").summarize(m=pl.col("x").mean(), _groups="drop_last")
     assert isinstance(out, GroupBy)
     assert out._by == ["g"]
-    # Downstream mutate is windowed over the remaining group var.
-    # R reference: groups left = g; g_sum = sum(m) within g.
     follow = out.mutate(g_sum=pl.col("m").sum()).sort("g", "h")
     assert follow["g_sum"].to_list() == [3.0, 3.0, 7.0, 7.0, 5.0]
-    # Single-group-var case collapses to DataFrame (matches dplyr).
     out1 = d.group_by("g").summarize(m=pl.col("x").mean(), _groups="drop_last")
     assert isinstance(out1, DataFrame) and not isinstance(out1, GroupBy)
 
@@ -571,7 +523,6 @@ def test_summarize_groups_without_groups_only_drop_allowed(df):
         df.summarize(m=pl.col("x").mean(), _groups="keep")
     with pytest.raises(ValueError, match="no groups to preserve"):
         df.summarize(m=pl.col("x").mean(), _groups="rowwise")
-    # _by= form supports all four values like the group_by chain.
     out = df.summarize(m=pl.col("x").mean(), _by="g", _groups="keep")
     assert isinstance(out, GroupBy) and out._by == ["g"]
 
@@ -620,11 +571,6 @@ def test_ungroup_on_dataframe_is_noop(df):
     assert df.ungroup() is df
 
 
-# ---------------------------------------------------------------------------
-# Slice family
-# ---------------------------------------------------------------------------
-
-
 def test_slice_head(df):
     out = df.slice_head(2)
     assert out.height == 2
@@ -637,7 +583,6 @@ def test_slice_tail(df):
 
 def test_slice_min_with_ties_keeps_all(tied):
     out = tied.slice_min("x", n=1)
-    # x=1 appears twice; with_ties=True keeps both.
     assert out.height == 2
 
 
@@ -653,7 +598,6 @@ def test_slice_max_with_ties(df):
 
 def test_groupby_slice_min(df):
     out = df.group_by("g").slice_min("x", n=1)
-    # Smallest x per group: a→1, b→4.
     assert sorted(zip(out["g"].to_list(), out["x"].to_list())) == [("a", 1), ("b", 4)]
 
 
@@ -663,12 +607,7 @@ def test_groupby_slice_max(df):
 
 
 def test_groupby_slice_max_keeps_all_null_group():
-    """dplyr parity: a group with only null values still yields ``n`` rows.
-
-    Critical for r4ds chapter-3 example: ``flights |> group_by(dest)
-    |> slice_max(arr_delay, n=1)`` → 108 rows because LGA has a single
-    null-arr_delay row that must survive.
-    """
+    """dplyr parity: a group with only null values still yields ``n`` rows."""
     df = DataFrame(
         {
             "g": ["a", "a", "a", "b"],
@@ -676,7 +615,6 @@ def test_groupby_slice_max_keeps_all_null_group():
         }
     )
     out = df.group_by("g").slice_max("x", n=1)
-    # a's max=3 (1 row); b's only row is null → kept.
     assert out.height == 2
     b_row = out.filter(pl.col("g") == "b")
     assert b_row.height == 1
@@ -693,11 +631,6 @@ def test_slice_max_keeps_all_null_when_only_rows():
 def test_groupby_slice_max_n_gt_1(df):
     out = df.group_by("g").slice_max("y", n=2)
     assert out.height == 4
-
-
-# ---------------------------------------------------------------------------
-# Positional slice — dplyr's slice() overloaded onto polars' slice()
-# ---------------------------------------------------------------------------
 
 
 def test_slice_polars_contiguous_preserved(df):
@@ -744,19 +677,15 @@ def test_slice_positional_rejects_length(df):
 
 def test_groupby_slice_positional(df):
     """Per-group positional slice. Group a = x[1,2,3], group b = x[4,5,6]."""
-    # First row of each group (list and scalar forms agree).
     assert sorted(df.group_by("g").slice([0]).ungroup()["x"].to_list()) == [1, 4]
     assert sorted(df.group_by("g").slice(0).ungroup()["x"].to_list()) == [1, 4]
-    # 2nd row of each group.
     assert sorted(df.group_by("g").slice([1]).ungroup()["x"].to_list()) == [2, 5]
-    # First + last of each group (from-end negative is per-group).
     assert sorted(df.group_by("g").slice([0, -1]).ungroup()["x"].to_list()) == [
         1,
         3,
         4,
         6,
     ]
-    # Out-of-range per-group position → empty (groups have 3 rows each).
     assert df.group_by("g").slice([5]).ungroup().height == 0
 
 
@@ -765,7 +694,6 @@ def test_groupby_slice_preserves_grouping(df):
     g = df.group_by("g").slice([0, 1])
     assert isinstance(g, GroupBy)
     assert g._by == ["g"]
-    # A following grouped verb windows per group.
     assert g.slice([0]).ungroup().sort("g")["x"].to_list() == [1, 4]
 
 
@@ -798,14 +726,12 @@ def test_slice_keep_drop_are_complementary(df):
 
 def test_groupby_slice_drop(df):
     """Per-group drop. Group a = x[1,2,3], group b = x[4,5,6]."""
-    # Drop each group's first row.
     assert sorted(df.group_by("g").slice(drop([0])).ungroup()["x"].to_list()) == [
         2,
         3,
         5,
         6,
     ]
-    # Drop each group's last row (from-end, per group).
     assert sorted(df.group_by("g").slice(drop([-1])).ungroup()["x"].to_list()) == [
         1,
         2,
@@ -842,22 +768,8 @@ def test_groupby_slice_sample(df):
     assert sorted(out["g"].unique().to_list()) == ["a", "b"]
 
 
-# ---------------------------------------------------------------------------
-# End-to-end integration with hea.lm
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Chapter 5 — pivots and pull
-# ---------------------------------------------------------------------------
-
-
 def test_pivot_longer_basic():
-    """Smallest example from the chapter: bp1/bp2 columns → long.
-
-    Row-major output matches dplyr: each input row's pivoted values
-    appear contiguously, in the original column order.
-    """
+    """Smallest example from the chapter: bp1/bp2 columns → long."""
     d = DataFrame(
         {"id": ["A", "B", "C"], "bp1": [100, 140, 120], "bp2": [120, 115, 125]}
     )
@@ -873,11 +785,7 @@ def test_pivot_longer_basic():
 
 
 def test_pivot_longer_billboard_row_order():
-    """dplyr orders pivoted rows so all weeks for one song come first.
-
-    Polars' raw ``unpivot`` is column-major (all-of-wk1 first); we
-    reorder by tagging the input row index and sorting at the end.
-    """
+    """dplyr orders pivoted rows so all weeks for one song come first."""
     billboard = hea.data("billboard", package="tidyr")
     out = (
         billboard.pivot_longer(
@@ -886,7 +794,6 @@ def test_pivot_longer_billboard_row_order():
             values_to="rank",
         ).slice_head(76)  # all weeks of the first song
     )
-    # All 76 rows belong to the first artist (2 Pac).
     assert out["artist"].n_unique() == 1
     assert out["week"].to_list()[:3] == ["wk1", "wk2", "wk3"]
 
@@ -900,11 +807,8 @@ def test_pivot_longer_billboard():
         values_to="rank",
         values_drop_na=True,
     )
-    # 76 wk-cols, 317 songs, but with values_drop_na the result is much smaller.
     assert "week" in long.columns and "rank" in long.columns
     assert long["rank"].null_count() == 0
-    # The drop_na collapse must remove rows; raw billboard has 317*76 = 24092
-    # cells but only ~5300 have non-null rank.
     assert long.height < 24092
     assert long.height > 1000
 
@@ -939,7 +843,6 @@ def test_pivot_longer_names_sep_multi():
         names_sep="_",
         values_to="count",
     )
-    # 4 pivoted cols × 2 rows = 8 long rows
     assert out.height == 8
     assert {"diagnosis", "gender", "age", "count"}.issubset(out.columns)
     assert sorted(out["diagnosis"].unique().to_list()) == ["ep", "sp"]
@@ -977,10 +880,7 @@ def test_pivot_longer_dot_value_sentinel():
         names_sep="_",
         values_drop_na=True,
     )
-    # Two original "values" columns (name, dob) survive as output columns.
-    # child column gets the second piece of each name.
     assert set(out.columns) == {"family", "child", "name", "dob"}
-    # Family 2 had child2 = null name+dob → drop_na keeps only child1.
     fam2 = out.filter(pl.col("family") == 2)
     assert fam2.height == 1
     assert fam2["child"].item() == "child1"
@@ -1039,7 +939,6 @@ def test_pivot_wider_id_cols_selector():
 def test_pivot_wider_values_fill():
     long = DataFrame({"id": [1, 1, 2], "k": ["a", "b", "a"], "v": [10, 20, 30]})
     out = long.pivot_wider(names_from="k", values_from="v", values_fill=0)
-    # Row 2 has no "b" → filled with 0.
     assert out.filter(pl.col("id") == 2)["b"].item() == 0
 
 
@@ -1079,11 +978,6 @@ def test_pull_int_position(df):
     assert df.pull(-1).name == "y"
 
 
-# ---------------------------------------------------------------------------
-# End-to-end integration with hea.lm
-# ---------------------------------------------------------------------------
-
-
 def test_chain_then_lm():
     """A full tidyverse chain still produces something hea.lm accepts."""
     gala = hea.data("gala", package="faraway")
@@ -1094,11 +988,6 @@ def test_chain_then_lm():
     )
     m = hea.models.lm("Species ~ log_area + Elevation", sub)
     assert m is not None
-
-
-# ---------------------------------------------------------------------------
-# summary() — R's per-column summary
-# ---------------------------------------------------------------------------
 
 
 def _entries(summary, col):
@@ -1125,7 +1014,6 @@ def test_summary_numeric_six_stats():
     assert by_label["Min."] == "1"
     assert by_label["Max."] == "5"
     assert by_label["Median"] == "3"
-    # quantile(0.25, linear) on 1..5 = 2 — not the polars default ("nearest")
     assert by_label["1st Qu."] == "2"
     assert by_label["3rd Qu."] == "4"
 
@@ -1137,9 +1025,7 @@ def test_summary_format_keeps_integer_means_verbatim():
     rounds to integer)."""
     g = hea.data("gavote", package="faraway")
     e = dict(_entries(g.summary(width=120), "votes"))
-    # Mean = 16331.025 — R prints "16331", not signif-rounded "16330".
     assert e["Mean"] == "16331"
-    # Max stays as the literal integer.
     assert e["Max."] == "263211"
 
 
@@ -1159,7 +1045,6 @@ def test_summary_factor_levels_in_category_order():
     order — matches R's ``summary.factor`` on a factor with ``levels=``."""
     g = hea.data("gavote", package="faraway")
     e = _entries(g.summary(), "equip")
-    # gavote.equip levels are LEVER, OS-CC, OS-PC, PAPER, PUNCH.
     assert e == [
         ("LEVER", "74"),
         ("OS-CC", "44"),
@@ -1177,12 +1062,10 @@ def test_summary_factor_other_collapse():
     data = [lvl for lvl, n in zip(levels, counts) for _ in range(n)]
     df = DataFrame({"f": pl.Series(data, dtype=pl.Enum(levels))})
     e = _entries(df.summary(maxsum=7), "f")
-    # Top 6 by count + (Other) = 7 entries.
     labels = [lbl for lbl, _ in e]
     assert labels == ["a", "b", "c", "d", "e", "f", "(Other)"]
     counts_out = dict(e)
     assert counts_out["a"] == "50"
-    # (Other) sums g+h+i+j = 4+3+2+1 = 10.
     assert counts_out["(Other)"] == "10"
 
 
@@ -1228,7 +1111,6 @@ def test_summary_factor_reserves_slot_for_nas():
     data += [None, None]  # 2 nulls
     df = DataFrame({"f": pl.Series(data, dtype=pl.Enum(levels))})
     e = _entries(df.summary(maxsum=5), "f")
-    # 6 levels > slots(=4 because nulls reserved one) → keep top 3, then (Other), then NA's.
     labels = [lbl for lbl, _ in e]
     assert labels == ["a", "b", "c", "(Other)", "NA's"]
 
@@ -1239,12 +1121,10 @@ def test_summary_repr_packs_blocks_horizontally():
     a blank line."""
     df = DataFrame({"x": [1, 2, 3], "y": [10, 20, 30], "z": [100, 200, 300]})
     s = repr(df.summary(width=200))
-    # All three column headers on the first line — wide enough to fit.
     first_line = s.split("\n")[0]
     assert "x" in first_line and "y" in first_line and "z" in first_line
 
     narrow = repr(df.summary(width=30))
-    # Narrow forces wrapping; expect a blank line separating row groups.
     assert "" in narrow.split("\n")
 
 
@@ -1254,9 +1134,7 @@ def test_summary_repr_preserves_block_alignment():
     df = DataFrame({"x": [1, 2, 3, 4, 5]})
     s = repr(df.summary(width=80))
     lines = s.split("\n")
-    # Find the body lines (skip the centered header).
     body = [ln for ln in lines if ":" in ln]
-    # Every line has the colon at the same column.
     colon_positions = {ln.index(":") for ln in body}
     assert len(colon_positions) == 1
 
@@ -1292,18 +1170,6 @@ def test_summary_dates_stay_as_dates():
     e = dict(_entries(df.summary(), "d"))
     for lbl in ("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max."):
         assert " " not in e[lbl], f"{lbl} = {e[lbl]!r} has time component"
-
-
-# ===========================================================================
-# Tidyverse helpers (dplyr / readr / stringr / tibble)
-#
-# These live in hea/dataframe.py with the rest of the tidyverse port (R.py
-# is base R only). Each section compares behavior to a documented R / dplyr
-# reference value so the port is self-checking against the source language.
-# ===========================================================================
-
-
-# ---- if_else / case_when (dplyr) -----------------------------------------
 
 
 def test_if_else_chains_with_parse_number():
@@ -1418,9 +1284,6 @@ def test_case_when_usage_errors():
         hea.tidy.case_when(pl.col("x") < 2)
 
 
-# ---- parse_number / parse_double (readr) ---------------------------------
-
-
 def test_parse_double_strict_list():
     """Whole string must be a valid double; otherwise null."""
     assert hea.tidy.parse_double(["1.2", "5.6", "1e3", "-0.5"]) == [
@@ -1477,9 +1340,6 @@ def test_parse_number_inside_mutate():
     assert out["age_num"].to_list() == [25.0, None, 30.0, 1234.56, 12.5, None]
 
 
-# ---- str_wrap (stringr) --------------------------------------------------
-
-
 def test_str_wrap_single_string():
     out = hea.tidy.str_wrap("hello world this is a long string", width=15)
     assert out == "hello world\nthis is a long\nstring"
@@ -1490,24 +1350,11 @@ def test_str_wrap_list_passthrough():
     assert out == ["short", "much\nlonger\nline here"]
 
 
-# ---- glimpse (tibble) ----------------------------------------------------
-
-
 def test_glimpse_dispatches_on_dataframe():
     """polars / hea DataFrame has .glimpse() — just confirm we don't error."""
     df = DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
     hea.tidy.glimpse(df)
 
-
-# ---- rank family (dplyr) -------------------------------------------------
-#
-# Reference values from R 4.6 / dplyr 1.x:
-#   x <- c(1, 5, 5, 17, 22, NA)
-#   min_rank(x)     -> c(1, 2, 2, 4, 5, NA)
-#   dense_rank(x)   -> c(1, 2, 2, 3, 4, NA)
-#   percent_rank(x) -> c(0, 0.25, 0.25, 0.75, 1.0, NA)
-#   cume_dist(x)    -> c(0.2, 0.6, 0.6, 0.8, 1.0, NA)
-#   ntile(x, 3)     -> c(1, 1, 2, 2, 3, NA)
 
 _RANK_X = [1, 5, 5, 17, 22, None]
 
@@ -1634,8 +1481,6 @@ def test_row_number_no_arg_is_position_expr():
 def test_row_number_eager_list_is_ordinal_rank():
     """``row_number(x)`` is ``rank(x, "ordinal") - 1`` — 0-based ranks,
     ties broken by first appearance."""
-    # R reference is 1-based: row_number(c(3, 1, 1, 2)) -> c(4, 1, 2, 3);
-    # hea subtracts 1 to match Python indexing.
     assert hea.tidy.row_number([3, 1, 1, 2]).to_list() == [3.0, 0.0, 1.0, 2.0]
     assert hea.tidy.row_number(_RANK_X).to_list() == [0.0, 1.0, 2.0, 3.0, 4.0, None]
 
@@ -1645,16 +1490,6 @@ def test_row_number_expr_form():
     df = pl.DataFrame({"x": _RANK_X})
     out = df.select(rn=hea.tidy.row_number(pl.col("x")))["rn"].to_list()
     assert out == [0, 1, 2, 3, 4, None]
-
-
-# ---- lag / lead (dplyr) --------------------------------------------------
-#
-# R reference (dplyr):
-#   x <- c(2, 5, 11, 11, 19, 35)
-#   lag(x)                    -> c(NA, 2, 5, 11, 11, 19)
-#   lag(x, n=2, default=0)    -> c(0, 0, 2, 5, 11, 11)
-#   lead(x)                   -> c(5, 11, 11, 19, 35, NA)
-#   lead(x, n=2, default=-1)  -> c(11, 11, 19, 35, -1, -1)
 
 
 _LAG_X = [2, 5, 11, 11, 19, 35]
@@ -1680,7 +1515,6 @@ def test_lag_inside_mutate_per_group():
     """``mutate`` handles the grouping; lag operates per-group automatically."""
     df = DataFrame({"g": ["a", "a", "b", "b", "b"], "x": [1, 2, 3, 4, 5]})
     out = df.group_by("g").mutate(lx=hea.tidy.lag(pl.col("x"))).sort("g", "x")
-    # R: group_by(g) %>% mutate(lx = lag(x)) yields [NA, 1, NA, 3, 4]
     assert out["lx"].to_list() == [None, 1, None, 3, 4]
 
 
@@ -1699,11 +1533,7 @@ def test_lag_lead_dispatch_ndarray():
     arr = np.array([1.0, 2.0, 3.0, 4.0])
     out = hea.tidy.lag(arr)
     assert isinstance(out, np.ndarray)
-    # n=1 default=None → leading NaN
     assert np.isnan(out[0]) and out[1:].tolist() == [1.0, 2.0, 3.0]
-
-
-# ---- between / na_if / near (dplyr) --------------------------------------
 
 
 def test_between_eager_list():
@@ -1750,9 +1580,6 @@ def test_near_expr_inside_mutate():
     df = DataFrame({"a": [1.0, 1.00000001, 2.0], "b": [1.0, 1.0, 2.0]})
     out = df.mutate(close=hea.tidy.near(pl.col("a"), pl.col("b")))
     assert out["close"].to_list() == [True, True, True]
-
-
-# ---- cummean / cumall / cumany (dplyr) -----------------------------------
 
 
 def test_cummean_eager():
@@ -1809,9 +1636,6 @@ def test_cumany_expr_inside_mutate():
     assert out["c"].to_list() == [False, False, True, True, True]
 
 
-# ---- consecutive_id (dplyr) ----------------------------------------------
-
-
 def test_consecutive_id_single_input():
     """``consecutive_id([1,1,2,2,2,1,1])`` -> [0,0,1,1,1,2,2] (0-based;
     R / dplyr produces [1,1,2,2,2,3,3])."""
@@ -1837,17 +1661,6 @@ def test_consecutive_id_empty_args_raises():
         hea.tidy.consecutive_id()
 
 
-# ---- first / last / nth (dplyr) ------------------------------------------
-#
-# R / dplyr reference is 1-based; hea uses 0-based Python indexing.
-# Equivalences below:
-#   R: nth(x, 2)   <=>  hea: nth(x, 1)
-#   R: nth(x, -1)  <=>  hea: nth(x, -1)  (negative offsets unchanged)
-#   R: nth(x, -2)  <=>  hea: nth(x, -2)
-#   R: nth(x, 3, na_rm=TRUE)  <=>  hea: nth(x, 2, na_rm=True)
-#
-# Sample data: x <- c(2, 5, NA, 11, 19, 35)
-
 _NTH_X = [2, 5, None, 11, 19, 35]
 
 
@@ -1865,7 +1678,6 @@ def test_first_default_fires_on_empty_input():
 
 def test_first_na_rm_skips_leading_nulls():
     assert hea.tidy.first([None, 5, 10], na_rm=True) == 5
-    # All-null + na_rm → empty arr → default
     assert hea.tidy.first([None, None], na_rm=True, default=-1) == -1
 
 
@@ -1911,8 +1723,6 @@ def test_nth_default_na_rm_true_skips_nulls_before_counting():
 
 def test_first_order_by_reorders_then_picks():
     """``first(x, order_by=t)`` returns the value of x when sorted by t."""
-    # R 1-based: first(c("a","b","c"), order_by=c(3,1,2)) -> "b"
-    # hea 0-based: nth(..., 1) picks the second of the reordered values.
     assert hea.tidy.first(["a", "b", "c"], order_by=[3, 1, 2]) == "b"
     assert hea.tidy.last(["a", "b", "c"], order_by=[3, 1, 2]) == "a"
     assert hea.tidy.nth(["a", "b", "c"], 0, order_by=[3, 1, 2]) == "b"
@@ -1939,13 +1749,7 @@ def test_nth_expr_oob_uses_default():
 
 
 def test_lag_with_first_default_canonical_pattern():
-    """The motivating use case from R:
-
-        mutate(diff = time - lag(time, default = first(time)))
-
-    First row gets diff=0 (lag uses first(time)); subsequent rows are
-    real diffs. Verified against R's output.
-    """
+    """The motivating use case from R:"""
     events = DataFrame({"time": [1, 3, 8, 15, 20]})
     out = events.mutate(
         diff=pl.col("time")
@@ -1964,14 +1768,6 @@ def test_first_last_nth_live_under_tidy():
     assert hea.tidy.first is not pl.first
     assert hea.tidy.last is not pl.last
     assert hea.tidy.nth is not pl.nth
-
-
-# ---- cumsum / cumprod / cummax / cummin Expr dispatch --------------------
-#
-# These R-named cumulative functions live in hea.R (base R), but they're
-# routinely used inside ``mutate()`` (e.g. the dplyr `cumsum(has_gap)` group
-# trick). They dispatch on Expr/Series/ndarray like rank/signed_rank so the
-# same name works for both eager translation and pipeline construction.
 
 
 def test_cumsum_dispatches_on_expr_inside_mutate():
@@ -2004,9 +1800,6 @@ def test_cumulative_series_in_series_out():
         assert out.to_list() == expected
 
 
-# ---- GroupBy preserves grouping (matches dplyr) --------------------------
-
-
 def test_groupby_mutate_returns_groupby():
     """dplyr keeps grouping through mutate; hea now matches.
     ``df.group_by(g).mutate(...)`` returns a GroupBy so downstream
@@ -2015,25 +1808,11 @@ def test_groupby_mutate_returns_groupby():
     out = df.group_by("g").mutate(y=pl.col("x") * 2)
     assert isinstance(out, GroupBy)
     assert out.groups == ["g"]
-    # Subscript still works (passes through to the underlying frame)
     assert out["y"].to_list() == [2, 4, 6, 8]
 
 
 def test_groupby_filter_reductions_are_per_group():
-    """The motivating user pattern, written exactly as in dplyr:
-
-        flights |> group_by(year, month, day) |>
-          mutate(r = min_rank(sched_dep_time)) |>
-          filter(r %in% c(1, max(r)))
-
-    Two things make this work:
-    - ``GroupBy.filter`` wraps the predicate in ``.over(by_cols)`` so
-      ``col("r").max()`` becomes per-group;
-    - hea's ``is_in`` patch (see ``test_is_in_accepts_mixed_literal_expr_list``)
-      lets a Python list mix literals and Exprs, so the dplyr-idiomatic
-      ``[1, col("r").max()]`` reads symbol-for-symbol the same as R's
-      ``c(1, max(r))``.
-    """
+    """The motivating user pattern, written exactly as in dplyr:"""
     flights = DataFrame(
         {
             "year": [2013] * 8,
@@ -2049,9 +1828,6 @@ def test_groupby_filter_reductions_are_per_group():
     )
     assert isinstance(out, GroupBy)
     flat = out.ungroup().sort("year", "month", "day", "sched_dep_time")
-    # First and last sched_dep_time per day. With 0-based ranks: day1 has
-    # 5 distinct ranks → r=0 and r=4; day2 has 3 distinct ranks → r=0 and
-    # r=2.
     assert flat["sched_dep_time"].to_list() == [515, 2359, 500, 2300]
 
 
@@ -2063,7 +1839,6 @@ def test_is_in_accepts_mixed_literal_expr_list():
     """
     df = DataFrame({"x": [1, 2, 3, 4, 5]})
     out = df.with_columns(in_mixed=pl.col("x").is_in([1, pl.col("x").max()]))
-    # Keeps the literal 1 and the dynamic max (5).
     assert out["in_mixed"].to_list() == [True, False, False, False, True]
 
 
@@ -2079,8 +1854,6 @@ def test_is_in_mixed_list_with_nulls_equal_uses_eq_missing():
     """``nulls_equal=True`` propagates into the OR-chain via ``eq_missing``."""
     df = DataFrame({"x": [1, None, 3]})
     out = df.with_columns(m=pl.col("x").is_in([1, pl.col("x").max()], nulls_equal=True))
-    # 1 matches 1; null matches neither (the null in x doesn't equal max=3,
-    # and the literal 1 is not null); 3 matches max=3.
     assert out["m"].to_list() == [True, False, True]
 
 
@@ -2090,7 +1863,6 @@ def test_is_in_patch_only_affects_expr_not_series():
     right answer there. (Also avoids triggering the Series-coverage test.)
     """
     s = pl.Series([1, 2, 3, 4])
-    # Pure literals still work eagerly:
     assert s.is_in([1, 3]).to_list() == [True, False, True, False]
 
 
@@ -2100,9 +1872,7 @@ def test_groupby_repr_shows_data_and_groups_banner():
     df = DataFrame({"g": ["a", "a", "b", "b", "c"], "x": [1, 2, 3, 4, 5]})
     out = df.group_by("g").mutate(y=pl.col("x") * 2)
     rendered = repr(out)
-    # The Groups: banner appears first
     assert rendered.startswith("# Groups: g [3]\n")
-    # The underlying frame's repr follows (with the table)
     assert "shape:" in rendered
     assert "1" in rendered and "10" in rendered  # data values present
 
@@ -2112,7 +1882,6 @@ def test_groupby_repr_html_includes_groups_banner():
     out = df.group_by("g")
     html = out._repr_html_()
     assert "<small>Groups: g [2]</small>" in html
-    # Polars' frame HTML follows
     assert "<table" in html
 
 
@@ -2123,8 +1892,6 @@ def test_groupby_filter_with_multiple_predicates_anded():
         pl.col("x") > pl.col("x").min(),  # not the per-group min
         pl.col("x") < pl.col("x").max(),  # not the per-group max
     )
-    # group a: min=1, max=5 → keep nothing strictly between (none)
-    # group b: min=2, max=6 → keep x=3
     assert out.ungroup().sort("g", "x")["x"].to_list() == [3]
 
 
@@ -2155,7 +1922,6 @@ def test_groupby_distinct_includes_group_cols_in_key():
     """``df.group_by(g).distinct(x)`` is distinct on ``(g, x)``."""
     df = DataFrame({"g": ["a", "a", "a", "b"], "x": [1, 1, 2, 1]})
     out = df.group_by("g").distinct("x").ungroup().sort("g", "x")
-    # (a,1), (a,2), (b,1) — three rows
     assert out.shape == (3, 2)
 
 
@@ -2193,7 +1959,6 @@ def test_IQR_in_grouped_summarize():
         )
         .filter(pl.col("distance_iqr") > 0)
     )
-    # Only (A, X) has non-zero IQR — distances 100 and 150 → IQR 25
     assert out["origin"].to_list() == ["A"]
     assert out["dest"].to_list() == ["X"]
     assert out["distance_iqr"].to_list() == [25.0]
@@ -2202,16 +1967,7 @@ def test_IQR_in_grouped_summarize():
 
 
 def test_lag_then_cumsum_group_pattern():
-    """End-to-end translation of dplyr's canonical event-grouping idiom:
-
-        events |> mutate(
-            diff    = time - lag(time, default = first(time)),
-            has_gap = diff >= 5,
-            group   = cumsum(has_gap),
-        )
-
-    Verified against the R output shown in the dplyr docs.
-    """
+    """End-to-end translation of dplyr's canonical event-grouping idiom:"""
     events = DataFrame(
         {
             "time": [0, 1, 2, 3, 5, 10, 11, 12, 14, 15, 20, 21, 24, 25],
@@ -2223,7 +1979,6 @@ def test_lag_then_cumsum_group_pattern():
         has_gap=pl.col("diff") >= 5,
         group=hea.R.cumsum(pl.col("has_gap")),
     )
-    # has_gap True only at time=10 and time=20 → group jumps there
     assert out["group"].to_list() == [
         0,
         0,

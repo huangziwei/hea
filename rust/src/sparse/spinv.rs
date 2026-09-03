@@ -74,14 +74,10 @@
 
 use super::numeric::{mulsub, Factor};
 
-/// Why a selected inverse could not be computed.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SpinvError {
-    /// The factor has no numeric values.
     NotNumeric,
-    /// The factor is `LL'`; upstream's recursion wants `LDL'`.
     NotLdl,
-    /// `A` was not positive definite, so `L` is only valid up to `minor`.
     NotPositiveDefinite(usize),
     /// A column of `Z` has no diagonal entry — `sparseinv.c:82`'s `return -1`.
     NoDiagonal(usize),
@@ -107,25 +103,16 @@ impl std::fmt::Display for SpinvError {
     }
 }
 
-/// `Z`, the selected inverse, on `pattern(L + L')` in compressed-column form.
-///
-/// In the factor's own ordering: `L` factors `P A P'`, so `Z` is the selected
-/// inverse of `P A P'` and the caller unpermutes.
 #[derive(Debug, Clone)]
 pub struct Selected {
     pub n: usize,
-    /// Column pointers, size `n + 1`. Packed, so column `j` is `p[j]..p[j+1]`.
     pub p: Vec<i64>,
-    /// Row indices, ascending within each column.
     pub i: Vec<i64>,
-    /// Values.
     pub x: Vec<f64>,
-    /// `Zdiagp`: where column `j`'s diagonal entry sits in [`Selected::i`].
     pub diagp: Vec<i64>,
 }
 
 impl Selected {
-    /// `diag(Z)`, in the factor's ordering.
     pub fn diagonal(&self) -> Vec<f64> {
         (0..self.n)
             .map(|j| self.x[self.diagp[j] as usize])
@@ -133,19 +120,10 @@ impl Selected {
     }
 }
 
-/// Nanoseconds spent in each of [`sweep`]'s three phases.
-///
-/// All zero unless the crate is built with the `profiling` feature. The clock
-/// is read once per phase per column rather than per entry, so a sweep that is
-/// being measured does the same work at the same rate as one that is not.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Phases {
-    /// Scattering column `j` of `Z` into the dense workspace.
     pub scatter: u64,
-    /// The recurrence itself: the back-substitution for the strictly-upper
-    /// entries of column `j`, fused with the left-looking updates it feeds.
     pub recurrence: u64,
-    /// Gathering column `j` back out and clearing the workspace.
     pub gather: u64,
 }
 
@@ -168,20 +146,12 @@ fn tock(t: Option<std::time::Instant>, acc: &mut u64) {
     }
 }
 
-/// Column `j` of the factor as a half-open range into `L->i` / `L->x`.
 #[inline]
 fn col(l: &Factor, j: usize) -> (usize, usize) {
     let b = l.p[j] as usize;
     (b, b + l.nz[j] as usize)
 }
 
-/// `pattern(L + L')`, with each column's diagonal located.
-///
-/// Column `j` is row `j` of `L` without its diagonal, then column `j` of `L`.
-/// Row `j` of `L` holds column indices `i ≤ j` and column `j` of `L` holds row
-/// indices `i ≥ j`, both ascending, so the concatenation is ascending and the
-/// diagonal sits exactly at the join. That is upstream's requirement — `Zi`
-/// sorted, diagonal present — met by construction rather than by a sort.
 fn z_pattern(l: &Factor) -> (Vec<i64>, Vec<i64>, Vec<i64>) {
     let n = l.n;
 
@@ -367,11 +337,6 @@ fn sweep(
     Ok(flops)
 }
 
-/// The selected inverse of the matrix `l` factors, in `l`'s own ordering.
-///
-/// `l` must be a numeric simplicial `LDL'` factor. Returns `Z`, upstream's
-/// flop count, and where the time went — the last being all zero unless the
-/// crate is built with the `profiling` feature.
 pub fn selected_inverse(l: &Factor) -> Result<(Selected, i64, Phases), SpinvError> {
     if !l.numeric {
         return Err(SpinvError::NotNumeric);
@@ -433,7 +398,6 @@ mod tests {
     use super::super::{numeric, testcorpus};
     use super::*;
 
-    /// An `LDL'` factor of a corpus matrix, and the triangle it came from.
     fn factor(n: usize, edges: &[(usize, usize)]) -> (Factor, Vec<i64>, Vec<i64>, Vec<f64>) {
         let (p, i, v) = spd_triangle(n, edges, false);
         let a = Sparse {
@@ -464,7 +428,6 @@ mod tests {
         (l, p, i, v)
     }
 
-    /// `inv(P A P')` by Gaussian elimination, for the small cases.
     fn dense_inverse(n: usize, p: &[i64], i: &[i64], v: &[f64], perm: &[i64]) -> Vec<f64> {
         /* A as dense, symmetric, from the stored upper triangle */
         let mut a = vec![0.0f64; n * n];

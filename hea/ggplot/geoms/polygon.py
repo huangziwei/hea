@@ -37,9 +37,6 @@ class GeomPolygon(Geom):
         if len(data) == 0:
             return
 
-        # Auto-group fallback: when no group aes is set (`add_group` returns
-        # group=-1), treat the whole frame as a single polygon. Otherwise
-        # split per group.
         if "group" in data.columns:
             groups = data["group"].to_list()
         else:
@@ -52,7 +49,6 @@ class GeomPolygon(Geom):
         for g in order:
             sub = data.filter(data["group"] == g) if "group" in data.columns else data
             if len(sub) < 3:
-                # Need at least 3 vertices for a polygon.
                 continue
             xy = np.column_stack([sub["x"].to_numpy(), sub["y"].to_numpy()])
             patches.append(Polygon(xy, closed=True))
@@ -75,7 +71,6 @@ class GeomPolygon(Geom):
             alpha=alpha,
         )
         ax.add_collection(coll)
-        # PatchCollection doesn't auto-update axes data limits.
         all_x = data["x"].to_numpy()
         all_y = data["y"].to_numpy()
         ax.update_datalim(

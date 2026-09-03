@@ -34,18 +34,7 @@ def today(tzone: str = ""):
 
 
 def _parse_lubridate(value, order: str, with_time: bool, tz: str = ""):
-    """Parse a date / datetime according to a lubridate-style order string.
-
-    ``order`` is one of ``"ymd"`` / ``"mdy"`` / ``"dmy"`` (component
-    order). Uses ``dateutil.parser`` with the matching ``dayfirst`` /
-    ``yearfirst`` hint, which covers stringr's wide format tolerance
-    (separators ``-`` / ``/`` / ``.`` / ``,`` / spaces; month names full
-    or abbreviated; ordinal suffixes ``1st`` / ``2nd``).
-
-    Works on scalars, polars Series, lists / numpy arrays. Output mirrors
-    the input shape: a ``date`` (or ``datetime`` when ``with_time``) for
-    scalars; a Python list for list/Series/ndarray inputs.
-    """
+    """Parse a date / datetime according to a lubridate-style order string."""
     import re as _re
 
     from dateutil import parser as _du
@@ -54,7 +43,6 @@ def _parse_lubridate(value, order: str, with_time: bool, tz: str = ""):
     yearfirst = order == "ymd"
 
     def _coerce(v):
-        # ``ymd(20130102)`` — 8-digit numeric form maps to the canonical string.
         if isinstance(v, (int, float)):
             return str(int(v))
         return v
@@ -66,7 +54,6 @@ def _parse_lubridate(value, order: str, with_time: bool, tz: str = ""):
         if not isinstance(text, str):
             return None
         text = text.strip()
-        # Strip English ordinal suffix (``January 31st`` → ``January 31``).
         text = _re.sub(r"(\d+)(st|nd|rd|th)\b", r"\1", text)
         try:
             dt = _du.parse(text, dayfirst=dayfirst, yearfirst=yearfirst)
@@ -81,10 +68,6 @@ def _parse_lubridate(value, order: str, with_time: bool, tz: str = ""):
         return pl.Series(value.name, out)
     if isinstance(value, (list, tuple, np.ndarray)):
         return [_parse_one(v) for v in value]
-    # Scalar return: numpy datetime64 so ``+`` with int/ndarray works the
-    # R way (``ymd('2022-01-01') + 5`` → ``2022-01-06``;
-    # ``ymd('2022-01-01') + np.array([1, 2])`` → array of two dates).
-    # Python's bare ``datetime.date`` rejects ``+ int``.
     scalar = _parse_one(value)
     if scalar is None:
         return None

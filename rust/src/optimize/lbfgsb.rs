@@ -1,15 +1,3 @@
-//! L-BFGS-B version 2.3 (`R optim(method="L-BFGS-B")`) — mirrors
-//! `hea/R/lbfgsb.py` (the spec and test oracle) line by line, itself a
-//! port of R 4.6.0 `src/appl/lbfgsb.c` + the `lbfgsb()` driver in
-//! `src/appl/optim.c`, with R-as-built clang FMA contractions via
-//! `rfma` and the R-linked (Accelerate) BLAS emulation from
-//! `super::linpack` (see the Python docstrings for receipts and the
-//! ctypes-oracle validation against R's compiled driver).
-//!
-//! Matrices are flat column-major with explicit leading dimensions.
-//! The task-string reverse-communication protocol is kept verbatim so
-//! the driver logic is line-comparable with the C.
-
 use pyo3::prelude::*;
 
 use super::linpack::{
@@ -24,8 +12,6 @@ pub trait Objective {
     fn grad(&mut self, x: &[f64], g: &mut [f64]) -> PyResult<()>;
 }
 
-/// The mainlb statics + workspaces (C `static`s / caller `wa`),
-/// (re)initialized on task == "START" exactly like the C.
 pub struct State {
     ws: Vec<f64>,
     wy: Vec<f64>,
@@ -142,7 +128,6 @@ impl State {
     }
 }
 
-/// lbfgsb.c `active` (:929).
 fn active(
     n: usize,
     lo: &[f64],
@@ -185,8 +170,6 @@ fn active(
     }
 }
 
-/// lbfgsb.c `bmv` (:1025): p = M v for the 2col middle matrix; `wa`
-/// carries both vectors at offsets ov (in) and op (out).
 fn bmv(m: usize, sy: &[f64], wt: &[f64], col: usize, wa: &mut [f64], ov: usize, op: usize) -> i32 {
     if col == 0 {
         return 0;
@@ -200,7 +183,6 @@ fn bmv(m: usize, sy: &[f64], wt: &[f64], col: usize, wa: &mut [f64], ov: usize, 
         }
         wa[op + i2 - 1] = wa[ov + i2 - 1] + s;
     }
-    // dtrsl on wa[op+col .. op+2col] with wt (m×m), order col, job 11/1
     {
         let (wt_ro, b) = (wt, &mut wa[op + col..op + 2 * col]);
         let info = dtrsl(wt_ro, 0, m, col, b, 0, 1, 11);
@@ -231,7 +213,6 @@ fn bmv(m: usize, sy: &[f64], wt: &[f64], col: usize, wa: &mut [f64], ov: usize, 
     0
 }
 
-/// lbfgsb.c `hpsolb` (:2316): heapsort step.
 fn hpsolb(n: usize, t: &mut [f64], iorder: &mut [usize], iheap: i32) {
     if iheap == 0 {
         for k in 2..=n {
@@ -280,7 +261,6 @@ fn hpsolb(n: usize, t: &mut [f64], iorder: &mut [usize], iheap: i32) {
     }
 }
 
-/// lbfgsb.c `cauchy` (:1154). Returns (nint, info).
 #[allow(clippy::too_many_arguments)]
 fn cauchy(
     n: usize,
@@ -352,8 +332,6 @@ fn cauchy(
             d[i - 1] = 0.0;
         } else {
             d[i - 1] = neggi;
-            // f1 -= neggi*neggi is emitted fused (line-0-attributed
-            // fnmsub; confirmed by the R-driver oracle)
             f1 = rfma(-neggi, neggi, f1);
             for j in 1..=col {
                 wa[op + j - 1] = rfma(wy[(i - 1) + (pointr - 1) * n], neggi, wa[op + j - 1]);
@@ -455,8 +433,6 @@ fn cauchy(
             }
             nint += 1;
             let dibp2 = dibp * dibp;
-            // f1 += dt*f2 + dibp2 - theta*dibp*zibp: fma(dt, f2, dibp2),
-            // fma of the negated (rounded) theta*dibp product, plain add
             f1 += rfma(-(theta * dibp), zibp, rfma(dt, f2, dibp2));
             f2 = rfma(-theta, dibp2, f2);
             if col > 0 {
@@ -476,7 +452,6 @@ fn cauchy(
                 let wmw = ddot(col2, wa, owbp, 1, wa, ov, 1);
                 daxpy_same(col2, -dibp, wa, owbp, op);
                 f1 = rfma(dibp, wmc, f1);
-                // inner two-product subtract fuses on its first product
                 f2 += rfma(2.0 * dibp, wmp, -(dibp2 * wmw));
             }
             if f2 < epsmch * f2_org {
@@ -506,7 +481,6 @@ fn cauchy(
     (nint, 0)
 }
 
-/// lbfgsb.c `cmprlb` (:1652). Returns info (−8 on singular bmv).
 #[allow(clippy::too_many_arguments)]
 fn cmprlb(
     n: usize,
@@ -547,7 +521,6 @@ fn cmprlb(
         let a2 = theta * wa[col + j - 1];
         for i in 1..=nfree {
             let k = indx[i - 1];
-            // r += wy*a1 + ws*a2: first product fused
             r[i - 1] += rfma(
                 wy[(k - 1) + (pointr - 1) * n],
                 a1,
@@ -559,7 +532,6 @@ fn cmprlb(
     0
 }
 
-/// lbfgsb.c `errclb` (:1745). Returns (task, info, k).
 fn errclb(n: usize, m: usize, factr: f64, lo: &[f64], up: &[f64], nbd: &[i32]) -> (String, i32) {
     let mut task = String::new();
     let mut info = 0;
@@ -585,7 +557,6 @@ fn errclb(n: usize, m: usize, factr: f64, lo: &[f64], up: &[f64], nbd: &[i32]) -
     (task, info)
 }
 
-/// lbfgsb.c `formk` (:1800). Returns info (−1/−2 on Cholesky failure).
 #[allow(clippy::too_many_arguments)]
 fn formk(
     n: usize,
@@ -794,7 +765,6 @@ fn formk(
     0
 }
 
-/// lbfgsb.c `formt` (:2143). Returns info (−3 on failure).
 fn formt(m: usize, wt: &mut [f64], sy: &[f64], ss: &[f64], col: usize, theta: f64) -> i32 {
     for j in 1..=col {
         wt[(j - 1) * m] = theta * ss[(j - 1) * m];
@@ -804,7 +774,6 @@ fn formt(m: usize, wt: &mut [f64], sy: &[f64], ss: &[f64], col: usize, theta: f6
             let k1 = i.min(j) - 1;
             let mut ddum = 0.0;
             for k in 1..=k1 {
-                // division feeds the add: no contraction
                 ddum += sy[(i - 1) + (k - 1) * m] * sy[(j - 1) + (k - 1) * m]
                     / sy[(k - 1) + (k - 1) * m];
             }
@@ -818,7 +787,6 @@ fn formt(m: usize, wt: &mut [f64], sy: &[f64], ss: &[f64], col: usize, theta: f6
     0
 }
 
-/// lbfgsb.c `freev` (:2217). Returns (nfree, nenter, ileave, wrk).
 #[allow(clippy::too_many_arguments)]
 fn freev(
     n: usize,
@@ -863,8 +831,6 @@ fn freev(
     (nfree, nenter, ileave, wrk)
 }
 
-/// lbfgsb.c `dcstep` (:3237): MINPACK-2 safeguarded step (R-as-built
-/// fusions in the trial-step/gamm expressions).
 #[derive(Default)]
 pub struct Dcsrch {
     brackt: bool,
@@ -1018,7 +984,6 @@ fn dcstep(
     *stp = stpf;
 }
 
-/// lbfgsb.c `dcsrch` (:2980): More-Thuente search. Returns the task.
 #[allow(clippy::too_many_arguments)]
 fn dcsrch(
     f: f64,
@@ -1171,7 +1136,6 @@ fn dcsrch(
     "FG".into()
 }
 
-/// lbfgsb.c `lnsrlb` (:2425). Returns (f, task).
 #[allow(clippy::too_many_arguments)]
 fn lnsrlb(
     n: usize,
@@ -1268,7 +1232,6 @@ fn lnsrlb(
     (f, task_out)
 }
 
-/// lbfgsb.c `matupd` (:2562).
 #[allow(clippy::too_many_arguments)]
 fn matupd(
     n: usize,
@@ -1313,7 +1276,6 @@ fn matupd(
     sy[(col - 1) + (col - 1) * m] = st.dr;
 }
 
-/// lbfgsb.c `projgr` (:2663).
 fn projgr(n: usize, lo: &[f64], up: &[f64], nbd: &[i32], x: &[f64], g: &[f64]) -> f64 {
     let mut sbgnrm = 0.0;
     for i in 0..n {
@@ -1340,7 +1302,6 @@ fn projgr(n: usize, lo: &[f64], up: &[f64], nbd: &[i32], x: &[f64], g: &[f64]) -
     sbgnrm
 }
 
-/// lbfgsb.c `subsm` (:2708). Returns (iword, info).
 #[allow(clippy::too_many_arguments)]
 fn subsm(
     n: usize,
@@ -1394,8 +1355,6 @@ fn subsm(
         let js = col + jy;
         for i in 1..=nsub {
             let k = ind[i - 1];
-            // d += wy*wv/theta + ws*wv: the add of (division, product)
-            // fuses only the product child
             d[i - 1] += rfma(
                 ws[(k - 1) + (pointr - 1) * n],
                 wv[js - 1],
@@ -1454,8 +1413,6 @@ fn subsm(
     (iword, 0)
 }
 
-/// lbfgsb.c `mainlb` (:358): the reverse-communication core. Mutates
-/// x/g in place; returns (f, task).
 #[allow(clippy::too_many_arguments)]
 pub fn mainlb(
     n: usize,
@@ -1546,7 +1503,6 @@ pub fn mainlb(
         st.isave13 = st.nfgv;
         return (f, task);
     } else {
-        // any other task falls through to the f0/g0 request (C 648-651)
         task = "FG_START".into();
         st.isave13 = st.nfgv;
         return (f, task);

@@ -1,8 +1,3 @@
-//! `psigamma` — R's nmath/polygamma.c (Amos, TOMS 610). Line-by-line mirror of
-//! the `hea/R/nmath.py` psigamma cluster (which itself mirrors the C): the
-//! scalar `dpsifn` specialized to the R case (kode=1, m=1) + the
-//! `psigamma(x, deriv)` wrapper, behind a numpy-vectorized PyO3 entry that
-//! rayon-parallelizes over the array (the kernel is per-element independent).
 #![allow(dead_code)]
 
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
@@ -71,7 +66,6 @@ fn dpsifn_m1(mut x: f64, n: i64) -> f64 {
     }
     if x <= 0.0 {
         if x == x.round() {
-            // non-positive integer
             return if n % 2 != 0 { f64::INFINITY } else { f64::NAN };
         }
         let mut ans = dpsifn_m1(1.0 - x, n); // reflection (A&S 6.4.7)
@@ -85,15 +79,11 @@ fn dpsifn_m1(mut x: f64, n: i64) -> f64 {
         let mut k: i64 = 0;
         let mut j: i64 = k - n;
         while j < 1 {
-            // m == 1  => j < 1
             t1 *= M_PI; // t1 == pi^(k+1)
             if k >= 2 {
                 t2 *= k as f64; // t2 == k!
             }
             if j >= 0 {
-                // R fuses `ans + (t1/t2)*d_n_cot` to one fmadd on arm64; the
-                // reflection cancels badly so a 1-ulp FMA diff amplifies.
-                // `rfma` matches R per-arch (= plain `a*b+c` on x86).
                 ans = s * rfma(t1 / t2, d_n_cot(x, k), ans);
             }
             k += 1;
@@ -102,7 +92,6 @@ fn dpsifn_m1(mut x: f64, n: i64) -> f64 {
         }
         return ans;
     }
-    // x > 0
     let xln = x.ln();
     let lrg = 1.0 / (2.0 * DBL_EPSILON);
     if n == 0 && x * xln > lrg {
@@ -142,7 +131,6 @@ fn dpsifn_m1(mut x: f64, n: i64) -> f64 {
         fln = x * xm / eps;
         xm = xmin - x;
         if xm > 7.0 && fln < 15.0 {
-            // rapidly-converging series
             let nn_s = fln as i64 + 1;
             let np_ = n + 1;
             t = (-(n as f64 + 1.0) * xln).exp();
@@ -171,7 +159,6 @@ fn dpsifn_m1(mut x: f64, n: i64) -> f64 {
     if tk > elim {
         return 0.0; // underflow
     }
-    // L10: asymptotic (Bernoulli) expansion in 1/xdmy^2
     let tss = (-t).exp();
     let tt = 0.5 / xdmy;
     t1 = tt;
@@ -197,7 +184,6 @@ fn dpsifn_m1(mut x: f64, n: i64) -> f64 {
     }
     s = (s + t1) * tss;
     if xinc != 0.0 {
-        // backward recur xdmy -> x
         nx = xinc as i64;
         let np_ = nn + 1;
         if nx > 100 {
@@ -241,7 +227,6 @@ pub fn psigamma_scalar(x: f64, deriv: f64) -> f64 {
     ans
 }
 
-/// `psigamma(x, deriv)` over a 1-D array; `deriv` is the scalar polygamma order.
 #[pyfunction]
 pub fn psigamma<'py>(
     py: Python<'py>,

@@ -25,14 +25,7 @@ from hea.models.gmm import (
 
 
 def test_nelder_mead_quadratic_matches_lme4():
-    """Minimize ``f(x) = (x[0]-2)^2 + (x[1]-3)^2``, bounded ``[-5, 5]``.
-
-    R recipe::
-        Nelder_Mead(function(x) (x[1]-2)^2 + (x[2]-3)^2,
-                    par=c(0,0), lower=c(-5,-5), upper=c(5,5),
-                    control=list(xst=c(0.5,0.5),
-                                 xt =c(0.5,0.5)*5e-4, maxfun=10000))
-    """
+    """Minimize ``f(x) = (x[0]-2)^2 + (x[1]-3)^2``, bounded ``[-5, 5]``."""
 
     def py_fn(x):
         return (x[0] - 2.0) ** 2 + (x[1] - 3.0) ** 2
@@ -46,7 +39,6 @@ def test_nelder_mead_quadratic_matches_lme4():
     nm = NelderMead(lb, ub, xst, x0, xtol_abs=xt)
     nm.minimize(py_fn)
 
-    # lme4 reference (Nelder_Mead) — see R recipe in the docstring.
     expected_par = np.array([1.9999241652667235, 2.9999784858794447])
     expected_fval = 6.2137641543925668e-09
     expected_feval = 75
@@ -57,14 +49,7 @@ def test_nelder_mead_quadratic_matches_lme4():
 
 
 def test_nelder_mead_rosenbrock_matches_lme4():
-    """A harder objective — Rosenbrock function, narrow curved valley.
-
-    R recipe::
-        Nelder_Mead(function(x) 100 * (x[2] - x[1]^2)^2 + (1 - x[1])^2,
-                    par=c(-1.2,1.0), lower=c(-5,-5), upper=c(5,5),
-                    control=list(xst=c(0.1,0.1),
-                                 xt =c(0.1,0.1)*5e-4, maxfun=10000))
-    """
+    """A harder objective — Rosenbrock function, narrow curved valley."""
 
     def py_fn(x):
         return 100 * (x[1] - x[0] ** 2) ** 2 + (1 - x[0]) ** 2
@@ -88,14 +73,7 @@ def test_nelder_mead_rosenbrock_matches_lme4():
 
 
 def test_nelder_mead_bounded_at_optimum_matches_lme4():
-    """Optimum on the lower bound — verifies the bound-pinning logic.
-
-    R recipe::
-        Nelder_Mead(function(x) (x[1]+3)^2 + (x[2]-2)^2,
-                    par=c(0,0), lower=c(0,-5), upper=c(5,5),
-                    control=list(xst=c(0.5,0.5),
-                                 xt =c(0.5,0.5)*5e-4, maxfun=10000))
-    """
+    """Optimum on the lower bound — verifies the bound-pinning logic."""
 
     def py_fn(x):
         return (x[0] + 3) ** 2 + (x[1] - 2) ** 2
@@ -119,13 +97,7 @@ def test_nelder_mead_bounded_at_optimum_matches_lme4():
 
 
 def test_nelder_mead_1d_matches_lme4():
-    """1D case — smallest possible simplex (2 vertices).
-
-    R recipe::
-        Nelder_Mead(function(x) (x[1]-1.7)^2 + 0.1 * sin(x[1]),
-                    par=c(0), lower=c(-5), upper=c(5),
-                    control=list(xst=c(0.5), xt=c(0.5)*5e-4, maxfun=10000))
-    """
+    """1D case — smallest possible simplex (2 vertices)."""
 
     def py_fn(x):
         return (x[0] - 1.7) ** 2 + 0.1 * np.sin(x[0])
@@ -182,14 +154,6 @@ def test_nelder_mead_zero_xstep_raises():
 def test_nlopt_bobyqa_quadratic_matches_nloptr():
     """Anisotropic quadratic with mixed bounds ``lb=(0,-Inf,0)`` — exercises
     the variable rescaling (unequal default steps ⇒ non-trivial ``s``).
-
-    R recipe::
-        nloptr(x0=c(1,0,1),
-               eval_f=function(x) 3*(x[1]-0.7)^2 + (x[2]+0.3)^2 +
-                                  5*(x[3]-0.9)^2 + 0.2*x[1]*x[2],
-               lb=c(0,-Inf,0), ub=c(Inf,Inf,Inf),
-               opts=list(algorithm="NLOPT_LN_BOBYQA",
-                         xtol_abs=1e-8, ftol_abs=1e-8, maxeval=1e5))
     """
 
     def fq(x):
@@ -206,7 +170,6 @@ def test_nlopt_bobyqa_quadratic_matches_nloptr():
         np.array([0.0, -np.inf, 0.0]),
         np.array([np.inf, np.inf, np.inf]),
     )
-    # nloptr reference (NLOPT_LN_BOBYQA) — byte-for-byte.
     expected_sol = np.array([0.712374762653482, -0.371237567717368, 0.899999814113911])
     expected_fval = -0.0473578595314938
     np.testing.assert_allclose(r.x, expected_sol, rtol=0, atol=1e-12)
@@ -230,7 +193,6 @@ def test_nlopt_compute_rescaling_makes_steps_equal():
     steps differ, so ``dx[i]/s[i]`` is constant; all-ones when equal."""
     s = _nlopt_compute_rescaling(np.array([0.75, 1.0, 0.75]))
     np.testing.assert_allclose(s, [1.0, 1.0 / 0.75, 1.0], rtol=0, atol=0)
-    # equal steps → identity scaling
     np.testing.assert_array_equal(
         _nlopt_compute_rescaling(np.array([0.2, 0.2, 0.2])), [1.0, 1.0, 1.0]
     )

@@ -19,7 +19,6 @@ from hea.sparse import CholmodError, Factor, cho_factor, cho_solve
 def _rect(m, n, seed=0, density=0.3):
     rng = np.random.default_rng(seed)
     A = sp.csc_array(sp.random_array((m, n), density=density, rng=rng))
-    # keep every column occupied so `AᵀA` has a zero-free diagonal
     A = sp.csc_array(A + sp.eye_array(m, n, format="csc"))
     A.sort_indices()
     return A
@@ -29,9 +28,6 @@ def _gram(A, kind, ridge):
     G = (A.T @ A) if kind == "col" else (A @ A.T)
     n = G.shape[0]
     return sp.csc_array(G + ridge * sp.eye_array(n, format="csc"))
-
-
-# --- the answer is the same answer -------------------------------------------
 
 
 @pytest.mark.parametrize("kind", ["col", "row"])
@@ -94,9 +90,6 @@ def test_the_ldl_factorization_works_too():
     )
 
 
-# --- shape plumbing follows the Gram matrix ----------------------------------
-
-
 def test_n_is_the_gram_matrix_s_dimension():
     A = _rect(60, 20, seed=10)
     assert cho_factor(A, beta=1.0, sym_kind="col").n == 20
@@ -128,11 +121,6 @@ def test_L_is_the_gram_matrix_s_factor():
 
 @pytest.mark.parametrize("supernodal", ["simplicial", "supernodal"])
 def test_L_survives_both_factorization_paths(supernodal):
-    # The supernodal arm reaches `.L` through `from_supernodal` +
-    # `resymbol_noperm`, and resymbol's `LL' = FF'` branch queues the columns
-    # of the matrix whose *rows* index `L` -- so it takes `S`, not `F`. Handing
-    # it the wrong one of that pair is a dimension error, not a wrong answer,
-    # which is why this needs a case big enough to go supernodal.
     A = _rect(200, 90, seed=24, density=0.12)
     F = cho_factor(A, beta=1.0, sym_kind="col", supernodal=supernodal)
     assert F.is_super is (supernodal == "supernodal")
@@ -170,9 +158,6 @@ def test_an_unknown_sym_kind_is_rejected():
         cho_factor(_rect(10, 10, seed=16), sym_kind="colwise")
 
 
-# --- the idiom it exists for --------------------------------------------------
-
-
 def test_refactorize_keeps_the_analysis():
     A = _rect(60, 20, seed=17)
     F = cho_factor(A, beta=1.0, sym_kind="col")
@@ -199,9 +184,6 @@ def test_cho_solve_takes_sym_kind():
 
 
 def test_a_rank_deficient_gram_matrix_still_raises():
-    # `A` with more columns than rows makes `AᵀA` singular, and a Cholesky of a
-    # singular matrix is still an error — `sym_kind` changes what is factorized,
-    # not whether it has to be positive definite.
     A = _rect(6, 20, seed=21)
     with pytest.raises(CholmodError, match="not positive definite"):
         cho_factor(A, sym_kind="col")

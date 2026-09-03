@@ -1,14 +1,6 @@
-//! `libmetis/refine.c` — the two edge-bisection setup routines.
-//!
-//! `Refine2Way` and `Project2WayPartition` are the uncoarsening driver for the
-//! *edge* objective; `METIS_NodeND` never enters them, because its initial
-//! partition is computed on the coarsest graph and it uncoarsens through
-//! `Refine2WayNode` (`srefine.c`) instead.
-
 use super::super::ws::Ws;
 use super::graph::{bnd_insert, Graph};
 
-/// `Allocate2WayPartitionMemory` (`refine.c:...`).
 pub fn allocate_2way_partition_memory(graph: &mut Graph) {
     let nvtxs = graph.nvtxs as usize;
     let ncon = graph.ncon as usize;
@@ -21,11 +13,7 @@ pub fn allocate_2way_partition_memory(graph: &mut Graph) {
     graph.ed = vec![0; nvtxs];
 }
 
-/// `Compute2WayPartitionParams` (`refine.c:...`), `ncon == 1`.
 pub fn compute_2way_partition_params(graph: &mut Graph) {
-    // The C's prologue, taken through `Ws`. Every subscript is one the
-    // algorithm produced itself, so the bound is walked in `cargo test` and
-    // elided here (`sparse::ws`, `metis::tests`).
     let Graph {
         xadj,
         adjncy,
@@ -54,9 +42,6 @@ pub fn compute_2way_partition_params(graph: &mut Graph) {
     let nvtxs = graph.nvtxs as usize;
     let ncon = graph.ncon as usize;
 
-    // `iset (2*ncon, 0, graph->pwgts)` — a prefix, not the whole array:
-    // `GrowBisectionNode` allocates three slots and only two are the edge
-    // bisection's.
     for i in 0..2 * ncon {
         pwgts[i] = 0;
     }

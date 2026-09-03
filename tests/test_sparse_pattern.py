@@ -15,13 +15,7 @@ from hea.sparse import CholmodError, PatternPlan, cho_factor
 
 
 def _linear_index(M):
-    """``col * nrow + row`` for every stored entry of a sorted CSC matrix.
-
-    An oracle, not a copy of anything the module does: it reduces a pattern to
-    one ascending key per entry so a union can be checked against the general
-    set routine. ``PatternPlan`` merges the CSC structures directly and builds
-    no such key.
-    """
+    """``col * nrow + row`` for every stored entry of a sorted CSC matrix."""
     M = sp.csc_array(M)
     cols = np.repeat(np.arange(M.shape[1], dtype=np.int64), np.diff(M.indptr))
     return M.indices.astype(np.int64) + M.shape[0] * cols
@@ -29,9 +23,6 @@ def _linear_index(M):
 
 def _dense(M):
     return np.asarray(M.todense() if sp.issparse(M) else M, dtype=float)
-
-
-# --- what scipy prunes, and the plan does not --------------------------------
 
 
 def test_union_keeps_what_a_scipy_add_cancels():
@@ -42,17 +33,12 @@ def test_union_keeps_what_a_scipy_add_cancels():
 
 
 def test_of_product_keeps_what_a_scipy_product_cancels():
-    # The asymmetry blamed for this is not real: `A.T @ A` drops exact
-    # cancellations exactly as `A + B` does. `of_product` works because its
-    # operands are non-negative, not because multiplication is exempt.
     A = sp.csc_array(np.array([[1.0, 1.0], [1.0, -1.0], [0.0, 0.0]]))
     assert (A.T @ A).nnz == 2
     assert PatternPlan.of_product(A).nnz == 4
 
 
 def test_of_product_survives_an_explicitly_stored_zero():
-    # `abs(A).T @ abs(A)` is the near-miss: |0| is still 0, so a stored zero
-    # produces a zero in the product and is pruned back out.
     A = sp.csc_array(
         (np.array([1.0, 0.0]), np.array([0, 1]), np.array([0, 1, 2])), shape=(2, 2)
     )
@@ -66,12 +52,8 @@ def test_of_product_is_a_superset_of_the_real_product():
     A = sp.random_array((40, 12), density=0.25, rng=rng, format="csc")
     plan = PatternPlan.of_product(A)
     G = sp.csc_array(A.T @ A)
-    # containment: every entry of the real product is in the plan
     assert plan.scatter(G).shape == (plan.nnz,)
     assert plan.nnz >= G.nnz
-
-
-# --- scatter ------------------------------------------------------------------
 
 
 def test_scatter_then_materialize_round_trips():
@@ -130,9 +112,6 @@ def test_scatter_rejects_an_entry_outside_the_pattern():
 
 
 def test_scatter_rejects_an_entry_past_the_last_slot():
-    # A separate arm of the merge's guard from the case above: this entry runs
-    # its column's cursor off the end, so it is rejected by the exhaustion test
-    # rather than by the row comparison.
     A = sp.csc_array(np.array([[1.0, 0.0], [0.0, 0.0]]))
     plan = PatternPlan.union(A)
     outside = sp.csc_array(np.array([[1.0, 0.0], [0.0, 5.0]]))
@@ -148,8 +127,6 @@ def test_scatter_onto_an_empty_pattern_rejects_every_entry():
 
 
 def test_union_of_empty_matrices_is_empty():
-    # The union deduplicates by comparing neighbours, which has no first
-    # neighbour to compare when nothing is stored.
     empty = sp.csc_array((3, 3))
     plan = PatternPlan.union(empty, empty)
     assert plan.nnz == 0
@@ -177,10 +154,6 @@ def test_union_of_three_matrices():
 
 
 def test_union_matches_a_general_set_union():
-    # `union` is a scipy add over ones-valued patterns, which is a linear-time
-    # merge and assumes both operands are already ascending. If that ever stops
-    # holding the answer diverges from the general set routine, so pin them
-    # together against one that sorts.
     rng = np.random.default_rng(5)
     A = sp.csc_array(sp.random_array((50, 50), density=0.1, rng=rng))
     B = sp.csc_array(sp.random_array((50, 50), density=0.1, rng=rng))
@@ -201,9 +174,6 @@ def test_scatter_of_an_empty_matrix_is_all_zeros():
     plan = PatternPlan.union(A)
     empty = sp.csc_array((2, 2))
     assert plan.scatter(empty).tolist() == [0.0, 0.0]
-
-
-# --- materialize ---------------------------------------------------------------
 
 
 def test_materialize_rejects_the_wrong_number_of_values():
@@ -231,8 +201,6 @@ def test_materialize_does_not_alias_the_plan():
 
 
 def test_an_all_zero_pattern_is_not_factorizable():
-    # Why `materialize` takes values rather than defaulting to zeros: CHOLMOD
-    # factorizes numerically while it analyzes.
     plan = PatternPlan.union(sp.csc_array(np.eye(3)))
     with pytest.raises(CholmodError, match="not positive definite"):
         cho_factor(plan.materialize(np.zeros(3)))
@@ -246,17 +214,8 @@ def test_the_pattern_is_immutable_through_the_views():
         plan.indptr[0] = 7
 
 
-# --- the idiom the class exists for -------------------------------------------
-
-
 def _penalized_system(n=24, seed=3):
-    """A data term and a second-difference penalty on the same unknowns.
-
-    Each row of ``A`` touches two columns, one of them far from the other, so
-    ``AtA`` reaches outside the penalty's band and the union is strictly wider
-    than either operand. Every column is touched at least once, so ``AtA`` has
-    a zero-free diagonal.
-    """
+    """A data term and a second-difference penalty on the same unknowns."""
     rng = np.random.default_rng(seed)
     m = 3 * n
     rows = np.repeat(np.arange(m), 2)
@@ -293,9 +252,6 @@ def test_one_analysis_many_refactorizations_matches_factorizing_each():
 
 
 def test_the_shared_pattern_is_wider_than_any_one_lambda():
-    # The point of the union: at no single lambda does the assembled matrix
-    # carry every slot, so a factor analyzed on one lambda's matrix is not
-    # guaranteed to take another's.
     A, R = _penalized_system()
     AtA = sp.csc_array(A.T @ A)
     RtR = sp.csc_array(R.T @ R)
@@ -306,8 +262,6 @@ def test_the_shared_pattern_is_wider_than_any_one_lambda():
 
 
 def test_a_factor_on_the_plan_takes_a_narrower_matrix():
-    # `Factor.factorize` documents containment, not equality; the plan is how a
-    # caller lands on the safe side of that on purpose.
     A, R = _penalized_system()
     AtA = sp.csc_array(A.T @ A)
     RtR = sp.csc_array(R.T @ R)

@@ -18,11 +18,8 @@ from typing import Any
 
 import polars as pl
 
-# Map polars BinaryExpr ops (from Expr.meta.serialize) to a readable name.
 _BIN_OPS = {"Eq", "Lt", "LtEq", "Gt", "GtEq"}
 
-# Map a "left <op> right" inequality op to the polars join_asof strategy that
-# delivers dplyr's closest() semantics.
 _CLOSEST_STRATEGY = {
     "GtEq": "backward",  # left >= right: pick largest right ≤ left
     "Gt": "backward",
@@ -49,11 +46,7 @@ def _extract_col_name(arg: Any) -> str:
 
 
 def _parse_join_binary(expr: pl.Expr) -> tuple[str, str, str] | None:
-    """Parse ``col(L) <op> col(R)`` → ``(op, L, R)``; return ``None`` otherwise.
-
-    Reads polars' JSON serialization so we can read off the operator (which
-    polars doesn't otherwise expose on the public Expr API).
-    """
+    """Parse ``col(L) <op> col(R)`` → ``(op, L, R)``; return ``None`` otherwise."""
     import json
 
     if not isinstance(expr, pl.Expr):
@@ -143,16 +136,10 @@ def within(x_lower: Any, x_upper: Any, y_lower: Any, y_upper: Any) -> pl.Expr:
 class _JoinBy:
     """Normalized join specification produced by :func:`join_by`."""
 
-    # Parallel lists: equi-key columns on the left and right.
     equi_left: list[str] = field(default_factory=list)
     equi_right: list[str] = field(default_factory=list)
-    # Non-equi inequalities as ``(polars_op, left_col, right_col)``. Kept
-    # separately so we can rewrite right-side columns under suffix
-    # disambiguation when needed.
     ineqs: list[tuple[str, str, str]] = field(default_factory=list)
-    # Free-form predicate exprs (e.g. from overlaps / within / between).
     exprs: list[pl.Expr] = field(default_factory=list)
-    # Rolling spec — at most one closest() per call.
     asof: _Closest | None = None
 
 
@@ -212,8 +199,6 @@ def _consume_join_by_arg(spec: _JoinBy, a: Any) -> None:
     )
 
 
-# Map "Lt"/"LtEq"/"Gt"/"GtEq" → corresponding Expr builder for non-equi
-# predicates (used to reconstitute inequalities with suffixed right refs).
 _INEQ_BUILDERS: dict[str, Callable[[pl.Expr, pl.Expr], pl.Expr]] = {
     "Lt": lambda left, r: left < r,
     "LtEq": lambda left, r: left <= r,
@@ -223,21 +208,13 @@ _INEQ_BUILDERS: dict[str, Callable[[pl.Expr, pl.Expr], pl.Expr]] = {
 
 
 def _numeric_supertype(a: Any, b: Any) -> Any | None:
-    """Common numeric dtype that ``a`` and ``b`` both cast to, or ``None``.
-
-    Mirrors dplyr's implicit coercion of numeric join keys: integer +
-    float promotes to float; integer + integer promotes to the wider
-    signed integer. Non-numeric mismatches (string vs date, etc.)
-    return ``None`` and let polars raise its native ``SchemaError``.
-    """
+    """Common numeric dtype that ``a`` and ``b`` both cast to, or ``None``."""
     if a == b:
         return a
     if not (a.is_numeric() and b.is_numeric()):
         return None
     if a.is_float() or b.is_float():
         return pl.Float64
-    # Both integer kinds: promote to Int64 (widest signed). Hea doesn't
-    # try to preserve unsigned-ness — dplyr/R doesn't have it either.
     return pl.Int64
 
 
@@ -247,14 +224,7 @@ def _align_equi_key_types(
     left_keys: list[str],
     right_keys: list[str],
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """Cast equi-join key columns to a common supertype where they mismatch.
-
-    Polars rejects equi joins on mismatched dtypes; dplyr/R coerces
-    numeric keys (e.g. ``flights.year: integer`` ↔ ``planes.year: integer``
-    with ``NA`` works in R because integer is nullable). We auto-cast
-    numeric pairs to a common supertype; non-numeric mismatches fall
-    through and surface polars' native error.
-    """
+    """Cast equi-join key columns to a common supertype where they mismatch."""
     left_cast: list[pl.Expr] = []
     right_cast: list[pl.Expr] = []
     for lk, rk in zip(left_keys, right_keys):
@@ -277,11 +247,7 @@ def _align_equi_key_types(
 
 
 def _emit_natural_join_message(shared: list[str]) -> None:
-    """Print dplyr's ``Joining with `by = join_by(...)``` info message.
-
-    Goes to stderr to match R's ``message()`` channel — visible in
-    Jupyter and REPL output but doesn't pollute stdout-piped scripts.
-    """
+    """Print dplyr's ``Joining with `by = join_by(...)``` info message."""
     import sys
 
     quoted = ", ".join(repr(c) for c in shared)

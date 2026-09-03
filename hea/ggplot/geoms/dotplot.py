@@ -23,10 +23,6 @@ _PT_PER_MM = 72.27 / 25.4
 
 @dataclass
 class GeomDotplot(Geom):
-    # Mirrors ggplot2's ``GeomDotplot$default_aes`` (R/geom-dotplot.R):
-    # ``stroke = 2 * borderwidth = 1.0``, ``linetype = "solid"`` —
-    # missing in hea would let users override but no per-row default
-    # means the dot border is always whatever the geom hard-codes.
     default_aes: dict = field(
         default_factory=lambda: {
             "colour": "black",
@@ -49,20 +45,15 @@ class GeomDotplot(Geom):
         if len(x) == 0:
             return
 
-        # Default binwidth: (range / 30). Override with ``binwidth`` aes_param.
         rng = float(x.max() - x.min())
         bw = float(data["binwidth"][0]) if "binwidth" in data.columns else (rng / 30)
         if bw <= 0:
             bw = max(rng / 30, 1.0)
 
-        # Assign each x to its bin (centre at bin_lo + bw/2).
         bin_lo = x.min()
         bin_idx = ((x - bin_lo) / bw).astype(int)
-        # Within each bin, stack: the k-th point in the bin sits at y = (k+0.5)*bw.
         order = np.argsort(bin_idx, kind="stable")
         sorted_bins = bin_idx[order]
-        # Position within bin = cumulative count up to (and including) self.
-        # Use np.unique on the sorted array to compute per-bin starting indices.
         positions = np.zeros(len(x))
         prev = -1
         counter = 0
@@ -80,10 +71,6 @@ class GeomDotplot(Geom):
         fill = r_color(_first(data, "fill", "black"))
         alpha = float(_first(data, "alpha", 1.0))
 
-        # Use scatter with marker='o' and size in pt². Convert binwidth (data
-        # units) into a display-scale dot — ggplot2 does this geometrically;
-        # we approximate by mapping bw/2 (radius) to pt via the axes transform.
-        # Cheap proxy: fixed dot size equal to ``binwidth × 2.83 × 6`` pt.
         size_pt = (bw * _PT_PER_MM * 6) ** 2 if bw > 0 else 36
         ax.scatter(
             x_centres,

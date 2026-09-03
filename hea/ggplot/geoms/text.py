@@ -28,9 +28,6 @@ _PT_PER_MM = 72.27 / 25.4
 
 @dataclass
 class GeomText(Geom):
-    # Mirrors ggplot2's ``GeomText$default_aes`` (R/geom-text.R). ``size``
-    # is in MM (ggplot2's text-size convention) — 11 pt × 25.4 / 72.27 ≈
-    # 3.88 mm. ``lineheight`` is the ratio of line spacing to font size.
     default_aes: dict = field(
         default_factory=lambda: {
             "colour": "black",
@@ -55,7 +52,6 @@ class GeomText(Geom):
         y = data["y"].to_numpy()
         labels = data["label"].to_list()
 
-        # Per-row attributes — broadcast-style fallback to default if absent.
         colour = data["colour"].to_list() if "colour" in data.columns else None
         size = data["size"].to_numpy() if "size" in data.columns else None
         angle = data["angle"].to_numpy() if "angle" in data.columns else None
@@ -83,7 +79,6 @@ class GeomText(Geom):
             ax.text(x[i], y[i], str(label), **kwargs)
 
 
-# ggplot2's compute_just (R/utilities.R) maps these names to numerics.
 _HJUST_ALIASES = {
     "left": 0.0,
     "right": 1.0,
@@ -101,14 +96,7 @@ _VJUST_ALIASES = {
 
 
 def _resolve_just(raw, coord, axis_range, *, axis: str) -> float:
-    """Resolve a justify value to numeric in [0, 1].
-
-    Accepts numerics (passed through), static strings (``"left"``,
-    ``"right"``, ``"top"``, ``"bottom"``, ``"center"``/``"centre"``/
-    ``"middle"``), and the position-aware ``"inward"`` / ``"outward"``
-    (resolved per ggplot2's ``compute_just``: split on the panel midpoint).
-    Unknown strings fall back to 0.5 (matches ggplot2's silent-NA behaviour).
-    """
+    """Resolve a justify value to numeric in [0, 1]."""
     aliases = _HJUST_ALIASES if axis == "h" else _VJUST_ALIASES
     if isinstance(raw, str):
         if raw in aliases:
@@ -118,7 +106,6 @@ def _resolve_just(raw, coord, axis_range, *, axis: str) -> float:
             if hi <= lo:
                 return 0.5
             mid = 0.5 * (lo + hi)
-            # ggplot2's just_dir splits at the panel midpoint with a small tol.
             tol = 1e-6 * (hi - lo)
             if coord < mid - tol:
                 return 0.0 if raw == "inward" else 1.0
@@ -130,14 +117,7 @@ def _resolve_just(raw, coord, axis_range, *, axis: str) -> float:
 
 
 def _axis_ranges_for_inward(ax, x, y, hjust, vjust) -> tuple:
-    """Pick axis ranges for resolving inward/outward.
-
-    ``draw_panel`` runs before scales call ``apply_to_axis``, so
-    ``ax.get_xlim()`` may still be matplotlib's auto view from artists
-    drawn earlier in the layer stack. That's the right reference for
-    inward/outward — same panel the data lands in. If no other layer
-    has drawn yet we fall back to the geom's own data range. If neither
-    hjust nor vjust uses ``inward``/``outward`` we skip the work."""
+    """Pick axis ranges for resolving inward/outward."""
     needs_h = _has_inward_outward(hjust)
     needs_v = _has_inward_outward(vjust)
     if not (needs_h or needs_v):
@@ -147,7 +127,6 @@ def _axis_ranges_for_inward(ax, x, y, hjust, vjust) -> tuple:
         lo, hi = axis_lim
         if hi > lo and not (lo == 0.0 and hi == 1.0):
             return (float(lo), float(hi))
-        # Fall back to layer data extent.
         if len(coords) == 0:
             return (0.0, 1.0)
         try:
@@ -280,7 +259,6 @@ class GeomLabel(GeomText):
             else [self.default_aes["vjust"]] * n
         )
 
-        # Border width in pt — ggplot2 ``label_size`` is mm.
         border_pt = float(self.label_size) * _PT_PER_MM
 
         x_range, y_range = _axis_ranges_for_inward(ax, x, y, hjust, vjust)
@@ -337,11 +315,6 @@ def geom_label(
         geom_params=geom_params,
         na_rm=na_rm,
     )
-
-
-# ---------------------------------------------------------------------------
-# geom_label_repel — port of ggrepel's force-directed label placement
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -424,8 +397,6 @@ class GeomLabelRepel(GeomLabel):
             if "colour" in data.columns
             else [self.default_aes["colour"]] * n
         )
-        # ``fill`` only exists on GeomLabel subclasses; fall back to ``colour``
-        # so GeomTextRepel can share this code path.
         if "fill" in data.columns:
             fill = data["fill"].to_list()
         elif "fill" in self.default_aes:
@@ -445,16 +416,13 @@ class GeomLabelRepel(GeomLabel):
         hjust_arr = data["hjust"].to_numpy() if "hjust" in data.columns else None
         vjust_arr = data["vjust"].to_numpy() if "vjust" in data.columns else None
 
-        # Drop None / empty labels — ggrepel's na_rm equivalent.
         keep = [i for i, lbl in enumerate(labels) if lbl is not None and str(lbl) != ""]
         if not keep:
             return
 
-        # Initial positions: anchor + nudge.
         x_init = x[keep] + float(self.nudge_x)
         y_init = y[keep] + float(self.nudge_y)
 
-        # Resolve per-label ha/va (string aliases + inward/outward handled).
         x_range, y_range = _axis_ranges_for_inward(
             ax,
             x[keep],
@@ -483,7 +451,6 @@ class GeomLabelRepel(GeomLabel):
                 ha=ha_list[k],
                 va=va_list[k],
             )
-            # Don't let tight_layout shrink the axes for moved labels.
             ta.set_in_layout(False)
             text_artists.append(ta)
 
@@ -644,8 +611,6 @@ class GeomTextRepel(GeomText):
             zorder=10,
         )
 
-    # Reuse GeomLabelRepel's draw_panel — it already routes through
-    # self._make_text_artist for the per-row artist.
     draw_panel = GeomLabelRepel.draw_panel
 
 
@@ -729,7 +694,6 @@ def _schedule_repel(**params):
     state = {"cid": None}
 
     def _on_draw(event):
-        # Disconnect FIRST so the redraw we trigger doesn't re-enter us.
         fig.canvas.mpl_disconnect(state["cid"])
         try:
             _do_repel(renderer=event.renderer, **params)
@@ -783,14 +747,8 @@ def _do_repel(
     if n == 0:
         return
 
-    # Pixel-space conversions. ``transData`` is calibrated by this point
-    # — first draw means scale.apply_to_axis has already run.
     anchors = ax.transData.transform(np.column_stack([x_anchor, y_anchor]))
 
-    # Per-label offset between the user-visible text anchor (where ``set_position``
-    # plants the text) and the bbox CENTER (what the simulation tracks). Depends
-    # on the per-label ha/va. Without this, hjust/vjust != 0.5 would visibly
-    # drift after every position update.
     bboxes0 = [ta.get_window_extent(renderer) for ta in text_artists]
     anchor_to_center = np.zeros((n, 2))
     for i, (bb, ha, va) in enumerate(zip(bboxes0, ha_list, va_list)):
@@ -798,7 +756,6 @@ def _do_repel(
         anchor_to_center[i, 0] = (bb.x0 + bb.width / 2) - anchor_px[0]
         anchor_to_center[i, 1] = (bb.y0 + bb.height / 2) - anchor_px[1]
 
-    # ``pos`` tracks bbox CENTERS in display coords throughout the sim.
     pos = ax.transData.transform(np.column_stack([x_init, y_init])) + anchor_to_center
     initial = pos.copy()
 
@@ -809,7 +766,6 @@ def _do_repel(
     point_pad_px = point_padding_lines * line_px
     min_seg_px = min_segment_length_lines * line_px
 
-    # Half-extents per label (from real renderer bboxes), inflated by box pad.
     half_w = np.array([bb.width / 2 + box_pad_px for bb in bboxes0])
     half_h = np.array([bb.height / 2 + box_pad_px for bb in bboxes0])
 
@@ -822,7 +778,6 @@ def _do_repel(
 
     rng = np.random.default_rng(seed)
 
-    # Constraint walls: explicit xlim/ylim override the panel spines.
     if xlim is not None:
         wx = ax.transData.transform([[float(xlim[0]), 0], [float(xlim[1]), 0]])
         wall_xmin, wall_xmax = float(wx[0, 0]), float(wx[1, 0])
@@ -844,7 +799,6 @@ def _do_repel(
         forces = np.zeros_like(pos)
         moved = False
 
-        # Pairwise label-label repulsion (rectangle overlap).
         dx = pos[:, 0:1] - pos[:, 0:1].T  # (n, n)
         dy = pos[:, 1:2] - pos[:, 1:2].T
         ox = (half_w[:, None] + half_w[None, :]) - np.abs(dx)
@@ -853,8 +807,6 @@ def _do_repel(
         np.fill_diagonal(overlap, False)
         if overlap.any():
             moved = True
-            # Push along smaller-overlap axis. Add tiny jitter so coincident
-            # labels don't get stuck (sign(0)=0).
             jitter_x = rng.uniform(-0.5, 0.5, size=dx.shape)
             jitter_y = rng.uniform(-0.5, 0.5, size=dy.shape)
             sx = np.where(dx != 0, np.sign(dx), np.sign(jitter_x))
@@ -864,7 +816,6 @@ def _do_repel(
             forces[:, 0] += push_x_pair.sum(axis=1) * force
             forces[:, 1] += push_y_pair.sum(axis=1) * force
 
-        # Label-vs-anchor repulsion (push label off any anchor it covers).
         adx = pos[:, 0:1] - anchors[:, 0:1].T
         ady = pos[:, 1:2] - anchors[:, 1:2].T
         ax_inside = (np.abs(adx) < half_w[:, None] + point_pad_px) & (
@@ -872,8 +823,6 @@ def _do_repel(
         )
         if ax_inside.any():
             moved = True
-            # Push direction = away from each covered anchor; pick the
-            # axis with smaller intrusion (cheaper exit).
             ix = half_w[:, None] + point_pad_px - np.abs(adx)
             iy = half_h[:, None] + point_pad_px - np.abs(ady)
             sx = np.where(adx != 0, np.sign(adx), 1.0)
@@ -883,7 +832,6 @@ def _do_repel(
             forces[:, 0] += np.where(use_x, ix * sx, 0.0).sum(axis=1) * force
             forces[:, 1] += np.where(use_y, iy * sy, 0.0).sum(axis=1) * force
 
-        # Wall forces: keep label boxes inside the constraint box.
         push_left = np.maximum(wall_xmin - (pos[:, 0] - half_w), 0.0)
         push_right = np.maximum((pos[:, 0] + half_w) - wall_xmax, 0.0)
         push_bottom = np.maximum(wall_ymin - (pos[:, 1] - half_h), 0.0)
@@ -893,12 +841,10 @@ def _do_repel(
             forces[:, 0] += (push_left - push_right) * force
             forces[:, 1] += (push_bottom - push_top) * force
 
-        # Spring back toward initial (anchor + nudge) position.
         forces += (initial - pos) * 0.01 * force_pull
 
         forces *= dir_mask
 
-        # Damped position update.
         pos += forces * 0.5
 
         if not moved and np.max(np.abs(forces)) < 0.5:
@@ -911,7 +857,6 @@ def _do_repel(
                 )
             break
 
-    # Final overlap count (for max_overlaps decision).
     dx_f = pos[:, 0:1] - pos[:, 0:1].T
     dy_f = pos[:, 1:2] - pos[:, 1:2].T
     ox_f = (half_w[:, None] + half_w[None, :]) - np.abs(dx_f)
@@ -925,11 +870,8 @@ def _do_repel(
             f"geom_*_repel: {iters_run} iters, {n_overlapping} labels still overlapping"
         )
 
-    # If too many labels still overlap, hide the excess (matches ggrepel's
-    # max.overlaps behaviour: extra labels are silently dropped).
     hide_mask = np.zeros(n, dtype=bool)
     if n_overlapping > max_overlaps:
-        # Hide the most-overlapping labels first.
         overlap_count = overlap_f.sum(axis=1)
         n_to_hide = n_overlapping - max_overlaps
         to_hide = np.argsort(-overlap_count)[:n_to_hide]
@@ -939,8 +881,6 @@ def _do_repel(
         if verbose:
             print(f"geom_*_repel: hid {n_to_hide} labels (max_overlaps={max_overlaps})")
 
-    # Update text artist positions (data coords). ``set_position`` plants the
-    # *text anchor*, not the bbox center, so subtract back the per-label offset.
     text_anchor_px = pos - anchor_to_center
     new_data = ax.transData.inverted().transform(text_anchor_px)
     for i, ta in enumerate(text_artists):
@@ -948,13 +888,6 @@ def _do_repel(
             continue
         ta.set_position((float(new_data[i, 0]), float(new_data[i, 1])))
 
-    # Connector segments. Length is measured from the visible box edge to
-    # the anchor (NOT the bbox-center-to-anchor distance) — that's the
-    # actual visible line. With default ``min_segment_length=0.5`` lines
-    # and ``box_padding=0.25`` lines, an unobstructed repelled label sits
-    # with its anchor only ~0.25 lines outside the visible box edge, so
-    # no connector is drawn unless the simulation had to push the label
-    # further (overlap, wall, etc.). Matches ggrepel.
     linestyle = r_lty(segment_linetype)
     arrowstyle = "-|>" if arrow else "-"
     connstyle = f"arc3,rad={float(segment_curvature)}"
@@ -968,9 +901,6 @@ def _do_repel(
             continue  # anchor coincident with label center
         visible_hw = half_w[i] - box_pad_px
         visible_hh = half_h[i] - box_pad_px
-        # ``t`` = parameter along the center→anchor ray that lands on the
-        # visible box edge. ``t >= 1`` means the anchor is inside the box
-        # (no segment to draw).
         t_x = visible_hw / abs(direction[0]) if direction[0] != 0 else np.inf
         t_y = visible_hh / abs(direction[1]) if direction[1] != 0 else np.inf
         t = min(t_x, t_y)
@@ -982,9 +912,6 @@ def _do_repel(
         edge_px = (pos[i, 0] + t * direction[0], pos[i, 1] + t * direction[1])
         edge_data = ax.transData.inverted().transform(edge_px)
         seg_color = r_color(segment_color) if segment_color else r_color(colours[i])
-        # FancyArrowPatch uniformly handles straight + curved + arrow + linestyle.
-        # posA = label-box edge, posB = anchor (so the arrow head, if any, lands
-        # on the data point — matches ggrepel's arrow=arrow() default).
         patch = FancyArrowPatch(
             posA=(float(edge_data[0]), float(edge_data[1])),
             posB=(float(x_anchor[i]), float(y_anchor[i])),

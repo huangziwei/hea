@@ -20,20 +20,12 @@ from .scatter import scatter
 
 
 def _plot_emmeans_table(df: pl.DataFrame, *, comparisons=False, adjust=None, **_):
-    """Forest plot of an emmeans means table.
-
-    R's ``plot.emmGrid(rem$emmeans, …)`` returns a ggplot, so callers can
-    chain ``+ coord_flip()`` etc. We mirror that by returning a hea
-    ggplot of points + CI segments. ``comparisons``/``adjust`` are
-    accepted for R parity; the comparison-arrows overlay is v1-deferred.
-    """
+    """Forest plot of an emmeans means table."""
     import hea  # local to avoid import-time cycles
 
     factor_col = next(
         c for c in df.columns if c not in {"emmean", "SE", "df", "lower.CL", "upper.CL"}
     )
-    # Rename CL columns for the hea aes mapping (dot-in-name kwargs are
-    # awkward; the ymin/ymax aesthetics just need numeric columns).
     plot_df = hea.DataFrame(df).rename({"lower.CL": "lower_CL", "upper.CL": "upper_CL"})
     return plot_df.ggplot(
         x=factor_col, y="emmean", ymin="lower_CL", ymax="upper_CL"
@@ -81,47 +73,33 @@ def plot(
 
     a0 = args[0]
 
-    # Form: plot(lm_object) — 4-panel diagnostic
     if len(args) == 1 and _is_lm_like(a0):
         return plot_lm(a0, **kwargs)
 
-    # Form: plot(density_obj) — defers to the density's own .plot(),
-    # mirroring R's S3 ``plot.density`` dispatch.
     if len(args) == 1 and isinstance(a0, _Density):
         return a0.plot(ax=ax, **kwargs)
 
-    # Form: plot(df) — DataFrame routes by shape.
     if len(args) == 1 and isinstance(a0, pl.DataFrame):
-        # ts-marked frame → line plot of value vs time. Mirrors R's S3
-        # ``plot.ts`` dispatch. The ``_ts_meta`` flag is set by
-        # :func:`hea.R.ts` and by :func:`hea.data` for known R ts
-        # datasets — never inferred from column names, so a user-built
-        # ``DataFrame({"time": …, "value": …})`` won't accidentally fire.
         if getattr(a0, "_ts_meta", None) is not None:
             kwargs.setdefault("type", "l")
             kwargs.setdefault("xlab", "Time")
             kwargs.setdefault("ylab", "value")
             return scatter(a0["time"], a0["value"], ax=ax, **kwargs)
-        # emmeans .emmeans table → forest plot (R's plot.emmGrid).
         if {"emmean", "SE", "lower.CL", "upper.CL"} <= set(a0.columns):
             return _plot_emmeans_table(a0, ax=ax, **kwargs)
         return pairs(a0, **kwargs)
 
-    # Form: plot("formula", data=df)
     if isinstance(a0, str):
         if data is None and len(args) >= 2 and isinstance(args[1], pl.DataFrame):
             data = args[1]
-        # Capture caller frame here while it's still on the stack at a known depth
         caller_env = _frame_env(inspect.currentframe().f_back)
         return _plot_formula(
             a0, data=data, caller_env=caller_env, env=env, ax=ax, **kwargs
         )
 
-    # Form: plot(x, y) — two vectors
     if len(args) == 2:
         return scatter(a0, args[1], ax=ax, **kwargs)
 
-    # Form: plot(vec) — single vector vs index
     if len(args) == 1:
         v = a0.to_numpy() if isinstance(a0, pl.Series) else np.asarray(a0)
         return scatter(np.arange(len(v)), v, ax=ax, **kwargs)

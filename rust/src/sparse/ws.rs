@@ -38,22 +38,12 @@ impl<T> Ws<T> {
         unsafe { &*(s as *const [T] as *const Ws<T>) }
     }
 
-    /// Split into a read-only head and a writable tail.
-    ///
-    /// Asymmetric on purpose. The one caller is [`super::dense`]'s parallel
-    /// `C -= A B'`, where everything read lies below the destination and
-    /// everything written at or above it; the head is what several threads
-    /// share, and the tail is what gets carved into disjoint pieces — which
-    /// wants a plain slice, since [`Ws`] indexes by `Int` and the pieces are
-    /// bounded by construction.
     #[inline(always)]
     pub(super) fn split_at_mut(&mut self, mid: usize) -> (&Ws<T>, &mut [T]) {
         let (lo, hi) = self.0.split_at_mut(mid);
         (Ws::new_ref(lo), hi)
     }
 
-    /// `set_empty (X, n)` / `memset` — the whole-array reset the mark trick
-    /// falls back to on overflow.
     #[inline]
     pub(super) fn fill(&mut self, v: T)
     where
@@ -62,18 +52,6 @@ impl<T> Ws<T> {
         self.0.fill(v);
     }
 
-    /// `self[lo..hi]`, for the column loops that the C writes as
-    /// `for (p = Ap[j] ; p < pend ; p++) { i = Ai[p] ; ... }`.
-    ///
-    /// Handing the loop a slice is what makes it a pointer walk. Indexing
-    /// `Ai[p]` per iteration instead costs a scaled-index load plus a separate
-    /// increment and compare, where clang strength-reduces the same C into a
-    /// post-indexed load and a countdown — 6 instructions per skipped entry
-    /// against 5, which measured as the whole of one stage's gap.
-    ///
-    /// Only applicable where the loop does not also *write* the array it walks:
-    /// where it does, the C is scaled-index-bound too and there is nothing to
-    /// win.
     #[inline(always)]
     pub(super) fn range(&self, lo: i64, hi: i64) -> &[T] {
         debug_assert!(
@@ -88,10 +66,6 @@ impl<T> Ws<T> {
     }
 }
 
-/// `i64` is how the C spells a subscript, `usize` is how the loop counters
-/// arrive, and `i32` is what an unannotated literal infers to — `pwgts[0]` is
-/// written just that way in `metis`, following the C. All three land on the
-/// same unchecked access.
 macro_rules! ws_index {
     ($t:ty) => {
         impl<T> core::ops::Index<$t> for Ws<T> {
@@ -127,7 +101,6 @@ ws_index!(i64);
 ws_index!(usize);
 ws_index!(i32);
 
-/// `cholmod_internal.h` / `amd_internal.h` — `EMPTY` is `(-1)`.
 pub const EMPTY: i64 = -1;
 
 /// `cholmod_clear_flag` (`t_cholmod_clear_flag.c:34-49`), taking the two pieces
@@ -173,14 +146,8 @@ pub struct Work {
     /// (`cholmod_analyze.c:509-514`): the rest holds `Parent`, `First`,
     /// `Level` and `Post` across their calls.
     pub(super) iwork: Vec<i64>,
-    /// `Common->Flag`, size `n`, all `EMPTY` between users.
     pub(super) flag: Vec<i64>,
-    /// `Common->Head`, size `n+1`, all `EMPTY` between users. Every routine
-    /// that scribbles on it restores it before returning.
     pub(super) head: Vec<i64>,
-    /// `Common->Xwork`, size `n` for the real case. `Xwork [i] == 0` must hold
-    /// between users, and every routine that scatters into it clears the
-    /// entries it touched rather than the whole array.
     pub(super) xwork: Vec<f64>,
     /// `Common->mark`. `Flag [i] < mark` is the invariant every user of `Flag`
     /// relies on; bumping `mark` is how a kernel invalidates the whole array in
@@ -189,9 +156,6 @@ pub struct Work {
 }
 
 impl Work {
-    /// `cholmod_start` followed by the `cholmod_allocate_work (n, 6*n, n, …)`
-    /// that one factor's routines add up to — see [`Work::allocate`], which is
-    /// what every entry point calls with its own requirement.
     pub fn new(n: usize) -> Work {
         let mut w = Work {
             iwork: Vec::new(),
@@ -307,8 +271,6 @@ pub(super) struct Analyze<'a> {
     pub(super) post: &'a mut [i64],
 }
 
-/// A borrowed [`Work`] — what the kernels take, so that a caller holding a
-/// disjoint slice of the same block can still hand them the rest.
 pub struct WorkRef<'a> {
     pub(super) iwork: &'a mut [i64],
     pub(super) flag: &'a mut [i64],
@@ -318,8 +280,6 @@ pub struct WorkRef<'a> {
 }
 
 impl WorkRef<'_> {
-    /// The first `2n` of `Iwork` as two `n`-sized halves, which is how every
-    /// routine below `cholmod_analyze` slices it.
     pub(super) fn scratch2(&mut self, n: usize) -> (&mut [i64], &mut [i64]) {
         self.iwork[..2 * n].split_at_mut(n)
     }
@@ -343,18 +303,11 @@ impl WorkRef<'_> {
     }
 }
 
-/// Why a CSC pattern was rejected. Carries enough to name the offending entry,
-/// because the O(nnz) scan that finds it only runs once validation has already
-/// failed.
 #[derive(Debug)]
 pub enum CscError {
-    /// `indptr` was not `n + 1` long.
     IndptrLen { got: usize, want: usize },
-    /// `indptr` was not non-negative and non-decreasing.
     IndptrNotMonotone { at: usize, prev: i64, got: i64 },
-    /// `indptr[n]` ran past the end of `indices`.
     IndptrPastEnd { nz: i64, len: usize },
-    /// A row index fell outside `[0, n)`.
     RowOutOfRange { at: usize, got: i64, n: usize },
 }
 
@@ -380,23 +333,10 @@ impl core::fmt::Display for CscError {
     }
 }
 
-/// Check that `(indptr, indices)` is a well-formed CSC pattern over `n`
-/// columns, and return its `nnz`.
-///
-/// This is a precondition, not a courtesy: it is what makes every subscript
-/// derived from `indptr`/`indices` downstream provably in range, so the
-/// O(nnz) kernels can index without re-checking. O(n) for the pointers plus
-/// one branchless O(nnz) pass for the row indices — the reporting scan that
-/// locates a bad entry only runs after that pass has already failed.
 pub fn validate_csc(n: usize, indptr: &[i64], indices: &[i64]) -> Result<usize, CscError> {
     validate_csc_rect(n, n, indptr, indices)
 }
 
-/// [`validate_csc`] for a matrix whose row count is not its column count.
-///
-/// `indptr` is sized by `ncol` and the row indices are bounded by `nrow`; the
-/// two coincide for every symmetric matrix, which is why the square form is
-/// the one everything else calls.
 pub fn validate_csc_rect(
     nrow: usize,
     ncol: usize,
@@ -430,12 +370,6 @@ pub fn validate_csc_rect(
     }
     let nz = nz as usize;
 
-    // Two independent accumulators so the reduction is a pair of vector
-    // min/max chains rather than one tuple-carrying loop LLVM declines to
-    // widen. The `find` below is the slow path and never runs on valid input.
-    //
-    // `hi` starts below every legal index rather than at 0, so an empty
-    // pattern stays legal at n = 0 instead of tripping `hi >= n`.
     let (mut lo, mut hi) = (0i64, -1i64);
     for &i in &indices[..nz] {
         lo = lo.min(i);
@@ -471,17 +405,6 @@ pub fn columns_are_sorted(n: usize, indptr: &[i64], indices: &[i64]) -> bool {
 mod tests {
     use super::*;
 
-    /// The corpora these kernels run are only evidence if the check they rely
-    /// on is live in this profile, so prove that separately rather than
-    /// assuming it.
-    ///
-    /// `cargo test --release` is a profile where it is *not* live —
-    /// `debug_assertions` is off, so the index below reaches
-    /// `get_unchecked` and the process traps instead of unwinding, taking the
-    /// whole binary down with it rather than failing one test. Skipped there,
-    /// which is also the honest reading: this test asserts something about the
-    /// debug profile, and in a release run neither it nor the corpora beside it
-    /// are evidence of bounds safety.
     #[test]
     #[should_panic(expected = "out of range")]
     #[cfg_attr(not(debug_assertions), ignore = "the bound is compiled out")]
@@ -491,8 +414,6 @@ mod tests {
         std::hint::black_box(ws[10i64]);
     }
 
-    /// The unchecked indexing downstream is licensed by this check, so it has
-    /// to actually reject each way a pattern can be malformed.
     #[test]
     fn validate_csc_rejects_malformed_patterns() {
         assert!(matches!(

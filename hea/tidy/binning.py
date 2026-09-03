@@ -17,12 +17,7 @@ from ..R import cut as _R_cut
 
 
 def _cut_resolve(x, data: pl.DataFrame | None = None) -> np.ndarray:
-    """Materialize ``x`` as a 1-d float numpy array.
-
-    String / ``pl.Expr`` need a DataFrame context (the lazy form used
-    inside ``aes()``); eager forms (Series / ndarray / list) resolve
-    immediately.
-    """
+    """Materialize ``x`` as a 1-d float numpy array."""
     if isinstance(x, pl.Series):
         return x.to_numpy().astype(float)
     if isinstance(x, np.ndarray):
@@ -100,12 +95,8 @@ def cut_width(x, width, *, center=None, boundary=None, closed="right"):
             b = (center - width / 2) if center is not None else width / 2
         x_min = float(finite.min())
         x_max = float(finite.max())
-        # Shift origin so one breakpoint coincides with ``b`` modulo ``width``.
         shift = float(np.floor((x_min - b) / width))
         origin = b + shift * width
-        # Pad one extra slot on the right so x_max always falls inside a bin
-        # regardless of which side is closed (matches ggplot2's
-        # ``seq(min_x, max(range) + width, width)``).
         n_bins = max(int(np.ceil((x_max - origin) / width)), 1)
         breaks = origin + np.arange(n_bins + 2) * width
         return _R_cut(arr, breaks, right=(closed == "right"), include_lowest=True)
@@ -129,7 +120,6 @@ def cut_interval(x, n=None, length=None, *, closed="right"):
         x_min = float(finite.min())
         x_max = float(finite.max())
         if length is not None:
-            # ``fullseq``: round endpoints out to multiples of ``length``.
             start = float(np.floor(x_min / length) * length)
             end = float(np.ceil(x_max / length) * length)
             n_bins = max(round((end - start) / length), 1)

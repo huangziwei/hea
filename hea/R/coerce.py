@@ -66,6 +66,4 @@ def as_date(x, format=None):
     return pl.Series(x).str.to_date(format=format)
 
 
-# R's base spelling (``as.Date``) — Python can't have a dot, so the
-# convention here is the camel-cased underscore form. Same function.
 as_Date = as_date

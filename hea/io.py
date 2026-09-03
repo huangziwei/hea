@@ -39,9 +39,6 @@ from pathlib import Path
 
 import polars as _pl
 import polars as pl  # alias used by the dataset loaders below
-
-# These polars I/O helpers return plain dict[str, DataType] (schema
-# introspection only) — no wrapping needed.
 from polars import (
     read_ipc_schema,
     read_parquet_metadata,
@@ -62,12 +59,10 @@ def _wrap_factory(name: str):
     return wrapper
 
 
-# Eager I/O readers — return ``hea.DataFrame``.
 _READERS = (
     "read_avro",
     "read_clipboard",
     "read_csv",
-    "read_csv_batched",
     "read_database",
     "read_database_uri",
     "read_delta",
@@ -81,8 +76,8 @@ _READERS = (
     "read_parquet",
 )
 
-# Lazy scanners — return ``hea.LazyFrame``.
 _SCANNERS = (
+    "scan_arrow_c_stream",
     "scan_csv",
     "scan_delta",
     "scan_iceberg",
@@ -98,10 +93,6 @@ for _name in (*_READERS, *_SCANNERS):
         globals()[_name] = _wrap_factory(_name)
 
 
-# Override ``read_csv`` with a thin readr-kwarg shim. R-translated scripts
-# use names like ``na=``, ``skip=``, ``comment=``, ``col_names=`` (readr);
-# polars uses ``null_values=``, ``skip_rows=``, ``comment_prefix=``,
-# ``has_header=`` / ``new_columns=``. The shim translates and dispatches.
 _polars_read_csv = globals()["read_csv"]
 
 
@@ -113,13 +104,16 @@ def read_csv(source, *args, **kwargs):
     * ``na=`` → ``null_values=``
     * ``skip=`` → ``skip_rows=``
     * ``comment=`` → ``comment_prefix=``
-    * ``col_names=False`` → ``has_header=False``
+    * ``col_names=False`` → ``has_header=False``, with the columns named
+      ``X1``…``Xn`` as ``readr::read_csv(col_names = FALSE)`` names them,
+      in place of polars' own placeholders
     * ``col_names=["a", "b", ...]`` → ``has_header=False`` + ``new_columns=...``
 
     Translator-stripped readr kwargs (so the .py never carries them):
     ``col_types=`` (use polars ``schema_overrides=`` for column-type
     hints), ``id=`` (multi-file id-column — port if needed).
     """
+    readr_names = kwargs.get("col_names") is False and "new_columns" not in kwargs
     if "na" in kwargs:
         kwargs["null_values"] = kwargs.pop("na")
     if "skip" in kwargs:
@@ -133,22 +127,18 @@ def read_csv(source, *args, **kwargs):
         elif isinstance(col_names, (list, tuple)):
             kwargs["has_header"] = False
             kwargs["new_columns"] = list(col_names)
-        # ``col_names=True`` is polars default — no-op.
-    # readr accepts inline CSV content as the first arg (R detects this
-    # heuristically — embedded newlines = literal). Polars's reader
-    # treats every string as a path; wrap inline-string content in
-    # StringIO so it gets parsed instead of being looked up on disk.
     if isinstance(source, str) and "\n" in source:
         import io as _io
 
         source = _io.StringIO(source)
-    # readr also accepts a list of paths and concatenates the results
-    # row-wise. Polars's reader takes a single path; emulate by reading
-    # each and concatenating.
     if isinstance(source, (list, tuple)):
         frames = [_polars_read_csv(p, *args, **kwargs) for p in source]
-        return _pl.concat(frames, how="vertical_relaxed")
-    return _polars_read_csv(source, *args, **kwargs)
+        out = _pl.concat(frames, how="vertical_relaxed")
+    else:
+        out = _polars_read_csv(source, *args, **kwargs)
+    if readr_names:
+        out.columns = [f"X{i}" for i in range(1, out.width + 1)]
+    return out
 
 
 __all__ = [  # noqa: PLE0604 - _READERS/_SCANNERS are the source of truth
@@ -164,25 +154,9 @@ __all__ = [  # noqa: PLE0604 - _READERS/_SCANNERS are the source of truth
 del _name
 
 
-# =============================================================================
-# Dataset loaders (rdatasets + bundled CSV under ./datasets/)
-# =============================================================================
-
-
-# Our only label rewrite for rdatasets: ``"R"`` (hea's name for R's
-# built-in ``datasets`` package — mirrors our ``datasets/R/`` folder, which
-# avoids the ``datasets/datasets/`` path duplication). Every other package
-# label is passed straight through to rdatasets.
 _RDATASETS_PKG_ALIAS = {"R": "datasets"}
 
 
-# (canonical_package, name) → frequency for datasets R classifies as ``ts``.
-# rdatasets ships them as 2-col ``(time, value)`` frames because CSV can't
-# carry an R class attribute — but on load we want them marked so the
-# base-graphics plotters and ``summary()`` dispatch like R's ``ts`` would.
-# The flag is set explicitly here (never inferred from column names), so
-# a user-built ``DataFrame({"time": …, "value": …})`` won't accidentally
-# fire the ts dispatch.
 _KNOWN_TS_DATASETS: dict[tuple[str, str], float] = {
     ("datasets", "AirPassengers"): 12.0,  # monthly
     ("datasets", "BJsales"): 1.0,
@@ -234,12 +208,7 @@ def _apply_ts_metadata(df: DataFrame, package: str, name: str) -> DataFrame:
 
 
 def _find_bundled_dataset(package: str, name: str) -> Path | None:
-    """Walk up from CWD looking for a bundled ``datasets/{package}/{name}.csv``.
-
-    Returns the first match in CWD or any ancestor, or ``None`` if no
-    bundled copy exists anywhere up the tree (e.g. when ``hea`` is
-    installed as a package and the caller is outside the source repo).
-    """
+    """Walk up from CWD looking for a bundled ``datasets/{package}/{name}.csv``."""
     rel = Path("datasets") / package / f"{name}.csv"
     cwd = Path.cwd()
     for ancestor in (cwd, *cwd.parents):
@@ -250,12 +219,7 @@ def _find_bundled_dataset(package: str, name: str) -> Path | None:
 
 
 def _find_schema(package: str, name: str) -> Path | None:
-    """Walk up from CWD looking for ``datasets/{package}/{name}.schema.json``.
-
-    Schema sidecars carry R factor info (levels + ordered flag) that CSV
-    round-trip and ``rdatasets`` both erase. They are kept locally even when
-    the data itself is sourced from ``rdatasets``.
-    """
+    """Walk up from CWD looking for ``datasets/{package}/{name}.schema.json``."""
     rel = Path("datasets") / package / f"{name}.schema.json"
     cwd = Path.cwd()
     for ancestor in (cwd, *cwd.parents):
@@ -266,13 +230,7 @@ def _find_schema(package: str, name: str) -> Path | None:
 
 
 def _normalize_rownames(df: pl.DataFrame) -> pl.DataFrame:
-    """Standardize the row-id column rdatasets injects.
-
-    rdatasets always adds a ``rownames`` column; we rename it to
-    ``rowname`` (singular — tibble convention, matches what
-    ``export_data.R`` writes for bundled CSVs) and drop it entirely when
-    the values are just sequential ``1..n``, which carries no information.
-    """
+    """Standardize the row-id column rdatasets injects."""
     if "rownames" not in df.columns:
         return df
     rn = df["rownames"]
@@ -281,12 +239,6 @@ def _normalize_rownames(df: pl.DataFrame) -> pl.DataFrame:
     return df.rename({"rownames": "rowname"})
 
 
-#: What to tell someone who asked for a dataset that lives behind the extra.
-#: ``rdatasets`` and ``pyarrow`` moved out of the hard dependencies -- they are
-#: 177 MB and they serve one feature -- so a bare install resolves the bundled
-#: CSV corpus and nothing else. Without this, the failure is a bare "not found"
-#: (no ``rdatasets``) or polars' own pyarrow message (no ``pyarrow``), and
-#: neither says what to install.
 _DATA_EXTRA_HINT = (
     'the rdatasets corpus needs hea\'s "data" extra: '
     'pip install "hea[data]"  (or: uv add "hea[data]")'
@@ -301,12 +253,7 @@ def _have_rdatasets() -> bool:
 
 
 def _from_pandas(df):
-    """``pl.from_pandas``, with the missing-``pyarrow`` error made actionable.
-
-    polars needs ``pyarrow`` to convert a pandas frame whose columns are not
-    plain numpy-backed -- which the rdatasets corpus routinely is -- and says so
-    clearly, but says nothing about ``hea[data]``.
-    """
+    """``pl.from_pandas``, with the missing-``pyarrow`` error made actionable."""
     try:
         return pl.from_pandas(df)
     except ImportError as e:  # polars: "pyarrow is required for converting ..."
@@ -314,14 +261,7 @@ def _from_pandas(df):
 
 
 def _try_load_rdatasets(package: str, name: str) -> pl.DataFrame | None:
-    """Load ``(package, name)`` from the ``rdatasets`` package, or None if missing.
-
-    Tries ``package`` (after the ``R`` → ``datasets`` alias) against the
-    rdatasets package list, then against its item list. Returns None if
-    either lookup fails — caller falls back to bundled CSV / download.
-    The injected ``rownames`` column is normalized via
-    ``_normalize_rownames``.
-    """
+    """Load ``(package, name)`` from the ``rdatasets`` package, or None if missing."""
     try:
         import rdatasets
     except ImportError:
@@ -336,23 +276,11 @@ def _try_load_rdatasets(package: str, name: str) -> pl.DataFrame | None:
     return _normalize_rownames(df)
 
 
-# Accumulator for ordered-factor columns across data() calls within a session,
-# mirroring tests/conftest.py. Polars has no per-column "ordered" flag, so
-# ordered factors are tracked via a contextvar that hea.formula consults when
-# building contrasts. This set lets multiple data() calls coexist without one
-# clobbering another's ordered registrations.
 _data_ordered_cols: set[str] = set()
 
 
 def _apply_dataset_schema(df: pl.DataFrame, schema_path: Path | None) -> pl.DataFrame:
-    """Apply the JSON schema sidecar at ``schema_path``, if present.
-
-    Cast factor columns to ``pl.Enum`` and register ordered factors with the
-    formula machinery. Without this, R's factor type erased by CSV round-trip
-    (or stripped by ``rdatasets``) silently degrades ``s(...,bs='re')``,
-    ``by=factor``, ``fs``, ``sz``, and ordered-contrast paths. Sidecar format
-    mirrors tests/conftest.py: ``{"factors": {col: {"levels": [...], "ordered": bool}}}``.
-    """
+    """Apply the JSON schema sidecar at ``schema_path``, if present."""
     if schema_path is None or not schema_path.is_file():
         return df
     try:
@@ -383,12 +311,7 @@ def _apply_dataset_schema(df: pl.DataFrame, schema_path: Path | None) -> pl.Data
 
 @functools.lru_cache(maxsize=1)
 def _rdatasets_index() -> dict[str, frozenset[str]]:
-    """``{name: frozenset(packages)}`` for everything rdatasets carries.
-
-    Cached — rdatasets's package and item lists are static for the
-    process. The ``"datasets"`` package label is rewritten to ``"R"``
-    to match the convention used by hea's bundled directory layout.
-    """
+    """``{name: frozenset(packages)}`` for everything rdatasets carries."""
     try:
         import rdatasets
     except ImportError:
@@ -403,14 +326,7 @@ def _rdatasets_index() -> dict[str, frozenset[str]]:
 
 
 def _bundled_index() -> dict[str, set[str]]:
-    """``{name: {packages}}`` from local ``datasets/`` (CWD-walk).
-
-    Picks up both ``.csv`` files (bundled data) and ``.schema.json``
-    sidecars (covers entries where the schema is bundled but the CSV
-    is downloaded on first access). Not cached — CWD changes between
-    calls would invalidate the result, and a filesystem walk over
-    ~10 small directories is sub-millisecond.
-    """
+    """``{name: {packages}}`` from local ``datasets/`` (CWD-walk)."""
     index: dict[str, set[str]] = {}
     seen_roots: set[Path] = set()
     cwd = Path.cwd()
@@ -515,17 +431,8 @@ def data(
             )
         package = candidates[0]
     else:
-        # Explicit package: if the local index says the dataset isn't
-        # there, raise immediately rather than launching a doomed
-        # GitHub round-trip. We only short-circuit when ``name`` IS in
-        # the index but under different packages — if ``name`` isn't
-        # in the index at all, fall through to the download path
-        # (covers fresh installs where ``datasets/`` is empty).
         idx = _dataset_index()
         if name in idx and package not in idx[name]:
-            # Without the extra the index only knows the bundled corpus, so
-            # "available in 'R'" can be an artefact of rdatasets being absent
-            # rather than a real answer about where the dataset lives.
             hint = "" if _have_rdatasets() else f"\n\n{_DATA_EXTRA_HINT}"
             quoted = ", ".join(repr(p) for p in idx[name])
             raise ValueError(
@@ -546,9 +453,6 @@ def data(
         datapath = os.path.join(save_to, package)
         csv_path = Path(datapath) / f"{name}.csv"
         if not csv_path.exists() or overwrite:
-            # Snapshot which dirs don't exist yet so a failed download can
-            # roll them back — otherwise a network error leaves an empty
-            # data/<package>/ (and possibly data/) behind in the CWD.
             created_dirs = [
                 Path(p) for p in (save_to, datapath) if not os.path.exists(p)
             ]
@@ -565,10 +469,6 @@ def data(
                     except OSError:
                         pass
                 if e.code == 404:
-                    # Most of the corpus is sourced from rdatasets, and the
-                    # download is only the fallback for what this repo bundles.
-                    # Without the extra the fallback is all there is, so say so
-                    # rather than leaving a bare 404.
                     hint = "" if _have_rdatasets() else f"\n\n{_DATA_EXTRA_HINT}"
                     suggestions = idx.get(name, [])
                     if suggestions:
@@ -603,13 +503,6 @@ def data(
     out = DataFrame._from_pydf(df._df)
     return _apply_ts_metadata(out, package, name)
 
-
-# ---------------------------------------------------------------------------
-# map_data — polygon datasets ported from R's ``maps`` package (CIA World
-# Data Bank II), bundled as zstd-compressed parquet under
-# ``datasets/maps/{name}.parquet``. Output schema mirrors
-# ``ggplot2::map_data()``: ``long, lat, group, order, region, subregion``.
-# ---------------------------------------------------------------------------
 
 _MAP_DATA_NAMES = (
     "world",

@@ -24,8 +24,6 @@ import polars as pl
 
 from .basics import _Desc
 
-# ---- janitor-style name cleaning ------------------------------------
-
 _CLEAN_NAMES_REPLACE = (
     ("'", ""),
     ('"', ""),
@@ -46,12 +44,8 @@ def _clean_one_name(name: str) -> str:
         name = str(name)
     for find, repl in _CLEAN_NAMES_REPLACE:
         name = name.replace(find, repl)
-    # Latin-ASCII transliteration: decompose to base + combining marks,
-    # then drop the combining marks (é → e, ñ → n, ü → u, …).
     name = unicodedata.normalize("NFKD", name)
     name = "".join(c for c in name if not unicodedata.combining(c))
-    # camelCase boundaries: ABCDef → ABC_Def, then aB → a_B. Digit↔upper
-    # is intentionally not split (janitor: x1Test → x1test, not x1_test).
     name = _CLEAN_NAMES_CAMEL_HEAD.sub(r"\1_\2", name)
     name = _CLEAN_NAMES_CAMEL_TAIL.sub(r"\1_\2", name)
     name = _CLEAN_NAMES_NON_ALNUM.sub("_", name)
@@ -83,9 +77,6 @@ def _disambiguate_clean_names(names: list[str]) -> list[str]:
     return out
 
 
-# ---- verb-shared helpers --------------------------------------------
-
-
 def _split_arrange(cols: tuple) -> tuple[list[str], list[bool]]:
     """Split ``arrange`` args into (column names, descending flags)."""
     names: list[str] = []
@@ -107,11 +98,7 @@ def _resolve_anchor(
     after: bool = False,
     verb: str = "mutate",
 ) -> int:
-    """Convert a ``_before`` / ``_after`` anchor to an insertion index.
-
-    Accepts either a column name or a **1-indexed** position (matching
-    dplyr's ``.before = 1`` semantics — "before the first column").
-    """
+    """Convert a ``_before`` / ``_after`` anchor to an insertion index."""
     if isinstance(anchor, bool):  # bool is an int subclass; reject explicitly
         raise TypeError(
             f"{verb}(): _before/_after must be a column name or position, not bool."
@@ -145,22 +132,7 @@ def _check_groups(_groups: str) -> None:
 
 
 def _apply_groups(out_df, by_cols: list, _groups: str):
-    """Resolve dplyr-style ``_groups`` on a summarize result.
-
-    Return type depends on ``_groups`` — analogous to dplyr where the
-    result is either an ungrouped tibble or a grouped one (tracked via
-    metadata; hea tracks it via the GroupBy wrapper type instead).
-
-    - ``"drop"`` → plain :class:`DataFrame` (polars' natural behavior).
-    - ``"drop_last"`` → :class:`GroupBy` on ``by_cols[:-1]``; if only one
-      group var existed, collapses to ungrouped (matches dplyr).
-    - ``"keep"`` → :class:`GroupBy` on all ``by_cols``.
-    - ``"rowwise"`` → :class:`GroupBy` on all ``by_cols``. After a
-      ``summarize``, each output row is unique by those columns, so
-      "each row is its own group" — operationally equivalent to dplyr's
-      rowwise. polars expressions are already row-vectorized, so there's
-      no further behavioral distinction inside ``mutate`` downstream.
-    """
+    """Resolve dplyr-style ``_groups`` on a summarize result."""
     from .groupby import GroupBy
 
     if _groups == "drop":
@@ -170,22 +142,16 @@ def _apply_groups(out_df, by_cols: list, _groups: str):
         if not remaining:
             return out_df
         return GroupBy(out_df, remaining, {"maintain_order": True})
-    # "keep" or "rowwise" — group on all original by cols
     return GroupBy(out_df, list(by_cols), {"maintain_order": True})
 
 
 def _kwargs_to_exprs(args: tuple, kwargs: dict) -> list[pl.Expr]:
-    """Translate ``(*args, **kwargs)`` of a verb into a list of polars exprs.
-
-    Positional args pass through. Keyword args ``name=expr`` get
-    ``.alias(name)`` so the kwarg name becomes the output column.
-    """
+    """Translate ``(*args, **kwargs)`` of a verb into a list of polars exprs."""
     exprs: list[Any] = list(args)
     for name, expr in kwargs.items():
         if isinstance(expr, (pl.Expr, pl.Series)):
             exprs.append(expr.alias(name))
         else:
-            # bare scalar / list — broadcast as a literal column
             exprs.append(pl.lit(expr).alias(name))
     return exprs
 
@@ -193,25 +159,7 @@ def _kwargs_to_exprs(args: tuple, kwargs: dict) -> list[pl.Expr]:
 def _resolve_lazy_factors(
     df: pl.DataFrame, args: tuple, kwargs: dict
 ) -> tuple[tuple, dict]:
-    """Replace deferred factor placeholders with concrete expressions / series.
-
-    Two placeholder shapes are resolved here:
-
-    * ``_LazyFactor`` — returned by ``factor("col")`` / ``factor(pl.col(...))``
-      for str/Expr inputs because the Enum's level set has to be detected
-      from the actual data (polars expressions can't ``.to_list()``
-      mid-pipeline). Resolved to a ``pl.Expr``.
-    * Tagged callables — ``fct_reorder("col", "by")`` and friends (and
-      the ``cut_*`` binning helpers) carry ``__hea_aes_source__`` so the
-      ggplot build pipeline can invoke them. The same shape works in
-      ``mutate`` / ``select``: call with the frame, get back a Series.
-
-    Verbs that own a materialized frame (``mutate``, ``select``,
-    ``GroupBy.mutate``) call this pre-pass so downstream code only
-    sees real expressions / series. For kwargs the kwarg name is
-    offered as a fallback column name when a ``_LazyFactor`` was
-    built from a ``pl.Expr`` without an output_name.
-    """
+    """Replace deferred factor placeholders with concrete expressions / series."""
     from ..R import _LazyFactor
 
     def _resolve(v, fallback_name=None):
@@ -224,9 +172,6 @@ def _resolve_lazy_factors(
     new_args = tuple(_resolve(a) for a in args)
     new_kwargs = {k: _resolve(v, fallback_name=k) for k, v in kwargs.items()}
     return new_args, new_kwargs
-
-
-# ---- column-range placeholder ---------------------------------------
 
 
 class _TidyRange:

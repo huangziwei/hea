@@ -1,9 +1,8 @@
 """Tests for ``hea.ggplot.stats.smooth.loess`` — local polynomial regression.
 
-R-oracle parity tests against ``stats::loess`` come later (X.1). These are
-hand-checked sanity tests covering the algorithmic core: fit recovery on
+Hand-checked sanity tests covering the algorithmic core: fit recovery on
 linear/constant data, outlier suppression by the M-step, prediction
-consistency.
+consistency. They are not oracle-pinned against ``stats::loess``.
 """
 
 from __future__ import annotations
@@ -21,10 +20,7 @@ def test_loess_recovers_linear_data():
     y = 2 * x + 1 + 0.3 * rng.standard_normal(80)
 
     fit = loess(x, y, span=0.75, degree=1)
-    # Residual sd should be close to the noise sd (0.3); inflated by the
-    # df approximation but still in the right order of magnitude.
     assert 0.2 < fit.sigma < 0.6
-    # Prediction at x=5 should be ≈11.
     assert abs(float(fit.predict([5.0])[0]) - 11.0) < 0.5
 
 
@@ -69,7 +65,6 @@ def test_loess_symmetric_family_suppresses_outlier():
     fit_g = loess(x, y_dirty, span=0.4, degree=1, family="gaussian")
     fit_s = loess(x, y_dirty, span=0.4, degree=1, family="symmetric", iterations=4)
 
-    # Gaussian fit gets pulled toward the outlier; symmetric should not.
     pred_g = float(fit_g.predict([x[10]])[0])
     pred_s = float(fit_s.predict([x[10]])[0])
     truth = 2 * x[10] + 1

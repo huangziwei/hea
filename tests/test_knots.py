@@ -28,8 +28,6 @@ from hea.formula import expand, materialize_smooths, parse
 from hea.models.bam import bam
 from hea.models.gam import gam
 
-# Covariate vectors mirrored verbatim in the R generator so that data-adaptive
-# placement (cc length-2 -> place.knots) is reproducible between mgcv and hea.
 XA = np.array(  # cyclic covariate strictly inside (0, 2*pi)
     [0.3, 0.7, 1.1, 1.6, 2.0, 2.4, 2.9, 3.3, 3.8, 4.2, 4.7, 5.1, 5.6, 6.0, 6.2]
 )
@@ -62,11 +60,8 @@ DB = pl.DataFrame({"xb": XB})
 
 KNOT_ATOL = 1e-8  # resolved-knot arithmetic: observed <= 4.3e-11
 FIT_ATOL = 1e-4  # end-to-end REML fit vs mgcv: observed ~1.5e-11, kept loose
-#                    against documented cross-machine REML/devfun FP drift.
 
-# --- mgcv 1.9.4 resolved knot vectors, one per resolver branch ---------------
 MGCV_KNOTS = {
-    # cc length-2: endpoints pinned, interior ADAPTIVE (place.knots(c(lo,hi,x))).
     "cc_len2": [
         0.0,
         0.966666666667,
@@ -76,7 +71,6 @@ MGCV_KNOTS = {
         5.73333333333,
         6.28318530718,
     ],
-    # cc full length-nk: verbatim.
     "cc_verb": [
         0.0,
         1.0471975512,
@@ -86,7 +80,6 @@ MGCV_KNOTS = {
         5.23598775598,
         6.28318530718,
     ],
-    # cp length-2: EVEN over [lo,hi] (seq), nk = bs_dim + 1 = 8.
     "cp_len2": [
         0.0,
         0.897597901026,
@@ -97,7 +90,6 @@ MGCV_KNOTS = {
         5.38558740615,
         6.28318530718,
     ],
-    # cp full length-nk: verbatim.
     "cp_verb": [
         0.0,
         0.897597901026,
@@ -108,12 +100,8 @@ MGCV_KNOTS = {
         5.38558740615,
         6.28318530718,
     ],
-    # cr: verbatim (no length-2 form), length must equal k.
     "cr_verb": [1.0, 4.0, 6.5, 9.0, 11.0],
-    # cs (cr + shrinkage) reuses cr's verbatim knot rule.
     "cs_verb": [1.0, 4.0, 6.5, 9.0, 11.0],
-    # ps length-2: [lo,hi] range fed into the PADDED even-knot build (note the
-    # -0.012 / 12.012 from the 0.1% pad mgcv applies to the supplied range too).
     "ps_len2": [
         -5.16514285714,
         -3.44742857143,
@@ -130,7 +118,6 @@ MGCV_KNOTS = {
         15.4474285714,
         17.1651428571,
     ],
-    # bs length-2: identical construction to ps for this (k, m).
     "bs_len2": [
         -5.16514285714,
         -3.44742857143,
@@ -147,7 +134,6 @@ MGCV_KNOTS = {
         15.4474285714,
         17.1651428571,
     ],
-    # bs length-4: sorted boundary+interior, NO pad (boundary lands at 0 and 12).
     "bs_len4": [
         -5.14285714286,
         -3.42857142857,
@@ -166,7 +152,6 @@ MGCV_KNOTS = {
     ],
 }
 
-# (case, formula, data, knots dict) for each resolved-knot reference above.
 KNOT_CASES = [
     ("cc_len2", 'y ~ s(xa, bs="cc", k=7)', DA, {"xa": [0.0, TWO_PI]}),
     ("cc_verb", 'y ~ s(xa, bs="cc", k=7)', DA, {"xa": list(np.linspace(0, TWO_PI, 7))}),
@@ -202,10 +187,8 @@ def test_cc_len2_is_adaptive_not_linspace():
     NOT an even linspace (that rule is cp's). On non-uniform data the two differ."""
     got = _resolved_knots('y ~ s(xa, bs="cc", k=7)', DA, {"xa": [0.0, TWO_PI]})
     even = np.linspace(0.0, TWO_PI, 7)
-    # endpoints pinned to the period either way ...
     assert got[0] == pytest.approx(0.0)
     assert got[-1] == pytest.approx(TWO_PI)
-    # ... but the interior must be adaptive, i.e. clearly NOT the even grid.
     assert not np.allclose(got, even, atol=1e-3)
 
 
@@ -214,9 +197,6 @@ def test_cp_len2_is_even_not_adaptive():
     got = _resolved_knots('y ~ s(xa, bs="cp", k=7)', DA, {"xa": [0.0, TWO_PI]})
     spacing = np.diff(got)
     assert np.allclose(spacing, spacing[0], atol=KNOT_ATOL)
-
-
-# --- back-compat: the knots param must not perturb the default path ----------
 
 
 @pytest.mark.parametrize(
@@ -232,21 +212,15 @@ def test_cp_len2_is_even_not_adaptive():
 def test_no_knots_equals_empty_and_ignores_irrelevant_keys(formula, data):
     base = _resolved_knots(formula, data, None)
     assert np.array_equal(base, _resolved_knots(formula, data, {}))
-    # a dict that names a different covariate leaves this smooth on its default
     assert np.array_equal(base, _resolved_knots(formula, data, {"zzz": [0.0, 1.0]}))
-
-
-# --- error paths (match mgcv's stop()s) --------------------------------------
 
 
 @pytest.mark.parametrize(
     "formula, data, knots",
     [
-        # range does not cover the data -> error (cp / ps / bs)
         ('y ~ s(xb, bs="cp", k=7)', DB, {"xb": [2.0, 10.0]}),
         ('y ~ s(xb, bs="ps", k=10)', DB, {"xb": [2.0, 10.0]}),
         ('y ~ s(xb, bs="bs", k=10)', DB, {"xb": [2.0, 10.0]}),
-        # wrong-length verbatim vector -> error
         ('y ~ s(xa, bs="cc", k=7)', DA, {"xa": [0.0, 1.0, 2.0]}),
         ('y ~ s(xa, bs="cp", k=7)', DA, {"xa": [0.0, 1.0, 2.0]}),
         ('y ~ s(xb, bs="cr", k=5)', DB, {"xb": [1.0, 5.0, 11.0]}),
@@ -267,20 +241,11 @@ def test_non_dict_knots_rejected(model):
         )
 
 
-# --- end-to-end: cyclic period correctness (the acceptance case) -------------
-#
-# theta = (pi/6)*month, a clean harmonic signal. With the TRUE period
-# knots=[0,2*pi], month 1 (theta=pi/6) and month 12 (theta=2*pi) are distinct
-# points, so f(Jan) != f(Dec). Without knots the default period is the data
-# range [pi/6, 2*pi], which identifies those endpoints and forces f(Jan)==f(Dec)
-# EXACTLY -- the silently-wrong behavior this feature fixes.
-
 _MONTH = np.arange(1, 13)
 _THETA = (np.pi / 6.0) * _MONTH
 _Y = 2.0 * np.sin(_THETA) + 1.5 * np.cos(_THETA)
 _DF = pl.DataFrame({"theta": _THETA, "y": _Y})
 
-# mgcv gam(y ~ s(theta, bs="cc", k=7), knots=list(theta=c(0,2*pi)), method="REML")
 MGCV_FIT_KNOTS = np.array(
     [
         2.29433162013,
@@ -311,11 +276,9 @@ def test_cc_period_correctness_matches_mgcv():
     fk = np.asarray(gk.fitted_values, dtype=float).ravel()
     f0 = np.asarray(g0.fitted_values, dtype=float).ravel()
 
-    # structural: default period collapses Jan==Dec; true period does not.
     assert abs(f0[0] - f0[11]) < 1e-6
     assert abs(fk[0] - fk[11]) > 0.5
 
-    # parity: fit and Jan-Dec gap reproduce mgcv.
     assert np.allclose(fk, MGCV_FIT_KNOTS, atol=FIT_ATOL, rtol=0)
     assert (fk[0] - fk[11]) == pytest.approx(MGCV_GAP_KNOTS, abs=FIT_ATOL)
 
@@ -326,22 +289,12 @@ def test_cc_predict_reuses_supplied_period():
     )
     nd = pl.DataFrame({"theta": [1.0, 1.0 + TWO_PI, 4.0, 4.0 + TWO_PI]})
     p = np.asarray(gk.predict(nd), dtype=float).ravel()
-    # predicting one full period apart is identical (period reused at predict).
     assert p[0] == pytest.approx(p[1], abs=1e-8)
     assert p[2] == pytest.approx(p[3], abs=1e-8)
-    # and matches mgcv's predictions.
     assert p[0] == pytest.approx(MGCV_PRED_AT_1, abs=FIT_ATOL)
     assert p[2] == pytest.approx(MGCV_PRED_AT_4, abs=FIT_ATOL)
 
 
-# --- te/ti/t2 marginal knots (slice 3) ---------------------------------------
-#
-# mgcv passes the same knots= list to every marginal smooth.construct. hea's
-# tensor cr margins consume it (verbatim, length k) exactly like a standalone
-# cr; tp margins ignore it (matches mgcv); cc/cp/ps/bs margins are unsupported
-# in hea's te and raise regardless of knots (loud, never silent).
-
-# deterministic 8x8 grid in [1,11] x [0,10]
 _I = np.arange(64)
 _GX = 1.0 + 10.0 * (_I % 8) / 7.0
 _GZ = 0.0 + 10.0 * (_I // 8) / 7.0
@@ -355,8 +308,6 @@ _CR_MARGIN_KNOTS = [
     12.0,
 ]  # length k=5 (te default), brackets [1,11]
 
-# mgcv gam(y ~ {te,ti,t2}(x, z), knots=list(x=c(0,3,6,9,12)), method="REML"):
-# (first 6 fitted values, sum of fitted values).
 _TENSOR_REF = {
     "te": (
         [1.488167379, 1.950615789, 1.943195215, 1.482116663, 0.804951035, 0.2042411712],
@@ -387,15 +338,12 @@ def test_tensor_cr_margin_knots_match_mgcv(fn):
     fit = np.asarray(g.fitted_values, dtype=float).ravel()
     fit0 = np.asarray(g0.fitted_values, dtype=float).ravel()
     ref6, refsum = _TENSOR_REF[fn]
-    # the cr-margin knots actually changed the fit (else they were ignored)
     assert np.sum(np.abs(fit - fit0)) > 1e-5
-    # and the fit reproduces mgcv
     assert np.allclose(fit[:6], np.array(ref6), atol=FIT_ATOL, rtol=0)
     assert fit.sum() == pytest.approx(refsum, abs=1e-3)
 
 
 def test_tensor_tp_margin_ignores_knots():
-    # tp margins ignore knots in mgcv -> hea fit must be unchanged by knots=.
     a = gam('y ~ te(x, z, bs="tp")', _DGRID, knots={"x": [0.0, 12.0]}, method="REML")
     b = gam('y ~ te(x, z, bs="tp")', _DGRID, method="REML")
     assert np.allclose(
@@ -406,7 +354,6 @@ def test_tensor_tp_margin_ignores_knots():
 
 
 def test_tensor_unsupported_margin_raises_not_silent():
-    # a margin basis hea's te does not implement (gp) raises loudly, not silent.
     with pytest.raises(NotImplementedError):
         materialize_smooths(expand(parse('y ~ te(x, z, bs="gp")')), _DGRID)
 
@@ -418,17 +365,12 @@ def test_tensor_unrelated_knots_ignored():
     assert blocks
 
 
-# --- new tensor margin bases cc/cp/ps/bs (Phase 2, Tier 1) -------------------
-# Headline: a cyclic `cc` tensor margin reproduces mgcv with the supplied period.
-# Grid with x in (0, 2pi) so the cc/cp margins are meaningful.
 _J = np.arange(64)
 _TGX = 0.15 + (2 * np.pi - 0.3) * (_J % 8) / 7.0  # x in (0, 2pi)
 _TGZ = (_J // 8) / 7.0 * 10.0  # z in [0, 10]
 _TGY = np.sin(_TGX) + np.cos(_TGZ / 3) + 0.4 * np.sin(_TGX) * _TGZ / 10
 _DTENS = pl.DataFrame({"x": _TGX, "z": _TGZ, "y": _TGY})
 
-# mgcv gam(y ~ te(x, z, bs=c(<m>,"tp")), knots=list(x=...), method="REML"):
-# margin -> (knots for x, first-6 fitted values, sum of fitted values)
 _TE_MARGIN_REF = {
     "cc": (
         [0.0, 2 * np.pi],
@@ -487,15 +429,10 @@ def test_te_new_margin_knots_match_mgcv(margin):
     assert fit.sum() == pytest.approx(refsum, abs=1e-3)
 
 
-# --- standalone shrinkage bases ts / cs (Phase 2, Tier 1) --------------------
-# ts = tp + 0.1 null-space shrinkage; cs = cr + 0.1 shrinkage. Verify the fit
-# reproduces mgcv AND differs from the un-shrunk tp/cr base, so a missing- or
-# wrong-shrinkage regression is caught (the shrink effect ~7e-5 > the 1e-5 tol).
 _SX = np.linspace(0.0, 1.0, 40)
 _SY = np.sin(4 * _SX) + 0.5 * _SX + 0.2 * np.cos(8 * _SX)
 _DSHRINK = pl.DataFrame({"x": _SX, "y": _SY})
 
-# mgcv gam(y ~ s(x, bs=<b>, k=10), method="REML"): (first-6 fitted, sum, base bs)
 _SHRINK_REF = {
     "cs": (
         [
@@ -524,14 +461,12 @@ def test_shrinkage_basis_matches_mgcv(bs):
     gbase = gam(f'y ~ s(x, bs="{base}", k=10)', _DSHRINK, method="REML")
     fit = np.asarray(g.fitted_values, dtype=float).ravel()
     fitb = np.asarray(gbase.fitted_values, dtype=float).ravel()
-    # shrinkage measurably changes the fit vs the un-shrunk base
     assert np.sum(np.abs(fit - fitb)) > 1e-5
-    # and reproduces mgcv's shrinkage fit
     assert np.allclose(fit[:6], np.array(ref6), atol=1e-5, rtol=0)
     assert fit.sum() == pytest.approx(refsum, abs=1e-4)
 
 
-# --- ds (Duchon spline, Phase 2 Tier 2) --------------------------------------
+# --- ds (Duchon spline, Tier 2) --------------------------------------
 # Reproducible NON-GRID points (√2,√3,√5 mod 1). A regular grid's symmetry makes
 # the kernel eigenvalues degenerate at the rank-k truncation boundary, where
 # eigh and mgcv's slanczos pick different (equally valid) bases of the degenerate
@@ -545,7 +480,6 @@ _DDZ = ((_DI + 1) * np.sqrt(5)) % 1
 _DDRESP = np.sin(3 * _DDX) + np.cos(3 * _DDY) + 0.5 * _DDX * _DDY
 _DDUCHON = pl.DataFrame({"x": _DDX, "y": _DDY, "z": _DDZ, "resp": _DDRESP})
 
-# mgcv gam(..., method="REML") fitted-value refs: (first 6, sum).
 _DS_REF = {
     'resp~s(x,bs="ds")': (
         [
@@ -593,10 +527,6 @@ def test_duchon_spline_matches_mgcv(formula):
     assert fit.sum() == pytest.approx(refsum, abs=1e-4)
 
 
-# --- sos (spline on the sphere, Phase 2 Tier 2) ------------------------------
-# The intrinsic sphere smoother. Default m=0 uses the dilogarithm kernel (mgcv's
-# C rksos, ported as a closed form via scipy.special.spence); m=1..4 are
-# closed-form. Non-grid lat/long points (deg).
 _SI = np.arange(100)
 _SLA = -90 + 180 * (((_SI + 1) * np.sqrt(2)) % 1)
 _SLO = -180 + 360 * (((_SI + 1) * np.sqrt(3)) % 1)
@@ -607,7 +537,6 @@ _SOSRESP = (
 )
 _DSOS = pl.DataFrame({"la": _SLA, "lo": _SLO, "resp": _SOSRESP})
 
-# mgcv gam(resp~s(la,lo,bs="sos",m=<m>,k=30), method="REML"): (first 6, sum).
 _SOS_REF = {
     0: (
         [

@@ -27,10 +27,6 @@ from .color_continuous import ScaleContinuousColor
 from .discrete import ScaleDiscreteColor
 from .scale import _NAME_MISSING
 
-# ---------------------------------------------------------------------------
-# Size — continuous (default), area-proportional, manual, discrete
-# ---------------------------------------------------------------------------
-
 
 def scale_size_continuous(
     *,
@@ -88,7 +84,6 @@ def scale_size_manual(
     )
 
 
-# alias matches ggplot2 — the ``_continuous`` suffix is the canonical default
 scale_size = scale_size_continuous
 
 
@@ -112,11 +107,6 @@ def scale_radius(
         limits=limits,
         palette=rescale_pal(range_=range),
     )
-
-
-# ---------------------------------------------------------------------------
-# Alpha — continuous (default), manual
-# ---------------------------------------------------------------------------
 
 
 def scale_alpha_continuous(
@@ -162,11 +152,6 @@ def scale_alpha_manual(
 scale_alpha = scale_alpha_continuous
 
 
-# ---------------------------------------------------------------------------
-# Shape — discrete only (continuous shape doesn't make sense)
-# ---------------------------------------------------------------------------
-
-
 def scale_shape(*, name=_NAME_MISSING, breaks="default", labels="default", limits=None):
     return ScaleDiscreteColor(
         aesthetics=("shape",),
@@ -198,11 +183,6 @@ def scale_shape_manual(
         limits=limits,
         palette=manual_pal(values),
     )
-
-
-# ---------------------------------------------------------------------------
-# Linetype — discrete only
-# ---------------------------------------------------------------------------
 
 
 def scale_linetype(

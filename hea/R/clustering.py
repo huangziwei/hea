@@ -27,7 +27,6 @@ from .distance import Dist, _pmatch, as_dist, as_matrix_dist
 from .distributions import _r_rng
 
 __all__ = [
-    # dendrogram subsystem (cluster_dendrogram.R)
     "Dendrogram",
     "Hclust",
     "Kmeans",
@@ -57,7 +56,6 @@ __all__ = [
     "str_dendrogram",
 ]
 
-# order --> i.meth --> Fortran iOpt codes (1..8)
 _METHODS = (
     "ward.D",
     "single",
@@ -69,28 +67,15 @@ _METHODS = (
     "ward.D2",
 )
 
-# Rust seam (plan build-order step 10): a serial ``hclust`` kernel mirroring
-# ``_hclust_fortran``/``_hcass2`` 1:1. Inherently sequential (NN-chain
-# agglomeration with data-dependent tie-breaking) — NEVER parallelize. ``None``
-# until built ⇒ the pure-Python port below is the spec/oracle.
 _rs_hclust = rs_fn("hclust")
 
-# Rust seam (step 10): the Hartigan-Wong kernel (`_kmns`/`_optra`/`_qtran`).
-# Sequential OPTRA/QTRAN transfer loops — NEVER parallelize.
 _rs_kmns = rs_fn("kmns")
 
-# Rust seams for the remaining compiled-in-R kernels (R does these in C/Fortran,
-# so the pure-Python ports are slow): the cutree grouping (`C_cutree`) and the
-# Lloyd/MacQueen k-means (`cluster_kmeans.c`). Lloyd's assignment phase is
-# rayon-parallel (independent per point); the rest stays sequential (0-ulp).
 _rs_cutree = rs_fn("cutree")
 _rs_lloyd = rs_fn("lloyd")
 _rs_macqueen = rs_fn("macqueen")
 
 
-# --------------------------------------------------------------------------- #
-# Fortran core (hclust.f), ported 1:1 with 1-based indexing
-# --------------------------------------------------------------------------- #
 def _hclust_fortran(n, diss, iopt, membr0):
     """Port of ``SUBROUTINE HCLUST``. ``diss`` is R's packed lower-triangle
     vector (0-based, length ``n*(n-1)/2``); ``iopt`` is the 1-based method code;
@@ -99,7 +84,6 @@ def _hclust_fortran(n, diss, iopt, membr0):
     inf = 1.0e300
     length = n * (n - 1) // 2
 
-    # 1-based working arrays (index 0 unused), mirroring the Fortran declarations.
     d = np.empty(length + 1, dtype=float)
     d[1 : length + 1] = diss
     ia = [0] * (n + 1)
@@ -113,7 +97,6 @@ def _hclust_fortran(n, diss, iopt, membr0):
     flag = [False] * (n + 1)
 
     def ioffst(i, j):
-        # map row i < col j of the symmetric matrix onto the packed vector
         return j + (i - 1) * n - (i * (i + 1)) // 2
 
     im = jj = jm = 0  # persistent locals (carry across iterations, as in Fortran)
@@ -127,7 +110,6 @@ def _hclust_fortran(n, diss, iopt, membr0):
         for i in range(1, length + 1):
             d[i] = d[i] * d[i]
 
-    # initial nearest-neighbour list (NN to the RIGHT of i)
     for i in range(1, n):
         dmin = inf
         for j in range(i + 1, n + 1):
@@ -139,7 +121,6 @@ def _hclust_fortran(n, diss, iopt, membr0):
         disnn[i] = dmin
 
     while True:  # 400 CONTINUE
-        # least dissimilarity among the current NNs
         dmin = inf
         for i in range(1, n):
             if flag[i] and disnn[i] < dmin:
@@ -157,7 +138,6 @@ def _hclust_fortran(n, diss, iopt, membr0):
         crit[n - ncl] = dmin
         flag[j2] = False
 
-        # update dissimilarities from the new cluster
         dmin = inf
         for k in range(1, n + 1):
             if flag[k] and k != i2:
@@ -166,8 +146,6 @@ def _hclust_fortran(n, diss, iopt, membr0):
                 d12 = d[ioffst(i2, j2)]
 
                 if isward:
-                    # R's gfortran fuses the LW update to fmadd on arm64;
-                    # ``_rfma`` mirrors it per-arch (plain a*b+c on x86).
                     d[ind1] = _rfma(
                         membr[i2] + membr[k], d[ind1], (membr[j2] + membr[k]) * d[ind2]
                     )
@@ -203,7 +181,6 @@ def _hclust_fortran(n, diss, iopt, membr0):
         disnn[i2] = dmin
         nn[i2] = jj
 
-        # update the NN list where it pointed at the merged pair
         for i in range(1, n):
             if flag[i] and (nn[i] == i2 or nn[i] == j2):
                 dmin = inf
@@ -289,7 +266,6 @@ def _cutree_c(merge, which):
     col1 = merge[:, 0]
     col2 = merge[:, 1]
 
-    # 1-based working arrays (index 0 unused), as in the C "--" pointers.
     sing = [True] * (n + 1)  # is k-th obs still alone in a cluster?
     m_nr = [0] * (n + 1)  # last merge-step number containing k-th obs
     z = [0] * (n + 1)
@@ -320,7 +296,6 @@ def _cutree_c(merge, which):
                 if m_nr[ell] == m1 or m_nr[ell] == m2:
                     m_nr[ell] = k
 
-        # does this merge leave a requested number of groups (n - k)?
         found_j = False
         for j in range(nw):
             if which[j] == n - k:
@@ -348,9 +323,6 @@ def _cutree_c(merge, which):
     return ans
 
 
-# --------------------------------------------------------------------------- #
-# kmeans kernels — Lloyd/MacQueen (cluster_kmeans.c), Hartigan-Wong (kmns.f)
-# --------------------------------------------------------------------------- #
 def _kmeans_lloyd(x, centers, k, maxiter):
     """Port of ``kmeans_Lloyd`` (``cluster_kmeans.c``). ``x`` is ``(n, p)``,
     ``centers`` ``(k, p)``; returns ``(cl, cen, nc, wss, iter)`` with ``cl``
@@ -402,7 +374,6 @@ def _kmeans_macqueen(x, centers, k, maxiter):
     cl = np.zeros(n, dtype=np.int64)
     nc = np.zeros(k, dtype=np.int64)
     with np.errstate(invalid="ignore", divide="ignore"):
-        # initial nearest-centre assignment
         for i in range(n):
             best = np.inf
             inew = 0
@@ -416,7 +387,6 @@ def _kmeans_macqueen(x, centers, k, maxiter):
                     inew = j + 1
             if cl[i] != inew:
                 cl[i] = inew
-        # centroids
         cen[:] = 0.0
         nc[:] = 0
         for i in range(n):
@@ -425,7 +395,6 @@ def _kmeans_macqueen(x, centers, k, maxiter):
             cen[it] += x[i]
         for j in range(k):
             cen[j] /= nc[j]
-        # incremental refinement
         broke = False
         iteration = 0
         for iteration in range(maxiter):
@@ -466,7 +435,6 @@ def _kmeans_wss(x, cen, cl, k):
         it = cl[i] - 1
         for c in range(p):
             tmp = x[i, c] - cen[it, c]
-            # R fuses `wss += d*d` to fmadd on arm64; ``_rfma`` mirrors per-arch.
             wss[it] = _rfma(tmp, tmp, wss[it])
     return wss
 
@@ -487,7 +455,6 @@ def _kmns(x, centers, k, iter_max, trace=0):
         return {"ifault": 3}
     ifault = 0
 
-    # 1-based working arrays (index 0 unused).
     ic1 = [0] * (m + 1)
     ic2 = [0] * (m + 1)
     d = [0.0] * (m + 1)
@@ -498,7 +465,6 @@ def _kmns(x, centers, k, iter_max, trace=0):
     live = [0] * (k + 1)
     itran = [0] * (k + 1)
 
-    # For each point, its two closest centres IC1, IC2.
     for i in range(1, m + 1):
         ic1[i] = 1
         ic2[i] = 2
@@ -532,7 +498,6 @@ def _kmns(x, centers, k, iter_max, trace=0):
                 dt[0] = db
                 ic1[i] = ell
 
-    # Update centres to the mean of their members; cluster sizes NC.
     for ell in range(1, k + 1):
         nc[ell] = 0
         for j in range(1, p + 1):
@@ -688,7 +653,6 @@ def _kmns(x, centers, k, iter_max, trace=0):
                             ic2[i] = l1
                 if icoun == m:
                     return indx
-            # GO TO 10: repeat the sweep
 
     indx = 0
     iter_returned = iter_max + 1  # set IFAULT=2 unless we break early
@@ -711,7 +675,6 @@ def _kmns(x, centers, k, iter_max, trace=0):
         for ell in range(1, k + 1):
             ncp[ell] = 0
 
-    # Within-cluster sum of squares (recomputes centres as the cluster means).
     wss = [0.0] * (k + 1)
     for ell in range(1, k + 1):
         for j in range(1, p + 1):
@@ -738,9 +701,6 @@ def _kmns(x, centers, k, iter_max, trace=0):
     }
 
 
-# --------------------------------------------------------------------------- #
-# the Hclust object
-# --------------------------------------------------------------------------- #
 class Hclust:
     """R's ``"hclust"`` object — the agglomeration history.
 
@@ -778,9 +738,6 @@ class Hclust:
         return print_hclust(self, _return=True)
 
 
-# --------------------------------------------------------------------------- #
-# public API
-# --------------------------------------------------------------------------- #
 def hclust(d, method="complete", members=None):
     """R ``stats::hclust(d, method, members)`` — agglomerative hierarchical
     clustering of a :class:`~hea.R.distance.Dist`.
@@ -833,9 +790,6 @@ def hclust(d, method="complete", members=None):
 
     merge = np.empty((n - 1, 2), dtype=np.int64)
     if _rs_hclust is not None:
-        # Rust does the agglomeration AND hcass2 (the merge->order transform),
-        # returning the final columns directly — no O(n^2) Python post-processing.
-        # The pure-Python ``_hclust_fortran``/``_hcass2`` below stay the spec.
         iia, iib, height, order = _rs_hclust(
             n, np.ascontiguousarray(data), iopt, members
         )
@@ -888,7 +842,6 @@ def cutree(tree, k=None, h=None):
         heights_inf = np.concatenate([height, [np.inf]])
         which = np.empty(hvals.size, dtype=np.int64)
         for i, hv in enumerate(hvals):
-            # which.max of the logical: index (1-based) of the first TRUE
             which[i] = n + 1 - (int(np.argmax(heights_inf > hv)) + 1)
     else:
         which = np.atleast_1d(np.asarray(k, dtype=np.int64))
@@ -964,9 +917,6 @@ def print_hclust(x, _return=False):
     return None
 
 
-# --------------------------------------------------------------------------- #
-# kmeans (public API)
-# --------------------------------------------------------------------------- #
 def _match_arg(arg, choices):
     """R ``match.arg`` for a single string: exact, else unique prefix."""
     if arg in choices:
@@ -1240,9 +1190,6 @@ def print_kmeans(x, _return=False):
     return None
 
 
-# --------------------------------------------------------------------------- #
-# Dendrogram subsystem (port of cluster_dendrogram.R, non-graphics surface)
-# --------------------------------------------------------------------------- #
 class Dendrogram:
     """R's ``"dendrogram"`` object — a binary (or k-ary) tree carried as nested
     nodes with attributes, mirroring R's "list / integer + attributes" layout so
@@ -1266,15 +1213,12 @@ class Dendrogram:
         self.attrs = {} if attrs is None else attrs
 
     def __len__(self):
-        # R length(): #{branches} for a node, 1 for a leaf (a scalar integer).
         return 1 if self.children is None else len(self.children)
 
     def __int__(self):
-        # R as.integer(<leaf>) — the observation index.
         return int(self.value)
 
     def __getitem__(self, key):
-        # R `[[.dendrogram` (1-based); a sequence descends recursively.
         if isinstance(key, (tuple, list, np.ndarray)):
             node = self
             for k in key:
@@ -1398,7 +1342,6 @@ def _validity_hclust(x, merge=None, order=True):
         return "'height' is of wrong length"
     if order and len(x.order) != n:
         return "'order' is of wrong length"
-    # identical(sort(as.integer(merge)), c(-(n:1L), +seq_len(n-2L)))
     expected = np.concatenate([np.arange(-n, 0), np.arange(1, n - 1)])
     if np.array_equal(np.sort(merge.astype(np.int64).ravel()), expected):
         return True

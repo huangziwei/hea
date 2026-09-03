@@ -43,7 +43,6 @@ pub fn ikvwspacemalloc(n: Idx) -> Vec<Ikv> {
     vec![Ikv::default(); n.max(0) as usize]
 }
 
-/// `iset (n, val, iwspacemalloc (ctrl, n))`, the shape most call sites use.
 #[inline]
 pub fn iset_wspace(n: Idx, val: Idx) -> Vec<Idx> {
     vec![val; n.max(0) as usize]

@@ -1,7 +1,3 @@
-//! Continuous "second-half" families — R's nmath dcauchy/pcauchy/qcauchy,
-//! dlogis/plogis/qlogis, dlnorm/plnorm/qlnorm, dweibull/pweibull/qweibull.
-//! Mirror of the `hea/R/nmath.py` scalar kernels. All closed-form (no LDOUBLE
-//! series) → f64 is 0-ulp to R here.
 #![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
@@ -15,10 +11,8 @@ use super::norm::{dt0, dt1, pnorm5_scalar, qnorm5_scalar};
 use super::tf::tanpi;
 use super::util::rfma;
 
-// --- dpq.h helpers not already centralised -----------------------------------
 #[inline]
 fn r_d_val(x: f64, log_p: bool) -> f64 {
-    // R_D_val(x) = log_p ? log(x) : x
     if log_p {
         x.ln()
     } else {
@@ -27,7 +21,6 @@ fn r_d_val(x: f64, log_p: bool) -> f64 {
 }
 #[inline]
 fn r_d_clog(p: f64, log_p: bool) -> f64 {
-    // R_D_Clog(p) = log_p ? log1p(-p) : (0.5 - p + 0.5)
     if log_p {
         (-p).ln_1p()
     } else {
@@ -35,7 +28,6 @@ fn r_d_clog(p: f64, log_p: bool) -> f64 {
     }
 }
 
-/// R's `log1pexp(x) = log(1 + exp(x))` (plogis.c), overflow-safe.
 #[inline]
 fn log1pexp(x: f64) -> f64 {
     if x <= 18.0 {
@@ -47,8 +39,6 @@ fn log1pexp(x: f64) -> f64 {
     }
 }
 
-/// Faithful expansion of the `R_Q_P01_boundaries(p, left, right)` macro: returns
-/// `Some(boundary)` when `p` is out of range or at 0/1, else `None`.
 #[inline]
 fn q_p01_boundaries(p: f64, lower_tail: bool, log_p: bool, left: f64, right: f64) -> Option<f64> {
     if log_p {
@@ -75,7 +65,6 @@ fn q_p01_boundaries(p: f64, lower_tail: bool, log_p: bool, left: f64, right: f64
     None
 }
 
-// === Cauchy ==================================================================
 pub(crate) fn dcauchy_scalar(x: f64, location: f64, scale: f64, give_log: bool) -> f64 {
     if x.is_nan() || location.is_nan() || scale.is_nan() {
         return x + location + scale;
@@ -118,7 +107,6 @@ pub(crate) fn pcauchy_scalar(
     if !lower_tail {
         x = -x;
     }
-    // Installed R (no HAVE_ATANPI) uses the atan(1/x)/M_PI branch.
     if x.abs() > 1.0 {
         let y = (1.0 / x).atan() / PI;
         if x > 0.0 {
@@ -141,7 +129,6 @@ pub(crate) fn qcauchy_scalar(
     if p.is_nan() || location.is_nan() || scale.is_nan() {
         return p + location + scale;
     }
-    // R_Q_P01_check(p)
     if (log_p && p > 0.0) || (!log_p && (p < 0.0 || p > 1.0)) {
         return f64::NAN;
     }
@@ -151,7 +138,6 @@ pub(crate) fn qcauchy_scalar(
         }
         return f64::NAN;
     }
-    // my_INF := location + (lower_tail ? scale : -scale) * +Inf  (original lower_tail)
     let my_inf = location + (if lower_tail { scale } else { -scale }) * f64::INFINITY;
     if log_p {
         if p > -1.0 {
@@ -179,7 +165,6 @@ pub(crate) fn qcauchy_scalar(
     location + (if lower_tail { -scale } else { scale }) / tanpi(p)
 }
 
-// === Logistic ================================================================
 pub(crate) fn dlogis_scalar(x: f64, location: f64, scale: f64, give_log: bool) -> f64 {
     if x.is_nan() || location.is_nan() || scale.is_nan() {
         return x + location + scale;
@@ -214,7 +199,6 @@ pub(crate) fn plogis_scalar(
     if x.is_nan() {
         return f64::NAN;
     }
-    // R_P_bounds_Inf_01(x)
     if !x.is_finite() {
         return if x > 0.0 {
             dt1(lower_tail, log_p)
@@ -248,7 +232,6 @@ pub(crate) fn qlogis_scalar(
     if scale == 0.0 {
         return location;
     }
-    // p := logit(p) = log(p / (1-p))
     p = if log_p {
         if lower_tail {
             p - r_log1_exp(p)
@@ -263,7 +246,6 @@ pub(crate) fn qlogis_scalar(
     location + scale * p
 }
 
-// === Log-normal ==============================================================
 pub(crate) fn dlnorm_scalar(x: f64, meanlog: f64, sdlog: f64, give_log: bool) -> f64 {
     if x.is_nan() || meanlog.is_nan() || sdlog.is_nan() {
         return x + meanlog + sdlog;
@@ -287,9 +269,6 @@ pub(crate) fn dlnorm_scalar(x: f64, meanlog: f64, sdlog: f64, give_log: bool) ->
     }
     let y = (x.ln() - meanlog) / sdlog;
     if give_log {
-        // R: `-(M_LN_SQRT_2PI + 0.5 * y * y + log(x * sdlog))`; clang contracts
-        // `M_LN_SQRT_2PI + (0.5*y)*y` into one fmadd on arm64, so `rfma` (=
-        // plain `a*b+c` on x86) is what keeps this 0-ulp to R on both arches.
         -(rfma(0.5 * y, y, M_LN_SQRT_2PI) + (x * sdlog).ln())
     } else {
         M_1_SQRT_2PI * (-0.5 * y * y).exp() / (x * sdlog)
@@ -332,7 +311,6 @@ pub(crate) fn qlnorm_scalar(
     qnorm5_scalar(p, meanlog, sdlog, lower_tail, log_p).exp()
 }
 
-// === Weibull =================================================================
 pub(crate) fn dweibull_scalar(x: f64, shape: f64, scale: f64, give_log: bool) -> f64 {
     if x.is_nan() || shape.is_nan() || scale.is_nan() {
         return x + shape + scale;
@@ -408,7 +386,6 @@ pub(crate) fn qweibull_scalar(
     scale * (-r_dt_clog(p, lower_tail, log_p)).powf(1.0 / shape)
 }
 
-// === PyO3 wrappers ===========================================================
 macro_rules! wrap_d3 {
     ($name:literal, $fn:ident, $sc:path) => {
         #[pyfunction]

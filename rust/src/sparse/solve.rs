@@ -48,30 +48,19 @@ use crate::nmath::util::rfma;
 /// `LD`/`L` and `DLt`/`Lt` name the same solve there.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Sys {
-    /// `x = P' * (L' \ (D \ (L \ (P * b))))`
     A,
-    /// `x = L' \ (D \ (L \ b))`
     LDLt,
-    /// `x = D \ (L \ b)`
     LD,
-    /// `x = L' \ (D \ b)`
     DLt,
-    /// `x = L \ b`
     L,
-    /// `x = L' \ b`
     Lt,
-    /// `x = D \ b`
     D,
-    /// `x = P * b`
     P,
-    /// `x = P' * b`
     Pt,
 }
 
-/// Why a solve could not be performed.
 #[derive(Debug)]
 pub enum SolveError {
-    /// `B` and `L` disagree on `n`, or `L` carries no numeric values.
     Invalid(&'static str),
 }
 
@@ -87,11 +76,8 @@ impl core::fmt::Display for SolveError {
 /* === the three forms each template is compiled in ======================== */
 /* ========================================================================= */
 
-/// `LL'`: non-unit diagonal (`#define LL`).
 const LL: u8 = 0;
-/// `LDL'`: fold `D` into this half of the solve (`#define LD`).
 const LD: u8 = 1;
-/// `LDL'`: unit diagonal, `D` handled elsewhere (neither macro defined).
 const UNIT: u8 = 2;
 
 /// `switch (Y->nrow) { case 1: ... case 4: }`
@@ -111,18 +97,6 @@ macro_rules! by_rank {
 /* === Lx=b, LDx=b ========================================================= */
 /* ========================================================================= */
 
-/// `t_cholmod_lsolve_template.c` — solve `Lx=b` with unit or non-unit
-/// diagonal, or `LDx=b`.
-///
-/// `x` holds `b` on input and the solution on output, `NRHS`-by-`n` in row
-/// form: entry `i` of right-hand side `c` is `x [i*NRHS + c]`.
-///
-/// The loop advances one, two or three columns at a time. The two- and
-/// three-column branches are not an optimization of the one-column branch:
-/// they fire when consecutive columns of `L` form a dense chain
-/// (`lnz == Lnz[j+1] + 1 && Li[p+1] == j+1`), and they accumulate two or three
-/// products before subtracting, which is a different rounding from doing them
-/// one at a time.
 fn lsolve<const NRHS: usize, const FORM: u8>(l: &Factor, x: &mut [f64]) {
     let (lx, li) = (Ws::new_ref(&l.x), Ws::new_ref(&l.i));
     let (lp, lnz) = (Ws::new_ref(&l.p), Ws::new_ref(&l.nz));
@@ -246,18 +220,6 @@ fn lsolve<const NRHS: usize, const FORM: u8>(l: &Factor, x: &mut [f64]) {
 /* === L'x=b, DL'x=b ======================================================= */
 /* ========================================================================= */
 
-/// `t_cholmod_ltsolve_template.c` — solve `L'x=b` with unit or non-unit
-/// diagonal, or `DL'x=b`. The back-substitution counterpart of [`lsolve`],
-/// walking the columns of `L` in reverse and gathering rather than scattering.
-///
-/// **The four ranks are not the same routine four times.** `LSOLVE(4)` has no
-/// three-column branch: its third condition is commented out (`:656`) and the
-/// `else` takes everything, so a four-right-hand-side back-solve walks a
-/// three-column chain as 2+1 where the other three ranks walk it as 3. That
-/// changes which products are summed together, so it changes the answer in the
-/// last bit — this port gives all four kernels one body, and `NRHS == 4` is
-/// what keeps that body from being a *different* one. `lsolve` has no such
-/// asymmetry; all four of its ranks branch three ways.
 fn ltsolve<const NRHS: usize, const FORM: u8>(l: &Factor, x: &mut [f64]) {
     let (lx, li) = (Ws::new_ref(&l.x), Ws::new_ref(&l.i));
     let (lp, lnz) = (Ws::new_ref(&l.p), Ws::new_ref(&l.nz));
@@ -568,7 +530,6 @@ impl SolveWork {
         SolveWork::default()
     }
 
-    /// `cholmod_ensure_dense` — grow to hold `nr`-by-`n`, never shrink.
     fn ensure(&mut self, len: usize) -> &mut [f64] {
         if self.y.len() < len {
             self.y.resize(len, 0.0);
@@ -647,7 +608,6 @@ mod tests {
     use super::super::{numeric, testcorpus};
     use super::*;
 
-    /// The factor of a corpus matrix, as `factorize` leaves it.
     fn factor(n: usize, edges: &[(usize, usize)], ll: bool) -> Factor {
         let (p, i, v) = spd_triangle(n, edges, false);
         let a = Sparse {
@@ -678,7 +638,6 @@ mod tests {
         l
     }
 
-    /// `A * x`, for the residual check, from the same triangle the factor saw.
     fn matvec(n: usize, p: &[i64], i: &[i64], v: &[f64], x: &[f64], nrhs: usize) -> Vec<f64> {
         let mut out = vec![0.0; n * nrhs];
         for j in 0..n {
@@ -707,8 +666,6 @@ mod tests {
         b
     }
 
-    /// Every `nrhs` in 1..=9 exercises all four unrolled kernels and the
-    /// blocking loop that feeds them: 4+4+1 for nrhs = 9.
     #[test]
     fn solving_reproduces_the_right_hand_side() {
         for (name, n, edges) in testcorpus::corpus() {
@@ -732,8 +689,6 @@ mod tests {
         }
     }
 
-    /// `A \ b` composed out of its pieces must agree with the one-shot solve,
-    /// which is what makes the `sys` dispatch checkable without a second oracle.
     #[test]
     fn the_pieces_compose_into_the_whole_solve() {
         for (name, n, edges) in testcorpus::corpus() {
@@ -762,8 +717,6 @@ mod tests {
         }
     }
 
-    /// `P` and `Pt` invert each other, which is the property `gmm` needs and
-    /// scikit-sparse 0.5.0 does not expose.
     #[test]
     fn the_permutation_solves_are_inverses() {
         for (name, n, edges) in testcorpus::corpus() {

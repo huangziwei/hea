@@ -80,7 +80,6 @@ fn tweedie_series<'py>(
     let jcount = jmax as usize;
     let onep2 = onep * onep;
 
-    // Shared length-J special-function tables (R's Rmath via nmath, α constant).
     let mut lgam_j1 = vec![0.0f64; jcount];
     let mut lgam_nja = vec![0.0f64; jcount];
     let mut psi = vec![0.0f64; jcount];
@@ -110,7 +109,6 @@ fn tweedie_series<'py>(
         if ji > jmax {
             ji = jmax;
         }
-        // log W_j: mgcv wb[jb] − j·alogy, wb[jb] = j·w_base − lgamma(j+1) − lgamma(-jα)
         let lw = |j: i64| -> f64 {
             let k = (j - 1) as usize;
             let jf = j as f64;

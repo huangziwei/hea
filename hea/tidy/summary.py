@@ -19,6 +19,8 @@ from typing import Any
 
 import polars as pl
 
+from .._polars_compat import cat_pool
+
 
 @dataclass(slots=True)
 class _SummaryBlock:
@@ -122,8 +124,6 @@ def _summary_block(
         entries = _boolean_entries(s)
         nas_inline = False
     elif isinstance(dtype, (pl.Enum, pl.Categorical)):
-        # _factor_entries appends NA's itself so it can reserve a slot
-        # in the maxsum budget (matches R's summary.factor).
         entries = _factor_entries(s, maxsum=maxsum, n_null=n_null)
         nas_inline = True
     elif dtype == pl.String:
@@ -133,7 +133,6 @@ def _summary_block(
         entries = _temporal_entries(s)
         nas_inline = False
     else:
-        # Lists, structs, objects — fall back to length/class.
         entries = [
             ("Length", str(s.len())),
             ("Class", str(dtype)),
@@ -174,16 +173,7 @@ def _signif_round(x: float, digits: int) -> float:
 
 
 def _format_numeric_stats(values: list[float], digits: int) -> list[str]:
-    """Format six-number stats matching R's ``format.default`` semantics.
-
-    Two-stage: ``signif`` each value at ``digits`` to determine whether
-    decimals are needed at all, then format each **original** value
-    (not the signif version) at the resulting common decimal count via
-    fixed-point rounding. This is why ``Mean = 16331.025`` in an
-    integer-magnitude column prints as ``16331`` rather than the signif
-    rounded ``16330``: the column's signif values are all
-    integer-valued, so D = 0, and the original is rounded to integer.
-    """
+    """Format six-number stats matching R's ``format.default`` semantics."""
     signifs = [0.0 if v == 0 else _signif_round(v, digits) for v in values]
 
     if all(v == int(v) for v in signifs):
@@ -216,12 +206,7 @@ def _factor_entries(
     maxsum: int,
     n_null: int,
 ) -> list[tuple[str, str]]:
-    """Factor counts in level order, with ``(Other)`` collapse and NA's row.
-
-    Matches R's ``summary.factor``: when more levels exist than slots,
-    the (maxsum-1) most populous levels are kept and the rest pooled as
-    ``(Other)``; an ``NA's`` slot is reserved when the column has nulls.
-    """
+    """Factor counts in level order, with ``(Other)`` collapse and NA's row."""
     slots = maxsum - 1 if n_null > 0 else maxsum
 
     counts = s.value_counts(sort=True)
@@ -232,14 +217,13 @@ def _factor_entries(
     }
 
     if isinstance(s.dtype, (pl.Enum, pl.Categorical)):
-        all_levels = s.cat.get_categories().to_list()
+        all_levels = cat_pool(s).to_list()
     else:
         all_levels = sorted(counted.keys())
 
     pairs = [(lvl, counted.get(lvl, 0)) for lvl in all_levels]
 
     if len(pairs) > slots:
-        # Keep the (slots-1) most populous; pool the rest as "(Other)".
         ranked = sorted(pairs, key=lambda x: -x[1])
         keep_set = {lvl for lvl, _ in ranked[: slots - 1]}
         keep = [(lvl, n) for lvl, n in pairs if lvl in keep_set]
@@ -262,12 +246,7 @@ def _string_entries(s: pl.Series) -> list[tuple[str, str]]:
 
 
 def _temporal_entries(s: pl.Series) -> list[tuple[str, str]]:
-    """Six-stat summary on Date / Datetime / Time, formatted as strings.
-
-    For ``Date`` input, polars promotes quantile / mean / median to
-    ``Datetime``; we drop the time component to keep the block visually
-    consistent (and matches R's ``summary`` on dates returning dates).
-    """
+    """Six-stat summary on Date / Datetime / Time, formatted as strings."""
     s_clean = s.drop_nulls()
     if s_clean.is_empty():
         return list(zip(_NUMERIC_LABELS, ["NA"] * 6))

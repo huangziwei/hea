@@ -42,11 +42,6 @@ from .lm import _label_top_n, _lowess, _qq_plot
 __all__ = ["glm"]
 
 
-# ---------------------------------------------------------------------------
-# IRLS engine
-# ---------------------------------------------------------------------------
-
-
 class _IRLSResult:
     """Converged Fisher-IRLS state. Same shape downstream code consumes for
     the main fit and the null-deviance fit."""
@@ -89,19 +84,7 @@ def _fit_irls(
     qr_tol: float = 1e-7,
     binom_n: np.ndarray | None = None,
 ) -> _IRLSResult:
-    """Fisher-scored IRLS — drop-in replacement for ``stats::glm.fit``.
-
-    Each step solves weighted least squares on ``√w · X`` (matches R's
-    ``Cdqrls``) by economy QR. Step-halves the β-update if μ leaves the
-    family's valid region or if the deviance worsens (mgcv "inner loop 2/3"
-    rule, also what ``glm.fit`` does via ``valideta`` / ``validmu``).
-
-    Convergence rule mirrors R: ``|Δdev| / (|dev| + 0.1) < epsilon``.
-
-    ``binom_n``: the cbind-response trials vector — selects binomial
-    initialize's NCOL=2 mustart ``(n·y + 0.5)/(n + 1)`` (R keeps the
-    trials distinct from the merged ``weights = pw·n``).
-    """
+    """Fisher-scored IRLS — drop-in replacement for ``stats::glm.fit``."""
     link: Link = family.link
     _n, p = X.shape
 
@@ -113,8 +96,6 @@ def _fit_irls(
     eta = link.link(mu) - offset  # η excludes offset; offset added on use
     beta = np.zeros(p)
 
-    # If mustart pushed μ to the boundary, do mgcv's startup nudge so the
-    # first IRLS sweep has finite Fisher weights.
     ii = 0
     while not (link.valideta(eta + offset) and family.validmu(mu)):
         ii += 1
@@ -137,18 +118,11 @@ def _fit_irls(
         V = family.variance(mu)
         if np.any(V == 0) or np.any(~np.isfinite(V)):
             raise FloatingPointError("V(μ) is 0 or non-finite in glm IRLS")
-        # Fisher weights w_i = prior_w_i · (dμ/dη)² / V(μ)  — `glm.fit`'s
-        # `w` uses ``sqrt(prior.weights * (mu.eta.val)^2 / variance(mu))``
-        # in the QR step; we square that here and drop the sqrt back in
-        # before QR.
         w = prior_w * mu_eta_v**2 / V
-        # working response z_i: η_i + (y_i − μ_i)/(dμ/dη)_i, in the
-        # offset-stripped η so the LS solve recovers β directly.
         z = eta + (y - mu) / mu_eta_v
 
         good = w > 0
         if not np.all(good):
-            # R drops zero-weight rows from the QR; we mirror by row-masking.
             sw = np.sqrt(w[good])
             X_w = X[good] * sw[:, None]
             z_w = z[good] * sw
@@ -158,9 +132,6 @@ def _fit_irls(
             z_w = z * sw
 
         Q, R = qr(X_w, mode="economic")
-        # Rank diagnosis from the |R[i,i]|. R::Cdqrls drops columns whose
-        # |R[i,i]| < tol · |R[0,0]|; we replicate. The dropped β-entries are
-        # set to NaN downstream so the printed table matches R's NA rows.
         diag_R = np.abs(np.diag(R))
         if diag_R.size and diag_R[0] > 0:
             keep = diag_R >= qr_tol * diag_R[0]
@@ -168,7 +139,6 @@ def _fit_irls(
             keep = np.zeros(p, dtype=bool)
         rank = int(keep.sum())
         if rank < p:
-            # Re-do QR on the kept columns; the dropped β's are NaN.
             X_w_keep = X_w[:, keep]
             Q, R_keep = qr(X_w_keep, mode="economic")
             f = Q.T @ z_w
@@ -188,7 +158,6 @@ def _fit_irls(
         eta_full_new = eta_new + offset
         mu_new = link.linkinv(eta_full_new)
 
-        # mgcv "inner loop 2": step-halve until μ_new is family-valid.
         ii = 0
         while not (link.valideta(eta_full_new) and family.validmu(mu_new)):
             ii += 1
@@ -201,8 +170,6 @@ def _fit_irls(
 
         dev_new = float(np.sum(family.dev_resids(y, mu_new, prior_w)))
 
-        # mgcv "inner loop 3" / glm.fit step-halving on dev increase. R's
-        # criterion: dev_new is non-finite OR (it > 1 and dev_new > dev).
         ii = 0
         while (not np.isfinite(dev_new)) or (it > 1 and dev_new > dev):
             ii += 1
@@ -216,7 +183,6 @@ def _fit_irls(
                 continue
             dev_new = float(np.sum(family.dev_resids(y, mu_new, prior_w)))
 
-        # convergence check: R uses ``|dev_new - dev| / (0.1 + |dev_new|)``.
         if abs(dev_new - dev) / (0.1 + abs(dev_new)) < epsilon:
             beta = beta_new
             eta = eta_new
@@ -230,7 +196,6 @@ def _fit_irls(
         mu = mu_new
         dev = dev_new
 
-    # Final consistent w at the converged (β, μ, η).
     eta_full = eta + offset
     mu_eta_v = link.mu_eta(eta_full)
     V = family.variance(mu)
@@ -254,11 +219,6 @@ def _row_frame(values: np.ndarray, columns: list[str]) -> pl.DataFrame:
     """Build a 1-row pl.DataFrame from a flat numpy array + column names."""
     flat = np.asarray(values).reshape(-1)
     return pl.DataFrame({c: [float(flat[i])] for i, c in enumerate(columns)})
-
-
-# ---------------------------------------------------------------------------
-# Public class
-# ---------------------------------------------------------------------------
 
 
 class glm:
@@ -323,18 +283,12 @@ class glm:
         self.formula = formula
         self.data = data
         if isinstance(family, type) and issubclass(family, Family):
-            # R: glm(family=quasipoisson) passes the constructor itself;
-            # R calls it (`if (is.function(family)) family <- family()`).
             family = family()
         self.family = Gaussian() if family is None else family
         ctl = {"epsilon": 1e-8, "maxit": 25}
         if control:
             ctl.update(control)
 
-        # cbind(success, failure) ~ ... — R's two-column binomial form. Rewrite
-        # to (proportion, weights = success + failure) so the rest of the
-        # pipeline runs unchanged. This must happen before prepare_design,
-        # which doesn't accept Call() on the LHS.
         f_parsed = parse(formula)
         _cbind = (
             isinstance(f_parsed.lhs, Call)
@@ -363,10 +317,6 @@ class glm:
             tot = s + f
             with np.errstate(divide="ignore", invalid="ignore"):
                 p = np.where(tot > 0, s / tot, 0.0)
-            # NaN counts → NaN proportion so prepare_design's NA-omit
-            # drops the row (R's model.frame does the same before
-            # initialize); both columns ride the frame so the trials
-            # stay row-aligned through the drop (same as gam's C10).
             p = np.where(np.isnan(tot), np.nan, p)
             data = data.with_columns(
                 pl.Series("_hea_cbind_p", p),
@@ -374,8 +324,6 @@ class glm:
             )
             formula = f"_hea_cbind_p ~ {deparse(f_parsed.rhs)}"
 
-        # R's predvars: capture poly/bs/ns/scale training params at fit so
-        # predict() replays them on new data instead of recomputing.
         self._basis_state: dict = {}
         d = prepare_design(formula, data, basis_state=self._basis_state)
         self._expanded = d.expanded
@@ -383,19 +331,12 @@ class glm:
         self.X = d.X  # pl.DataFrame
         self.y = d.y  # pl.Series
 
-        # Reuse the design's F-order numpy buffer (the same one ``self.X`` views)
-        # directly — IRLS reads X read-only (it row-scales / column-subsets into
-        # fresh arrays), so no ``self.X.to_numpy()`` round-trip is needed.
-        # float64 + F-contiguous by construction; the guard is a no-op safety net.
         X = d.X_values
         if X is None:
             X = self.X.to_numpy().astype(float)
         elif X.dtype != np.float64:
             X = X.astype(np.float64)
         y = _coerce_response(self.y, self.family)
-        # Numeric form of y (factor → 0/1 for Binomial, etc.) — kept so
-        # residuals_of / plots don't re-coerce self.y, which fails on
-        # string factors.
         self._y_numeric = y
         n, p = X.shape
 
@@ -408,11 +349,6 @@ class glm:
             raise ValueError(f"weights must have length {n}, got {prior_w.shape}")
         if np.any(prior_w < 0):
             raise ValueError("negative weights not allowed")
-        # cbind responses: weights ← weights·n (R binomial initialize's
-        # NCOL=2 branch). Trials re-read from the NA-filtered design
-        # frame so rows stay aligned; the unmerged trials vector feeds
-        # family.aic's n argument (R: aic(y, n, mu, weights, dev) with
-        # weight coefficient wt/n = the caller's prior weight).
         self._binom_n = None
         if _cbind:
             self._binom_n = d.data["_hea_cbind_n"].to_numpy().astype(float)
@@ -424,12 +360,6 @@ class glm:
         )
         if off.shape != (n,):
             raise ValueError(f"offset must have length {n}, got {off.shape}")
-        # Add any `offset(...)` terms parsed from the formula. R's glm()
-        # sums formula-level offset(...) calls with the offset= arg, so
-        # `y ~ x + offset(log(t))` and `y ~ x, offset=log(t)` produce the
-        # same fit. expanded.offsets holds the inner AST of each call;
-        # _eval_atom evaluates it against the NA-cleaned design data so
-        # row-alignment matches X / y.
         for off_node in d.expanded.offsets:
             blk = _eval_atom(off_node, d.data)
             off = off + blk.values.flatten().astype(float)
@@ -446,7 +376,6 @@ class glm:
         self.n = n
         self.p = p
 
-        # ---- main IRLS fit ------------------------------------------------
         fit = _fit_irls(
             X,
             y,
@@ -471,16 +400,13 @@ class glm:
         self.coef = NamedVector(self.column_names, self._bhat_arr)
         self.coefficients = self.coef
 
-        # μ̂, η̂ (η̂ includes offset).
         self.fitted_values = fit.mu
         self.linear_predictors = fit.eta
         self.yhat = pl.DataFrame({"fit": fit.mu})  # lm-style
         self.fitted = self.fitted_values
 
-        # Deviance.
         self.deviance = fit.deviance
 
-        # ---- dispersion + vcov + SE --------------------------------------
         self.dispersion = self._compute_dispersion(fit, prior_w, y)
         self.scale = self.dispersion  # gam-style alias
         self.sigma_squared = self.dispersion  # lm-style alias
@@ -492,9 +418,6 @@ class glm:
         self._se_bhat_arr = se
         self.se_bhat = _row_frame(se, self.column_names)
 
-        # IRLS hat-matrix diagonal h_ii = w_i · X_i'(X'WX)⁻¹X_i and the
-        # standardized residual flavors from rstandard.glm
-        # (r / √(φ·(1−h))). Used by every diagnostic plot below.
         keep = ~np.isnan(np.diag(self._XtWXinv))
         if keep.any():
             Xk = X[:, keep]
@@ -509,7 +432,6 @@ class glm:
         self.std_dev_residuals = self.residuals_of("deviance") / denom
         self.std_pearson_residuals = self.residuals_of("pearson") / denom
 
-        # ---- inference: t-or-z, p, CI ------------------------------------
         self._test_kind = "z" if self.family.scale_known else "t"
         with np.errstate(invalid="ignore", divide="ignore"):
             stat = self._bhat_arr / self._se_bhat_arr
@@ -519,27 +441,13 @@ class glm:
         self.p_values = _row_frame(self._wald_p(stat), self.column_names)
         self.ci_bhat = self._compute_ci(0.05)
 
-        # ---- null deviance, AIC, BIC, logLik -----------------------------
         self.null_deviance, self.df_null = self._compute_null_deviance(y, prior_w, off)
-        # Mirror R's stats:::logLik.glm exactly:
-        #   p <- rank + (family %in% c("gaussian","Gamma","inverse.gaussian"))
-        #   loglik <- p - aic/2;   df <- p
-        # Then stats:::BIC.default uses df from logLik:  -2·loglik + log(n)·df.
-        # And stats:::glm.fit's `aic` field is `family$aic + 2·rank` — where
-        # family$aic already includes a "+2" for the dispersion df on
-        # Gaussian/Gamma/IG (see hea/family.py). So the dispersion df enters
-        # once via family$aic (not a second time via rank), but the *npar*
-        # used by logLik/BIC explicitly counts it.
         self.npar = fit.rank + (0 if self.family.scale_known else 1)
         self.aic = self._compute_aic(y, fit.mu, prior_w, k_for_aic=fit.rank)
         self.AIC = self.aic
         self.loglike = float(self.npar) - 0.5 * self.aic
-        # R's nobs(glm) returns n (length of fitted), not Σwt — Σwt only
-        # enters via the family's weighted log-likelihood inside aic.
         self.bic = -2.0 * self.loglike + float(np.log(self.n)) * self.npar
         self.BIC = self.bic
-
-    # ----- helpers ---------------------------------------------------------
 
     def _compute_dispersion(
         self, fit: _IRLSResult, prior_w: np.ndarray, y: np.ndarray
@@ -549,20 +457,15 @@ class glm:
         if self.df_residual <= 0:
             return float("nan")
         V = self.family.variance(fit.mu)
-        # Pearson: Σ prior_w · (y - μ)² / V(μ)  (matches summary.glm$dispersion).
         chi2 = float(np.sum(prior_w * (y - fit.mu) ** 2 / V))
         return chi2 / self.df_residual
 
     def _compute_vcov(self, fit: _IRLSResult):
-        # vcov = dispersion · (XᵀWX)⁻¹ at converged W. We have R from
-        # QR(√w·X_used); (X_usedᵀWX_used)⁻¹ = R⁻¹ (R⁻¹)ᵀ. For dropped
-        # columns (NaN β), insert NaN rows/cols so the printed table aligns.
         p = self.p
         rank = fit.rank
         V = np.full((p, p), np.nan)
         if rank == 0:
             return V, V.copy()
-        # Build `keep` mask from the diagonal of fit.R (NaN in dropped slots).
         diag = np.diag(fit.R)
         keep = ~np.isnan(diag)
         R_keep = fit.R[np.ix_(keep, keep)]
@@ -580,11 +483,6 @@ class glm:
             return 2.0 * _dist.pt(np.abs(stat), self.df_residual, lower_tail=False)
 
     def _compute_ci(self, alpha: float) -> pl.DataFrame:
-        # R's confint.default — used as the default `confint` for glm
-        # objects — applies the qnorm quantile to ALL families, even
-        # unknown-scale ones (Gaussian/Gamma/IG). The t-quantile is
-        # only used by confint.lm. (confint.glm itself returns profile-
-        # likelihood CIs, which are out of scope here.)
         q = float(_nmath.qnorm5(1.0 - alpha / 2.0))
         bhat = self._bhat_arr
         se = self._se_bhat_arr
@@ -599,29 +497,19 @@ class glm:
         )
 
     def _compute_null_deviance(self, y, prior_w, offset):
-        """Intercept-only fit deviance.
-
-        Score equation for an intercept-only model gives the link-applied
-        weighted mean of y as the unique solution, *for any monotone link*
-        (μ is constant ⇒ ∂L/∂β₀ = 0 ⇒ Σ wᵢ(yᵢ - μ̂) = 0). This matches
-        ``glm.fit``'s ``wtdmu`` shortcut. With offset, μ varies but the
-        same closed form needs an IRLS step — fall back to that case.
-        """
+        """Intercept-only fit deviance."""
         df_null = self.n - (1 if self.has_intercept else 0)
         if not self.has_intercept:
-            # Null model is the empty model: μ = link.linkinv(offset).
             mu0 = self.family.link.linkinv(offset)
             null_dev = float(np.sum(self.family.dev_resids(y, mu0, prior_w)))
             return null_dev, df_null
 
         if np.allclose(offset, 0.0):
-            # Closed form: μ̂ = wtdmu = Σ wy / Σ w (constant).
             mu0_const = float(np.sum(prior_w * y) / np.sum(prior_w))
             mu0 = np.full(self.n, mu0_const)
             null_dev = float(np.sum(self.family.dev_resids(y, mu0, prior_w)))
             return null_dev, df_null
 
-        # Offset present → run IRLS on the intercept-only design.
         X1 = np.ones((self.n, 1))
         try:
             null_fit = _fit_irls(
@@ -638,18 +526,6 @@ class glm:
         return null_dev, df_null
 
     def _compute_aic(self, y, mu, prior_w, *, k_for_aic: int) -> float:
-        # R glm.fit: aic.model = family$aic(y, n, μ, w, dev) + 2 · rank,
-        # where `dev` is the model deviance — *not* `scale · Σwt`. That
-        # distinction matters for Gamma/IG: their family.aic recovers the
-        # dispersion as `dev/Σwt` (deviance/n moment estimator), which
-        # differs from the Pearson estimator `summary()` reports.
-        # mgcv's gam.fit3 swaps in `scale · Σwt` (see family._aic_dev1) so
-        # the AIC tracks the REML/Pearson scale; that's a GAM-only choice
-        # and matching R glm requires bypassing it here.
-        # cbind responses: ``n`` is the trials vector (R binomial's aic
-        # evaluates dbinom at the true counts with coefficient wt/n =
-        # the caller's prior weight — distinct from the merged wt=pw·n);
-        # otherwise R passes nobs.
         n_aic = self._binom_n if self._binom_n is not None else self.n
         family_aic = float(
             self.family.aic(
@@ -661,8 +537,6 @@ class glm:
             )
         )
         return family_aic + 2.0 * k_for_aic
-
-    # ----- residuals_of ---------------------------------------------------
 
     def residuals_of(self, type: str = "deviance") -> np.ndarray:
         """Residuals of the requested type.
@@ -692,11 +566,7 @@ class glm:
 
     @property
     def residuals(self) -> pl.DataFrame:
-        # Default = deviance residuals (R glm() default). Returned as a
-        # 1-col DataFrame for consistency with lm.residuals.
         return pl.DataFrame({"residuals": self.residuals_of("deviance")})
-
-    # ----- predict --------------------------------------------------------
 
     def predict(
         self,
@@ -716,10 +586,6 @@ class glm:
         if new is None:
             X_new = self.X.to_numpy().astype(float)
             n_new = self.n
-            # In-sample predict (predict.glm with no newdata): R reuses the
-            # offset from the model frame. Caller-supplied `offset` here would
-            # *replace* it, but the typical case is None and we fall back to
-            # the fit-time offset so η̂ matches what was actually fit.
             default_off = self._offset
         else:
             X_new = (
@@ -728,8 +594,6 @@ class glm:
                 .astype(float)
             )
             n_new = X_new.shape[0]
-            # Re-evaluate any formula offset(...) atoms against newdata
-            # — predict.glm does the same. Caller's offset= still overrides.
             default_off = np.zeros(n_new)
             for off_node in self._expanded.offsets:
                 blk = _eval_atom(off_node, new)
@@ -740,10 +604,6 @@ class glm:
         if off_new.shape != (n_new,):
             raise ValueError(f"offset must have length {n_new}")
 
-        # Replace NaN coef slots with 0 — they correspond to dropped rank-
-        # deficient columns, which R also reports as NA-coefficient and
-        # excludes from the prediction. The matching X column is multiplied
-        # by 0 here (same as R's behaviour for `singular.ok`).
         beta = np.nan_to_num(self._bhat_arr)
         eta = X_new @ beta + off_new
         if type == "link":
@@ -758,8 +618,6 @@ class glm:
         if not se_fit:
             return pl.DataFrame({"fit": fit})
 
-        # SE on the link scale: √diag(X · vcov · Xᵀ); use the kept-column
-        # subspace so NaN-vcov entries don't propagate.
         keep = ~np.isnan(np.diag(self.vcov))
         Xk = X_new[:, keep]
         Vk = self.vcov[np.ix_(keep, keep)]
@@ -767,11 +625,8 @@ class glm:
         se_link = np.sqrt(np.maximum(var_link, 0.0))
         if type == "link":
             return pl.DataFrame({"fit": fit, "se.fit": se_link})
-        # response-scale SE = |dμ/dη(η̂)| · se_link  (delta method).
         mu_eta_v = self.family.link.mu_eta(eta)
         return pl.DataFrame({"fit": fit, "se.fit": np.abs(mu_eta_v) * se_link})
-
-    # ----- printing -------------------------------------------------------
 
     def __repr__(self) -> str:
         d = f"glm({self.formula!r}, family={self.family!r})\n\n"
@@ -792,9 +647,6 @@ class glm:
         ci_low_col, ci_hi_col = self.ci_bhat.columns[1], self.ci_bhat.columns[2]
         ci_low_arr = self.ci_bhat[ci_low_col].to_numpy()
         ci_hi_arr = self.ci_bhat[ci_hi_col].to_numpy()
-        # Estimate+SE share decimals (R's printCoefmat cs.ind block); CI
-        # columns join a separate group so the smaller-magnitude bounds
-        # don't force extra decimals on Estimate/SE.
         est_s, se_s = format_signif_jointly(
             [self._bhat_arr, self._se_bhat_arr],
             digits=digits,
@@ -840,15 +692,6 @@ class glm:
         out += f"\n\nNumber of Fisher Scoring iterations: {self.iter}"
         out += "" if self.converged else "  (did NOT converge!)"
         print(out)
-
-    # ----- diagnostic plots -----------------------------------------------
-    #
-    # Match R's plot.glm conventions:
-    # - x-axis on residual panels = η̂ (linear predictors with offset),
-    #   labeled "Predicted values" — that's what predict(model) returns.
-    # - panels 1/2/3 use deviance residuals (the residuals.glm default).
-    # - panel 5 (leverage) uses standardized Pearson residuals on y, with
-    #   Cook's-distance contours scaled by rank(X) not p.
 
     def plot_observed_fitted(
         self,
@@ -949,8 +792,6 @@ class glm:
         if smooth:
             xs, ys = _lowess(h, r)
             ax.plot(xs, ys, color="red", linewidth=1.0)
-        # Cook's contours for GLM: D_i = (r²/k) · h/(1−h), k = rank(X).
-        # Solving for r: r = ±sqrt(c · k · (1−h)/h).
         ymin, ymax = ax.get_ylim()
         h_max = float(np.clip(h.max() * 1.1, 1e-3, 0.999))
         h_grid = np.linspace(1e-3, h_max, 200)

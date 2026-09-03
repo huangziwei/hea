@@ -16,9 +16,6 @@ from scipy.sparse.linalg import lsqr as sp_lsqr
 
 from hea.sparse import lsmr, lsqr
 
-# Both algorithms are a sequence of scalar recurrences around two sparse
-# products, so a faithful port reproduces every value exactly. Anything less
-# than `==` here would hide a transposed rotation.
 EXACT = {"rtol": 0.0, "atol": 0.0}
 
 
@@ -36,26 +33,20 @@ def _cases():
     A = sp.csc_array(sp.random_array((40, 40), density=0.2, rng=rng))
     out["square"] = (A, rng.standard_normal(40))
 
-    # Consistent: b is exactly in the range of A, so it terminates on istop 1
-    # rather than 2.
     A = sp.csc_array(sp.random_array((50, 15), density=0.4, rng=rng))
     out["consistent"] = (A, np.asarray(A @ rng.standard_normal(15)).ravel())
 
-    # Rank deficient: two columns repeated.
     D = np.asarray(sp.random_array((30, 8), density=0.5, rng=rng).todense())
     D[:, 6] = D[:, 0]
     D[:, 7] = D[:, 1]
     out["rank_deficient"] = (sp.csc_array(D), rng.standard_normal(30))
 
-    # Badly scaled, to exercise the condition-number tests.
     D = np.asarray(sp.random_array((40, 12), density=0.4, rng=rng).todense())
     D[:, 0] *= 1e-8
     out["ill_conditioned"] = (sp.csc_array(D), rng.standard_normal(40))
 
-    # A dense ndarray rather than a sparse one.
     out["dense"] = (rng.standard_normal((25, 10)), rng.standard_normal(25))
 
-    # b = 0, which returns before the loop.
     A = sp.csc_array(sp.random_array((20, 10), density=0.4, rng=rng))
     out["zero_rhs"] = (A, np.zeros(20))
     return out
@@ -134,12 +125,7 @@ def test_csr_and_coo_inputs_agree_with_csc():
     _same(lsqr(sp.coo_array(A).tocsr(), b), ref, "coo")
 
 
-# --- the contract that is hea's, not scipy's ----------------------------------
-
-
 def test_the_iteration_limit_is_reported_not_raised():
-    # Non-convergence is a normal outcome for an iterative solver. It must
-    # arrive as istop, and it must not be an exception of any kind.
     A, b = CASES["ill_conditioned"]
     x, istop, itn = lsqr(A, b, atol=0.0, btol=0.0, conlim=0.0, iter_lim=3)[:3]
     assert istop == 7
@@ -153,8 +139,6 @@ def test_the_iteration_limit_is_reported_not_raised():
 
 
 def test_no_cholmod_error_escapes_a_singular_system():
-    # A direct solve raises on a rank-deficient system; these must not, since
-    # the least-squares answer is well defined and is what was asked for.
     A, b = CASES["rank_deficient"]
     for solver in (lsqr, lsmr):
         x, istop = solver(A, b)[:2]
@@ -163,8 +147,6 @@ def test_no_cholmod_error_escapes_a_singular_system():
 
 
 def test_the_first_two_returns_are_x_and_istop():
-    # `lsqr(...)[:2]` is the shape callers unpack; pinning it keeps the swap
-    # with scipy a one-line import change.
     A, b = CASES["overdetermined"]
     x, istop = lsqr(A, b)[:2]
     assert x.shape == (A.shape[1],)
@@ -181,8 +163,6 @@ def test_normal_equations_and_lsqr_reach_the_same_least_squares_answer():
 
 
 def test_a_matvec_only_operator_is_accepted():
-    # No scipy LinearOperator involved: anything with shape, matvec and rmatvec
-    # works, which is what keeps this module free of scipy.sparse.linalg.
     A, b = CASES["overdetermined"]
 
     class Op:
