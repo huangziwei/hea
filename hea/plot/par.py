@@ -24,6 +24,7 @@ which the simple stack here doesn't model.
 from __future__ import annotations
 
 import contextlib
+from typing import Self
 
 import numpy as np
 
@@ -69,7 +70,7 @@ class _ParContext:
         self._cells: list = []
         self._idx: int = 0
 
-    def __enter__(self) -> _ParContext:  # noqa: PYI034 - typing.Self needs 3.11, we support 3.10
+    def __enter__(self) -> Self:
         import matplotlib.pyplot as plt
 
         nrow, ncol = self.shape

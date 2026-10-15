@@ -2,7 +2,7 @@
 # them + the sdist to PyPI. maturin is the build backend (rust/ crate hea-rs),
 # so `pip install hea` must find a prebuilt wheel — otherwise pip falls back to
 # the sdist and needs a Rust toolchain on the user's machine. The crate is
-# abi3-py310, so ONE wheel per (os, arch) covers CPython 3.10+ (no Python
+# abi3-py311, so ONE wheel per (os, arch) covers CPython 3.11+ (no Python
 # matrix). Linux uses the manylinux2014 container (glibc 2.17 → broad
 # compatibility) + musllinux (Alpine).
 #
