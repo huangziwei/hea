@@ -1,15 +1,6 @@
-# hea: Linear Models with Python
+# hea: R-style Linear Models without *R* (but with Python)
 
-> hea v. (Cantonese) 
-> 1. to kill time; to hang around  
-> 2. to do something without putting much care or effort into it.
-> 3. to go through the motions; to give a carefree response; to beat around the bush; to treat someone lightly
-> 4. to place things casually; to disperse (with an outward motion)
-> (from [wikitionary](https://en.wiktionary.org/wiki/hea#Verb)) 
 
-This project started as a laid-back exercise of implementing R's `lm`in Python many years ago. It was called `lmpy` at the time. I wanted to add `lme` and `gam` too, but didn't manage to go very far, mostly because the Python ecosystem back then still lacked general supports for generating the needed design matrices to fit such models. I come back to it from time to time, check community progress, tinker with it a bit myself, and slowly, try to do it with many generations of LLMs as they came along. It's kind of becoming my private benchmark for LLMs, and see at which point they can crack code porting from R to Python without too much hand holding. Until recently, they still couldn't. But since Claude Code with Opus 4.6, things started to change.
-
-BTW, the name `lmpy` is blocked on PyPI due to the name is "too similar to some existing projects", so I asked Claude to brainstorm some other names and one of them is "hea, v., to measure" in Hawaiian, which is likely a [hallucination](https://en.wiktionary.org/wiki/hea#Hawaiian). But I like it a lot, as it means something completely different in Cantonese and fit the vibe of this project nicely. :)
 
 ## Install
 
@@ -25,7 +16,31 @@ or if you want to load the example datasets:
 pip install "hea[data]"
 ```
 
-## Usage
+## Usages
+
+### Data transformation and visualization
+
+`hea` supports mostly tidyverse compatible api (can be chained with the classic `+` or with the method-based `.` in the fluent API style) for data manipulation:
+
+```python 
+from hea import data
+
+penguins = data("penguins", package="palmerpenguins")
+penguins.glimpse()
+(
+    penguins.ggplot(
+        x="flipper_length_mm", y="body_mass_g", color="species", shape="species"
+    )
+    .geom_point()
+    .geom_smooth(method="lm")
+)
+```
+
+We use Polars DataFrame under the hood. It's basically `tidypoars` + `plotnine`, but in a more integrated manner. More examples can be found in [examples/books/r4ds](./examples/books/r4ds/)
+
+### Linear model(s)
+
+Currently `lm` and `gam` are relatively mature, while `glm` and `gmm` (generalized mixed models, the `lmer` and `glmer` equivalents) are relatively rudimental:
 
 ```python
 from hea import data
@@ -36,4 +51,16 @@ m = lm("Species ~ Area + Adjacent + Elevation + Nearest + Scruz", gala)
 m.summary()
 ```
 
-See more [examples](./example/).
+```python
+from hea import data
+from hea.models import gam
+from hea.family import Gamma
+
+trees = data("trees", "mgcv")
+
+ct1 = gam("Volume ~ s(Height) + s(Girth)", family=Gamma(link="log"), data=trees)
+ct1.summary()
+ct1.plot_smooth(partial_residuals=True)
+```
+
+See more examples in [examples/books/lmwr](./example/books/lmwr), [examples/books/gam](./example/books/gam.ipynb) and more.
