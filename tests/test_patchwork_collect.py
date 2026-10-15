@@ -56,7 +56,6 @@ def test_amp_operator_skips_guide_area_placeholders(mpg):
     the operand to it (it isn't a ggplot)."""
     p1 = mpg.ggplot(aes(x="cty", color="drv", fill="drv")).geom_density(alpha=0.5)
     composition = (guide_area() / p1) & theme(legend_position="top")
-    # The guide_area still exists; the leaf has the theme applied.
     assert composition.find_guide_area() is not None
     leaves = composition.leaves()
     assert len(leaves) == 1
@@ -91,8 +90,6 @@ def test_guide_area_receives_collected_legend(mpg):
     try:
         legends = _legend_axes(fig)
         assert len(legends) == 1
-        # The guide_area is in row 0; the legend host axes y-position should
-        # be ABOVE the panel axes (which are in row 1).
         legend_y = legends[0].get_position().y0
         panel_axes = [
             ax
@@ -111,11 +108,6 @@ def test_guide_area_receives_collected_legend(mpg):
 def test_show_legend_false_excludes_layer_from_merge(mpg):
     """A layer's ``show_legend=False`` must keep it from contributing to
     the merged guide — same rule ggplot2 applies per-plot."""
-    # p1 has show_legend=False on the boxplot (key_glyph="polygon");
-    # p2 has show_legend=False on the geom_point (key_glyph="point").
-    # p3 contributes via geom_density (key_glyph="polygon"). Without
-    # show_legend handling, the merged legend would have two groups (one
-    # per glyph). With it, only p3's polygon contributes.
     p1 = mpg.ggplot(aes(x="drv", y="cty", color="drv")).geom_boxplot(show_legend=False)
     p2 = mpg.ggplot(aes(x="cty", y="hwy", color="drv")).geom_point(show_legend=False)
     p3 = mpg.ggplot(aes(x="cty", color="drv", fill="drv")).geom_density(alpha=0.5)
@@ -146,7 +138,6 @@ def test_auto_placement_when_no_guide_area(mpg):
     try:
         legends = _legend_axes(fig)
         assert len(legends) == 1
-        # Top auto-placement: legend should be ABOVE the panels.
         legend_y = legends[0].get_position().y0
         panel_axes = [
             ax

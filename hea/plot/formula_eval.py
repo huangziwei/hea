@@ -58,12 +58,7 @@ def _coef(model):
 
 
 def _factor(series, levels=None, ordered=False):
-    """Lazy bridge to ``hea.R.factor`` for the formula-eval env.
-
-    Lazy import dodges the cost of pulling :mod:`hea.R` (and its scipy
-    surface) at plot-module load time. Same behaviour as R's ``factor()`` —
-    cast a column to a factor.
-    """
+    """Lazy bridge to ``hea.R.factor`` for the formula-eval env."""
     from ..R import factor as _f
 
     if isinstance(series, pl.Series):

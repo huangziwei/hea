@@ -83,8 +83,6 @@ class GeomLinerange(Geom):
 
 @dataclass
 class GeomErrorbar(Geom):
-    # Mirrors ggplot2's ``GeomErrorbar$default_aes`` (R/geom-errorbar.R):
-    # ``width = 0.9`` (90% of bar slot), NOT 0.5.
     default_aes: dict = field(
         default_factory=lambda: {
             "colour": "black",
@@ -115,9 +113,6 @@ class GeomErrorbar(Geom):
 
 @dataclass
 class GeomErrorbarh(Geom):
-    # ggplot2 dropped ``GeomErrorbarh`` in favour of ``geom_errorbar`` with
-    # ``orientation = "y"``; we keep it as a separate class but match the
-    # same ``height = 0.9`` (= width=0.9 flipped) default.
     default_aes: dict = field(
         default_factory=lambda: {
             "colour": "black",
@@ -148,12 +143,6 @@ class GeomErrorbarh(Geom):
 
 @dataclass
 class GeomPointrange(Geom):
-    # Mirrors ggplot2's ``GeomPointrange$default_aes`` (R/geom-pointrange.R):
-    # ``size = pointsize / 3 = 0.5``, ``linewidth = 0.5``,
-    # ``stroke = 2 * borderwidth = 1.0``. hea conflates point ``size`` and
-    # the bar's line width into one ``size`` aes (the bar takes ``size``
-    # mm, the point dia ≈ 4× that), so ``stroke`` only matters for
-    # fillable shape variants.
     default_aes: dict = field(
         default_factory=lambda: {
             "colour": "black",
@@ -178,8 +167,6 @@ class GeomPointrange(Geom):
         kw = _line_kwargs(data)
         _vlines(ax, x, ymin, ymax, **kw)
 
-        # Point at (x, y). ggplot2's pointrange uses size as line width AND
-        # for the point: the point's diameter is ~4× the line width.
         line_pt = float(_scalar(data, "size", default=0.5)) * _PT_PER_MM
         point_size_pt2 = (line_pt * 4) ** 2
         ax.scatter(
@@ -224,19 +211,12 @@ class GeomCrossbar(Geom):
         )
 
         kw = _line_kwargs(data)
-        # Box outline: top, bottom, left, right.
         _hlines(ax, ymax, x - w / 2, x + w / 2, **kw)
         _hlines(ax, ymin, x - w / 2, x + w / 2, **kw)
         _vlines(ax, x - w / 2, ymin, ymax, **kw)
         _vlines(ax, x + w / 2, ymin, ymax, **kw)
-        # Median line — thicker (ggplot2 doubles the width).
         median_kw = {**kw, "linewidths": kw["linewidths"] * 2}
         _hlines(ax, y, x - w / 2, x + w / 2, **median_kw)
-
-
-# ---------------------------------------------------------------------------
-# Factories
-# ---------------------------------------------------------------------------
 
 
 def _make_layer(geom, mapping, data, stat, position, kwargs):

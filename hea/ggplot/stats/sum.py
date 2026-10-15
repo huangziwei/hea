@@ -26,7 +26,6 @@ class StatSum(Stat):
         out = (
             data.group_by(keys, maintain_order=True).agg(pl.len().alias("n")).sort(keys)
         )
-        # ggplot2 also computes ``prop = n / sum(n)`` for after_stat use.
         total = out["n"].sum()
         out = out.with_columns(
             prop=(pl.col("n") / total) if total else pl.col("n") * 0.0,

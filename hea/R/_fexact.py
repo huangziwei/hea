@@ -22,9 +22,6 @@ import math
 from .._dispatch import rs_fn
 from . import nmath as _nm
 
-# Rust kernel — None when the extension is absent/disabled, in which case the
-# pure-Python port below runs unchanged (bit-identical, just slower). The
-# Python path is the reference oracle; tests/test_rs_parity.py pins rs == python.
 _rs_fexact = rs_fn("fexact")
 
 _INT_MAX = 2147483647
@@ -133,12 +130,9 @@ class _Fexact:
         self.emin = emin
         self.workspace = workspace
         self.mult = mult
-        # C statics
         self._f3_nst = 0
         self._f3_nitc = 0
         self._f5_itp = 0
-
-    # -- f3xact static-carrying helpers are methods; leaf f6/f7 too ----------
 
     def run(self):
         nrow, ncol = self.nrow, self.ncol
@@ -159,9 +153,6 @@ class _Fexact:
         iwkmax = 2 * (self.workspace // 2)
         n2_stack = max(200, iwkmax // 1000)
 
-        # Reproduce iwork()'s workspace accounting up to the hash tables so
-        # that ldkey/ldstp match R exactly (the pre-accumulation order, hence
-        # the last ulps of the p-value, depend on them).
         iwkpt = 0
 
         def _alloc(number, itype):
@@ -193,7 +184,6 @@ class _Fexact:
         self.ldstp = ldstp
         self.n2_stack = n2_stack
 
-        # Work arrays (1-based; index 0 is an unused sentinel).
         z = nco + 2
         self.iro = [0] * z
         self.ico = [0] * z
@@ -211,7 +201,6 @@ class _Fexact:
 
         return self._f2xact(ntot, nco, nro)
 
-    # ---------------------------------------------------------------- f2xact
     def _f2xact(self, ntot, nco_in, nro_in):
         nrow, ncol = self.nrow, self.ncol
         M = self.M
@@ -229,14 +218,12 @@ class _Fexact:
         nr_gt_nc = nrow > ncol
         nco = nrow if nr_gt_nc else ncol
 
-        # Row marginals + total
         ntot = 0
         for i in range(1, nrow + 1):
             iro[i] = 0
             for j in range(1, ncol + 1):
                 iro[i] += TBL(i, j)
             ntot += iro[i]
-        # Column marginals
         for i in range(1, ncol + 1):
             ico[i] = 0
             for j in range(1, nrow + 1):
@@ -255,7 +242,6 @@ class _Fexact:
         else:
             nro = nrow
 
-        # Hash-table multipliers
         kyy[1] = 1
         for i in range(1, nro):
             if iro[i] + 1 <= _INT_MAX // kyy[i]:
@@ -271,7 +257,6 @@ class _Fexact:
                 "consider using 'simulate_p_value=True'"
             )
 
-        # Log factorials (R's exact recurrence, not lgamma)
         fact = [0.0] * (ntot + 1)
         if ntot >= 2:
             fact[2] = math.log(2.0)
@@ -284,7 +269,6 @@ class _Fexact:
             i += 2
         self.fact = fact
 
-        # Observed path length
         obs = tol
         ntot = 0
         for j in range(1, nco + 1):
@@ -300,12 +284,9 @@ class _Fexact:
             obs += fact[ico[j]] - dd
 
         dro = _f9xact(nro, ntot, iro[1:], fact)
-        # (C also sets *prt = exp(obs - dro), the observed point probability;
-        # R's Fexact returns only the p-value, so we skip it — as does the Rust.)
         pre = 0.0
         itop = 0
 
-        # Buffer / stage pointers
         k = nco
         last = ldkey + 1
         jkey = ldkey + 1
@@ -324,7 +305,6 @@ class _Fexact:
 
         stp, ifrq = self.stp, self.ifrq
 
-        # Per-node state shared L150 -> L240 -> L300
         k1 = nro2 = nrb = 0
         ddf = drn = obs2 = obs3 = tmp = 0.0
         kval = 0
@@ -347,7 +327,6 @@ class _Fexact:
                 kmax = nro
                 for i in range(1, nro + 1):
                     idif[i] = 0
-                # Generate first daughter
                 while True:
                     kd -= 1
                     ntot = min(n, iro[kd])
@@ -554,11 +533,9 @@ class _Fexact:
                         return pre
                 continue
 
-    # ---------------------------------------------------------------- f3xact
     def _f3xact(self, nrow, irow_s, ncol, icol_s, ntot, fact, ldst):
         """Longest path length ("LONGP"). ``irow_s``/``icol_s`` are 0-based
         marginal slices; returns the (negated) longest path."""
-        # 1-based views
         irow = [0] + list(irow_s)
         icol = [0] + list(icol_s)
 
@@ -579,7 +556,6 @@ class _Fexact:
             n12 = irow[1] - n11
             return -(fact[n11] + fact[n12] + fact[icol[1] - n11] + fact[icol[2] - n12])
 
-        # Test for optimal table
         val = 0.0
         if irow[nrow] <= irow[1] + ncol:
             xmin, val = _f10act(nrow, irow[1:], ncol, icol[1:], val, fact)
@@ -590,7 +566,6 @@ class _Fexact:
         if xmin:
             return -val
 
-        # Dynamic-programming setup
         mx = max(nrow, ncol)
         ico = [0] * (mx + 2)
         iro = [0] * (mx + 2)
@@ -796,7 +771,6 @@ class _Fexact:
                     continue
                 return -vmn
 
-    # ---------------------------------------------------------------- f4xact
     def _f4xact(self, nrow, irow_s, ncol, icol_s, dspt, fact, tol):
         """Shortest path length ("SHORTP"). ``irow_s``/``icol_s`` are 0-based
         marginal slices; returns the (offset) shortest path."""
@@ -829,7 +803,6 @@ class _Fexact:
         nstk = [0] * (NRP1 + 1)
         ystk = [0.0] * (NRP1 + 1)
 
-        # column istk (1-based) start offsets
         def ircol(istk):
             return (istk - 1) * nrow
 
@@ -966,7 +939,6 @@ class _Fexact:
                     state = "L100"
                 continue
 
-    # ---------------------------------------------------------------- f5xact
     def _f5xact(self, pastp, kval, ifreq, itop, jkey, jstp, jstp2, jstp3, jstp4, psh):
         """Put a node on the stack ("PUT"): a per-key binary tree of past path
         lengths, merging entries within ``tol`` and accumulating frequencies."""
@@ -1068,7 +1040,6 @@ class _Fexact:
         ifrq[jstp3 + itop - 1] = -1
         return itop
 
-    # ---------------------------------------------------------------- f6xact
     def _f6xact(self, nrow, ikkey, ldkey, last):
         """Pop a node off the stack ("GET"); decodes the row config into
         ``self.iro[1..nrow]``. Returns ``(no_more_nodes, last, ipn)``."""
@@ -1088,7 +1059,6 @@ class _Fexact:
             else:
                 return True, 0, None
 
-    # ---------------------------------------------------------------- f7xact
     def _f7xact(self, nrow, k, ks):
         """Generate the new nodes for given marginal totals. Mutates
         ``self.idif``; returns ``(generated, k, ks)``."""
@@ -1122,7 +1092,6 @@ class _Fexact:
                 kk += 1
             if not found_l70:
                 return False, k, ks
-            # L70
             mm = 1
             for i in range(1, k + 1):
                 mm += idif[i]

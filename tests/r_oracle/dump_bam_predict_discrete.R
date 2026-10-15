@@ -31,7 +31,7 @@
 
 suppressMessages(library(mgcv))
 
-base <- "/Users/ziweih/Works/hea/tests/fixtures/bam_predict_discrete"
+base <- "tests/fixtures/bam_predict_discrete"
 
 dump_one <- function(tag, fam) {
   set.seed(if (tag == "gauss") 11 else 12)

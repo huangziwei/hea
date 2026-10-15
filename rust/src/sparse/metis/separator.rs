@@ -17,7 +17,6 @@ pub fn construct_separator(ctrl: &mut Ctrl, graph: &mut Graph) {
 
     let mut r#where = graph.r#where[..nvtxs].to_vec();
 
-    // Put the nodes on the boundary into the separator, ignoring islands.
     {
         let (xadj, bndind) = (Ws::new_ref(&graph.xadj), Ws::new_ref(&graph.bndind));
         let w = Ws::new(&mut r#where);

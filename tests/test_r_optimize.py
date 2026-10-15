@@ -64,10 +64,6 @@ from hea.R.optimize import nlm, optim, optimHess
 
 _DARWIN_ARM64 = sys.platform == "darwin" and platform.machine() == "arm64"
 
-# R 4.6.0 on darwin/arm64 (Accelerate BLAS). Layouts: nlm entries are
-# [minimum, estimate..., gradient..., code, iterations] (nlm_fd omits
-# the gradient); optim entries are [par..., value, fncount, grcount,
-# convergence]; hessians are column-major.
 _PINS = {
     "nlm_default": [
         1.1820961652299623e-20,
@@ -242,7 +238,6 @@ def test_nlm_rosenbrock_mgcv_config_bitexact_vs_r(rv):
 
 
 def test_nlm_rosenbrock_fd_gradient_bitexact_vs_r(rv):
-    # no gradient supplied → optdrv's forward-difference path (fstofd)
     e = rv["nlm_fd"]
     r = nlm(_frv, [-1.2, 1])
     assert r["minimum"] == e[0]
@@ -252,7 +247,6 @@ def test_nlm_rosenbrock_fd_gradient_bitexact_vs_r(rv):
 
 
 def test_nlm_hessian_true_bitexact_vs_r(rv):
-    # want.hessian → fdhess at the optimum + symmetrization
     e = rv["nlm_hess"]  # column-major
     r = nlm(_fr, [-1.2, 1], hessian=True)
     h = r["hessian"]
@@ -299,7 +293,6 @@ def test_optim_lbfgsb_bounded_bitexact_vs_r(rv):
 
 
 def test_optim_maxit_and_method_validation():
-    # convergence=1 when the iteration cap trips (R optim semantics)
     r = optim([-1.2, 1], _frv, _grv, method="L-BFGS-B", control={"maxit": 2})
     assert r["convergence"] == 1
     with pytest.raises(NotImplementedError, match="L-BFGS-B"):
@@ -307,8 +300,6 @@ def test_optim_maxit_and_method_validation():
 
 
 def test_optimHess_matches_r(rv):
-    # optimHess(c(-1.2, 1), frv, grv): bit-exact FD of the analytic
-    # gradient with ndeps=1e-3 + symmetrization
     e = rv["opthess"]  # column-major
     h = optimHess([-1.2, 1], _frv, _grv)
     assert h[0, 0] == e[0]
@@ -318,8 +309,6 @@ def test_optimHess_matches_r(rv):
 
 
 def test_nlm_nonfinite_value_mapping():
-    # optimize.c fcn: NaN/Inf → DBL_MAX with a warning (nlm recovers by
-    # backtracking); the optimum is still found
     def f(x):
         v = _frv(x)
         if x[0] > 1.5:

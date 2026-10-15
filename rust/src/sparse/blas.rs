@@ -134,26 +134,12 @@ pub const MIN_FLOPS: f64 = 1.0e5;
 #[cfg(feature = "blas-all")]
 pub const MIN_FLOPS: f64 = 0.0;
 
-/// The cutoff in force. A `const` read, and the compiler folds the comparison
-/// in [`worth_it`] away, except under `blas-sweep`.
 #[cfg(not(feature = "blas-sweep"))]
 #[inline(always)]
 pub fn cutoff() -> f64 {
     MIN_FLOPS
 }
 
-/// `HEA_BLAS_MIN_FLOPS`, read once, defaulting to [`MIN_FLOPS`].
-///
-/// Locating the crossing means measuring a column per cutoff, and compiling the
-/// constant in means one build of the crate per column. Under this feature — and
-/// only under it — it becomes a `OnceLock` seeded from the environment, so a
-/// sweep costs one build.
-///
-/// The added work is one relaxed load per call, identical in every column, so it
-/// cancels in the comparison the sweep is making. It is not free in absolute
-/// terms, which is why this is a feature and not the shipped path:
-/// `cfg(not(blas-sweep))` above keeps `worth_it` a constant comparison
-/// everywhere else.
 #[cfg(feature = "blas-sweep")]
 pub fn cutoff() -> f64 {
     use std::sync::OnceLock;
@@ -166,24 +152,11 @@ pub fn cutoff() -> f64 {
     })
 }
 
-/// Whether a call of this many flops is worth the vendor's dispatch.
 #[inline]
 pub fn worth_it(flops: f64) -> bool {
     flops >= cutoff()
 }
 
-// The classic 32-bit-integer F77 BLAS and LAPACK, which both libraries export.
-// The character arguments carry hidden trailing lengths in the Fortran ABI;
-// every C and Rust caller omits them and every implementation ignores them,
-// reading only the first byte.
-//
-// **The library's name is not one string.** `-l scipy_openblas` makes the Unix
-// linkers look for `libscipy_openblas.{so,dylib,a}`, which is what the wheel
-// ships — but MSVC's `link.exe` adds no prefix and looks for
-// `scipy_openblas.lib`, while the Windows wheel ships
-// `libscipy_openblas.lib`, prefix and all. So the Windows build died at
-// `LNK1181: cannot open input file 'scipy_openblas.lib'` the first time it was
-// ever run, and only the literal name works there.
 #[cfg_attr(accelerate, link(name = "Accelerate", kind = "framework"))]
 #[cfg_attr(
     all(not(accelerate), target_env = "msvc"),
@@ -324,13 +297,11 @@ pub fn init() {
 #[inline]
 pub fn init() {}
 
-/// A one-character F77 flag.
 #[inline]
 fn ch(c: u8) -> c_char {
     c as c_char
 }
 
-/// `dgemm ("N","C", m, n, k, 1, a, lda, b, ldb, 0, c, ldc)` — upstream `:824`.
 #[allow(clippy::too_many_arguments)]
 pub fn gemm_nt(
     m: usize,
@@ -371,7 +342,6 @@ pub fn gemm_nt(
     }
 }
 
-/// `dsyrk ("L","N", n, k, 1, a, lda, 0, c, ldc)` — upstream `:769`.
 pub fn syrk_ln(n: usize, k: usize, a: &[f64], lda: usize, c: &mut [f64], ldc: usize) {
     if n == 0 {
         return;
@@ -396,10 +366,6 @@ pub fn syrk_ln(n: usize, k: usize, a: &[f64], lda: usize, c: &mut [f64], ldc: us
     }
 }
 
-/// `dtrsm ("R","L","C","N", m, n, 1, a, lda, b, ldb)` — upstream `:1175`.
-///
-/// The worker hands one array for both operands: `a` the supernode's leading
-/// `n`-by-`n` block and `b` the `m` rows below it at the same leading dimension.
 pub fn trsm_rlt(m: usize, n: usize, x: &mut [f64], ld: usize) {
     if m == 0 || n == 0 {
         return;
@@ -428,10 +394,6 @@ pub fn trsm_rlt(m: usize, n: usize, x: &mut [f64], ld: usize) {
     }
 }
 
-/// `dpotrf ("L", n, a, lda, info)` — upstream `:1023`.
-///
-/// Returns `INFO`, which [`super::dense::potrf_l`] reports as the 1-based column
-/// that was not positive definite.
 pub fn potrf_l(n: usize, a: &mut [f64], lda: usize) -> i64 {
     if n == 0 {
         return 0;
@@ -455,7 +417,6 @@ pub fn potrf_l(n: usize, a: &mut [f64], lda: usize) -> i64 {
  * shared and the destination is the exclusive `&mut` — none of these can alias,
  * which is what makes the raw pointers sound. */
 
-/// `dtrsv ("L","N","N", n, a, lda, x, 1)` — solve worker `:93`.
 pub fn trsv_ln(n: usize, a: &[f64], lda: usize, x: &mut [f64]) {
     if n == 0 {
         return;
@@ -477,7 +438,6 @@ pub fn trsv_ln(n: usize, a: &[f64], lda: usize, x: &mut [f64]) {
     }
 }
 
-/// `dtrsv ("L","C","N", n, a, lda, x, 1)` — solve worker `:398`.
 pub fn trsv_lt(n: usize, a: &[f64], lda: usize, x: &mut [f64]) {
     if n == 0 {
         return;
@@ -498,7 +458,6 @@ pub fn trsv_lt(n: usize, a: &[f64], lda: usize, x: &mut [f64]) {
     }
 }
 
-/// `dgemv ("N", m, n, -1, a, lda, x, 1, 1, y, 1)` — solve worker `:99`.
 pub fn gemv_n(m: usize, n: usize, a: &[f64], lda: usize, x: &[f64], y: &mut [f64]) {
     if m == 0 || n == 0 {
         return;
@@ -525,10 +484,6 @@ pub fn gemv_n(m: usize, n: usize, a: &[f64], lda: usize, x: &[f64], y: &mut [f64
     }
 }
 
-/// `dgemv ("C", m, n, -1, a, lda, x, 1, 1, y, 1)` — solve worker `:388`.
-///
-/// The transpose swaps the two extents against [`gemv_n`]: `x` is `m` long and
-/// `y` is `n`, while `a` is still `m`-by-`n` at `lda`.
 pub fn gemv_t(m: usize, n: usize, a: &[f64], lda: usize, x: &[f64], y: &mut [f64]) {
     if m == 0 || n == 0 {
         return;
@@ -553,7 +508,6 @@ pub fn gemv_t(m: usize, n: usize, a: &[f64], lda: usize, x: &[f64], y: &mut [f64
     }
 }
 
-/// `dtrsm ("L","L","N","N", m, n, 1, a, lda, b, ldb)` — solve worker `:204`.
 pub fn trsm_lln(m: usize, n: usize, a: &[f64], lda: usize, b: &mut [f64], ldb: usize) {
     if m == 0 || n == 0 {
         return;
@@ -582,7 +536,6 @@ pub fn trsm_lln(m: usize, n: usize, a: &[f64], lda: usize, b: &mut [f64], ldb: u
     }
 }
 
-/// `dtrsm ("L","L","C","N", m, n, 1, a, lda, b, ldb)` — solve worker `:505`.
 pub fn trsm_llt(m: usize, n: usize, a: &[f64], lda: usize, b: &mut [f64], ldb: usize) {
     if m == 0 || n == 0 {
         return;
@@ -608,11 +561,6 @@ pub fn trsm_llt(m: usize, n: usize, a: &[f64], lda: usize, b: &mut [f64], ldb: u
     }
 }
 
-/// `dgemm ("N","N", m, n, k, -1, a, lda, b, ldb, 1, c, ldc)` — solve worker
-/// `:213`.
-///
-/// `beta` is 1 here, not 0 as in [`gemm_nt`]: the solve accumulates into `E`
-/// rather than overwriting it.
 #[allow(clippy::too_many_arguments)]
 pub fn gemm_nn(
     m: usize,
@@ -651,10 +599,6 @@ pub fn gemm_nn(
     }
 }
 
-/// `dgemm ("C","N", m, n, k, -1, a, lda, b, ldb, 1, c, ldc)` — solve worker
-/// `:494`.
-///
-/// `a` is `k`-by-`m`, the transpose swapping its extents.
 #[allow(clippy::too_many_arguments)]
 pub fn gemm_tn(
     m: usize,

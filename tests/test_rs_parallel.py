@@ -16,9 +16,6 @@ import pytest
 
 rs = pytest.importorskip("hea._rs")
 
-# N is above PAR_THRESHOLD (2048) → parallel branch; CHUNK is below it → serial
-# branch. Margins on both sides keep both branches exercised if the threshold is
-# retuned modestly.
 N = 3000
 CHUNK = 512
 
@@ -41,7 +38,6 @@ def _build_cases():
     sx = g.uniform(-0.4, 0.4, n)  # small |x| for pow1p
     Z = np.zeros(n)
     ONE = np.ones(n)
-    # (rs name, [inputs in native order], (trailing flag bools))
     return [
         ("pnorm", [xr, Z, ONE], (True, False)),
         ("qnorm", [p01, Z, ONE], (True, False)),
@@ -97,6 +93,4 @@ def test_parallel_matches_serial(case):
     fn = getattr(rs, name)
     par = _call(fn, arrs, fl, slice(None))  # N=3000 → parallel branch
     ser = _serial(fn, arrs, fl)  # CHUNK=512 → serial branch
-    # Same Rust kernel both ways → identical output bits (incl. sign-of-zero and
-    # NaN payloads), so a raw byte compare is the right 0-ulp check here.
     assert par.tobytes() == ser.tobytes(), f"{name}: parallel != serial"

@@ -43,10 +43,8 @@ _METHODS = [
     "ward.D2",
 ]
 
-# X <- matrix(c(0,0, 1,0, 0,1, 5,5, 6,5, 5,6), nrow=6, byrow=TRUE); d <- dist(X)
 _X = np.array([[0, 0], [1, 0], [0, 1], [5, 5], [6, 5], [5, 6]], dtype=float)
 
-# merge is column-major (R as.vector(h$merge)); height; order.
 _PINS = {
     "ward.D": (
         [-1, -4, -3, -6, 3, -2, -5, 1, 2, 4],
@@ -91,14 +89,6 @@ _PINS = {
 }
 
 
-# R's Fortran hclust (`hclust.f`) fuses the Lance-Williams update
-# `(membr*d + membr*d) ...` to a single `fmadd` on arm64 (gfortran's default
-# contraction), where x86 keeps two roundings. So the committed (x86-captured)
-# heights differ by <= a few ulp on arm64 for the multiply-add methods. hea
-# mirrors R per-arch via ``_rfma`` (see hea/R/_shared.py); these overrides keep
-# ``test_hclust_pins`` 0-ulp on arm64 too. The bit-exact arch-correct guarantee
-# is ``test_hclust_vs_live_R`` (live R on whatever machine runs); only the
-# always-run committed pin needs the branch. Only ward.D2 differs for ``_X``.
 _HEIGHT_ARM64 = {
     "ward.D2": [1.0, 1.0, 1.2909944487358058, 1.2909944487358058, 12.24744871391589],
 }
@@ -170,9 +160,6 @@ def test_hclust_object_shapes():
     assert h.order.shape == (6,)
 
 
-# --------------------------------------------------------------------------- #
-# cutree
-# --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
     "k,expected",
     [
@@ -261,7 +248,6 @@ def test_cutree_k_out_of_range():
 
 
 def test_compose_dist_hclust_cutree():
-    # compose gate: the full dist -> hclust -> cutree pipeline.
     rng = np.random.default_rng(5)
     x = rng.standard_normal((20, 3))
     h = hclust(dist(x), method="average")
@@ -276,7 +262,6 @@ def test_cutree_vs_live_R(method):
     x = rng.standard_normal((16, 4))
     d = dist(x)
     h = hclust(d, method=method)
-    # build the same hclust in R, then cut by a range of k and h.
     elems = ",".join(float(v).hex() for v in d.data)
     rexpr = (
         f"d<-structure(c({elems}),Size={d.Size}L,Diag=FALSE,Upper=FALSE,"
@@ -299,9 +284,6 @@ def test_cutree_vs_live_R(method):
     assert cutree(h, h=float(np.median(h.height))).tolist() == hvec
 
 
-# --------------------------------------------------------------------------- #
-# cophenetic
-# --------------------------------------------------------------------------- #
 _COPH_PINS = {
     "complete": [
         1,
@@ -347,7 +329,6 @@ def test_cophenetic_pins(method):
 
 
 def test_compose_dist_hclust_cophenetic():
-    # compose gate: dist -> hclust -> cophenetic, round-tripped through R.
     rng = np.random.default_rng(11)
     x = rng.standard_normal((12, 3))
     h = hclust(dist(x), method="average")
@@ -381,15 +362,8 @@ def test_cophenetic_vs_live_R(method):
     _assert_height(cophenetic(h), expected)
 
 
-# --------------------------------------------------------------------------- #
-# live-R differential
-# --------------------------------------------------------------------------- #
 def _r_hclust(packed, n, method, members=None):
-    """``stats::hclust`` on this machine; returns ``(merge, height, order)``.
-
-    The packed lower-triangle vector is rebuilt into a ``"dist"`` object in R so
-    the exact same dissimilarities are clustered.
-    """
+    """``stats::hclust`` on this machine; returns ``(merge, height, order)``."""
     elems = ",".join(float(v).hex() for v in packed)
     mem = (
         f"members=c({','.join(float(v).hex() for v in members)})"
@@ -445,12 +419,6 @@ def test_hclust_members_vs_live_R():
     _assert_height(h.height, height)
 
 
-# --------------------------------------------------------------------------- #
-# Rust ``hclust`` kernel: A/B 0-ulp vs the pure-Python ``_hclust_fortran`` +
-# ``_hcass2``. The Rust kernel does the agglomeration AND hcass2 and returns the
-# final ``(merge_a, merge_b, height, order)``; the Python reference runs both
-# stages. merge/order are integer-exact; height is 0-ulp (macOS) / tol (off).
-# --------------------------------------------------------------------------- #
 _rs_mod = pytest.importorskip("hea._rs")
 _HAS_RS_HCLUST = hasattr(_rs_mod, "hclust")
 
@@ -490,7 +458,6 @@ def test_rs_hclust_matches_python(method):
 
 @pytest.mark.skipif(not hasattr(_rs_mod, "cutree"), reason="hea._rs.cutree not built")
 def test_rs_cutree_matches_python():
-    # A/B: Rust cutree (C_cutree port) vs pure-Python _cutree_c. Integer-exact.
     from hea.R.clustering import _cutree_c
 
     rng = np.random.default_rng(11)

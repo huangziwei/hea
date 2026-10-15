@@ -1,10 +1,3 @@
-//! `ptukey` / `qtukey` — CDF/quantile of the studentized range (nmath/ptukey.c,
-//! qtukey.c). Mirror of the `hea/R/nmath.py` tukey cluster. Copenhaver-Holland
-//! Gauss-Legendre quadrature (wprob) + AS 70 start + secant (qtukey).
-//!
-//! Only `wprob`'s inner accumulators (einsum/elsum/blb/bub) are `LDOUBLE` in R;
-//! `ptukey`'s outer sum is plain `double`. Rust has no 80-bit float, so wprob's
-//! accumulators are `f64` here — the residual vs R is confined to wprob.
 #![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::needless_range_loop)]
@@ -19,7 +12,6 @@ use super::util::rfma;
 
 const M_1_SQRT_2PI: f64 = 0.398942280401432677939946059934; // 1/sqrt(2pi)
 
-// wprob: 12-point Gauss-Legendre nodes/weights (upper half)
 const XLEG: [f64; 6] = [
     0.981560634246719250690549090149,
     0.904117256370474856678465866119,
@@ -36,7 +28,6 @@ const ALEG: [f64; 6] = [
     0.233492536538354808760849898925,
     0.249147045813402785000562436043,
 ];
-// ptukey: 16-point Gauss-Legendre nodes/weights (upper half)
 const XLEGQ: [f64; 8] = [
     0.989400934991649932596154173450,
     0.944575023073232576077988415535,
@@ -181,9 +172,6 @@ pub(crate) fn ptukey_scalar(
         return r_dt_val(wprob(q, rr, cc), lower_tail, log_p);
     }
 
-    // clang contracts the *leading* multiply of each `a*b ± c` into one fmadd
-    // on arm64, so `rfma` (= plain `a*b+c` on x86) is what keeps this whole
-    // quadrature 0-ulp to R on both arches.
     let f2 = df * 0.5;
     let mut f2lf = rfma(f2, df.ln(), -(df * M_LN2)) - lgammafn(f2);
     let f21 = f2 - 1.0;
@@ -222,8 +210,6 @@ pub(crate) fn ptukey_scalar(
                 let qsqz = if ihalfq < jj {
                     q * (rfma(XLEGQ[j], ulen, twa1) * 0.5).sqrt()
                 } else {
-                    // `(-(XLEGQ[j]*ulen)) + twa1`: the negation makes the LHS an
-                    // fneg, not an fmul, so clang leaves this one uncontracted.
                     q * (((-(XLEGQ[j] * ulen)) + twa1) * 0.5).sqrt()
                 };
                 let wprb = wprob(qsqz, rr, cc);
@@ -260,7 +246,6 @@ fn qtukey_qinv(p: f64, c: f64, v: f64) -> f64 {
     let c5 = 1.4142;
     let vmax = 120.0;
 
-    // Every `a*b + c` below is one fmadd in R's arm64 build (see ptukey above).
     let ps = 0.5 - 0.5 * p;
     let yi = (1.0 / (ps * ps)).ln().sqrt();
     let mut t = yi
@@ -354,7 +339,6 @@ pub(crate) fn qtukey_scalar(
     ans
 }
 
-// === PyO3 wrappers ===========================================================
 #[pyfunction]
 #[pyo3(name = "ptukey", signature = (q, rr, cc, df, lower_tail=true, log_p=false))]
 pub fn ptukey<'py>(

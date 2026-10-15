@@ -39,10 +39,6 @@ def dqrls_rank(x: np.ndarray, tol: float = 1e-7):
     ``pivot`` is 1-based."""
     x = np.asarray(x, dtype=float)
     if _rs_dqrls_rank is not None:
-        # The kernel works column-major, so hand it a Fortran-order array — for
-        # polars-origin designs (already F-order) this is a no-op; forcing C with
-        # ascontiguousarray would add a needless F→C transpose (then a second
-        # transpose inside Rust). asfortranarray only copies for a C-order caller.
         rank, pivot = _rs_dqrls_rank(np.asfortranarray(x, dtype=float), tol)
         return int(rank), np.asarray(pivot)
     _, _, _, _, k, jpvt, _ = dqrls(x.copy(), np.zeros(x.shape[0]), tol)
@@ -61,22 +57,17 @@ def dqrdc2(x: np.ndarray, tol: float = 1e-7):
     work = np.zeros((p, 2))
     jpvt = np.arange(1, p + 1)  # 1-based column indices (R 'pivot')
 
-    # compute the norms of the columns of x
     if n > 0:
         for j in range(p):
             qraux[j] = np.linalg.norm(qr[:, j])  # dnrm2(n, x(1,j))
             work[j, 0] = qraux[j]
             work[j, 1] = qraux[j] if qraux[j] != 0.0 else 1.0
 
-    # Householder reduction of x
     lup = min(n, p)
     k = p + 1  # Fortran 'k' (1-based rank boundary)
     for l in range(1, lup + 1):
         l0 = l - 1
-        # cycle columns l..p left-to-right until one has non-negligible norm;
-        # a column is negligible if its norm fell below tol·(original norm).
         while not (l >= k or qraux[l0] >= work[l0, 1] * tol):
-            # cyclic left-shift of columns l..p, moving column l to position p
             tcol = qr[:, l0].copy()
             qr[:, l0 : p - 1] = qr[:, l0 + 1 : p]
             qr[:, p - 1] = tcol
@@ -90,21 +81,18 @@ def dqrdc2(x: np.ndarray, tol: float = 1e-7):
             work[p - 1, 0], work[p - 1, 1] = tt_sv, ttt_sv
             k -= 1
         if l != n:
-            # Householder transformation for column l (rows l..n)
             nrmxl = np.linalg.norm(qr[l0:n, l0])  # dnrm2(n-l+1, x(l,l))
             if nrmxl != 0.0:
                 if qr[l0, l0] != 0.0:
                     nrmxl = math.copysign(nrmxl, qr[l0, l0])
                 qr[l0:n, l0] /= nrmxl  # dscal(1/nrmxl)
                 qr[l0, l0] += 1.0
-                # apply the transformation to the remaining columns + update norms
                 for j in range(l, p):  # Fortran j = l+1..p
                     t = -np.dot(qr[l0:n, l0], qr[l0:n, j]) / qr[l0, l0]
                     qr[l0:n, j] += t * qr[l0:n, l0]  # daxpy
                     if qraux[j] != 0.0:
                         tt = 1.0 - (abs(qr[l0, j]) / qraux[j]) ** 2
                         tt = max(tt, 0.0)
-                        # re-compute the norm if the reduction was large (BDR 9/99)
                         if abs(tt) >= 1e-6:
                             qraux[j] = qraux[j] * math.sqrt(tt)
                         else:
@@ -253,8 +241,6 @@ def Cdqrls(x: np.ndarray, y: np.ndarray, tol: float = 1e-7) -> dict:
     if not np.all(np.isfinite(y)):
         raise ValueError("NA/NaN/Inf in 'y'")
     if _rs_dqrls is not None:  # Rust active path (pure-Py = oracle)
-        # F-order X so the column-major kernel copies contiguously (no transpose);
-        # no-op for polars-origin (F) designs. y is 1-D (layout-agnostic).
         qr, coef, rsd, qty, k, jpvt, qraux = _rs_dqrls(
             np.asfortranarray(x, dtype=float), np.asarray(y, dtype=float), tol
         )

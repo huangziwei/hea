@@ -33,18 +33,11 @@ use rayon::prelude::*;
 
 use crate::nmath::util::rfma;
 
-/// Fixed chunk count for the parallel k-reduction: a deterministic function of
-/// `n` ONLY (independent of the runtime thread pool), so the summation order —
-/// and thus the result — is identical on every machine. ~2048 rows/chunk keeps
-/// each chunk's rank-1 sweep cache-resident; capped at 64-way to bound the
-/// partial-tile memory and the serial combine.
 #[inline]
 fn nchunks(n: usize) -> usize {
     (n / 2048).clamp(1, 64).min(n.max(1))
 }
 
-/// `a[..] = rfma(x, b[..], a[..])` — the `p_j`-wide rank-1 (axpy) update. `a` is
-/// `&mut` (⇒ `noalias`) so LLVM vectorises the fused multiply-adds.
 #[inline]
 fn axpy(a: &mut [f64], x: f64, b: &[f64]) {
     for (av, &bv) in a.iter_mut().zip(b.iter()) {
@@ -52,12 +45,9 @@ fn axpy(a: &mut [f64], x: f64, b: &[f64]) {
     }
 }
 
-/// `A[r,c] = Σ_k xi[k,r]·wxj[k,c]`, row/col-consistent by construction.
 fn xwx(xi: &[f64], wxj: &[f64], n: usize, pi: usize, pj: usize) -> Vec<f64> {
     let pij = pi * pj;
     let nc = nchunks(n);
-    // Per-chunk partial tiles, each a sequential rank-1 accumulation over its own
-    // contiguous k-range; `collect` preserves chunk index order.
     let partials: Vec<Vec<f64>> = (0..nc)
         .into_par_iter()
         .map(|ci| {
@@ -74,7 +64,6 @@ fn xwx(xi: &[f64], wxj: &[f64], n: usize, pi: usize, pj: usize) -> Vec<f64> {
             a
         })
         .collect();
-    // Combine partials in fixed chunk-index order (same order for every entry).
     let mut out = vec![0.0f64; pij];
     for p in &partials {
         for (o, &pv) in out.iter_mut().zip(p.iter()) {
@@ -94,7 +83,6 @@ fn gamlss_xwx<'py>(
     let n = xi.shape()[0];
     let pi = xi.shape()[1];
     let pj = wxj.shape()[1];
-    // Logical-order flat copies → unit-stride inner loops regardless of layout.
     let xi_f: Vec<f64> = xi.as_array().iter().copied().collect();
     let wxj_f: Vec<f64> = wxj.as_array().iter().copied().collect();
     let a = py.allow_threads(|| xwx(&xi_f, &wxj_f, n, pi, pj));

@@ -35,12 +35,6 @@ from . import nmath as _nm
 from ._shared import NamedVector
 from .rng import RMersenneTwister
 
-# --- Process-global R Mersenne-Twister backing the r* / sample surface --------
-# R keeps ONE global RNG; ``set_seed`` (R's ``set.seed``) reseeds it and every
-# ported r* family draws from it, so ``set_seed(k); runif(n)`` is bit-exact to
-# R's ``set.seed(k); runif(n)``. All of runif / rnorm / rexp / rpois / rbinom /
-# rgamma / rbeta / rchisq / rt / rf and ``sample`` (incl. weighted) route through
-# this one R MT stream — bit-exact, no scipy/numpy RNG in the r* path.
 _R_RNG: RMersenneTwister | None = None
 
 
@@ -67,7 +61,6 @@ def _recycle(p, n: int) -> np.ndarray:
     return np.resize(arr, n)
 
 
-# normal
 def dnorm(x, mean=0, sd=1, log=False):
     """R's ``dnorm`` — bit-exact via the ported ``dnorm5`` (nmath/dnorm.c)."""
     if np.ndim(x) == 0 and np.ndim(mean) == 0 and np.ndim(sd) == 0:
@@ -100,9 +93,6 @@ def rnorm(n, mean=0, sd=1):
     import polars as pl
 
     if isinstance(n, pl.Expr):
-        # Lazy per-row generation inside a tibble — draws from R's stream in
-        # row order (reproducible and R-exact per draw; the in-frame generation
-        # order is not something R itself defines).
         rng = _r_rng()
         return pl.int_range(0, n).map_elements(
             lambda _: mean + sd * rng.norm_rand(),
@@ -111,7 +101,6 @@ def rnorm(n, mean=0, sd=1):
     return _r_rng().rnorm(int(n), mean=mean, sd=sd)
 
 
-# Student's t  (df = degrees of freedom, ncp = non-centrality)
 def dt(x, df, ncp=0, log=False):
     """R's ``dt`` — bit-exact via ported dt / dnt (nmath/dt.c, dnt.c)."""
     if np.all(np.asarray(ncp) == 0):
@@ -147,7 +136,6 @@ def rt(n, df, ncp=0):
     return num / np.sqrt(den / dfv)
 
 
-# F  (df() PDF intentionally omitted — clashes with `df` variable name)
 def pf(q, df1, df2, ncp=0, lower_tail=True, log_p=False):
     """R's ``pf`` — bit-exact via ported pf / pnf (nmath/pf.c, pnf.c)."""
     if np.all(np.asarray(ncp) == 0):
@@ -178,11 +166,7 @@ def rf(n, df1, df2, ncp=0):
     return num / den
 
 
-# chi-squared  (ncp != 0 via ported nmath dnchisq/pnchisq/qnchisq — bit-exact to
-# R except a ≤1-ulp residual on the ncp>=80 far-lower-tail, where numpy's long-
-# double exp differs from the system expl R links; still far tighter than scipy.)
 def dchisq(x, df, ncp=0):
-    # central chi-square = gamma(shape=df/2, scale=2) — bit-exact via nmath.
     if np.all(np.asarray(ncp) == 0):
         return _nm._disp(
             "dgamma", _nm.dgamma, [x, np.asarray(df, float) / 2.0, 2.0], (False,)
@@ -222,7 +206,6 @@ def rchisq(n, df, ncp=0):
     return rng.rchisq_n(dfv, ncpv)
 
 
-# binomial
 def dbinom(x, size, prob, log=False):
     """R's ``dbinom`` — bit-exact via ported dbinom (nmath/dbinom.c)."""
     return _nm._disp("dbinom", _nm.dbinom, [x, size, prob], (log,))
@@ -247,7 +230,6 @@ def rbinom(n, size, prob):
     return rng.rbinom_n(sz, pr).astype(np.int64)
 
 
-# poisson  (R uses `lambda`, a Python keyword → spelled `lambda_`)
 def dpois(x, lambda_, log=False):
     """R's ``dpois`` — bit-exact via ported dpois (nmath/dpois.c, Loader)."""
     return _nm._disp("dpois", _nm.dpois, [x, lambda_], (log,))
@@ -271,7 +253,6 @@ def rpois(n, lambda_):
     return rng.rpois_n(lam).astype(np.int64)
 
 
-# uniform  (exact closed form — R nmath/{dunif,punif,qunif}.c, no special functions)
 def _scalar_in(*xs) -> bool:
     return all(np.ndim(x) == 0 for x in xs)
 
@@ -322,13 +303,11 @@ def qunif(p, min=0, max=1, lower_tail=True, log_p=False):
     p = np.asarray(p, float)
     a = np.asarray(min, float)
     b = np.asarray(max, float)
-    # R_DT_qIv: map (lower_tail, log_p) back to the lower-tail identity prob.
     if log_p:
         pv = np.exp(p) if lower_tail else -np.expm1(p)
     else:
         pv = p if lower_tail else 1.0 - p
     out = np.asarray(a + pv * (b - a), float)
-    # R_Q_P01_check: probability out of [0,1] (identity scale) -> NaN.
     p01_bad = (pv < 0.0) | (pv > 1.0)
     bad = (
         p01_bad
@@ -349,7 +328,6 @@ def runif(n, min=0, max=1):
     return min + (max - min) * u
 
 
-# exponential  (R: rate = 1/scale)
 def dexp(x, rate=1, log=False):
     """R's ``dexp`` — bit-exact via ported dexp (nmath/dexp.c)."""
     return _nm._disp("dexp", _nm.dexp, [x, 1.0 / np.asarray(rate, float)], (log,))
@@ -377,7 +355,6 @@ def rexp(n, rate=1):
     return rng.exp_rand_n(nn) / rt_
 
 
-# gamma  (R: shape, rate; ``scale`` overrides if given)
 def dgamma(x, shape, rate=1, scale=None, log=False):
     """R's ``dgamma`` — bit-exact via the ported ``dgamma`` (nmath/dgamma.c)."""
     if scale is None:
@@ -410,7 +387,6 @@ def rgamma(n, shape, rate=1, scale=None):
     return rng.rgamma_n(sh, sc)
 
 
-# beta
 def dbeta(x, shape1, shape2, log=False):
     """R's ``dbeta`` — bit-exact via ported dbeta (nmath/dbeta.c)."""
     return _nm._disp("dbeta", _nm.dbeta, [x, shape1, shape2], (log,))
@@ -436,7 +412,6 @@ def rbeta(n, shape1, shape2):
     return rng.rbeta_n(s1, s2)
 
 
-# cauchy
 def dcauchy(x, location=0, scale=1, log=False):
     """R's ``dcauchy`` — Cauchy density (nmath/dcauchy.c); bit-exact."""
     return _nm._disp("dcauchy", _nm.dcauchy, [x, location, scale], (log,))
@@ -463,7 +438,6 @@ def rcauchy(n, location=0, scale=1):
     return loc + sc * np.tan(np.pi * u)
 
 
-# logistic
 def dlogis(x, location=0, scale=1, log=False):
     """R's ``dlogis`` — logistic density (nmath/dlogis.c); bit-exact."""
     return _nm._disp("dlogis", _nm.dlogis, [x, location, scale], (log,))
@@ -490,7 +464,6 @@ def rlogis(n, location=0, scale=1):
     return loc + sc * np.log(u / (1.0 - u))
 
 
-# log-normal
 def dlnorm(x, meanlog=0, sdlog=1, log=False):
     """R's ``dlnorm`` — log-normal density (nmath/dlnorm.c); bit-exact."""
     return _nm._disp("dlnorm", _nm.dlnorm, [x, meanlog, sdlog], (log,))
@@ -512,7 +485,6 @@ def rlnorm(n, meanlog=0, sdlog=1):
     return np.exp(rnorm(n, meanlog, sdlog))
 
 
-# weibull
 def dweibull(x, shape, scale=1, log=False):
     """R's ``dweibull`` — Weibull density (nmath/dweibull.c); bit-exact."""
     return _nm._disp("dweibull", _nm.dweibull, [x, shape, scale], (log,))
@@ -539,7 +511,6 @@ def rweibull(n, shape, scale=1):
     return sc * np.power(-np.log(u), 1.0 / sh)
 
 
-# geometric  (R: dgeom(x, prob) — Pr(X=x) = prob*(1-prob)^x, x = 0,1,2,...)
 def dgeom(x, prob, log=False):
     """R's ``dgeom`` — geometric density (nmath/dgeom.c); bit-exact."""
     return _nm._disp("dgeom", _nm.dgeom, [x, prob], (log,))
@@ -571,7 +542,6 @@ def rgeom(n, prob):
     return out
 
 
-# Wilcoxon signed-rank distribution (exact; nmath/signrank.c)
 def dsignrank(x, n, log=False):
     """R's ``dsignrank`` — density of the Wilcoxon signed-rank statistic."""
     return _nm._vec(lambda xx, nn: _nm.dsignrank(xx, nn, log), x, n)
@@ -587,7 +557,6 @@ def qsignrank(p, n, lower_tail=True, log_p=False):
     return _nm._vec(lambda pp, nn: _nm.qsignrank(pp, nn, lower_tail, log_p), p, n)
 
 
-# Wilcoxon rank-sum (Mann-Whitney) distribution (exact; nmath/wilcox.c)
 def dwilcox(x, m, n, log=False):
     """R's ``dwilcox`` — density of the Wilcoxon rank-sum (Mann-Whitney) stat."""
     return _nm._vec(lambda xx, mm, nn: _nm.dwilcox(xx, mm, nn, log), x, m, n)
@@ -607,7 +576,6 @@ def qwilcox(p, m, n, lower_tail=True, log_p=False):
     )
 
 
-# hypergeometric  (R: dhyper(x, m, n, k) — m white, n black, k drawn)
 def dhyper(x, m, n, k, log=False):
     """R's ``dhyper`` — hypergeometric density (nmath/dhyper.c); R-parity."""
     return _nm._disp("dhyper", _nm.dhyper, [x, m, n, k], (log,))
@@ -623,7 +591,6 @@ def qhyper(p, m, n, k, lower_tail=True, log_p=False):
     return _nm._disp("qhyper", _nm.qhyper, [p, m, n, k], (lower_tail, log_p))
 
 
-# negative binomial  (R accepts EITHER prob OR mu; mu → the (size, mu) kernels)
 def dnbinom(x, size, prob=None, mu=None, log=False):
     """R's ``dnbinom(x, size, prob | mu)`` (nmath/dnbinom.c); bit-exact."""
     if mu is not None:
@@ -649,7 +616,6 @@ def qnbinom(p, size, prob=None, mu=None, lower_tail=True, log_p=False):
     return _nm._disp("qnbinom", _nm.qnbinom, [p, size, prob], (lower_tail, log_p))
 
 
-# studentized range (Tukey)  — R exposes only the CDF / quantile (no d*/r*)
 def ptukey(q, nmeans, df, nranges=1, lower_tail=True, log_p=False):
     """R's ``ptukey`` — CDF of the studentized range distribution.
 
@@ -725,14 +691,6 @@ def sample(x, size=None, replace=False, prob=None):
     return values[idx]
 
 
-# ======================================================================
-# Combinatorial / multivariate distributions (2nd-half Tier-1 add-ons).
-# The r* generators draw from the process-global R MT stream (bit-exact to
-# set.seed); the closed-form pbirthday/qbirthday/dmultinom are pure R ports.
-# ======================================================================
-
-
-# negative binomial variates (R: rnbinom(n, size, prob | mu); rnbinom.c)
 def rnbinom(n, size, prob=None, mu=None):
     """R: ``rnbinom(n, size, prob | mu)`` — negative-binomial variates,
     ``rpois(rgamma(size, ·))`` on R's MT stream (bit-exact). Supply ``prob`` or
@@ -747,7 +705,6 @@ def rnbinom(n, size, prob=None, mu=None):
     return np.array([rng.rnbinom_prob(float(sz[i]), float(pr[i])) for i in range(nn)])
 
 
-# hypergeometric variates (R: rhyper(nn, m, n, k); rhyper.c, H2PE)
 def rhyper(nn, m, n, k):
     """R: ``rhyper(nn, m, n, k)`` — ``nn`` hypergeometric variates: white balls
     drawn when ``k`` are taken from ``m`` white + ``n`` black, on R's MT stream
@@ -762,7 +719,6 @@ def rhyper(nn, m, n, k):
     )
 
 
-# Wilcoxon signed-rank + rank-sum variates (signrank.c / wilcox.c)
 def rsignrank(nn, n):
     """R: ``rsignrank(nn, n)`` — ``nn`` Wilcoxon signed-rank variates for a
     sample of size ``n``, on R's MT stream (signrank.c); bit-exact."""
@@ -782,7 +738,6 @@ def rwilcox(nn, m, n):
     return np.array([rng.rwilcox(float(ms[i]), float(ns[i])) for i in range(ln)])
 
 
-# multinomial variates (R: rmultinom(n, size, prob); rmultinom.c)
 def rmultinom(n, size, prob):
     """R: ``rmultinom(n, size, prob)`` — a (K x n) integer matrix of independent
     Multinomial(size, prob) columns, on R's MT stream (rmultinom.c); bit-exact.
@@ -790,7 +745,6 @@ def rmultinom(n, size, prob):
     return _r_rng().rmultinom(int(n), int(size), prob)
 
 
-# random 2-way contingency tables (R: r2dtable(n, r, c); rcont.c, AS 159)
 def r2dtable(n, r, c):
     """R: ``r2dtable(n, r, c)`` — ``n`` random 2-way tables with fixed row
     (``r``) and column (``c``) margins, on R's MT stream (rcont.c, AS 159);
@@ -814,7 +768,6 @@ def r2dtable(n, r, c):
     ]
 
 
-# Wishart matrices (R: rWishart(n, df, Sigma); rWishart.c, Bartlett)
 def rWishart(n, df, Sigma):
     """R: ``rWishart(n, df, Sigma)`` — ``n`` draws from Wishart(df, Sigma) on R's
     MT stream (rWishart.c, Bartlett decomposition). Returns a (p, p, n) array.
@@ -839,7 +792,6 @@ def rWishart(n, df, Sigma):
     return out
 
 
-# --- closed-form (no RNG): birthday problem + multinomial density -----------
 def pbirthday(n, classes=365, coincident=2):
     """R's ``pbirthday(n, classes, coincident)`` (birthday.R) — probability of a
     coincidence of at least ``coincident`` among ``n`` items over ``classes``

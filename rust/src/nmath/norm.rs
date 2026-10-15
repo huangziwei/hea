@@ -1,11 +1,3 @@
-//! `pnorm` — normal CDF (R's `nmath/pnorm.c`, Cody 1993).
-//!
-//! Line-by-line mirror of `hea/R/nmath.py`'s `_pnorm_both` / `pnorm5`. The
-//! float-op order is preserved EXACTLY (it is what makes the Python 0-ulp to R):
-//! do not reassociate, do not introduce FMA. `ldexp(v, k)` for power-of-two `k`
-//! is written as the exact multiply/divide (`v * 16.0`, `v * 0.5`, `/ 16.0`),
-//! which is bit-identical to `ldexp` for the (non-subnormal) ranges here.
-
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
 
@@ -13,11 +5,9 @@ use super::coeffs::{QN_A, QN_B, QN_C, QN_D, QN_E, QN_F};
 use super::consts::{M_2PI, M_LN2, M_LN_SQRT_2PI, M_SQRT2};
 use super::util::{ldexp, rfma, round_half_even};
 
-// --- constants (Rmath.h) -----------------------------------------------------
 const M_SQRT_32: f64 = 5.656854249492380195206754896838; // sqrt(32)
 const M_1_SQRT_2PI: f64 = 0.398942280401432677939946059934; // 1/sqrt(2pi)
 
-// --- Cody 1993 rational-approximation coefficients (mirror nmath.py) ---------
 const PN_A: [f64; 5] = [
     2.2352520354606839287,
     161.02823106855587881,
@@ -68,7 +58,6 @@ const PN_Q: [f64; 5] = [
     7.29751555083966205e-5,
 ];
 
-// R_DT_0 = lower_tail ? R_D__0 : R_D__1
 #[inline]
 pub(crate) fn dt0(lower_tail: bool, log_p: bool) -> f64 {
     if lower_tail {
@@ -84,7 +73,6 @@ pub(crate) fn dt0(lower_tail: bool, log_p: bool) -> f64 {
     }
 }
 
-// R_DT_1 = lower_tail ? R_D__1 : R_D__0
 #[inline]
 pub(crate) fn dt1(lower_tail: bool, log_p: bool) -> f64 {
     if lower_tail {
@@ -100,8 +88,6 @@ pub(crate) fn dt1(lower_tail: bool, log_p: bool) -> f64 {
     }
 }
 
-/// R's `pnorm_both(x, &cum, &ccum, i_tail, log_p)`. `i_tail` in {0,1} =
-/// {lower, upper}. Returns `(cum, ccum)`; the non-requested entry may be NaN.
 fn pnorm_both(x: f64, i_tail: i32, log_p: bool) -> (f64, f64) {
     if x.is_nan() {
         return (x, x);
@@ -148,7 +134,6 @@ fn pnorm_both(x: f64, i_tail: i32, log_p: bool) -> (f64, f64) {
     }
 
     if y <= M_SQRT_32 {
-        // qnorm(3/4) < |x| <= sqrt(32) ~ 5.657
         let mut xn = PN_C[8] * y;
         let mut xd = y;
         for i in 0..7 {
@@ -156,7 +141,6 @@ fn pnorm_both(x: f64, i_tail: i32, log_p: bool) -> (f64, f64) {
             xd = (xd + PN_D[i]) * y;
         }
         let temp = (xn + PN_C[7]) / (xd + PN_D[7]);
-        // do_del(y)
         let xsq = (y * 16.0).trunc() / 16.0;
         let del = (y - xsq) * (y + xsq);
         let mut cum;
@@ -171,7 +155,6 @@ fn pnorm_both(x: f64, i_tail: i32, log_p: bool) -> (f64, f64) {
             ccum = 1.0 - cum;
         }
         if x > 0.0 {
-            // swap_tail
             let t = cum;
             if lower {
                 cum = ccum;
@@ -181,7 +164,6 @@ fn pnorm_both(x: f64, i_tail: i32, log_p: bool) -> (f64, f64) {
         return (cum, ccum);
     }
 
-    // |x| > sqrt(32)
     if (log_p && y < 1e170)
         || (lower && -38.4674 < x && x < 8.2924)
         || (upper && -8.2924 < x && x < 38.4674)
@@ -195,7 +177,6 @@ fn pnorm_both(x: f64, i_tail: i32, log_p: bool) -> (f64, f64) {
         }
         let mut temp = xsq0 * (xn + PN_P[4]) / (xd + PN_Q[4]);
         temp = (M_1_SQRT_2PI - temp) / y;
-        // do_del(x)
         let xsq = (x * 16.0).trunc() / 16.0;
         let del = (x - xsq) * (x + xsq);
         let mut cum;
@@ -210,7 +191,6 @@ fn pnorm_both(x: f64, i_tail: i32, log_p: bool) -> (f64, f64) {
             ccum = 1.0 - cum;
         }
         if x > 0.0 {
-            // swap_tail
             let t = cum;
             if lower {
                 cum = ccum;
@@ -220,7 +200,6 @@ fn pnorm_both(x: f64, i_tail: i32, log_p: bool) -> (f64, f64) {
         return (cum, ccum);
     }
 
-    // large |x|: probs are 0 or 1
     let rd0 = if log_p { f64::NEG_INFINITY } else { 0.0 };
     let rd1 = if log_p { 0.0 } else { 1.0 };
     if x > 0.0 {
@@ -230,7 +209,6 @@ fn pnorm_both(x: f64, i_tail: i32, log_p: bool) -> (f64, f64) {
     }
 }
 
-/// R's `pnorm5(x, mu, sigma, lower_tail, log_p)`, bit-exact.
 pub fn pnorm5_scalar(x: f64, mu: f64, sigma: f64, lower_tail: bool, log_p: bool) -> f64 {
     if x.is_nan() || mu.is_nan() || sigma.is_nan() {
         return x + mu + sigma;
@@ -242,7 +220,6 @@ pub fn pnorm5_scalar(x: f64, mu: f64, sigma: f64, lower_tail: bool, log_p: bool)
         if sigma < 0.0 {
             return f64::NAN;
         }
-        // sigma == 0
         return if x < mu {
             dt0(lower_tail, log_p)
         } else {
@@ -265,9 +242,6 @@ pub fn pnorm5_scalar(x: f64, mu: f64, sigma: f64, lower_tail: bool, log_p: bool)
     }
 }
 
-/// Vectorized `pnorm` over a 1-D f64 array. Mirrors `nmath._vec` semantics for
-/// the scalar-params case (R recycling of array-vs-scalar args is handled in
-/// Python before the native call).
 #[pyfunction]
 #[pyo3(signature = (x, mu, sigma, lower_tail=true, log_p=false))]
 pub fn pnorm<'py>(
@@ -281,11 +255,6 @@ pub fn pnorm<'py>(
     let xs = x.as_slice().unwrap();
     let ms = mu.as_slice().unwrap();
     let ss = sigma.as_slice().unwrap();
-    // Scalar mean/sd (the common case: pnorm(x), the probit linkinv, …) arrive
-    // as length-1 arrays — broadcast the scalar over x with a unary map instead
-    // of materialising two length-n constant slices in Python. Bit-identical:
-    // pnorm5_scalar(x[i], m0, s0, …) is exactly what map3 over constant arrays
-    // computes (0 ulp).
     let out = if ms.len() == 1 && ss.len() == 1 {
         let (m0, s0) = (ms[0], ss[0]);
         crate::par::map1(py, xs, |x| pnorm5_scalar(x, m0, s0, lower_tail, log_p))
@@ -297,10 +266,6 @@ pub fn pnorm<'py>(
     out.into_pyarray(py)
 }
 
-// === qnorm5 — normal quantile (nmath/qnorm.c, Wichura AS-241) =================
-// FMA NOTE: R's qnorm.c writes each rational as ONE C expression, so on arm64 R
-// fuses every `a*b + c` to `fmadd`; on x86-64 it does not. `rfma` mirrors that
-// per-arch (see util::rfma) — plain `v*r + k` diverges from R-arm64 by up to 7 ulp.
 #[inline]
 fn qn_horner(r: f64, c: &[f64]) -> f64 {
     let mut v = c[0];
@@ -310,7 +275,6 @@ fn qn_horner(r: f64, c: &[f64]) -> f64 {
     v
 }
 
-/// R's `qnorm5(p, mu, sigma, lower_tail, log_p)`, bit-exact.
 pub fn qnorm5_scalar(p: f64, mu: f64, sigma: f64, lower_tail: bool, log_p: bool) -> f64 {
     if p.is_nan() || mu.is_nan() || sigma.is_nan() {
         return p + mu + sigma;
@@ -373,7 +337,6 @@ pub fn qnorm5_scalar(p: f64, mu: f64, sigma: f64, lower_tail: bool, log_p: bool)
     let q = p_ - 0.5;
 
     if q.abs() <= 0.425 {
-        // `r = .180625 - q*q` is one C expression → R fuses to fnmadd on arm64.
         let r = rfma(-q, q, 0.180625);
         let val = q * qn_horner(r, &QN_A) / qn_horner(r, &QN_B);
         return mu + sigma * val;
@@ -440,8 +403,6 @@ pub fn qnorm5_scalar(p: f64, mu: f64, sigma: f64, lower_tail: bool, log_p: bool)
     mu + sigma * val
 }
 
-// === dnorm5 — normal density (nmath/dnorm.c) =================================
-/// R's `dnorm4/dnorm5(x, mu, sigma, give_log)`, bit-exact (non-FAST variant).
 pub fn dnorm5_scalar(x: f64, mu: f64, sigma: f64, give_log: bool) -> f64 {
     if x.is_nan() || mu.is_nan() || sigma.is_nan() {
         return x + mu + sigma;
@@ -476,7 +437,6 @@ pub fn dnorm5_scalar(x: f64, mu: f64, sigma: f64, give_log: bool) -> f64 {
     if x < 5.0 {
         return M_1_SQRT_2PI * (-0.5 * x * x).exp() / sigma;
     }
-    // _DNORM_BIG = sqrt(-2*M_LN2*(DBL_MIN_EXP+1-DBL_MANT_DIG)), exprs match nmath.py
     let dnorm_big = (-2.0 * M_LN2 * (-1021.0 + 1.0 - 53.0)).sqrt();
     if x > dnorm_big {
         return 0.0;
@@ -500,8 +460,6 @@ pub fn qnorm<'py>(
     let ps = p.as_slice().unwrap();
     let ms = mu.as_slice().unwrap();
     let ss = sigma.as_slice().unwrap();
-    // Scalar mean/sd (the common case: qnorm(p), the probit linkfun/d?link) —
-    // unary map over p, no length-n constant slices. Bit-identical to map3.
     let v = if ms.len() == 1 && ss.len() == 1 {
         let (m0, s0) = (ms[0], ss[0]);
         crate::par::map1(py, ps, |p| qnorm5_scalar(p, m0, s0, lower_tail, log_p))
@@ -525,8 +483,6 @@ pub fn dnorm<'py>(
     let xs = x.as_slice().unwrap();
     let ms = mu.as_slice().unwrap();
     let ss = sigma.as_slice().unwrap();
-    // Scalar mean/sd (the common case: dnorm(x), the probit mu.eta) — unary map
-    // over x, no length-n constant slices. Bit-identical to map3.
     let v = if ms.len() == 1 && ss.len() == 1 {
         let (m0, s0) = (ms[0], ss[0]);
         crate::par::map1(py, xs, |x| dnorm5_scalar(x, m0, s0, give_log))

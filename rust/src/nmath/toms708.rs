@@ -1,6 +1,3 @@
-//! `pbeta` / `lbeta` — R's nmath/toms708.c (Morris ALGORITHM 708 `bratio`) +
-//! pbeta.c / lbeta.c. Mirror of the `hea/R/nmath.py` toms708 cluster. Scalar
-//! kernels + numpy-vectorized PyO3 wrappers. Float-op order preserved exactly.
 #![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::needless_range_loop)]
@@ -99,10 +96,6 @@ const BCORR_C: [f64; 6] = [
     -0.00165322962780713,
 ];
 
-/// Horner with R-parity FMA: `((c[0]*x + c[1])*x + … )`. Each `*x +` step is a
-/// single-expression `a*b + c` that R's clang fuses to fmadd on arm64; `rfma`
-/// is per-arch (plain on x86-64, so a no-op there). Use for any C polynomial
-/// written `(((c0*t+c1)*t+c2)…)` — append a trailing `1.0` for the `…+1` forms.
 #[inline]
 fn horner(x: f64, c: &[f64]) -> f64 {
     let mut v = c[0];
@@ -610,7 +603,6 @@ fn betaln(a0: f64, b0: f64) -> f64 {
                 return rfma(-(n as f64), b.ln(), ww.ln()) + (gamln(a) + algdiv(a, b));
             }
         }
-        // L40
         let n = (b - 1.0) as i64;
         let mut z = 1.0;
         for _ in 1..=n {
@@ -1406,11 +1398,6 @@ fn basym(a: f64, b: f64, lambda: f64, eps: f64, log_p: bool) -> f64 {
 }
 
 #[inline]
-/// `R_Log1_Exp` as redefined *inside* toms708.c (its lines 46-47 `#undef` the
-/// dpq.h macro and re-`#define` it to call the file-local `rexpm1` instead of
-/// libm `expm1`). Every `R_Log1_Exp` reached from `bratio` is this variant; it
-/// differs from `gamma::r_log1_exp` by ~1 ulp on the `x > -M_LN2` branch, which
-/// the `log_p` beta tails expose.
 fn log1_exp_rexpm1(x: f64) -> f64 {
     if x > -M_LN2 {
         (-rexpm1(x)).ln()
@@ -1597,7 +1584,6 @@ pub(crate) fn bratio(a: f64, b: f64, x: f64, y: f64, log_p: bool) -> (f64, f64, 
             did_bup = true;
             b0 += n as f64;
         }
-        // L131
         let (w1r, ierr1) = bgrat(b0, a0, y0, x0, w1v, 15.0 * eps, false);
         w1v = w1r;
         if w1v == 0.0 || (0.0 < w1v && w1v < DBL_MIN) {
@@ -1711,7 +1697,6 @@ pub(crate) fn bratio(a: f64, b: f64, x: f64, y: f64, log_p: bool) -> (f64, f64, 
             }
             return br_end_from_w(wv3, do_swap, log_p, ierr);
         }
-        // L180 — basym
         let wv = basym(a0m, b0, lam, eps * 100.0, log_p);
         let w1v = if log_p {
             log1_exp_rexpm1(wv)
@@ -1787,7 +1772,6 @@ pub(crate) fn lbeta_scalar(a: f64, b: f64) -> f64 {
     }
     if p >= 10.0 {
         let corr = lgammacor(p) + lgammacor(q) - lgammacor(p + q);
-        // C one-liner; clang fuses each `mul (+/-) acc` left-to-right on arm64.
         let s = rfma(q.ln(), -0.5, M_LN_SQRT_2PI) + corr;
         let s = rfma(p - 0.5, (p / (p + q)).ln(), s);
         return rfma(q, (-p / (p + q)).ln_1p(), s);
@@ -1803,8 +1787,6 @@ pub(crate) fn lbeta_scalar(a: f64, b: f64) -> f64 {
     }
     (gammafn(p) * (gammafn(q) / gammafn(p + q))).ln()
 }
-
-// === PyO3 wrappers ===========================================================
 
 #[pyfunction]
 #[pyo3(name = "pbeta", signature = (x, a, b, lower_tail=true, log_p=false))]

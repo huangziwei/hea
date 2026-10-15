@@ -33,11 +33,6 @@ class StatCount(Stat):
             )
             .sort(groupby_cols)
         )
-        # ``prop`` — fraction of the bar's count within its layer-level
-        # group (ggplot2's ``StatCount$compute_group``: ``count /
-        # sum(abs(count))``). With ``group=1`` all bars share one group, so
-        # ``prop`` is the global proportion; with each bar in its own group
-        # (the default when no discrete aes splits) ``prop = 1``.
         count_f = pl.col("count").cast(pl.Float64)
         if "group" in out.columns:
             prop_expr = count_f / count_f.abs().sum().over("group")

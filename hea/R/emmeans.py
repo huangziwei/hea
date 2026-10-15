@@ -172,9 +172,6 @@ def summary_emmgrid_contrasts(
     t_vals = df["t.ratio"].to_numpy()
     dfs = df["df"].to_numpy().astype(float)
     k = df.height
-    # Effective k for studentized range — recover number of levels from
-    # the contrast count when adjust='tukey'. Without that we conservatively
-    # use ``k`` directly.
     k_levels = _infer_k_levels(k)
 
     if adjust is not None:
@@ -196,11 +193,6 @@ def summary_emmgrid_contrasts(
     return df
 
 
-# ---------------------------------------------------------------------
-# Internals
-# ---------------------------------------------------------------------
-
-
 def _parse_specs(specs: str) -> tuple[str, str]:
     """``"pairwise ~ variety"`` → ``("pairwise", "variety")``;
     ``"~variety"`` → ``("", "variety")``."""
@@ -211,23 +203,14 @@ def _parse_specs(specs: str) -> tuple[str, str]:
 
 
 def _factor_levels(model, target: str) -> list:
-    """Levels of the target factor, in their natural-sort order.
-
-    Drawn from the model's data column; emmeans needs the *original*
-    level set (the design matrix may drop the reference level).
-    """
+    """Levels of the target factor, in their natural-sort order."""
     col = model.data[target]
     levels = sorted(col.unique().to_list())
     return levels
 
 
 def _reference_grid(model, target: str, levels: list) -> np.ndarray:
-    """Build the L matrix: one row per target level.
-
-    Each row sets the intercept to 1, the target's dummy to 1 for that
-    level (0 for the reference, which has no dummy), and every other
-    column to its data-mean (R's "equal-weighted" default).
-    """
+    """Build the L matrix: one row per target level."""
     col_names = list(model.column_names)
     X = model.X.to_numpy().astype(float)
 
@@ -256,7 +239,6 @@ def _reference_grid(model, target: str, levels: list) -> np.ndarray:
         key = str(lvl)
         if key in target_col_idx:
             L[i, target_col_idx[key]] = 1.0
-        # Otherwise this is the reference level — all target dummies 0.
     return L
 
 
@@ -376,20 +358,12 @@ def _p_adjust(p_raw, t_vals, dfs, method, k_levels) -> np.ndarray:
         m = len(p_raw)
         return np.minimum(np.asarray(p_raw) * m, 1.0)
     if method == "tukey":
-        # Studentized range upper tail for ``k_levels`` groups — R's
-        # ptukey(q, nmeans, df, lower.tail=FALSE), bit-exact via nmath.
         q = np.abs(t_vals) * np.sqrt(2.0)
         return _dist.ptukey(q, k_levels, dfs, lower_tail=False)
     raise ValueError(f"emmeans: unknown adjust={method!r}")
 
 
 def _infer_k_levels(n_contrasts: int) -> int:
-    """Back out the level count ``k`` from the contrast count.
-
-    Pairwise contrast count is ``k*(k-1)/2``; solve for ``k``. Used to
-    re-derive a Tukey adjustment when only the contrasts table is at
-    hand (R's ``summary(...)`` path).
-    """
-    # Solve k(k-1)/2 = n → k = (1 + sqrt(1 + 8n)) / 2.
+    """Back out the level count ``k`` from the contrast count."""
     k = (1 + np.sqrt(1 + 8 * n_contrasts)) / 2
     return round(k)

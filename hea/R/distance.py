@@ -51,28 +51,16 @@ __all__ = [
     "print_dist",
 ]
 
-# Order matches the R function ``dist`` (the C ``enum`` is 1-based off this).
 _METHODS = ("euclidean", "maximum", "manhattan", "canberra", "binary", "minkowski")
 
-# <float.h> constants used verbatim by distance.c.
 _DBL_MIN = 2.2250738585072014e-308
 _DBL_MAX = 1.7976931348623157e308
 
-# Rust seam (plan build-order step 10): a ``cdist`` kernel mirroring this module's
-# pure-Python ``_cdist`` 1:1 (rayon over independent pairs, sequential per-pair
-# column reduction → parallel == serial bit-for-bit). ``None`` until built ⇒ the
-# pure-Python path below runs and stays the spec/oracle.
 _rs_cdist = rs_fn("cdist")
 
 
-# --------------------------------------------------------------------------- #
-# helpers
-# --------------------------------------------------------------------------- #
 def _pmatch(x, table):
-    """R ``pmatch(x, table)`` for a single string: exact, else unique prefix.
-
-    Returns the 0-based index, or ``None`` for no/ambiguous match.
-    """
+    """R ``pmatch(x, table)`` for a single string: exact, else unique prefix."""
     for i, t in enumerate(table):
         if t == x:
             return i
@@ -83,10 +71,6 @@ def _pmatch(x, table):
 def _lower_tri_ij(n):
     """Row/column index arrays for R's ``dist`` packing: the strict lower
     triangle in **column-major** order — for ``j = 0..n-2``, ``i = j+1..n-1``.
-
-    The column-major lower triangle (``i>j``, column outer) is exactly the
-    **upper**-triangle indices (``r<c``, row outer) with the two axes swapped, so
-    ``np.triu_indices`` builds both arrays in C with no Python-level loop.
     """
     if n < 2:
         z = np.empty(0, dtype=np.intp)
@@ -141,9 +125,6 @@ def _r_pow_nonneg(x, y):
     return np.power(x, y)
 
 
-# --------------------------------------------------------------------------- #
-# the six metric kernels (distance.c), pair-vectorized, column-sequential
-# --------------------------------------------------------------------------- #
 def _cdist(x, mi, p):
     """Packed lower-triangle distance vector for method index ``mi`` (0-based
     into :data:`_METHODS`). Mirrors ``R_distance`` / the per-metric C functions.
@@ -163,8 +144,6 @@ def _cdist(x, mi, p):
                 ok = ~(np.isnan(a) | np.isnan(b))
                 dev = a - b
                 use = ok & ~np.isnan(dev)
-                # R fuses `dist += dev*dev` to a single fmadd on arm64 (clang's
-                # default contraction); ``_rfma_vec`` mirrors that per-arch.
                 dist = np.where(use, _rfma_vec(dev, dev, dist), dist)
                 count += use
             return np.sqrt(_finish_scaled(dist, count, nc))
@@ -203,7 +182,6 @@ def _cdist(x, mi, p):
                 diff = np.abs(a - b)
                 outer = ok & ((s > _DBL_MIN) | (diff > _DBL_MIN))
                 dev = diff / s
-                # second clause: Inf/Inf with diff==sum is the limit x->oo, dev:=1
                 special = (~np.isfinite(diff)) & (diff == s)
                 accept = outer & (~np.isnan(dev) | special)
                 dev_used = np.where(np.isnan(dev), 1.0, dev)
@@ -250,9 +228,6 @@ def _cdist(x, mi, p):
     raise ValueError("distance(): invalid distance")  # pragma: no cover
 
 
-# --------------------------------------------------------------------------- #
-# the Dist object
-# --------------------------------------------------------------------------- #
 class Dist:
     """R's ``"dist"`` object — a packed lower-triangle distance vector + attrs.
 
@@ -302,9 +277,6 @@ class Dist:
         return print_dist(self, _return=True)
 
 
-# --------------------------------------------------------------------------- #
-# public API
-# --------------------------------------------------------------------------- #
 def dist(x, method="euclidean", diag=False, upper=False, p=2):
     """R ``stats::dist(x, method, diag, upper, p)`` — pairwise distances.
 
@@ -447,7 +419,6 @@ def cmdscale(d, k=2, eig=False, add=False, x_ret=False, list_=None):
 
     add_c = 0.0
     if add:
-        # additive constant = largest eigenvalue of the 2n x 2n block matrix Z
         z = np.zeros((2 * n, 2 * n))
         z[:n, n:] = -x
         z[n:, :n] = -np.eye(n)

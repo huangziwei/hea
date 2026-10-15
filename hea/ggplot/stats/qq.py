@@ -41,7 +41,6 @@ def _sample_column(data: pl.DataFrame) -> np.ndarray:
 def _ppf(distribution: str, dparams: dict):
     from scipy import stats as scstats
 
-    # Allow R-style aliases: "normal" → scipy "norm".
     name = {"normal": "norm", "exp": "expon"}.get(distribution, distribution)
     dist = getattr(scstats, name, None)
     if dist is None:
@@ -68,8 +67,6 @@ class StatQq(Stat):
             return pl.DataFrame()
 
         sample_sorted = np.sort(sample)
-        # ggplot2 / R use ppoints: (1:n - a) / (n + 1 - 2a) with a = 0.5 for n > 10
-        # else a = 3/8. We match that for parity.
         a = 0.5 if n > 10 else 3 / 8
         probs = (np.arange(1, n + 1) - a) / (n + 1 - 2 * a)
         ppf = _ppf(self.distribution, self.dparams)
@@ -99,8 +96,6 @@ class StatQqLine(Stat):
         q_lo, q_hi = self.quantiles
         x1, x2 = float(ppf(q_lo)), float(ppf(q_hi))
         y1, y2 = float(np.quantile(sample, q_lo)), float(np.quantile(sample, q_hi))
-        # Extend the line over the full theoretical range so it visibly
-        # crosses every plotted Q-Q point.
         n = len(sample)
         a = 0.5 if n > 10 else 3 / 8
         probs = (np.arange(1, n + 1) - a) / (n + 1 - 2 * a)

@@ -17,10 +17,6 @@ from .geom import Geom
 
 @dataclass
 class GeomRibbon(Geom):
-    # Mirrors ggplot2's ``GeomRibbon$default_aes`` (R/geom-ribbon.R):
-    # ``fill = col_mix(ink, paper, 0.2)`` ≈ ``"grey20"`` and ``alpha = NA``
-    # (= 1.0). ``geom_smooth`` defaults to grey60 + alpha 0.4 — that's a
-    # different geom; don't conflate them here.
     default_aes: dict = field(
         default_factory=lambda: {
             "colour": None,
@@ -88,20 +84,11 @@ def geom_ribbon(
     )
 
 
-# ---------------------------------------------------------------------------
-# geom_area = ribbon with ymin=0 injected
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class GeomArea(GeomRibbon):
     required_aes: tuple = ("x", "y")
 
     def setup_data(self, data):
-        # Anchor the area baseline at y = 0 so scale training picks 0 up
-        # (otherwise the y axis ticks span only the curve's value range
-        # and miss the floor). ``position=stack``/``fill`` already inject
-        # ymin/ymax — preserve those.
         if (
             "y" in data.columns
             and "ymin" not in data.columns

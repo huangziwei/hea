@@ -42,7 +42,6 @@ use super::ws::{clear_flag, Work, WorkRef, Ws, EMPTY};
 /// (`t_cholmod_rowfac_worker.c:430-434`), and so does this.
 #[derive(Debug)]
 pub enum NumericError {
-    /// `A->stype <= 0`, or `A` and `L` disagree on `n`.
     Invalid(&'static str),
     /// `L` would need more entries than an `Int` can address
     /// (`t_cholmod_change_factor.c:602`).
@@ -77,11 +76,7 @@ pub struct Params {
     pub grow1: f64,
     pub grow2: i64,
     pub dbound: f64,
-    /// `Common->final_ll`: factorize to `LL'` rather than `LDL'`.
     pub final_ll: bool,
-    /// `Common->final_asis`: leave `L` in whatever form `rowfac` produced.
-    /// True at its default, which is what makes the `final_pack` /
-    /// `final_monotonic` conversion below a no-op.
     pub final_asis: bool,
     pub final_pack: bool,
     pub final_monotonic: bool,
@@ -130,48 +125,21 @@ impl Params {
 /* === cholmod_factor ====================================================== */
 /* ========================================================================= */
 
-/// A `cholmod_factor`, simplicial only.
-///
-/// `xtype` is `CHOLMOD_PATTERN` while [`Factor::p`] and the rest are empty
-/// (upstream's "simplicial symbolic": just `Perm` and `ColCount`), and
-/// `CHOLMOD_REAL` once [`Factor::change_factor`] has allocated them. There is
-/// no supernodal form here — `L->is_super` is always false, so the fields that
-/// only exist for it (`super`, `pi`, `px`, `s`, `maxcsize`, `maxesize`) are not
-/// carried.
-///
-/// `L->nzmax` is not a field: in this port it is `i.len()`, which cannot drift
-/// from the allocation the way a separately tracked count can.
 #[derive(Debug, Clone)]
 pub struct Factor {
     pub n: usize,
-    /// `L->Perm`, the fill-reducing ordering `cholmod_analyze` chose.
     pub perm: Vec<i64>,
-    /// `L->ColCount`, the exact nnz of each column of `L` under that ordering.
     pub colcount: Vec<i64>,
-    /// `L->ordering`.
     pub ordering: Ordering,
-    /// `L->is_ll`: `LL'` if set, `LDL'` if not.
     pub is_ll: bool,
-    /// `L->is_monotonic`: the columns appear in `L->i` in order `0..n-1`.
     pub is_monotonic: bool,
-    /// `L->minor`. `n` if the factorization succeeded; otherwise the first
-    /// column at which `A` was found not to be positive definite.
     pub minor: usize,
-    /// `L->xtype != CHOLMOD_PATTERN`: the arrays below are allocated.
     pub numeric: bool,
-    /// `L->p`, size `n+1`. Column `j` starts at `p[j]`; it *ends* at
-    /// `p[j] + nz[j]`, which is not `p[j+1]` unless `L` is packed.
     pub p: Vec<i64>,
-    /// `L->nz`, size `n`: entries currently in column `j`, diagonal included.
     pub nz: Vec<i64>,
-    /// `L->prev`, size `n+2`.
     pub prev: Vec<i64>,
-    /// `L->next`, size `n+2`. The doubly-linked list of columns in the order
-    /// they occupy `L->i`, with head `n+1` and tail `n`.
     pub next: Vec<i64>,
-    /// `L->i`, size `L->nzmax`.
     pub i: Vec<i64>,
-    /// `L->x`, size `L->nzmax`.
     pub x: Vec<f64>,
 }
 
@@ -263,7 +231,6 @@ impl Factor {
         f
     }
 
-    /// `L->nzmax`.
     #[inline]
     pub fn nzmax(&self) -> usize {
         self.i.len()
@@ -679,8 +646,6 @@ impl Factor {
         }
     }
 
-    /// The `for (k = 0 ; k < len ; k++) { Li_NEW [p_NEW+k] = Li [p+k] ; ... }`
-    /// that every arm of the template above shares.
     #[inline]
     fn move_entries<const MODE: u8>(
         &mut self,
@@ -826,14 +791,10 @@ impl Factor {
     }
 }
 
-/// `t_cholmod_change_factor_2_template.c`'s `#ifdef OUT_OF_PLACE`.
 const OUT_OF_PLACE: u8 = 0;
-/// its `#ifdef TO_PACKED`.
 const TO_PACKED: u8 = 1;
-/// its `#ifdef IN_PLACE`.
 const IN_PLACE: u8 = 2;
 
-/// `Li_NEW [p] = v`, where `Li_NEW` is `Li2` out of place and `Li` otherwise.
 #[inline]
 fn write_i<const MODE: u8>(li: &mut [i64], li2: &mut [i64], p: i64, v: i64) {
     if MODE == OUT_OF_PLACE {
@@ -843,7 +804,6 @@ fn write_i<const MODE: u8>(li: &mut [i64], li2: &mut [i64], p: i64, v: i64) {
     }
 }
 
-/// `Lx_NEW [p] = v`.
 #[inline]
 fn write_x<const MODE: u8>(lx: &mut [f64], lx2: &mut [f64], p: i64, v: f64) {
     if MODE == OUT_OF_PLACE {
@@ -1240,11 +1200,6 @@ pub(super) fn mulsub(x: f64, a: f64, b: f64) -> f64 {
     rfma(-a, b, x)
 }
 
-/// `for (p++ ; p < pend ; p++) W [Li [p]] -= Lx [p] * y`, the inner loop of the
-/// sparse triangular solve.
-///
-/// Handed the two columns as slices rather than indexed per iteration, for the
-/// reason [`Ws::range`] documents.
 #[inline]
 fn axpy(li: &[i64], lx: &[f64], p: i64, pend: i64, y: f64, wx: &mut Ws<f64>) {
     let (li, lx) = (Ws::new_ref(li), Ws::new_ref(lx));
@@ -1484,7 +1439,6 @@ mod tests {
     use crate::sparse::testcorpus::{corpus, spd_triangle, Lcg};
     use crate::sparse::ws::Work;
 
-    /// `A`, its symbolic analysis, and the factor it produces.
     fn setup(n: usize, edges: &[(usize, usize)], stype: i32) -> (Sparse<'static>, Symbolic) {
         let (p, i, x) = spd_triangle(n, edges, stype < 0);
         let s = analyze(
@@ -1511,8 +1465,6 @@ mod tests {
         )
     }
 
-    /// Dense `L` and `D` from the unpacked column form, so the reconstruction
-    /// below reads the same entries `cholmod_solve` would.
     fn dense_ldl(l: &Factor) -> (Vec<f64>, Vec<f64>) {
         let n = l.n;
         let mut ld = vec![0.0f64; n * n];
@@ -1528,10 +1480,6 @@ mod tests {
         (ld, d)
     }
 
-    /// `max |L*D*L'*v - P A P'*v|` over a few pseudo-random `v`, relative to
-    /// `max |P A P'*v|`. A matvec rather than a dense product: the corpus runs
-    /// to n = 1000 and this is a debug build, so an O(n^3) check would dominate
-    /// the whole test suite's runtime to catch nothing extra.
     fn residual(a: &Sparse, l: &Factor) -> f64 {
         let n = l.n;
         let mut pinv = vec![0i64; n];
@@ -1585,8 +1533,6 @@ mod tests {
         worst
     }
 
-    /// The corpus, factorized both ways round, in a debug build — which is
-    /// what makes [`Ws`]'s elided bounds checks evidence rather than a claim.
     #[test]
     fn factorize_never_indexes_out_of_bounds() {
         for (name, n, edges) in corpus() {
@@ -1616,10 +1562,6 @@ mod tests {
         }
     }
 
-    /// A factor analyzed for one pattern and then handed a denser one is the
-    /// only way `reallocate_column` — and through it `reallocate_factor` and
-    /// `pack_factor` — is reached, since a first factorization sizes every
-    /// column to its exact `ColCount`.
     #[test]
     fn a_denser_matrix_grows_the_columns_it_needs() {
         for (name, n, edges) in corpus() {
@@ -1665,8 +1607,6 @@ mod tests {
         }
     }
 
-    /// `LDL' -> LL' -> LDL'` is not the identity in floating point, but it is
-    /// on the pattern, and the values have to come back to within a few ulps.
     #[test]
     fn converting_between_ll_and_ldl_preserves_the_factorization() {
         for (name, n, edges) in corpus() {
@@ -1692,8 +1632,6 @@ mod tests {
         }
     }
 
-    /// Not positive definite is reported through `L->minor`, and the rows past
-    /// it are still computed rather than left as garbage.
     #[test]
     fn an_indefinite_matrix_reports_where_it_failed() {
         /* [[1,2],[2,1]] is symmetric with eigenvalues 3 and -1 */
@@ -1734,7 +1672,6 @@ mod tests {
         assert_eq!(l.minor, 1);
     }
 
-    /// `beta` shifts the diagonal without touching the pattern.
     #[test]
     fn beta_shifts_the_diagonal() {
         let (a, s) = setup(60, &corpus()[4].2, 1);
@@ -1752,7 +1689,6 @@ mod tests {
         }
     }
 
-    /// The scope limits are rejected rather than silently mis-answered.
     #[test]
     fn unsupported_inputs_are_rejected() {
         let mut work = Work::new(1);

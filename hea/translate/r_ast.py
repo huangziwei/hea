@@ -15,13 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-# (start_byte, end_byte) into the source string. Half-open: [start, end).
 Span = tuple[int, int]
-
-
-# ---------------------------------------------------------------------------
-# Literals
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +44,6 @@ class ComplexLit:
 class StrLit:
     value: str
     span: Span
-    # Whether this was a raw string (``r"(...)"``) — preserve for round-trip.
     raw: bool = False
 
 
@@ -91,11 +84,6 @@ class NanLit:
     span: Span
 
 
-# ---------------------------------------------------------------------------
-# Names
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True, slots=True)
 class Identifier:
     """Bare identifier. ``backticked`` is True for `` `weird name` `` form."""
@@ -103,11 +91,6 @@ class Identifier:
     name: str
     span: Span
     backticked: bool = False
-
-
-# ---------------------------------------------------------------------------
-# Compound expressions
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,7 +283,6 @@ class Program:
     span: Span = (0, 0)
 
 
-# Union type alias for static checkers / docs.
 Node = (
     NumLit
     | IntLit

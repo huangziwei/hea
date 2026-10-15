@@ -131,7 +131,6 @@ class GeomAbline(Geom):
         )
         alpha = data["alpha"].to_numpy() if "alpha" in data.columns else [1.0] * n
         for i in range(n):
-            # ``axline`` takes a point + slope; (0, intercept) is on the line.
             ax.axline(
                 (0.0, float(intercept[i])),
                 slope=float(slope[i]),
@@ -156,7 +155,6 @@ def _build_layer(geom, data: pl.DataFrame, kwargs):
         data=data,
         aes_params=aes_params,
         geom_params=geom_params,
-        # Reference-line geoms own their own data; never inherit from the plot.
         inherit_aes=False,
         show_legend=kwargs.pop("show_legend", True) if False else True,
         na_rm=False,
@@ -168,7 +166,6 @@ def geom_hline(*, yintercept, **kwargs):
     yvals = _ensure_iterable(yintercept, "yintercept")
     data = pl.DataFrame({"yintercept": yvals})
     layer = _build_layer(GeomHline(), data, kwargs)
-    # The layer needs a mapping so ``yintercept`` makes it through compute_aesthetics.
     from ..aes import Aes
 
     layer.mapping = Aes(yintercept="yintercept")

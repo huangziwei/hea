@@ -17,9 +17,6 @@ from .geom import Geom
 
 @dataclass
 class GeomViolin(Geom):
-    # Mirrors ggplot2's ``GeomViolin$default_aes`` (R/geom-violin.R):
-    # ``colour = col_mix(ink, paper, 0.2)`` ≈ ``"grey20"`` for the violin
-    # outline (NOT pure black).
     default_aes: dict = field(
         default_factory=lambda: {
             "colour": "grey20",
@@ -54,7 +51,6 @@ class GeomViolin(Geom):
         y, vw = y[order], vw[order]
 
         half = vw * self.half_width
-        # Build closed polygon: left side ascending, right side descending.
         poly_x = np.concatenate([x_center - half, (x_center + half)[::-1]])
         poly_y = np.concatenate([y, y[::-1]])
 

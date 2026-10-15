@@ -64,22 +64,9 @@ This package is the result of splitting the legacy ``hea/tidy.py`` (one
 
 from __future__ import annotations
 
-# ---- polars DataFrame constructors + multi-frame combinators ---------
-#
-# ``hea.tidy`` is the frame namespace, period — so ``concat``,
-# ``from_dict``, ``from_pandas``, etc. live here, not in ``hea.io``.
-# Each is wrapped so the result is the hea subclass.
 import functools as _functools
 
 import polars as _pl_tidy
-
-# ---- polars passthrough ----------------------------------------------
-#
-# Names a tidy pipeline reaches for. Expression builders (``col``, ``lit``,
-# ``when``), basic combinators, row-wise reducers, plus a couple of
-# typing/schema classes. Anything more esoteric stays in ``polars`` and
-# is NOT re-exported. Dtypes live in :mod:`hea.dtypes`; I/O factories
-# in :mod:`hea.io`.
 from polars import (
     Expr,
     Schema,
@@ -109,10 +96,6 @@ from ._shared import (
     _TidyRange,
     cols_between,
 )
-
-# Order matters: _shared and basics are foundational; dataframe pulls them
-# in; series uses dataframe; groupby uses both. Verb files don't depend on
-# the class hierarchy so they slot in anywhere.
 from .basics import (
     _Desc,
     _Drop,
@@ -126,12 +109,7 @@ from .basics import (
     n_distinct,
     tbl,
 )
-
-# Free-function tidyverse verbs (split by functional area).
 from .binning import cut_interval, cut_number, cut_width
-
-# Class hierarchy (these install module-level side effects: pl.Series and
-# pl.Expr get patched with hea-aware wrappers).
 from .dataframe import DataFrame
 from .dates import (
     dmy,
@@ -236,9 +214,6 @@ def _wrap_factory(name: str):
     return wrapper
 
 
-# DataFrame-returning constructors (``from_*``, ``json_normalize``) plus
-# multi-frame combinators (``concat``, ``align_frames``, ``merge_sorted``,
-# ``union``, ``collect_all``, ``from_epoch``). All wrap-then-return.
 _TIDY_FACTORIES = (
     "align_frames",
     "collect_all",
@@ -266,32 +241,26 @@ del _name
 
 
 __all__ = [
-    # core classes
     "DataFrame",
     "GroupBy",
     "LazyFrame",
     "Series",
     "Summary",
     "between",
-    # dplyr verbs / mutate helpers
     "case_when",
     "closest",
     "consecutive_id",
     "cumall",
     "cumany",
     "cume_dist",
-    # dplyr cumulative + run-length
     "cummean",
     "dense_rank",
     "desc",
     "drop",
-    # dplyr positional pickers (shadow polars pl.first / pl.last / pl.nth)
     "first",
     "glimpse",
     "if_else",
-    # dplyr two-table verb helpers (chapter 19)
     "join_by",
-    # dplyr window / numeric helpers
     "lag",
     "last",
     "lead",
@@ -303,11 +272,9 @@ __all__ = [
     "nth",
     "ntile",
     "overlaps",
-    # readr / stringr / tibble
     "parse_double",
     "parse_number",
     "percent_rank",
-    # dplyr rank family
     "row_number",
     "str_wrap",
     "tbl",

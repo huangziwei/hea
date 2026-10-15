@@ -43,17 +43,6 @@ use pyo3::types::PyDict;
 
 use amd::IntWidth;
 
-/// `cholmod_aat` — the pattern of `A A'` for an unsymmetric `A`.
-///
-/// `indptr`/`indices` are a CSC pattern of an `nrow`-by-`ncol` matrix with
-/// `stype == 0`. `mode` is upstream's, restricted to the pattern half: `0`
-/// keeps the diagonal, `-1` removes it, `-2` removes it and allocates AMD's
-/// elbow room. Returns `(indptr, indices)` of an `nrow`-by-`nrow` pattern,
-/// **unsorted** within each column, which is what upstream returns.
-///
-/// This is what a `stype == 0` analysis orders: the product exists as a
-/// pattern so a fill-reducing ordering has something to work on, and the
-/// numeric factorization then consumes `A` and `A'` without forming it.
 #[pyfunction]
 #[pyo3(signature = (nrow, ncol, indptr, indices, mode=-2))]
 fn aat_pattern(
@@ -81,12 +70,6 @@ fn aat_pattern(
     Ok((p.into_pyarray(py).unbind(), i.into_pyarray(py).unbind()))
 }
 
-/// `cholmod_transpose_unsym` — `C = A'` for an unsymmetric `A`.
-///
-/// `indptr`/`indices`/`data` are CSC for an `nrow`-by-`ncol` matrix with
-/// `stype == 0`; `data` may be empty for a pattern transpose. Returns
-/// `(indptr, indices, data)` of the `ncol`-by-`nrow` transpose, with row
-/// indices ascending.
 #[pyfunction]
 #[pyo3(signature = (nrow, ncol, indptr, indices, data, values=true, perm=None))]
 fn transpose_unsym(
@@ -121,11 +104,6 @@ fn transpose_unsym(
     ))
 }
 
-/// `cholmod_analyze` for a rectangular `stype == 0` matrix — `LL' = A A'`.
-///
-/// The counterpart of [`analyze`] for the unsymmetric case, which that entry
-/// point cannot express because it takes one dimension. Exists so the
-/// `stype == 0` path has something to pin against upstream.
 #[pyfunction]
 #[pyo3(signature = (nrow, ncol, indptr, indices, stype=0, ordering="best", use_long=false))]
 fn analyze_rect(
@@ -175,12 +153,6 @@ fn analyze_rect(
     Ok(d.unbind())
 }
 
-/// `cholmod_analyze` + `cholmod_factorize` for a rectangular `stype == 0`
-/// matrix, simplicial `LL'` — `L L' = A A'`.
-///
-/// Returns `(indptr, indices, data, perm)` of the packed `L`. Exists so the
-/// `stype == 0` numeric path has something to pin against upstream; the
-/// shipping entry point is `CholFactor`.
 #[pyfunction]
 #[pyo3(signature = (nrow, ncol, indptr, indices, data, ordering="amd", supernodal=false))]
 fn factorize_rect(
@@ -332,8 +304,6 @@ fn amd_order(
     } else {
         IntWidth::I32
     };
-    // `cholmod_amd` validates the pattern itself — that check is what licenses
-    // its kernels to index without re-checking, so it cannot be hoisted here.
     let (perm, info) = py
         .allow_threads(|| {
             let mut work = amd::Work::new(n);
@@ -460,17 +430,6 @@ fn analyze(
     Ok(d.unbind())
 }
 
-/// `cholmod_analyze` followed by `cholmod_factorize` — the simplicial numeric
-/// `LDL'` (or `LL'`) of `beta*I + P A P'`.
-///
-/// `indptr`/`indices`/`data` are a CSC matrix and `stype` selects the stored
-/// half. The remaining arguments are the `cholmod_common` fields
-/// `cholmod_factorize_p` reads, at their `cholmod_defaults` values.
-///
-/// Returns `L` in the internal unpacked form `cholmod_rowfac` leaves it in —
-/// column `j` occupies `Li [Lp[j] .. Lp[j]+Lnz[j])`, which is not `Lp[j+1]`
-/// unless `L` happens to be packed — plus `minor`, which is `n` when `A` was
-/// positive definite and otherwise the column where it stopped being so.
 #[pyfunction]
 #[pyo3(signature = (n, indptr, indices, data, stype, beta=0.0, ordering="best",
                     final_ll=false, final_asis=true, final_pack=true,
@@ -624,17 +583,6 @@ fn super_analyze(
     Ok(d.unbind())
 }
 
-/// `cholmod_analyze` + `cholmod_factorize` with the supernodal path forced —
-/// the supernodal `LL'` of `beta*I + P A P'`.
-///
-/// Returns the supernodal factor whole: the pattern (as `super_analyze` does)
-/// plus `L->x`, the concatenation of every supernode's dense
-/// `nsrow`-by-`nscol` column-major block, and `minor`.
-/// `numeric_reps > 0` also returns `numeric_ms`, the best of that many
-/// factorizations against one symbolic analysis — the *re*factorization cost,
-/// which is what a caller holding a factor pays. It cannot be had by
-/// differencing two whole-pipeline timings: the analysis is a third of them and
-/// the noise swamps the rest.
 #[pyfunction]
 #[pyo3(signature = (n, indptr, indices, data, stype, beta=0.0, ordering="best",
                     numeric_reps=0))]
@@ -718,17 +666,6 @@ fn super_factorize(
     Ok(d.unbind())
 }
 
-/// `cholmod_analyze` + `cholmod_factorize` + `cholmod_solve`, supernodal.
-///
-/// `b` is `n`-by-`nrhs` column-major; the solution comes back in the same
-/// layout. `sys` names the system in the spelling `cholmod.h` uses — `"A"`,
-/// `"LDLt"`, `"L"`, `"LD"`, `"Lt"`, `"DLt"`, `"D"`, `"P"`, `"Pt"` — so each
-/// half of the solve can be exercised on its own.
-///
-/// `solve_reps > 0` also returns `solve_ms`, the best of that many solves
-/// against the one factor, reusing the workspace as a caller holding a factor
-/// would. The solve is a few percent of analyze+factorize, so it cannot be
-/// measured by differencing two whole-pipeline timings.
 #[pyfunction]
 #[pyo3(name = "super_solve")]
 #[pyo3(signature = (n, indptr, indices, data, b, nrhs, stype, sys="A", beta=0.0,
@@ -823,28 +760,6 @@ fn supernodal_solve(
     Ok(d.unbind())
 }
 
-/// Which dense-kernel path this extension was compiled with.
-///
-/// `backend` is the library actually linked — `"accelerate"`, `"openblas"`, or
-/// `None` for the portable NEON kernels; `min_flops` is the cutoff in force —
-/// the flop count above which a call is handed to the vendor, so `0.0` means
-/// every call is. Three build-time constants read once, with one exception:
-/// under the `blas-sweep` feature the cutoff comes from the environment, and
-/// this reports what is actually in force rather than what was compiled in,
-/// which is the whole reason the sweep can trust its own columns.
-///
-/// **`blas` and `backend` can disagree, and that is the useful case.** `blas`
-/// is the feature, i.e. what the build asked for; `backend` is what `build.rs`
-/// found. The `blas` feature is on by default and OpenBLAS may simply not be
-/// present on a machine building from the sdist, in which case the build
-/// succeeds on the portable kernels rather than failing to link — see
-/// `build.rs`. `blas: true, backend: None` is exactly that build, and this is
-/// the only place it is visible.
-///
-/// It exists because a wheel's arithmetic is not visible from Python otherwise:
-/// which kernels ran decides which pinned digest applies, and the bit-exactness
-/// gate for the vendor path has to *refuse* to run on a build whose routing
-/// cutoff is not zero rather than report the resulting differences as failures.
 #[pyfunction]
 fn build_info(py: Python<'_>) -> PyResult<Py<PyDict>> {
     let d = PyDict::new(py);
@@ -864,13 +779,6 @@ fn build_info(py: Python<'_>) -> PyResult<Py<PyDict>> {
     Ok(d.unbind())
 }
 
-/// `B`'s values laid out on a wider CSC pattern — `PatternPlan.scatter`.
-///
-/// `(indptr, indices)` is the plan's pattern and `(bp, bi, bx)` is `B`, both
-/// CSC with row indices ascending within each column. Returns the filled value
-/// array together with the number of `B`'s entries that were **not** in the
-/// pattern; a nonzero count leaves the array meaningless and is the caller's
-/// to report, since the message worth printing names the plan.
 #[pyfunction]
 fn pattern_scatter(
     py: Python<'_>,

@@ -21,8 +21,6 @@ import numpy as np
 import polars as pl
 from scipy import stats as _sps
 
-# ---- shared helpers (rank + sort dispatch) -------------------------
-
 
 def _as_array(x) -> np.ndarray:
     if isinstance(x, pl.Series):
@@ -41,20 +39,10 @@ def _rankdata_with_nan(arr: np.ndarray, method: str) -> np.ndarray:
 
 
 def _eager_rank_out(x, arr: np.ndarray):
-    """Wrap an ndarray rank result based on the original input type.
-
-    For Python list / tuple input, return a :class:`pl.Series` with NaN
-    converted to null — so ``mutate(rn=min_rank(x))`` ends up with a
-    proper polars null column instead of a literal NaN value. For
-    ndarray input, return the ndarray unchanged (preserves the
-    lm/Wilcoxon contract used by :func:`hea.R.rank` / :func:`hea.R.signed_rank`).
-    """
+    """Wrap an ndarray rank result based on the original input type."""
     if isinstance(x, (list, tuple)):
         return pl.Series(arr, nan_to_null=True)
     return arr
-
-
-# ---- dplyr rank family ----------------------------------------------
 
 
 def row_number(x=None):
@@ -195,9 +183,6 @@ def ntile(x, n):
     return _eager_rank_out(x, out)
 
 
-# ---- dplyr window / mutate helpers --------------------------------
-
-
 def lag(x, n=1, default=None, order_by=None):
     """dplyr's ``lag()`` — value ``n`` positions before each entry.
 
@@ -318,17 +303,12 @@ def near(x, y, tol=1.5e-8):
     if isinstance(x, pl.Series):
         return (x - y).abs() < tol
     is_ndarray = isinstance(x, np.ndarray)
-    # Scalar shortcut — dplyr's near(1, 1+1e-10) returns a length-1 logical;
-    # in Python, returning a bool is the natural shape for scalar inputs.
     if np.isscalar(x) and np.isscalar(y):
         return bool(abs(float(x) - float(y)) < tol)
     arr = np.asarray(x, dtype=float)
     y_arr = np.asarray(y, dtype=float) if not np.isscalar(y) else y
     out = np.abs(arr - y_arr) < tol
     return out if is_ndarray else pl.Series(out)
-
-
-# ---- dplyr cumulative helpers --------------------------------------
 
 
 def cummean(x):
@@ -371,7 +351,6 @@ def cumall(x):
     ``pl.Series``; list / tuple → ``pl.Series``; ndarray → ``ndarray``.
     """
     if isinstance(x, pl.Expr):
-        # has_false = any FALSE so far; has_na = any NA so far
         has_false = (x == False).fill_null(False).cum_max()
         has_na = x.is_null().cum_max()
         return pl.when(has_false).then(False).when(has_na).then(None).otherwise(True)
@@ -399,11 +378,7 @@ def cumany(x):
 
 
 def _cumall_cumany_eager(x, all_):
-    """Shared eager loop for ``cumall`` (all_=True) and ``cumany`` (all_=False).
-
-    Returns a ``pl.Series`` of Boolean (with null) for Series / list /
-    tuple input, or an object ndarray for ndarray input.
-    """
+    """Shared eager loop for ``cumall`` (all_=True) and ``cumany`` (all_=False)."""
     is_series = isinstance(x, pl.Series)
     is_ndarray = isinstance(x, np.ndarray)
     src = x.to_list() if is_series else list(x)
@@ -426,14 +401,10 @@ def _cumall_cumany_eager(x, all_):
             state = absorb
             out.append(absorb)
         else:
-            # non-absorbing: state is True (cumall) or False (cumany), or None
             out.append(state)
     if is_ndarray:
         return np.asarray(out, dtype=object)
     return pl.Series(out, dtype=pl.Boolean)
-
-
-# ---- dplyr positional pickers (first / last / nth, consecutive_id) -
 
 
 def first(x, default=None, order_by=None, na_rm=True):
@@ -510,14 +481,9 @@ def _first_last_nth_expr(x_expr, k, default, order_by, na_rm):
         src = src.sort_by(ob)
     if na_rm:
         src = src.drop_nulls()
-    # polars' ``slice`` handles negative offsets (from end); slice(-1, 1)
-    # is the last element, slice(0, 1) the first. ``.first()`` on a
-    # 0-length slice (OOB) yields null — no ComputeError, unlike
-    # ``.gather()``.
     val = src.slice(k, 1).first()
     if default is None:
         return val
-    # OOB if ``|k| > len`` for negative k, or ``k >= len`` for non-negative.
     need_len = -k if k < 0 else k + 1
     in_bounds = src.len() >= need_len
     return pl.when(in_bounds).then(val).otherwise(pl.lit(default))
@@ -546,9 +512,6 @@ def _first_last_nth_eager(x, k, default, order_by, na_rm):
     return default
 
 
-# ---- runs / consecutive identity (dplyr) ----------------------------
-
-
 def consecutive_id(*args):
     """dplyr's ``consecutive_id()`` — 0-based id for each run of consecutive
     equal values.
@@ -570,14 +533,12 @@ def consecutive_id(*args):
     if not args:
         raise TypeError("consecutive_id() requires at least one argument")
 
-    # Pure-Expr / column-name path → return an Expr suitable for mutate().
     if all(isinstance(a, (pl.Expr, str)) for a in args):
         exprs = [a if isinstance(a, pl.Expr) else pl.col(a) for a in args]
         if len(exprs) == 1:
             return exprs[0].rle_id()
         return pl.struct(exprs).rle_id()
 
-    # Eager path.
     first = args[0]
     if len(args) == 1:
         if isinstance(first, pl.Series):
@@ -586,7 +547,6 @@ def consecutive_id(*args):
         out = pl.Series(first).rle_id()
         return out.to_numpy() if is_ndarray else out
 
-    # Multiple eager args — combine into a tiny frame, struct-then-rle.
     cols = {}
     for i, a in enumerate(args):
         name = f"__c{i}"

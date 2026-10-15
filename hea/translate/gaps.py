@@ -42,7 +42,6 @@ from pathlib import Path
 
 _KNOWN_KINDS: frozenset[str] = frozenset(
     {
-        # Translation-side
         "parse_error",
         "unknown_function",
         "unknown_verb",
@@ -58,10 +57,8 @@ _KNOWN_KINDS: frozenset[str] = frozenset(
         "with_expression",  # `with(df, expr)` — NSE rewrite not yet built
         "python_keyword_call",  # bare `class(x)`/`lambda(x)` collides with a Python keyword
         "lexer_ambiguity",  # parser/lexer can't disambiguate the input
-        # Runtime-side
         "runtime_error_r",
         "runtime_error_py",
-        # Parity-side
         "result_diff_schema",
         "result_diff_values",
         "result_diff_factor",
@@ -158,7 +155,6 @@ def log_gap(
         rows.append(new)
         _write_all(rows, registry)
         return new
-    # Merge into existing
     existing.last_seen = today
     if notes and notes not in existing.notes:
         existing.notes = (

@@ -19,7 +19,6 @@ Usage in a kernel module::
     ...
     if _rs is not None:
         return _rs(flat, ...).reshape(shape)
-    # else: pure-Python path
 """
 
 from __future__ import annotations
@@ -30,7 +29,6 @@ __all__ = ["HAVE_RS", "rs", "rs_fn"]
 
 
 def _load():
-    # HEA_NO_RS truthy → force the Python path (A/B parity, debugging).
     if os.environ.get("HEA_NO_RS", "").lower() not in ("", "0", "false", "no"):
         return None
     try:

@@ -36,9 +36,6 @@ def sapply(X, FUN, *args, **kwargs):
       matching R's ``sapply`` convention).
     - Mixed → list (R's ``lapply`` fallback).
     """
-    # Iterate respecting R's "elements of X." For a vector/list, it's
-    # the elements. For a polars Series, the values. For a NamedVector,
-    # the values too (names are dropped — sapply returns an unnamed array).
 
     if isinstance(X, NamedVector):
         items = list(X.values)
@@ -60,6 +57,5 @@ def sapply(X, FUN, *args, **kwargs):
     arrs = [np.asarray(r).ravel() for r in results]
     sizes = {len(a) for a in arrs}
     if len(sizes) == 1:
-        # Matrix: columns are X positions (R's convention).
         return np.stack(arrs, axis=1)
     return results  # fall back to a Python list (R's ``lapply`` shape)

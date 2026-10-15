@@ -42,7 +42,6 @@ def _assert_centers(got, exp):
         np.testing.assert_allclose(got, exp, rtol=1e-13)
 
 
-# Three well-separated blobs; explicit centres make every run deterministic.
 def _blobs():
     rng = np.random.default_rng(2026)
     return np.vstack(
@@ -117,14 +116,10 @@ def test_kmeans_explicit_larger_vs_R(algo):
 def test_totss_is_sum_of_within_plus_between():
     x = _blobs()
     z = kmeans(x, _CENTERS, algorithm="Lloyd")
-    # identity that must hold regardless of long-double sum drift
     np.testing.assert_allclose(z.tot_withinss + z.betweenss, z.totss, rtol=1e-12)
     np.testing.assert_allclose(z.withinss.sum(), z.tot_withinss, rtol=1e-12)
 
 
-# --------------------------------------------------------------------------- #
-# nstart RNG seam: draws + achieved cost match R
-# --------------------------------------------------------------------------- #
 @pytest.mark.skipif(not have_rscript(), reason="Rscript not on PATH (install R)")
 @pytest.mark.parametrize(
     "algo,seed,k,nstart",
@@ -160,13 +155,11 @@ def test_kmeans_nstart_cost_vs_R(algo, seed, k, nstart):
         text=True,
         timeout=120,
     ).stdout
-    # achieved within-cluster cost matches R (long-double vs double sum tolerance)
     np.testing.assert_allclose(z.tot_withinss, float(out), rtol=1e-12)
 
 
 @pytest.mark.skipif(not have_rscript(), reason="Rscript not on PATH (install R)")
 def test_kmeans_nstart_draws_match_R():
-    # the RNG seam: hea's sample_int must reproduce R's sample.int(mm, k) stream.
     from hea.R.distributions import _r_rng
 
     set_seed(99)
@@ -186,11 +179,7 @@ def test_kmeans_nstart_draws_match_R():
     assert np.array_equal(draws, r_draws)
 
 
-# --------------------------------------------------------------------------- #
-# object behaviour, k==1, fitted/print, errors
-# --------------------------------------------------------------------------- #
 def test_kmeans_k1_uses_macqueen():
-    # k == 1 forces nmeth=3 (HW Fortran needs k>1); one cluster = all points.
     x = _blobs()
     z = kmeans(x, np.array([[2.0, 2.0]]))
     assert isinstance(z, Kmeans)
@@ -240,12 +229,6 @@ def test_kmeans_column_mismatch_raises():
         kmeans(x, np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 2.0, 2.0]]))
 
 
-# --------------------------------------------------------------------------- #
-# Rust ``kmns`` kernel: A/B 0-ulp vs the pure-Python ``_kmns`` (Hartigan-Wong).
-# Both kernels are called directly (not via the ``_do_one`` seam), so the A/B
-# runs in one process. ``kmns`` is pure IEEE arithmetic (no transcendentals), so
-# rs == python is bit-for-bit on every platform.
-# --------------------------------------------------------------------------- #
 _rs_mod = pytest.importorskip("hea._rs")
 _HAS_RS_KMNS = hasattr(_rs_mod, "kmns")
 
@@ -285,7 +268,6 @@ def test_rs_kmns_matches_python(iter_max):
 
 @pytest.mark.skipif(not _HAS_RS_KMNS, reason="hea._rs.kmns not built")
 def test_rs_kmns_ifault3_k_out_of_range():
-    # k <= 1 or k >= m -> ifault 3, empty arrays (matches _kmns early return).
     x = np.ascontiguousarray(_blobs())
     centers = np.ascontiguousarray(x[:1])
     ifault, cluster, _cen_flat, _nc, _wss, _it = _rs_mod.kmns(x, centers, 1, 10)
@@ -302,8 +284,6 @@ def test_rs_kmns_ifault3_k_out_of_range():
     ],
 )
 def test_rs_lloyd_macqueen_matches_python(algo, rs_name, py_name):
-    # A/B: Rust Lloyd/MacQueen vs the pure-Python kernels. Pure IEEE arithmetic
-    # (no transcendentals) -> 0-ulp on every platform.
     import hea.R.clustering as C
 
     x, centers, k = _hw_fixture()

@@ -16,12 +16,7 @@ import functools
 
 @functools.lru_cache(maxsize=1)
 def _rdatasets_registry() -> dict[str, tuple[str, ...]]:
-    """``{dataset_name: (pkg, ...)}`` from rdatasets.
-
-    Cached: rdatasets's contents don't change at runtime. First call
-    scans ~75 packages × ~30 items each (≈600ms); subsequent are
-    instant. Empty dict if rdatasets isn't installed.
-    """
+    """``{dataset_name: (pkg, ...)}`` from rdatasets."""
     try:
         import rdatasets
     except ImportError:
@@ -37,13 +32,7 @@ def _rdatasets_registry() -> dict[str, tuple[str, ...]]:
 def _bundled_registry() -> dict[str, tuple[str, ...]]:
     """``{dataset_name: (pkg, ...)}`` from the local ``datasets/`` tree
     (CWD-walk via :func:`hea.io._bundled_index`).
-
-    NOT cached — the index is CWD-dependent. ``_bundled_index`` says
-    re-scanning is sub-millisecond, so this stays cheap. Empty dict if
-    no ``datasets/`` directory is reachable from CWD.
     """
-    # Local import: ``hea.translate`` is loaded after ``hea.io``, but
-    # ``_datasets`` itself may be imported at any time, so we defer.
     from hea.io import _bundled_index
 
     return {n: tuple(sorted(pkgs)) for n, pkgs in _bundled_index().items()}
@@ -68,12 +57,8 @@ def dataset_registry() -> dict[str, tuple[str, ...]]:
     return {n: tuple(sorted(pkgs)) for n, pkgs in merged.items()}
 
 
-# Names that should never trigger an autoload lookup even if they match
-# a rdatasets entry. Mix of Python builtins, hea / polars surface, and
-# common short variable names that would cause noisy false positives.
 DATASET_REF_EXCLUSIONS: frozenset[str] = frozenset(
     {
-        # Python builtins
         "True",
         "False",
         "None",
@@ -90,7 +75,6 @@ DATASET_REF_EXCLUSIONS: frozenset[str] = frozenset(
         "bool",
         "type",
         "object",
-        # hea / polars surface
         "hea",
         "pl",
         "col",
@@ -101,16 +85,12 @@ DATASET_REF_EXCLUSIONS: frozenset[str] = frozenset(
         "LazyFrame",
         "Series",
         "Expr",
-        # Common R-side names that map back via the FUNCTION_TABLE
         "case_when",
         "if_else",
         "coalesce",
         "data",
         "first",
         "last",
-        # Single-letter / very-short names — common variable names that
-        # happen to collide with datasets (e.g. ``x`` is a Sloan Digital
-        # Sky Survey dataset; we don't want that triggering).
         "x",
         "y",
         "z",
@@ -142,8 +122,6 @@ DATASET_REF_EXCLUSIONS: frozenset[str] = frozenset(
 )
 
 
-# R's default-loaded packages. ``library()`` for these is redundant; we
-# omit them from autoload preambles even when a dataset resolves there.
 R_DEFAULT_PACKAGES: frozenset[str] = frozenset(
     {
         "base",
@@ -186,7 +164,6 @@ def resolve_dataset(
         if pkg in R_DEFAULT_PACKAGES:
             return None
         return pkg
-    # Ambiguous: prefer a package the user explicitly loaded.
     for p in pkgs:
         if p in loaded_packages and p not in R_DEFAULT_PACKAGES:
             return p

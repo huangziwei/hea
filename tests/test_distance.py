@@ -31,11 +31,6 @@ from hea.R.distance import (
     mahalanobis,
 )
 
-# minkowski is the only metric using ``pow``, and it is 0-ulp to R only when hea
-# reproduces R's ``R_pow`` exactly: that needs the shared platform scalar libm
-# (macOS: Apple libm) for the general path AND the ported integer special-cases
-# (``x*x*x``/``x*x*x*x`` for ``|x|<=11``; per R's arithmetic.c). Off macOS
-# the libm differs, so ``pow`` drifts a few ulp.
 _STRICT = sys.platform == "darwin"
 _RTOL = 1e-14
 
@@ -46,7 +41,6 @@ def _assert_eq(got, exp):
     if _STRICT:
         gb = got.view(np.int64)
         eb = exp.view(np.int64)
-        # NaN bit-patterns: treat any-NaN == any-NaN
         nan_g, nan_e = np.isnan(got), np.isnan(exp)
         assert np.array_equal(nan_g, nan_e), (got, exp)
         mask = ~nan_g
@@ -64,17 +58,10 @@ def _assert_tol(got, exp):
     )
 
 
-# --------------------------------------------------------------------------- #
-# fixed inputs + R-captured pins
-# --------------------------------------------------------------------------- #
-# X1 <- matrix(c(1,2,3, 4,6,8, 1,0,0, 2,2,2), nrow=4, byrow=TRUE)
 _X1 = np.array([[1, 2, 3], [4, 6, 8], [1, 0, 0], [2, 2, 2]], dtype=float)
-# X2 <- matrix(c(1,2,NA, 4,6,8, 1,0,0, 2,NA,2), nrow=4, byrow=TRUE)
 _X2 = np.array([[1, 2, np.nan], [4, 6, 8], [1, 0, 0], [2, np.nan, 2]], dtype=float)
-# X3 <- matrix(c(1,0,1,0, 1,1,0,0, 0,0,1,1), nrow=3, byrow=TRUE)
 _X3 = np.array([[1, 0, 1, 0], [1, 1, 0, 0], [0, 0, 1, 1]], dtype=float)
 
-# as.vector(dist(X1, method=...)) — packed lower triangle, column-major.
 _PINS = {
     "euclidean": (
         _X1,
@@ -169,13 +156,11 @@ def test_dist_pins(name):
 
 
 def test_as_dist_pin():
-    # as.dist(matrix(c(0,2,3, 2,0,4, 3,4,0), 3, byrow=TRUE)) -> c(2,3,4)
     m = np.array([[0, 2, 3], [2, 0, 4], [3, 4, 0]], dtype=float)
     _assert_eq(as_dist(m), [2, 3, 4])
 
 
 def test_as_matrix_dist_pin():
-    # as.matrix(dist(X1)) flattened column-major.
     expected = [
         0,
         7.0710678118654755,
@@ -197,11 +182,6 @@ def test_as_matrix_dist_pin():
     _assert_eq(as_matrix_dist(dist(_X1, "euclidean")).ravel(order="F"), expected)
 
 
-# --------------------------------------------------------------------------- #
-# mahalanobis
-# --------------------------------------------------------------------------- #
-# x <- matrix(c(2,1, 3,4, 5,2, 1,1), nrow=4, byrow=TRUE)
-# center <- c(2.5, 2); S <- matrix(c(2,0.5,0.5,1), 2, 2)
 _MX = np.array([[2, 1], [3, 4], [5, 2], [1, 1]], dtype=float)
 _MCENTER = np.array([2.5, 2.0])
 _MCOV = np.array([[2, 0.5], [0.5, 1]], dtype=float)
@@ -215,7 +195,6 @@ def test_mahalanobis_pin():
 
 
 def test_mahalanobis_inverted_pin():
-    # inverted=TRUE: cov is already the precision matrix.
     _assert_tol(
         mahalanobis(_MX, _MCENTER, np.linalg.inv(_MCOV), inverted=True),
         [1, 4.1428571428571423, 3.5714285714285712, 1.5714285714285712],
@@ -223,7 +202,6 @@ def test_mahalanobis_inverted_pin():
 
 
 def test_mahalanobis_center_false_pin():
-    # center=FALSE -> R isFALSE(center): skip centering.
     _assert_tol(
         mahalanobis(_MX, False, _MCOV),
         [
@@ -236,7 +214,6 @@ def test_mahalanobis_center_false_pin():
 
 
 def test_mahalanobis_vector_input():
-    # is.vector(x): treated as a single row.
     _assert_tol(
         mahalanobis(np.array([4.0, 3.0]), _MCENTER, _MCOV), [1.5714285714285712]
     )
@@ -268,9 +245,6 @@ def test_mahalanobis_vs_live_R():
     _assert_tol(mahalanobis(x, center, cov), expected)
 
 
-# --------------------------------------------------------------------------- #
-# cmdscale (classical MDS) — points compared up to per-column sign
-# --------------------------------------------------------------------------- #
 def _assert_points_up_to_sign(got, exp, atol=1e-8):
     got = np.asarray(got, float)
     exp = np.asarray(exp, float)
@@ -282,9 +256,7 @@ def _assert_points_up_to_sign(got, exp, atol=1e-8):
         assert ok, f"column {j}: {got[:, j]} vs +/-{exp[:, j]}"
 
 
-# 6-point config the cmdscale oracle is built from (two well-separated clusters).
 _XC = np.array([[0, 0], [1, 0], [0, 1], [5, 5], [6, 5], [5, 6]], dtype=float)
-# cmdscale(dist(X), k=2) on the 6-point config.
 _CMD_PTS = np.array(
     [
         -4.0069384267237682,
@@ -332,12 +304,6 @@ def test_cmdscale_from_matrix():
 def test_cmdscale_add_constant():
     res = cmdscale(dist(_XC), k=2, add=True)
     _assert_points_up_to_sign(res["points"], _CMD_PTS, atol=1e-6)
-    # _XC is perfectly Euclidean, so the additive constant is theoretically 0.
-    # ``ac`` is ``max(Re(eigvals(Z)))`` (1:1 with R) of a matrix whose largest
-    # eigenvalue is 0, so the computed value is pure ``dgeev`` noise and varies
-    # by BLAS build: R/hea on Accelerate ~1e-15, OpenBLAS (Linux CI) ~1e-7. The
-    # 1e-6 bound matches the sibling points tolerance and still separates "~0"
-    # from a genuine (O(1)+) additive constant.
     assert abs(res["ac"]) < 1e-6
 
 
@@ -376,9 +342,6 @@ def test_cmdscale_vs_live_R():
     np.testing.assert_allclose(res["eig"], eig, atol=1e-8)
 
 
-# --------------------------------------------------------------------------- #
-# round-trips, object behaviour, errors
-# --------------------------------------------------------------------------- #
 def test_dist_object_is_vector_like():
     d = dist(_X1, "euclidean")
     assert isinstance(d, Dist)
@@ -398,7 +361,6 @@ def test_minkowski_p_stored():
 def test_as_matrix_dist_roundtrip_as_dist():
     d = dist(_X1, "manhattan")
     m = as_matrix_dist(d)
-    # as.dist of the expanded matrix returns the original packed vector.
     _assert_eq(as_dist(m), d.data)
 
 
@@ -414,7 +376,6 @@ def test_labels_dist_default_none():
 
 
 def test_method_partial_match_and_alias():
-    # "euclidian" misspelling alias, and prefix matching ("man" -> manhattan).
     _assert_eq(dist(_X1, "euclidian"), dist(_X1, "euclidean").data)
     _assert_eq(dist(_X1, "man"), dist(_X1, "manhattan").data)
 
@@ -437,18 +398,8 @@ def test_single_row_empty_dist():
     assert d.Size == 1
 
 
-# --------------------------------------------------------------------------- #
-# live-R differential (random inputs, all metrics)
-# --------------------------------------------------------------------------- #
 def _r_dist(mat, method, p=2):
-    """``as.vector(stats::dist(mat, method, p))`` via Rscript on this machine.
-
-    The matrix is embedded as a ``matrix(c(...))`` literal using Python
-    ``float.hex()`` per double (a C99 hex-float literal — bit-exact, unlike a
-    decimal ``repr`` which this R build's ``strtod`` rounds by up to 1 ulp; that
-    lossy transfer, not the kernel, was the arm64 ``*_vs_live_R`` failure). NaN
-    -> R ``NA``; R prints the packed vector with ``%.17g`` (exact f64 round-trip).
-    """
+    """``as.vector(stats::dist(mat, method, p))`` via Rscript on this machine."""
     n, k = mat.shape
     flat = mat.flatten(order="F")
     elems = ",".join("NA" if np.isnan(v) else float(v).hex() for v in flat)
@@ -476,7 +427,6 @@ def _r_dist(mat, method, p=2):
 def test_dist_vs_live_R(method, with_na):
     rng = np.random.default_rng(20260621)
     x = rng.standard_normal((9, 5))
-    # a couple of zeros so 'binary' has signal, and a sign mix for canberra
     x[0, 0] = 0.0
     x[3, 2] = 0.0
     if with_na:
@@ -506,12 +456,6 @@ def test_minkowski_pow_vs_live_R(p):
     _assert_eq(dist(x, method="minkowski", p=p), _r_dist(x, "minkowski", p))
 
 
-# --------------------------------------------------------------------------- #
-# Rust ``cdist`` kernel: A/B 0-ulp vs the pure-Python ``_cdist`` oracle.
-# The pure-Python kernel is the spec (pinned to R above); the Rust kernel must
-# mirror it bit-for-bit. We call BOTH kernels directly (not via the import-time
-# ``_rs_cdist`` seam) so the A/B runs in one process regardless of ``HEA_NO_RS``.
-# --------------------------------------------------------------------------- #
 _rs_mod = pytest.importorskip("hea._rs")
 _HAS_CDIST = hasattr(_rs_mod, "cdist")
 
@@ -564,7 +508,6 @@ def test_rs_cdist_binary_matches_python():
 
 @pytest.mark.skipif(not _HAS_CDIST, reason="hea._rs.cdist not built")
 def test_rs_cdist_n1_empty():
-    # single row -> no pairs -> empty vector (parity at the degenerate edge).
     arr = np.ascontiguousarray(np.array([[1.0, 2.0, 3.0]]))
     rs = np.asarray(_rs_mod.cdist(arr, 0, 2.0))
     assert rs.size == 0

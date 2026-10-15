@@ -19,8 +19,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-# Sentinel for "user didn't pass this kwarg." ``None`` itself is a valid
-# value meaning "explicitly suppress this label."
 _LABEL_MISSING: Any = object()
 
 
@@ -69,9 +67,6 @@ def labs(
         out["caption"] = caption
     if tag is not _LABEL_MISSING:
         out["tag"] = tag
-    # ``color`` and ``colour`` both map to canonical ``"colour"``. When
-    # both are supplied, ``color`` (assigned second) wins — matches the
-    # existing "last assignment wins" semantics asserted in tests.
     if colour is not _LABEL_MISSING:
         out["colour"] = colour
     if color is not _LABEL_MISSING:

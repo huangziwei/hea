@@ -62,9 +62,6 @@ import sys
 
 from ._shared import _rfma
 
-# Accelerate is R's BLAS only on macOS, and its n=4 pair tree was
-# probed on arm64; everywhere else R's ddot is plain sequential at
-# every n (reference BLAS), so the tree must not be applied there.
 _ACCEL_PAIR4 = sys.platform == "darwin" and platform.machine() == "arm64"
 
 
@@ -120,15 +117,7 @@ def _dcopy(n, dx, dy, ox=0, oy=0):
 def _dtrsl(t, n, b, job):
     """LINPACK ``dtrsl`` (src/appl/dtrsl.f): solve ``t*x=b`` (or
     ``t'x=b``) for triangular ``t``, overwriting ``b`` with the solution.
-
-    ``t`` is an ``[row, col]``-indexed matrix (a numpy view is fine — that
-    is the leading-dimension submatrix idiom); only the ``n×n`` leading
-    block is referenced. ``job``: 0 = lower, 1 = upper, 10 = lower
-    transposed, 11 = upper transposed. Returns ``info`` (0, or the
-    1-based index of the first zero diagonal; ``b`` untouched then).
-    The forward solves are the column-oriented ``daxpy`` sweeps of the
-    original — the BLAS calls route through the Accelerate-emulating
-    ``_daxpy``/``_ddot`` above, exactly as R's compiled ``dtrsl`` does."""
+    """
     for info in range(1, n + 1):
         if float(t[info - 1, info - 1]) == 0.0:
             return info
@@ -138,35 +127,27 @@ def _dtrsl(t, n, b, job):
     if (job % 100) // 10 != 0:
         kase += 2
     if kase == 1:
-        # solve t*x=b, t lower triangular
         b[0] = float(b[0]) / float(t[0, 0])
         for j in range(2, n + 1):
             temp = -float(b[j - 2])
-            # daxpy(n-j+1, temp, t(j, j-1), 1, b(j), 1)
             _daxpy(n - j + 1, temp, t[:, j - 2], b, ox=j - 1, oy=j - 1)
             b[j - 1] = float(b[j - 1]) / float(t[j - 1, j - 1])
     elif kase == 2:
-        # solve t*x=b, t upper triangular
         b[n - 1] = float(b[n - 1]) / float(t[n - 1, n - 1])
         for jj in range(2, n + 1):
             j = n - jj + 1
             temp = -float(b[j])
-            # daxpy(j, temp, t(1, j+1), 1, b(1), 1)
             _daxpy(j, temp, t[:, j], b)
             b[j - 1] = float(b[j - 1]) / float(t[j - 1, j - 1])
     elif kase == 3:
-        # solve trans(t)*x=b, t lower triangular
         b[n - 1] = float(b[n - 1]) / float(t[n - 1, n - 1])
         for jj in range(2, n + 1):
             j = n - jj + 1
-            # b(j) -= ddot(jj-1, t(j+1, j), 1, b(j+1), 1)
             b[j - 1] = float(b[j - 1]) - _ddot(jj - 1, t[:, j - 1], b, ox=j, oy=j)
             b[j - 1] = float(b[j - 1]) / float(t[j - 1, j - 1])
     else:
-        # solve trans(t)*x=b, t upper triangular
         b[0] = float(b[0]) / float(t[0, 0])
         for j in range(2, n + 1):
-            # b(j) -= ddot(j-1, t(1, j), 1, b(1), 1)
             b[j - 1] = float(b[j - 1]) - _ddot(j - 1, t[:, j - 1], b)
             b[j - 1] = float(b[j - 1]) / float(t[j - 1, j - 1])
     return 0
@@ -183,7 +164,6 @@ def _dpofa(a, n):
     for j in range(1, n + 1):
         s = 0.0
         for k in range(1, j):
-            # t = a(k,j) - ddot(k-1, a(1,k), 1, a(1,j), 1)
             t = float(a[k - 1, j - 1]) - _ddot(k - 1, a[:, k - 1], a[:, j - 1])
             t /= float(a[k - 1, k - 1])
             a[k - 1, j - 1] = t

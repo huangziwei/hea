@@ -6,7 +6,6 @@ use pyo3::prelude::*;
 
 pub mod mt;
 
-/// Register the RNG class onto the `_rs` module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<mt::RsMt>()?;
     Ok(())

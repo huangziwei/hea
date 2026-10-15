@@ -46,9 +46,6 @@ class _Ref:
     ncmpa: float
 
 
-# AMD 3.3.1 (SuiteSparse 7.6.0). ``head`` is Perm[:8] and ``sha`` the first 16
-# hex digits of sha256 over the full int64 permutation; the rest is AMD's
-# ``Info`` array under its upstream names.
 REF: dict[str, _Ref] = {
     "banded-50-2": _Ref(
         n=50,
@@ -98,7 +95,6 @@ REF: dict[str, _Ref] = {
         dmax=199,
         ncmpa=0,
     ),
-    # the one case that forces a garbage collection (ncmpa = 1)
     "random-400": _Ref(
         n=400,
         head=[26, 56, 91, 97, 24, 190, 146, 90],
@@ -123,7 +119,6 @@ REF: dict[str, _Ref] = {
         dmax=14,
         ncmpa=0,
     ),
-    # one dense row/column — the only case that trips AMD's `dense` threshold
     "arrow-300": _Ref(
         n=300,
         head=[1, 2, 3, 4, 5, 6, 7, 8],
@@ -148,7 +143,6 @@ REF: dict[str, _Ref] = {
         dmax=2,
         ncmpa=0,
     ),
-    # every row has degree 0 — the `deg == 0` init branch, exclusively
     "diagonal-32": _Ref(
         n=32,
         head=[0, 1, 2, 3, 4, 5, 6, 7],
@@ -161,7 +155,6 @@ REF: dict[str, _Ref] = {
         dmax=1,
         ncmpa=0,
     ),
-    # many identical row patterns — hammers supervariable detection
     "kron-duplicate-rows-120": _Ref(
         n=120,
         head=[39, 38, 37, 36, 43, 42, 41, 40],
@@ -240,17 +233,11 @@ CORPUS = corpus()
 @pytest.mark.parametrize("name,M", CORPUS, ids=[n for n, _ in CORPUS])
 @pytest.mark.parametrize("use_long", [False, True])
 def test_amd_matches_suitesparse_760(name, M, use_long):
-    """Permutation and every ``Info`` statistic, bit-exact to C AMD 3.3.1.
-
-    ``use_long`` selects which C build to reproduce. AMD's `hash` is `UInt`,
-    which follows `Int`, so the two builds can only diverge where `hash`
-    overflows; on this corpus they must agree.
-    """
+    """Permutation and every ``Info`` statistic, bit-exact to C AMD 3.3.1."""
     ref = REF[name]
     perm, info = amd_order(M, use_long=use_long)
 
     assert perm.shape == (ref.n,)
-    # a permutation, not just the right values
     np.testing.assert_array_equal(np.sort(perm), np.arange(ref.n))
     np.testing.assert_array_equal(perm[:8], ref.head)
     assert hashlib.sha256(perm.tobytes()).hexdigest()[:16] == ref.sha
@@ -316,8 +303,6 @@ def test_amd_rejects_bad_input():
     with pytest.raises(ValueError, match="out of range"):
         _rs.amd_order(5, indptr, bad, 1)
 
-    # a non-monotone indptr is what would otherwise send the column loop past
-    # the end of `indices`
     bad = indptr.copy()
     bad[2] = 0
     with pytest.raises(ValueError, match="non-decreasing"):
@@ -353,23 +338,6 @@ def test_amd_is_deterministic():
     first = amd_order(M)[0]
     for _ in range(3):
         np.testing.assert_array_equal(amd_order(M)[0], first)
-
-
-# ---------------------------------------------------------------------------
-# cholmod_analyze
-# ---------------------------------------------------------------------------
-#
-# From here on ``scikit-sparse``'s ``F.perm`` *is* the right comparison: it is
-# exactly what ``analyze`` returns, because the weighted postorder has now been
-# composed in. The pins below were taken from ``cholmod_l_analyze`` driven the
-# way the port drives it (``supernodal = CHOLMOD_SIMPLICIAL``, ``nmethods = 1``
-# with ``method[0].ordering = CHOLMOD_AMD``) and each one was cross-checked
-# against ``sksparse.cho_factor(A, order="amd")`` before being written down.
-#
-# The six upstream files this stage ports are byte-identical between v7.6.0 and
-# v7.12.2 apart from ``cholmod_analyze.c`` saving and restoring
-# ``Common->try_catch`` rather than clearing it, which is error-reporting state.
-# So a system CHOLMOD at either tag is a valid oracle here.
 
 
 @dataclass(frozen=True)
@@ -534,13 +502,7 @@ ANALYZE_CORPUS = CORPUS + [
 
 
 def analyze(M, stype: int = 1, **kw):
-    """``cholmod_analyze``, **pinned to AMD** unless told otherwise.
-
-    Every reference in this file was produced with ``nmethods = 1`` and
-    ``method[0].ordering = CHOLMOD_AMD``, so pinning is what makes them the
-    right oracle. The extension itself defaults to ``ordering="best"``, the
-    trial loop; pass it explicitly to exercise that.
-    """
+    """``cholmod_analyze``, **pinned to AMD** unless told otherwise."""
     kw.setdefault("ordering", "amd")
     M = sp.csc_array(M)
     tri = sp.triu(M) if stype > 0 else sp.tril(M)
@@ -553,11 +515,7 @@ def analyze(M, stype: int = 1, **kw):
 @pytest.mark.parametrize("name,M", ANALYZE_CORPUS, ids=[n for n, _ in ANALYZE_CORPUS])
 @pytest.mark.parametrize("stype", [1, -1])
 def test_analyze_matches_cholmod(name, M, stype):
-    """``Perm`` and the per-column nnz of ``L``, bit-exact to CHOLMOD.
-
-    ``stype`` picks which triangle is passed, not which matrix it is, so both
-    readings have to give the same analysis.
-    """
+    """``Perm`` and the per-column nnz of ``L``, bit-exact to CHOLMOD."""
     ref = REF_ANALYZE[name]
     got = analyze(M, stype=stype)
     perm = np.asarray(got["perm"])
@@ -569,8 +527,6 @@ def test_analyze_matches_cholmod(name, M, stype):
     assert hashlib.sha256(perm.tobytes()).hexdigest()[:16] == ref.perm_sha
     assert hashlib.sha256(colcount.tobytes()).hexdigest()[:16] == ref.colcount_sha
 
-    # Common->lnz, ->fl and ->anz as cholmod_rowcolcounts leaves them: the
-    # exact counts, not AMD's upper bounds
     assert got["lnz"] == ref.lnz
     assert got["fl"] == ref.fl
     assert got["anz"] == ref.anz
@@ -632,15 +588,7 @@ def test_analyze_composition_actually_moves_the_amd_ordering():
 def test_analyze_reports_when_cholmod_would_try_metis(name, M):
     """The one place this port's *candidate set* can diverge from a CHOLMOD
     built with the Partition module, reported rather than hidden.
-
-    With ``Common->nmethods == 0`` upstream runs AMD and then breaks out of the
-    method loop if ``fl < 500*lnz`` or ``lnz < 5*anz`` on AMD's own estimates
     (``cholmod_analyze.c:767-781``). When it breaks, both stop at AMD and the
-    answers agree by construction. When it does not, upstream's third method is
-    METIS and this port's is natural, so the two can pick different orderings.
-    ``laplacian3d-24`` is that case: CHOLMOD selects METIS there and gets
-    nnz(L) 1.87M against AMD's 2.30M, while ``laplacian3d-23``, one grid step
-    smaller, still breaks out.
     """
     ref = REF_ANALYZE[name]
     got = analyze(M, ordering="best")
@@ -653,20 +601,7 @@ def test_analyze_reports_when_cholmod_would_try_metis(name, M):
 @pytest.mark.parametrize("name,M", ANALYZE_CORPUS, ids=[n for n, _ in ANALYZE_CORPUS])
 def test_analyze_best_selects_but_does_not_invent(name, M):
     """``ordering="best"`` returns one of the orderings it tried, unchanged.
-
     The trial loop is CHOLMOD's (``cholmod_analyze.c:554-782``): run each
-    method, keep the smallest ``lnz``. Two properties follow, and both are
-    worth holding onto because the loop now decides what every caller of
-    ``hea.sparse`` gets by default. It never returns an analysis that is worse
-    than pinning AMD; and when AMD's break check fires it never *looks* past
-    AMD, which is what keeps the default as cheap as the pinned path on the
-    matrices — every one here — where AMD already wins.
-
-    The second method is METIS, which is upstream's own; it used to be the
-    natural ordering, because this port had no METIS. Selecting METIS is
-    therefore not free the way selecting natural was — it runs
-    ``METIS_NodeND`` — so "never looks past AMD when the break check fires"
-    now guards real work.
     """
     best = analyze(M, ordering="best")
     amd = analyze(M, ordering="amd")
@@ -716,50 +651,6 @@ def test_analyze_rejects_bad_input():
         _rs.analyze(5, bad, indices, 1)
 
 
-# ---------------------------------------------------------------------------
-# cholmod_rowfac
-# ---------------------------------------------------------------------------
-#
-# The pins below are ``cholmod_l_analyze`` + ``cholmod_l_factorize_p`` driven
-# the way the port drives them (``supernodal = CHOLMOD_SIMPLICIAL``,
-# ``nmethods = 1`` with ``method[0].ordering = CHOLMOD_AMD``, every other
-# ``Common`` field at its default), reading ``L``'s raw internal arrays rather
-# than any accessor's re-derivation of them.
-#
-# Two things about this stage are not intuitions and were measured:
-#
-# 1. ``stype`` is **not** immaterial here, unlike at the AMD and analyze stages.
-#    ``cholmod_factorize`` reaches ``rowfac``'s input by one ``ptranspose`` from
-#    a lower ``A`` and by two from an upper one, and the two routes leave the
-#    columns of that input in different orders. The row subtree is gathered in
-#    that order, so the dot products accumulate in a different order and ``L``
-#    differs in the last bit — 1042 of 3702 entries on a 400-node Laplacian.
-#    Both readings are pinned separately for that reason.
-#
-# 2. ``scikit-sparse``'s ``ldl_factor`` defaults to ``lower=True``, i.e.
-#    ``stype = -1``. Comparing it against the ``stype = +1`` factorization looks
-#    like a 1-ulp port defect and is not one.
-#
-# **Why the float pins are tuples.** ``R_MULTSUB`` is ``x [p] -= ax [q] * bx
-# [r]``, and a C compiler fuses that into a single rounding wherever the ISA has
-# a baseline FMA — true on aarch64, false on generic x86-64. So ``L`` is not the
-# same number on the two architectures *for CHOLMOD itself*, and
-# ``numeric::mulsub`` follows it per-arch so that hea matches the CHOLMOD you
-# would actually link on the machine you are on.
-#
-# A single stored digest of ``L``'s bits would therefore be a pin on one
-# machine, and this suite runs on several. Each float pin is instead **both of
-# CHOLMOD's answers**, fused and unfused, and the assertion is membership. That
-# keeps it exact — a structural defect matches neither — with no ``sys.platform``
-# anywhere: the tuple is two arithmetics, not two platforms. Ten of the twenty
-# factorization pins and thirty-two of the forty solve pins have two entries;
-# the rest took no fused step and are the same number either way.
-#
-# The unfused entry is CHOLMOD's, not merely hea's with the fusion switched off:
-# it was checked against upstream built ``-ffp-contract=off``, which is what a
-# baseline x86-64 compiler emits with no flag at all.
-
-
 def _sha(a: np.ndarray) -> str:
     return hashlib.sha256(np.ascontiguousarray(a).tobytes()).hexdigest()[:16]
 
@@ -773,7 +664,6 @@ class _RefFactor:
     lp_sha: str
     lnz_sha: str
     li_sha: str
-    #: both of CHOLMOD's answers -- see the note above on FP contraction
     lx_sha: tuple[str, ...]
     rowfacfl: float
 
@@ -1018,13 +908,7 @@ def factorize(M, stype: int = 1, **kw):
 
 
 def live(got) -> tuple[np.ndarray, np.ndarray]:
-    """The entries ``L`` actually holds.
-
-    ``rowfac`` leaves ``L`` unpacked: column ``j`` runs from ``Lp[j]`` for
-    ``Lnz[j]`` entries, which is ``Lp[j+1]`` only when the columns happen to
-    have been sized exactly. Everything between is untouched allocation and
-    carries whatever the allocator left there, so it is not comparable.
-    """
+    """The entries ``L`` actually holds."""
     lp, lnz = np.asarray(got["Lp"]), np.asarray(got["Lnz"])
     idx = np.concatenate([np.arange(lp[j], lp[j] + lnz[j]) for j in range(len(lnz))])
     return np.asarray(got["Li"])[idx], np.asarray(got["Lx"])[idx]
@@ -1129,7 +1013,6 @@ def test_factorize_beta_shifts_the_diagonal():
 def test_factorize_reports_where_it_stopped_being_positive_definite():
     """Not positive definite is reported through ``L->minor``, not an error —
     ``rowfac`` sets it and carries on (``t_cholmod_rowfac_worker.c:430-434``)."""
-    # eigenvalues 3 and -1: an LDL' exists (D goes negative), an LL' does not
     M = sp.csc_array(np.array([[1.0, 2.0], [2.0, 1.0]]))
     ldl = factorize(M, ordering="natural")
     assert ldl["minor"] == 2
@@ -1137,7 +1020,6 @@ def test_factorize_reports_where_it_stopped_being_positive_definite():
     ll = factorize(M, ordering="natural", final_ll=True)
     assert ll["minor"] == 1
 
-    # an exactly singular matrix stops the LDL' too, at the zero pivot
     S = sp.csc_array(np.array([[1.0, 1.0], [1.0, 1.0]]))
     assert factorize(S, ordering="natural")["minor"] == 1
 
@@ -1155,10 +1037,6 @@ def test_factorize_empty_and_singleton():
 
 
 def test_a_square_stype_zero_input_factorizes_aat():
-    # `stype == 0` means "unsymmetric", and CHOLMOD factorizes ``L L' = A A'``
-    # for it. On a square input that is a legal request, not a malformed one:
-    # here ``A`` is the identity, so ``A A'`` is too and ``L`` comes back with
-    # one entry per column.
     ip = np.array([0, 1, 2], dtype=np.int64)
     ii = np.array([0, 1], dtype=np.int64)
     ax = np.array([1.0, 1.0])
@@ -1208,7 +1086,6 @@ def test_factorize_rejects_bad_input():
 
 @dataclass(frozen=True)
 class _RefSolve:
-    #: both of CHOLMOD's answers -- see the note above on FP contraction
     by_rank: tuple[str, ...]
     by_system: tuple[str, ...]
     half_log_det: float
@@ -1476,13 +1353,6 @@ def solve_rhs(n: int, nrhs: int) -> np.ndarray:
 def cho(M, stype: int = 1, use_ll: bool = False, **kw):
     """A factor of the stored triangle, through the public facade, **pinned to
     the simplicial path** unless told otherwise.
-
-    The references in this file were generated with ``supernodal =
-    CHOLMOD_SIMPLICIAL``, so pinning is what makes them the right oracle — the
-    supernodal factorization computes the same ``L`` in a different arithmetic
-    order and does not reproduce them bit for bit. ``hea.sparse`` itself
-    defaults to ``CHOLMOD_AUTO``; :func:`test_supernodal_and_simplicial_agree`
-    is what covers that.
     """
     kw.setdefault("supernodal", "simplicial")
     tri = sp.csc_array((sp.triu(M) if stype > 0 else sp.tril(M)).tocsc())
@@ -1517,18 +1387,7 @@ def test_solve_matches_cholmod(name, M, stype, use_ll):
 @pytest.mark.parametrize("stype", [1, -1])
 def test_supernodal_and_simplicial_agree(name, M, stype):
     """The two factorizations are the same factorization.
-
-    ``hea.sparse`` picks between them the way CHOLMOD does — supernodal when
-    the analysis reports at least 40 flops per nonzero of ``L``
     (``cholmod_analyze.c:887-891``) — and it is worth 4x on the matrices that
-    trip it. Which one ran must not be observable in the answer: same ``L``
-    (same pattern, and the supernodal one is pruned of the entries relaxed
-    amalgamation added), same permutation, same log-determinant, same solves.
-
-    ``L`` is compared exactly on *pattern* and to a tolerance on *values*:
-    a different arithmetic order gives different last bits, which is why the
-    bit-exactness pins above run simplicial. Agreement with CHOLMOD's own
-    supernodal, bit for bit, is checked outside this suite.
     """
     n = M.shape[0]
     if n == 0:
@@ -1632,9 +1491,6 @@ def test_solve_accepts_the_full_matrix_or_its_triangle():
     for stype in (1, -1):
         full = hea.sparse.Factor(M, lower=stype < 0, use_ll=False).solve(b)
         np.testing.assert_array_equal(cho(M, stype).solve(b), full)
-    # ...but the two *stypes* are not interchangeable: cholmod_factorize
-    # reaches rowfac's input by one ptranspose from a lower A and two from an
-    # upper one, so the dot products accumulate in a different order.
     assert not np.array_equal(cho(M, 1).solve(b), cho(M, -1).solve(b))
 
 
@@ -1675,21 +1531,10 @@ def test_cho_solve_one_shot_matches_the_factor():
 
 
 def test_refactorize_accepts_a_pattern_that_shrank():
-    """``factorize`` takes ``A``'s pattern, not just its values.
-
-    A caller that builds ``A`` as a product does not control its pattern: an
-    entry that comes out numerically zero is not emitted at all. ``gmm``'s
-    ``M = Λ Zᵀ Z Λᵀ + I`` goes block-diagonal the moment the optimizer tries a
-    zero variance component, so the same factor is handed 72 nonzeros and then
-    36. That has to keep working -- ``cholmod_factorize`` is handed the whole
-    ``A`` for exactly this reason -- and it has to keep being *right*, which is
-    what the dense comparison below checks.
-    """
+    """``factorize`` takes ``A``'s pattern, not just its values."""
     full = sp.csc_array(np.array([[4.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]]))
     F = hea.sparse.cho_factor(full)
 
-    # the same matrix with its off-diagonal numerically zero -- and therefore
-    # structurally absent, which is what scipy hands back
     thin = sp.csc_array(np.diag([4.0, 3.0, 2.0]))
     assert thin.nnz < full.nnz
     F.factorize(thin)
@@ -1701,7 +1546,6 @@ def test_refactorize_accepts_a_pattern_that_shrank():
     np.testing.assert_allclose(
         F.half_log_det(), 0.5 * np.linalg.slogdet(thin.toarray())[1], rtol=1e-12
     )
-    # and it goes back
     F.factorize(full)
     np.testing.assert_allclose(
         F.solve(b), np.linalg.solve(full.toarray(), b), atol=1e-12
@@ -1712,11 +1556,6 @@ def test_refactorize_grows_the_pattern_on_the_simplicial_path():
     """A *wider* ``A`` is factorized, not refused — because ``rowfac`` derives
     each row's pattern from ``A`` and the etree as it goes and grows ``L`` when
     it has to. That is upstream's behaviour and it is load-bearing.
-
-    The shape is ``nlme::Machines`` with ``(Machine|Worker)``: no observation is
-    on two machines at once, so each worker's ``Zᵀ Z`` block has a structural
-    zero off the diagonal, and the moment a correlation parameter goes nonzero
-    ``Λ Zᵀ Z Λᵀ`` fills it in. Refusing that broke the fit outright.
     """
     ztz = np.array([[9.0, 3, 3], [3, 3, 0], [3, 0, 3]])
     lam = np.array([[1.0, 0, 0], [0.3, 1, 0], [0.2, 0.4, 1]])
@@ -1735,7 +1574,6 @@ def test_refactorize_grows_the_pattern_on_the_simplicial_path():
     np.testing.assert_allclose(
         F.half_log_det(), 0.5 * np.linalg.slogdet(wide.toarray())[1], rtol=1e-12
     )
-    # and back down again
     F.factorize(narrow)
     np.testing.assert_allclose(
         F.solve(b), np.linalg.solve(narrow.toarray(), b), atol=1e-12
@@ -1743,15 +1581,7 @@ def test_refactorize_grows_the_pattern_on_the_simplicial_path():
 
 
 def test_refactorize_reanalyzes_when_the_supernodes_cannot_hold_the_pattern():
-    """The supernodal path grows too — by re-analyzing, not by refusing.
-
-    Its supernodes fix where every entry of ``L`` lives, so unlike ``rowfac`` it
-    cannot absorb a wider ``A`` in place. Refusing was the first fix and it was
-    wrong: it broke ``InstEval`` with three crossed grouping factors, where the
-    pattern grows on the supernodal side. Redoing the analysis is what
-    ``cholmod_analyze`` + ``cholmod_factorize`` amount to, and it is bounded —
-    a pattern can only grow up to the structural product that produced it.
-    """
+    """The supernodal path grows too — by re-analyzing, not by refusing."""
     ztz = np.array([[9.0, 3, 3], [3, 3, 0], [3, 0, 3]])
     lam = np.array([[1.0, 0, 0], [0.3, 1, 0], [0.2, 0.4, 1]])
     narrow = sp.csc_array(ztz + np.eye(3))
@@ -1769,7 +1599,6 @@ def test_refactorize_reanalyzes_when_the_supernodes_cannot_hold_the_pattern():
         np.testing.assert_allclose(
             F.half_log_det(), 0.5 * np.linalg.slogdet(wide.toarray())[1], rtol=1e-12
         )
-        # L still factors the permuted matrix after a re-analysis
         p = F.P
         ld = F.L.toarray()
         np.testing.assert_allclose(ld @ ld.T, wide.toarray()[np.ix_(p, p)], atol=1e-12)

@@ -23,10 +23,7 @@ from .stat import Stat
 
 
 def _broadcast_pair(value):
-    """Accept a scalar, ``None``, or 2-element sequence; return ``(vx, vy)``.
-
-    Lets ``bins=30`` mean ``(30, 30)`` and ``binwidth=(0.1, 0.05)`` route
-    distinct widths to each axis."""
+    """Accept a scalar, ``None``, or 2-element sequence; return ``(vx, vy)``."""
     if value is None:
         return None, None
     if isinstance(value, (tuple, list)):
@@ -43,9 +40,6 @@ class StatBin2d(Stat):
     bins: int | tuple[int, int] | None = None
     binwidth: float | tuple[float, float] | None = None
     drop: bool = True
-    # Title for the colorbar when fill is auto-mapped to count by this stat
-    # (no user fill mapping). Mirrors ggplot2's ``after_stat(count)``
-    # default — the colorbar reads "count", not "fill".
     default_fill_label: str = "count"
 
     def compute_group(self, data, params):
@@ -60,7 +54,6 @@ class StatBin2d(Stat):
 
         x_breaks = self._breaks_axis(x, axis="x")
         y_breaks = self._breaks_axis(y, axis="y")
-        # numpy histogram2d returns counts in shape (n_x, n_y).
         counts, _, _ = np.histogram2d(x, y, bins=[x_breaks, y_breaks])
 
         x_mids = (x_breaks[:-1] + x_breaks[1:]) / 2
@@ -74,7 +67,6 @@ class StatBin2d(Stat):
         total = float(flat.sum())
         density = flat / total if total > 0 else flat
 
-        # ``ncount`` / ``ndensity`` — per-group normalised forms (peak=1).
         max_count = float(np.abs(flat).max()) if len(flat) else 0.0
         max_density = float(np.abs(density).max()) if len(density) else 0.0
         ncount = flat / max_count if max_count > 0 else flat.astype(float)
@@ -90,8 +82,6 @@ class StatBin2d(Stat):
                 "density": density.astype(float),
                 "ncount": ncount.astype(float),
                 "ndensity": ndensity.astype(float),
-                # Default fill = count so ``geom_bin2d()`` colours bins by
-                # density without the user needing ``aes(fill=after_stat(count))``.
                 "fill": flat.astype(float),
             }
         )
@@ -105,8 +95,6 @@ class StatBin2d(Stat):
         bw_x, bw_y = _broadcast_pair(self.binwidth)
         bw = bw_x if axis == "x" else bw_y
         if bw is not None:
-            # Same boundary convention as ``stat_bin``: bins centered on
-            # multiples of ``binwidth`` (boundary = binwidth/2).
             boundary = bw / 2
             shift = np.floor((a_min - boundary) / bw)
             start = boundary + shift * bw
@@ -172,15 +160,7 @@ class StatBinhex(Stat):
 
 
 def _matplotlib_hexbin(x, y, *, gridsize):
-    """Compute hex bins via matplotlib's ``hexbin`` in a hidden figure.
-
-    Returns ``(offsets, counts, hex_width, hex_height)`` — offsets are
-    hex centres in data coordinates, counts are per-hex sample counts,
-    and the width/height describe the (data-units) bounding box of one
-    hex polygon. matplotlib's hexbin runs the standard skewed-grid
-    algorithm and yields polygon shapes in data coords (matching what
-    we'd want to re-render via ``PolyCollection``).
-    """
+    """Compute hex bins via matplotlib's ``hexbin`` in a hidden figure."""
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots()

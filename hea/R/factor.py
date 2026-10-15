@@ -11,12 +11,11 @@ from __future__ import annotations
 
 import polars as pl
 
+from .._polars_compat import cat_pool
 from ..formula import set_ordered_cols
 
 
 def _label_key_to_str(k):
-    # polars casts bool to lowercase "true"/"false", but str(True) is "True".
-    # Match polars so factor(col != x, labels={False: ..., True: ...}) works.
     if isinstance(k, bool):
         return "true" if k else "false"
     return str(k)
@@ -68,8 +67,6 @@ class _LazyFactor:
                         "factor(df['col'])."
                     )
                 src = df[col_name]
-                # R's factor() sorts numerically when the input is numeric
-                # (then string-casts); only character/factor inputs sort lex.
                 if src.dtype.is_numeric():
                     levels_list = [
                         str(v) for v in src.drop_nulls().unique().sort().to_list()
@@ -176,8 +173,6 @@ def factor(
         out = s.replace_strict(old, new, return_dtype=pl.Enum(new))
     else:
         if levels is None:
-            # R's factor() sorts numerically when input is numeric
-            # (then string-casts); only character/factor inputs sort lex.
             if series.dtype.is_numeric():
                 levels_list = [
                     str(v) for v in series.drop_nulls().unique().sort().to_list()
@@ -197,10 +192,6 @@ def factor(
 
     result = _HeaSeries._from_pyseries(out._s)
     if ordered:
-        # Local marker so unnamed Series (factor(bare_list, ordered=True)
-        # has empty name → can't go in _ORDERED_COLS_CV) still print with
-        # ``Levels: a < b < c``. Lost on derived ops, which is fine for
-        # the print-after-construction use case.
         result._hea_ordered = True
     return result
 
@@ -245,7 +236,7 @@ def levels(x):
         if isinstance(x.dtype, pl.Enum):
             return x.dtype.categories.to_list()
         if isinstance(x.dtype, pl.Categorical):
-            return x.cat.get_categories().to_list()
+            return cat_pool(x).to_list()
     return None
 
 
@@ -317,7 +308,6 @@ def interaction(*args, drop=False, sep=".", lex_order=False):
         combined = pl.concat_str(col_exprs, separator=sep)
         return combined.cast(pl.Categorical)
 
-    # Eager path — compute Cartesian-product / observed levels explicitly.
     from itertools import product as _product
 
     str_cols: list[list] = []
@@ -351,9 +341,6 @@ def interaction(*args, drop=False, sep=".", lex_order=False):
                 seen_lvl[v] = None
         levels = list(seen_lvl.keys())
     else:
-        # R's lex.order=FALSE has the FIRST factor varying fastest;
-        # itertools.product varies the LAST iterable fastest, so we
-        # reverse both the input list and each output tuple.
         levels = [
             sep.join(reversed(combo)) for combo in _product(*reversed(levels_per_col))
         ]

@@ -24,11 +24,6 @@ from .geom import Geom
 _PT_PER_MM = 72.27 / 25.4
 
 
-# ---------------------------------------------------------------------------
-# Hexagon geom — draws a regular hex polygon per bin centre.
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class GeomHex(Geom):
     default_aes: dict = field(
@@ -50,9 +45,6 @@ class GeomHex(Geom):
         x = data["x"].to_numpy().astype(float)
         y = data["y"].to_numpy().astype(float)
         n = len(x)
-        # Width / height of the hex polygon in data units. Stat output
-        # carries these per-row (constant across rows for a given panel)
-        # so a future ``coord_fixed`` could override on the geom side.
         w = (
             data["width"].to_numpy().astype(float)
             if "width" in data.columns
@@ -64,10 +56,6 @@ class GeomHex(Geom):
             else np.ones(n)
         )
 
-        # Pointy-top hex polygon, vertices in CCW order relative to centre:
-        # top, upper-right, lower-right, bottom, lower-left, upper-left.
-        # Width is the horizontal extent (between the two vertical edges);
-        # height is the vertical extent (top vertex to bottom vertex).
         rel = np.array(
             [
                 [0.0, 0.5],
@@ -95,7 +83,6 @@ class GeomHex(Geom):
             alpha=alpha,
         )
         ax.add_collection(coll)
-        # PolyCollection doesn't auto-update data limits.
         ax.update_datalim(
             [
                 (float(polygons[:, :, 0].min()), float(polygons[:, :, 1].min())),
@@ -103,11 +90,6 @@ class GeomHex(Geom):
             ]
         )
         ax.autoscale_view()
-
-
-# ---------------------------------------------------------------------------
-# Helpers (mirrors rect.py's variants — kept local to avoid coupling).
-# ---------------------------------------------------------------------------
 
 
 def _scalar(df, col, default):
@@ -134,11 +116,6 @@ def _per_row_color(df, col, default, *, missing_value=None):
         only = next(iter(distinct))
         return only if only == "none" else r_color(only)
     return [v if v == "none" else r_color(v) for v in vals]
-
-
-# ---------------------------------------------------------------------------
-# Factories
-# ---------------------------------------------------------------------------
 
 
 def geom_hex(

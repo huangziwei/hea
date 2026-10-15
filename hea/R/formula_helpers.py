@@ -77,11 +77,6 @@ __all__ = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Formula algebra — operate on hea's canonical formula strings.
-# ---------------------------------------------------------------------------
-
-
 def _as_formula_node(obj) -> Formula:
     """Coerce ``obj`` (a formula string or already-parsed :class:`Formula`) to a
     :class:`hea.formula.Formula` AST."""
@@ -135,7 +130,6 @@ def reformulate(termlabels, response=None, intercept=True, env=None) -> str:
     termtext = "+".join(labels)
     if not intercept:
         termtext = f"{termtext} - 1"
-    # str2lang(termtext): parse the RHS, then canonicalize via deparse.
     rhs_str = deparse(parse(termtext).rhs)
     if response is None:
         return f"~{rhs_str}"
@@ -299,11 +293,6 @@ def get_all_vars(formula, data) -> pl.DataFrame:
     return data.select(names)
 
 
-# ---------------------------------------------------------------------------
-# NA handling — nafns.R
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class NAAction:
     """R's ``na.action`` index object (class ``"omit"`` / ``"exclude"``).
@@ -436,11 +425,6 @@ def naprint(x, **kwargs) -> str:
     return f"{n} {noun} deleted due to missingness"
 
 
-# ---------------------------------------------------------------------------
-# Model-frame class — models.R
-# ---------------------------------------------------------------------------
-
-
 def _series_is_ordered(x: pl.Series) -> bool:
     """Whether a hea factor Series is an R-style *ordered* factor — the
     ``_hea_ordered`` local marker (from ``ordered()``) or the column name in the
@@ -469,10 +453,6 @@ def MFclass(x) -> str:
         if dt == pl.Boolean:
             return "logical"
         if isinstance(dt, (pl.Categorical, pl.Enum)):
-            # hea represents *both* ordered and unordered factors as a polars
-            # Enum; the ordered signal is the ``_hea_ordered`` local marker
-            # (set by ``ordered()``) or the column name in the ``_ORDERED_COLS``
-            # context — matching how the formula engine detects ordered factors.
             if _series_is_ordered(x):
                 return "ordered"
             return "factor"
@@ -491,11 +471,6 @@ def MFclass(x) -> str:
             return f"nmatrix.{arr.shape[1]}"
         return "numeric"
     return "other"
-
-
-# ---------------------------------------------------------------------------
-# Orthogonal polynomials — contr.poly.R
-# ---------------------------------------------------------------------------
 
 
 class Poly(np.ndarray):
@@ -599,7 +574,6 @@ def poly(x, *args, degree=1, coefs=None, raw=False, simple=False):
     ≤2-ulp lm-QR/FMA residual; ``raw`` and prediction are 0-ulp. ``simple=True``
     returns a bare ndarray (no ``coefs`` / class), as in R.
     """
-    # `...`: an unnamed scalar is the degree; anything else → polym.
     if args:
         if len(args) == 1 and np.ndim(args[0]) == 0:
             degree = args[0]
@@ -638,8 +612,6 @@ def _expand_grid_degrees(nd: int, degree: int) -> np.ndarray:
     variable varies fastest. Returns an ``(m, nd)`` integer array."""
     vals = np.arange(degree + 1)
     grids = np.meshgrid(*([vals] * nd), indexing="ij")
-    # meshgrid(indexing="ij") makes the LAST axis vary fastest; expand.grid
-    # varies the FIRST fastest, so reverse the column stack order accordingly.
     cols = [g.reshape(-1, order="F") for g in grids]
     return np.column_stack(cols)
 

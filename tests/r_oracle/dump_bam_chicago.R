@@ -15,12 +15,12 @@ ap <- na.omit(chicago[, c("death", "pm10median", "o3median",
                           "so2median", "time", "tmpd")])
 
 cat("=== chicago after na.omit:", nrow(ap), "rows ===\n")
-write.csv(ap, "/Users/ziweih/Works/hea/tests/fixtures/chicago/data.csv",
+write.csv(ap, "tests/fixtures/chicago/data.csv",
           row.names = FALSE)
 
 dump_one <- function(name, model_fn) {
   cat("\n=== fitting", name, "===\n")
-  out_dir <- paste0("/Users/ziweih/Works/hea/tests/fixtures/chicago/", name)
+  out_dir <- paste0("tests/fixtures/chicago/", name)
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   m <- model_fn()
   cat("  iterations:", m$iter, "\n")

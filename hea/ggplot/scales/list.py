@@ -106,15 +106,6 @@ class ScalesList:
             if is_discrete:
                 from .discrete import ScaleDiscreteColor
 
-                # ggplot2 3.4+ dispatches ordered factors to
-                # ``scale_*_ordinal`` (viridis-backed) and unordered
-                # factors to ``scale_*_discrete`` (hue-backed). In
-                # polars, ``pl.Enum`` is the ordered case (carries a
-                # declared category order); ``Categorical``/``Utf8``
-                # are unordered. Mirror the dispatch here so e.g.
-                # ``diamonds.clarity`` (Enum) gets viridis by default
-                # while ``mtcars.cyl`` (numeric → unordered when cast)
-                # gets hue.
                 if isinstance(dtype, pl.Enum):
                     from ._palettes import viridis_pal_discrete
 
@@ -148,10 +139,6 @@ class ScalesList:
                     palette=rescale_pal((1.0, 6.0)),
                 )
             elif is_discrete:
-                # ggplot2 4.0 area-maps discrete size: per-level radii are
-                # ``sqrt(linspace(2², 6², n))`` so visual areas (not radii)
-                # space evenly. Linear-radius spacing would make the
-                # smallest level vanish next to the largest.
                 sc = ScaleDiscreteColor(
                     aesthetics=("size",),
                     palette=area_pal_discrete((2.0, 6.0)),
@@ -172,7 +159,6 @@ class ScalesList:
                     palette=alpha_pal((0.1, 1.0)),
                 )
             elif is_discrete:
-                # ggplot2 ``scale_alpha_ordinal``: ``seq(0.1, 1, length.out=n)``.
                 sc = ScaleDiscreteColor(
                     aesthetics=("alpha",),
                     palette=rescale_pal_discrete((0.1, 1.0)),
@@ -221,8 +207,6 @@ class ScalesList:
         """Independent copy — each ``draw()`` builds fresh scales so repeated
         builds don't accumulate state."""
         new = ScalesList()
-        # Preserve sharing: same Scale instance bound to multiple aesthetics
-        # ends up shared in the copy too.
         seen: dict[int, Scale] = {}
         for aes, sc in self._by_aes.items():
             if id(sc) in seen:

@@ -34,18 +34,6 @@ use std::borrow::Cow;
 
 use super::symbolic::{transpose_unsym, Sparse};
 
-/// `cholmod_aat` for a pattern `C = A A'`.
-///
-/// `A` must have `stype == 0`. Returns an `n`-by-`n` pattern matrix, `n` being
-/// `A->nrow`, with `stype == 0` — upstream sets `C->stype = 0` and leaves the
-/// caller to read it as the symmetric thing it is.
-///
-/// The two passes are upstream's and are kept apart for its reason: the first
-/// counts `nnz(C)` so `C` can be allocated once, and it marks with
-/// `jmark = -j-2` — always negative, and different for every column — so the
-/// same `W` serves as "seen in this column" without being cleared per column.
-/// The second pass re-uses `W` as "position of row `i` within the current
-/// column of `C`", which is why it is left holding negatives on entry.
 pub fn aat(a: &Sparse, mode: i32) -> Sparse<'static> {
     debug_assert!(a.stype == 0, "cholmod_aat wants an unsymmetric A");
     let mode = mode.clamp(-2, 0);
@@ -128,9 +116,6 @@ mod tests {
     use super::super::testcorpus::corpus;
     use super::*;
 
-    /// A rectangular pattern with `nrow` rows and `ncol` columns, built from an
-    /// edge list so the corpus can be reused for a shape it was not written
-    /// for.
     fn rect(nrow: usize, ncol: usize, edges: &[(usize, usize)]) -> Sparse<'static> {
         let mut cols: Vec<Vec<i64>> = vec![Vec::new(); ncol];
         for &(i, j) in edges {
@@ -158,7 +143,6 @@ mod tests {
         }
     }
 
-    /// `A A'` as a dense boolean matrix, the definition rather than the port.
     fn dense_aat(a: &Sparse) -> Vec<Vec<bool>> {
         let n = a.nrow;
         let mut out = vec![vec![false; n]; n];

@@ -34,9 +34,6 @@ from .lbfgsb import lbfgsb as _lbfgsb_driver
 from .uncmin import fdhess as _fdhess
 from .uncmin import optif9 as _optif9
 
-# Rust kernels — None when the extension is absent/disabled, in which
-# case the pure-Python optimizer loops below run unchanged
-# (bit-identical, just slower; tests/test_rs_parity.py pins rs == py).
 _rs_optif9 = rs_fn("optif9")
 _rs_lbfgsb = rs_fn("lbfgsb_drive")
 _rs_fdhess = rs_fn("uncmin_fdhess")
@@ -240,13 +237,10 @@ def nlm(
     if math.isnan(fscale):
         raise ValueError("invalid NA value in parameter")
     if stepmax is None:
-        # nlm.R default: max(1000*sqrt(sum((p/typsize)^2)), 1000)
         stepmax = max(1000.0 * math.sqrt(float(np.sum((x / typsiz) ** 2))), 1000.0)
     omsg = msg
     want_hessian = bool(hessian)
 
-    # force one evaluation to check for gradient and hessian (this one
-    # is outside the cache, exactly like the C's probe at :790)
     iagflg = 0
     iahflg = 0
     have_gradient = 0
@@ -286,8 +280,7 @@ def nlm(
     iexp = 0 if iahflg else 1  # function calls are expensive
     dlt = 1.0
     if _rs_optif9 is not None:
-        # rust d2fcn contract: return the n×n Hessian flat column-major
-        # (lower triangle read), vs the Python fill-in-place signature
+
         def _d2_flat(xv):
             a = np.zeros((n, n))
             state.d2fcn(xv, a)
@@ -393,7 +386,6 @@ def _optim_fmingr(p, df, fn, gr, fnscale, parscale, ndeps, n, usebounds, lower, 
         for i in range(n):
             df[i] = float(s[i]) * float(parscale[i]) / fnscale
         return
-    # numerical derivatives
     x = np.array([float(p[i]) * float(parscale[i]) for i in range(n)])
     if not usebounds:
         for i in range(n):
@@ -485,7 +477,6 @@ def optim(
         )
     lower = np.broadcast_to(np.asarray(lower, dtype=float), (npar,)).astype(float)
     upper = np.broadcast_to(np.asarray(upper, dtype=float), (npar,)).astype(float)
-    # --- stats optim.c L-BFGS-B branch (:346) ---
     trace = int(con["trace"])
     fnscale = float(con["fnscale"])
     parscale = np.asarray(con["parscale"], dtype=float).ravel()
@@ -518,7 +509,7 @@ def optim(
         _optim_fmingr(p, df, fn, gr, fnscale, parscale, ndeps, npar, True, lo, up)
 
     if _rs_lbfgsb is not None and trace == 0:
-        # rust fmingr contract: RETURN the scaled gradient
+
         def _gr_ret(p):
             df = np.zeros(npar)
             fmingr(p, df)
@@ -587,14 +578,12 @@ def optimHess(par, fn, gr=None, control=None):
         dpar[i] = float(dpar[i]) - 2 * eps
         fmingr(dpar, df2)
         for j in range(npar):
-            # column-major a[i*npar + j] == ans[j, i]
             ans[j, i] = (
                 fnscale
                 * (float(df1[j]) - float(df2[j]))
                 / (2 * eps * float(parscale[i]) * float(parscale[j]))
             )
         dpar[i] = float(dpar[i]) + eps
-    # symmetrize
     for i in range(npar):
         for j in range(i):
             tmp = 0.5 * (float(ans[j, i]) + float(ans[i, j]))

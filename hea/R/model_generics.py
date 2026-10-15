@@ -152,7 +152,6 @@ def resid(model, type=None, scaled=False):
         raise TypeError("resid(): scaled= is only supported for mixed models (gmm)")
     if hasattr(model, "residuals_of"):
         if type is None:
-            # lme4 default: LMM "response", GLMM (and glm/gam/bam) "deviance".
             is_glmm_fn = getattr(model, "_is_glmm", None)
             is_lmm = is_gmm and is_glmm_fn is not None and not is_glmm_fn()
             type = "response" if is_lmm else "deviance"
@@ -174,12 +173,8 @@ def resid(model, type=None, scaled=False):
     if type in (None, "response") or (is_lm and type == "working"):
         arr = raw
     elif is_lm and type in ("pearson", "deviance"):
-        # residuals.lm: weighted residuals √wᵢ·rᵢ (== raw when unweighted)
         arr = raw * np.sqrt(model._w)
     elif is_lm and type == "partial":
-        # residuals.lm(type="partial"): component-plus-residual, one column
-        # per RHS term. Returns a 2-D frame (n × nterms) like R's matrix —
-        # not a 1-D vector — so return early, padding handled inside.
         return _lm_partial_residuals(model, raw)
     else:
         allowed = (
@@ -191,9 +186,6 @@ def resid(model, type=None, scaled=False):
             f"resid(): type={type!r} not supported for "
             f"{model.__class__.__name__} (only {allowed})"
         )
-    # R's na.action="exclude" pads residuals back to the model-frame length
-    # with NA (naresid). ``_na_pad`` is a no-op for omit/fail and absent on
-    # models without na.action support, so this is transparent otherwise.
     pad = getattr(model, "_na_pad", None)
     return pad(arr) if pad is not None else arr
 
@@ -204,20 +196,7 @@ def residuals(model, type=None, scaled=False):
 
 
 def _lm_partial_residuals(model, raw):
-    """R: ``residuals.lm(type="partial")`` — component-plus-residual matrix.
-
-    For each RHS term ``j`` the partial residual is the raw residual plus
-    that term's centered contribution, ``r + predict(type="terms")[, j]``
-    (R's CR-plot input). ``model._predict_terms()`` already returns the
-    centered per-term contributions (and the overall ``constant``), so this
-    just adds ``raw`` to each column. Returns a ``hea.DataFrame`` with one
-    column per term label and ``.constant`` carried through — mirroring R's
-    named matrix with its ``"constant"`` attribute.
-
-    For ``na.action="exclude"`` each column is padded back to the
-    model-frame length with NA (R applies ``naresid`` then adds the already
-    ``napredict``-padded terms).
-    """
+    """R: ``residuals.lm(type="partial")`` — component-plus-residual matrix."""
     terms = model._predict_terms()  # centered per-term contributions
     pad = getattr(model, "_na_pad", None)
     cols = {}
@@ -255,8 +234,6 @@ def fitted(model):
                 raise TypeError(
                     f"fitted(): {model.__class__.__name__} has no fitted values"
                 )
-    # na.action="exclude" pads fitted values back to model-frame length (R's
-    # napredict); ``_na_pad`` is a no-op otherwise / absent on other models.
     pad = getattr(model, "_na_pad", None)
     return pad(arr) if pad is not None else arr
 
@@ -293,8 +270,6 @@ def confint(model, level=0.95, **kwargs):
     * Other model types — return ``model.ci_bhat`` when ``level=0.95``;
       otherwise raise.
     """
-    # Profile objects + gmm expose their own ``confint`` — use it (and pass the
-    # lme4 keyword surface through for gmm). Mirrors R's S3 confint dispatch.
     if (
         hasattr(model, "confint")
         and not hasattr(model, "ci_bhat")
@@ -537,7 +512,6 @@ def simulate(model, nsim=1, seed=None, **kwargs):
     """
     from .rng import RMersenneTwister
 
-    # gmm carries its own simulate.merMod (RE + per-family draws); use it.
     if hasattr(model, "simulate") and model.__class__.__name__ == "gmm":
         return model.simulate(nsim=nsim, seed=seed, **kwargs)
 
@@ -555,7 +529,6 @@ def simulate(model, nsim=1, seed=None, **kwargs):
 
         seed = random.Random().randint(0, 2**31 - 1)
     rng = RMersenneTwister(int(seed))
-    # R draws rnorm(n·nsim) column-major, recycling the per-row sd across cols.
     z = rng.rnorm(int(n * nsim))
     draws = z * np.tile(sd_vec, int(nsim))
     return pl.DataFrame(
@@ -594,7 +567,6 @@ def model_matrix(model, data=None):
     if hasattr(model, "X"):
         return model.X
     if isinstance(model, str) and data is not None:
-        # Formula form: import locally to avoid circular import at module load.
         from ..formula import prepare_design
 
         design = prepare_design(model, data)
@@ -714,7 +686,6 @@ def update(model, formula=None, **kwargs):
     parameters to the old formula's smooth structure.
     """
     if formula is None:
-        # R's default `formula. = .` — reuse the original verbatim.
         f = model.formula
     else:
         f = formula.strip()
@@ -744,10 +715,6 @@ def update(model, formula=None, **kwargs):
         if v is None or callable(v):
             continue
         kwargs[name] = v
-    # If the new formula references names that aren't in ``model.data``,
-    # look them up in the caller's frame (R's ``update()`` evaluates the
-    # formula in the parent environment, so locally-computed vectors
-    # like ``ab`` in ``update(m, .~. + ab)`` are picked up automatically).
     data = _merge_formula_vars_from_caller(f, model.data, inspect.currentframe().f_back)
     return cls(f, data, **kwargs)
 

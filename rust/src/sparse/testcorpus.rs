@@ -13,8 +13,6 @@
 //! target tag. The Rust side checks memory safety and structural invariants;
 //! the Python side checks the numbers.
 
-/// Deterministic, so a failing case is reproducible without a seed to thread
-/// through. Numerical Recipes' LCG constants.
 pub struct Lcg(pub u64);
 
 impl Lcg {
@@ -26,16 +24,11 @@ impl Lcg {
         (self.0 >> 33) as u32
     }
 
-    /// Uniform on `[0, hi)`; the modulo bias is irrelevant for a pattern
-    /// generator.
     pub fn below(&mut self, hi: usize) -> usize {
         self.next_u32() as usize % hi
     }
 }
 
-/// CSC pattern of one triangle of a symmetric matrix, from its off-diagonal
-/// edges plus a full diagonal. `lower` picks which triangle is stored, i.e.
-/// which sign of `stype` the result is meant for.
 pub fn triangle_csc(n: usize, edges: &[(usize, usize)], lower: bool) -> (Vec<i64>, Vec<i64>) {
     let mut cols: Vec<Vec<i64>> = vec![Vec::new(); n];
     for (j, col) in cols.iter_mut().enumerate() {
@@ -65,11 +58,6 @@ pub fn triangle_csc(n: usize, edges: &[(usize, usize)], lower: bool) -> (Vec<i64
     (indptr, indices)
 }
 
-/// The same triangle, given values that make the full symmetric matrix
-/// positive definite: off-diagonals from the LCG, then a diagonal that makes
-/// every row strictly dominant. Numeric kernels need a factorization that
-/// exists, and diagonal dominance is the cheapest way to guarantee one without
-/// bringing in an eigensolver to check.
 pub fn spd_triangle(
     n: usize,
     edges: &[(usize, usize)],
@@ -101,8 +89,6 @@ pub fn spd_triangle(
     (indptr, indices, x)
 }
 
-/// Matrices that between them reach every branch of these kernels that computes
-/// a subscript from data.
 pub fn corpus() -> Vec<(&'static str, usize, Vec<(usize, usize)>)> {
     let mut out: Vec<(&'static str, usize, Vec<(usize, usize)>)> = Vec::new();
 

@@ -44,9 +44,8 @@ class Trans:
         return np.asarray(x, dtype=float)
 
     def matplotlib_scale(self):
-        """Pre-transform-on-data approach means the matplotlib axis stays
-        linear; subclasses no longer need to return a scale name. Kept
-        for any caller that still inspects this."""
+        """No matplotlib scale name: the data is pre-transformed, so the
+        axis stays linear. Present for callers that inspect it."""
         return
 
     def reversed(self) -> bool:
@@ -71,7 +70,6 @@ class Log10Trans(Trans):
 
     def transform(self, x):
         arr = np.asarray(x, dtype=float)
-        # Match ggplot2: non-positive values become NaN, dropped at draw time.
         with np.errstate(divide="ignore", invalid="ignore"):
             return np.where(arr > 0, np.log10(arr), np.nan)
 
@@ -79,16 +77,9 @@ class Log10Trans(Trans):
         return 10.0 ** np.asarray(x, dtype=float)
 
     def matplotlib_scale(self):
-        # Used by ``coord_trans()`` (display-only transform: data is not
-        # pre-transformed, so matplotlib's log axis is the right tool).
-        # ``scale_x_log10()`` doesn't go through this — it pre-transforms
-        # the data in build.py and uses :meth:`tick_positions_and_labels`.
         return ("log", {"base": 10})
 
     def tick_positions_and_labels(self, lo: float, hi: float):
-        # Mirrors scales::log_breaks(): integer powers of 10 always; add
-        # 1-2-5 multiples per decade when the range spans few decades so
-        # the axis isn't a single lonely tick.
         return _log_breaks(lo, hi, base=10.0)
 
 
@@ -105,7 +96,6 @@ class Log2Trans(Trans):
         return 2.0 ** np.asarray(x, dtype=float)
 
     def matplotlib_scale(self):
-        # See note on ``Log10Trans.matplotlib_scale``.
         return ("log", {"base": 2})
 
     def tick_positions_and_labels(self, lo: float, hi: float):
@@ -124,9 +114,6 @@ class SqrtTrans(Trans):
         return np.asarray(x, dtype=float) ** 2
 
     def matplotlib_scale(self):
-        # See note on ``Log10Trans.matplotlib_scale``. ``coord_trans``
-        # uses matplotlib's FuncScale; data is unmodified at the stat
-        # layer (display-only transform).
         forward = lambda x: np.sqrt(np.maximum(x, 0))
         inverse = lambda x: x**2
         return ("function", {"functions": (forward, inverse)})
@@ -182,11 +169,6 @@ class ReverseTrans(Trans):
 def _log_breaks(lo: float, hi: float, *, base: float) -> tuple:
     """Generate ``(positions, labels)`` for a log-base axis spanning
     transformed range ``[lo, hi]``.
-
-    Mirrors scales::log_breaks(): always include integer powers of
-    ``base``; for narrow ranges (≤ 3 decades) include 1, 2, 5 multiples
-    per decade so the axis has more than one tick. For wide ranges, fall
-    back to integer powers only.
     """
     raw_lo = base**lo
     raw_hi = base**hi
@@ -195,8 +177,6 @@ def _log_breaks(lo: float, hi: float, *, base: float) -> tuple:
     k_hi = int(np.ceil(np.log(raw_hi) / log_b))
     decades = k_hi - k_lo
     if decades <= 3:
-        # Include 1, 2, 5 multipliers per decade (matches scales' default
-        # behaviour for sub-3-decade ranges).
         candidates = []
         for k in range(k_lo, k_hi + 1):
             for m in (1, 2, 5):
@@ -222,19 +202,12 @@ def _format_log_tick(value: float) -> str:
         return ""
     abs_v = abs(value)
     if abs_v >= 10000 or (0 < abs_v < 0.01):
-        # Use 10^k notation rendered via mathtext.
         exp = round(np.log10(abs_v))
         return f"$10^{{{exp}}}$"
     if abs_v >= 1:
         return f"{round(value)}"
-    # Sub-unit but not tiny: drop trailing zeros.
     s = f"{value:.6f}".rstrip("0").rstrip(".")
     return s
-
-
-# ---------------------------------------------------------------------------
-# Factories
-# ---------------------------------------------------------------------------
 
 
 def _scale_factory(aes_name: str, trans: Trans, name, breaks, labels, limits, expand):

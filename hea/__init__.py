@@ -36,27 +36,9 @@ Polars's own sub-namespaces are re-exported as ``hea.selectors``,
 ``hea.exceptions``, ``hea.api``, ``hea.plugins``.
 """
 
-# Everything below is resolved on first attribute access (PEP 562), not at
-# import time. The reason is a number: eager, ``import hea`` costs ~690 ms and
-# pulls 1476 modules including ``matplotlib.pyplot``, and a *submodule* import
-# cannot dodge its parent's cost -- so ``import hea.sparse`` paid all of it for
-# numpy and ``scipy.sparse``. Lazily it is ~112 ms, which is the
-# ``numpy + scipy.sparse`` floor to within 2 ms, and ``hea._rs`` alone is 12 ms
-# against a bare interpreter's 11.
-#
-# That is what makes ``hea.sparse`` usable as a dependency by a package that
-# wants a sparse Cholesky and nothing else -- the whole reason it is written
-# with no hea-internal imports. It also speeds up every other consumer: a
-# script that only needs ``hea.models`` no longer pays for ``ggplot``.
-#
-# Nothing about the public surface changes. Names resolve on first touch and
-# are cached in the module dict, so the second access is a plain global.
-
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    # Eager for type checkers and IDEs only -- never executed at runtime, so
-    # completion and go-to-definition keep working without the import cost.
     from polars import api, exceptions, plugins, selectors
 
     from . import (
@@ -75,9 +57,6 @@ if TYPE_CHECKING:
     from .session_info import session_info
     from .tidy import DataFrame, LazyFrame, Series
 
-#: hea sub-modules, reachable as ``hea.tidy`` / ``hea.models`` / … after a bare
-#: ``import hea``. ``sparse`` is here too: it is the CHOLMOD port, and it is the
-#: one module that must stay cheap enough to depend on alone.
 _SUBMODULES = frozenset(
     {
         "R",
@@ -93,13 +72,8 @@ _SUBMODULES = frozenset(
     }
 )
 
-#: Polars sub-namespaces re-exported as ``hea.selectors`` etc. — the only
-#: polars-flavored access points exposed at the top level.
 _POLARS = frozenset({"api", "exceptions", "plugins", "selectors"})
 
-#: Names that live in a sub-module but are hit often enough to belong at the
-#: top level: the three core data types, and the loaders/watermark that appear
-#: in nearly every notebook (``data('iris')``, ``session_info()``).
 _ATTRS = {
     "DataFrame": ".tidy",
     "LazyFrame": ".tidy",
@@ -124,7 +98,6 @@ def __getattr__(name: str):
         value = getattr(import_module(_ATTRS[name], __name__), name)
     else:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    # cache it, so this runs once per name and never again
     globals()[name] = value
     return value
 

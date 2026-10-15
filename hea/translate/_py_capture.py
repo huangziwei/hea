@@ -62,9 +62,6 @@ def _build_namespace() -> dict:
     for name in dir(hea):
         if not name.startswith("_"):
             ns[name] = getattr(hea, name)
-    # The top-level only exposes polars + the three subclasses; everything
-    # else (verbs, models, families, R functions, …) lives under a
-    # sub-namespace. Pre-bind those too.
     for sub in (hea.tidy, hea.models, hea.family, hea.R, hea.data, hea.session_info):
         for name in dir(sub):
             if not name.startswith("_") and name not in ns:
@@ -85,8 +82,6 @@ def _serialize_result(result: Any, out_csv: Path, out_schema: Path) -> None:
         out_schema.write_text(json.dumps({"dtypes": {}, "factors": {}}))
         return
     else:
-        # Scalar / list / dict — wrap as a one-row, one-column frame
-        # so the diff path stays homogeneous.
         try:
             df = pl.DataFrame({"value": [result]})
         except Exception as e:
@@ -108,13 +103,15 @@ def _capture_factors(df) -> dict:
     """Extract Enum/Categorical column levels so the diff can compare them."""
     import polars as pl
 
+    from .._polars_compat import cat_pool
+
     out: dict = {}
     for col, dtype in zip(df.columns, df.dtypes):
         if isinstance(dtype, pl.Enum):
             levels = list(dtype.categories)
             out[col] = {"levels": levels, "ordered": False}
         elif isinstance(dtype, pl.Categorical):
-            levels = list(df[col].cat.get_categories())
+            levels = list(cat_pool(df[col]))
             out[col] = {"levels": levels, "ordered": False}
     return out
 

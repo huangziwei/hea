@@ -33,11 +33,6 @@ def diastolic():
     return pl.Series("diastolic", rng.normal(72, 12, 80))
 
 
-# ---------------------------------------------------------------------------
-# Basic scoping: plots claim grid cells in row-major order.
-# ---------------------------------------------------------------------------
-
-
 def test_mfrow_pulls_cells_in_row_major_order(diastolic):
     with par(mfrow=(2, 3)) as p:
         a0 = hist(diastolic, main="a")
@@ -46,7 +41,6 @@ def test_mfrow_pulls_cells_in_row_major_order(diastolic):
         a3 = hist(diastolic, main="d")
     fig = p.figure
     assert len(fig.axes) == 6
-    # All four claimed cells came from the same figure, in row-major order.
     used = [a0, a1, a2, a3]
     fig_axes = list(fig.axes)
     assert [fig_axes.index(a) for a in used] == [0, 1, 2, 3]
@@ -57,16 +51,8 @@ def test_mfcol_pulls_cells_in_column_major_order(diastolic):
         a0 = hist(diastolic, main="a")
         a1 = hist(diastolic, main="b")
     fig_axes = list(p.figure.axes)
-    # Column-major: a0 → (0,0), a1 → (1,0). Matplotlib's ``axes`` list is
-    # still in C order, so a1 should be the 4th entry (row 1, col 0 of a
-    # 2×3 grid).
     assert fig_axes.index(a0) == 0
     assert fig_axes.index(a1) == 3
-
-
-# ---------------------------------------------------------------------------
-# Unused cells get hidden so the figure doesn't show blank panels.
-# ---------------------------------------------------------------------------
 
 
 def test_unused_cells_are_hidden(diastolic):
@@ -78,11 +64,6 @@ def test_unused_cells_are_hidden(diastolic):
     assert visibles == [True, True, False, False]
 
 
-# ---------------------------------------------------------------------------
-# Exhaustion raises a clear error rather than silently overflowing.
-# ---------------------------------------------------------------------------
-
-
 def test_too_many_plots_raises(diastolic):
     with pytest.raises(RuntimeError, match="all 2 cells used"), par(mfrow=(1, 2)):
         hist(diastolic)
@@ -90,18 +71,10 @@ def test_too_many_plots_raises(diastolic):
         hist(diastolic)
 
 
-# ---------------------------------------------------------------------------
-# Explicit ax= bypasses the grid — caller fully in control.
-# ---------------------------------------------------------------------------
-
-
 def test_explicit_ax_bypasses_grid(diastolic):
     fig_ext, ax_ext = plt.subplots()
     with par(mfrow=(1, 2)) as p:
-        # Drop a hist onto an externally-owned axes; the par grid
-        # shouldn't advance.
         hist(diastolic, ax=ax_ext)
-        # Next call should still get cell 0.
         a0 = hist(diastolic)
         a1 = hist(diastolic)
     fig_par = p.figure
@@ -110,11 +83,6 @@ def test_explicit_ax_bypasses_grid(diastolic):
     assert a1.figure is fig_par
     assert list(fig_par.axes).index(a0) == 0
     assert list(fig_par.axes).index(a1) == 1
-
-
-# ---------------------------------------------------------------------------
-# State scoping: stack empty before/after the with-block; no leakage.
-# ---------------------------------------------------------------------------
 
 
 def test_stack_is_clean_before_and_after(diastolic):
@@ -131,11 +99,6 @@ def test_outside_par_each_call_makes_own_figure(diastolic):
     assert a0.figure is not a1.figure
 
 
-# ---------------------------------------------------------------------------
-# Nested par(): innermost wins, outer resumes after the inner exits.
-# ---------------------------------------------------------------------------
-
-
 def test_nested_par_innermost_wins(diastolic):
     with par(mfrow=(1, 3)) as outer:
         outer_a0 = hist(diastolic)
@@ -143,17 +106,10 @@ def test_nested_par_innermost_wins(diastolic):
             inner_a0 = hist(diastolic)
             inner_a1 = hist(diastolic)
         outer_a1 = hist(diastolic)
-    # outer_a0 and outer_a1 come from the outer figure...
     assert outer_a0.figure is outer.figure
     assert outer_a1.figure is outer.figure
-    # ...and the two inner ones from the inner figure.
     assert inner_a0.figure is inner.figure
     assert inner_a1.figure is inner.figure
-
-
-# ---------------------------------------------------------------------------
-# Every single-panel plotter we ported routes through resolve_ax.
-# ---------------------------------------------------------------------------
 
 
 def test_par_works_for_every_single_panel_plotter(diastolic):
@@ -200,11 +156,6 @@ def test_profile_plot_single_param_inside_par():
     assert titles == ["log(.sigma)", ".sigma", ".sigma²"]
 
 
-# ---------------------------------------------------------------------------
-# Argument validation.
-# ---------------------------------------------------------------------------
-
-
 def test_par_rejects_both_mfrow_and_mfcol():
     with pytest.raises(ValueError, match="not both"):
         par(mfrow=(1, 2), mfcol=(2, 1))
@@ -220,11 +171,6 @@ def test_par_rejects_bad_shape():
         par(mfrow=(0, 3))
     with pytest.raises(TypeError, match="positive ints"):
         par(mfrow=("a", 3))
-
-
-# ---------------------------------------------------------------------------
-# Cleanup: an exception inside the block still pops the stack.
-# ---------------------------------------------------------------------------
 
 
 def test_exception_inside_par_unwinds_stack():

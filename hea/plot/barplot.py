@@ -52,7 +52,6 @@ def barplot(
     """
     ax = resolve_ax(ax)
 
-    # Accept the ``hea.R.table(x)`` layout: 2-col DataFrame (label, count).
     if isinstance(heights, pl.DataFrame) and heights.width == 2:
         if names is None:
             names = heights.to_series(0).cast(pl.Utf8).to_list()

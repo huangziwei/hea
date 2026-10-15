@@ -47,7 +47,6 @@ use crate::nmath::util::rfma;
 /// `_XWX_DENSE_MSIZE_CAP` in `hea/models/bam.py`.
 const XWX_DENSE_MSIZE_CAP: usize = 4_000_000;
 
-/// Row-scan inputs shared by every `(r,c)` sub-block of one term pair.
 struct Acc<'a> {
     si: usize,
     sj: usize,
@@ -64,8 +63,6 @@ struct Acc<'a> {
 }
 
 impl<'a> Acc<'a> {
-    /// Term i's `s`th index row and its `r`th truncated row-tensor column
-    /// (empty ⇒ mgcv `tensi == 0`).
     #[inline]
     fn rows_i(&self, s: usize, r: usize) -> (&'a [i64], &'a [f64]) {
         let n = self.n;
@@ -77,7 +74,6 @@ impl<'a> Acc<'a> {
         (&self.ki[s * n..s * n + n], tt)
     }
 
-    /// Term j's `t`th index row and its `c`th truncated row-tensor column.
     #[inline]
     fn rows_j(&self, t: usize, c: usize) -> (&'a [i64], &'a [f64]) {
         let n = self.n;
@@ -127,8 +123,6 @@ fn accumulate_wbar<F: FnMut(usize, usize, f64)>(a: &Acc<'_>, r: usize, c: usize,
                 &[]
             };
             if a.tri {
-                // AR1: keep the general form — `tri` is rare and the extra
-                // per-row branch is dwarfed by the three scatters it guards.
                 let gi = |row: usize| if tens_i { tti_sr[row] } else { 1.0 };
                 let gj = |row: usize| if tens_j { ttj_tc[row] } else { 1.0 };
                 for row in 0..n - 1 {
@@ -136,11 +130,8 @@ fn accumulate_wbar<F: FnMut(usize, usize, f64)>(a: &Acc<'_>, r: usize, c: usize,
                     let i1 = ki_s[row + 1] as usize;
                     let j0 = kj_t[row] as usize;
                     let j1 = kj_t[row + 1] as usize;
-                    // super: (K_i[l], K_j[l+1]) += w_off·dXi[l]·dXj[l+1]
                     deposit(i0, j1, a.woff[row] * gi(row) * gj(row + 1));
-                    // sub:   (K_i[l+1], K_j[l]) += w_off·dXi[l+1]·dXj[l]
                     deposit(i1, j0, a.woff[row] * gi(row + 1) * gj(row));
-                    // diag:  (K_i[l], K_j[l])   += w·dXi[l]·dXj[l]
                     deposit(i0, j0, a.w[row] * gi(row) * gj(row));
                 }
                 let row = n - 1;
@@ -150,8 +141,6 @@ fn accumulate_wbar<F: FnMut(usize, usize, f64)>(a: &Acc<'_>, r: usize, c: usize,
                     a.w[row] * gi(row) * gj(row),
                 );
             } else {
-                // The four mgcv branches, monomorphised. `w` alone for the
-                // singleton×singleton case — no all-ones factor streamed.
                 match (tens_i, tens_j) {
                     (true, true) => scatter(n, ki_s, kj_t, &mut deposit, |row| {
                         a.w[row] * tti_sr[row] * ttj_tc[row]
@@ -169,9 +158,6 @@ fn accumulate_wbar<F: FnMut(usize, usize, f64)>(a: &Acc<'_>, r: usize, c: usize,
     }
 }
 
-/// One `(K_i[row], K_j[row]) += weight(row)` pass — the row loop of mgcv's
-/// direct accumulation. Generic in `weight` so each `(tensi, tensj)` case
-/// compiles to its own straight-line loop.
 #[inline(always)]
 fn scatter<D: FnMut(usize, usize, f64), W: Fn(usize) -> f64>(
     n: usize,
@@ -274,9 +260,6 @@ unsafe fn direct_factor(
     }
 }
 
-/// True when every entry of `idx` is in `0..m` — the one-shot bounds proof for
-/// [`direct_factor`]. Vacuously true for an empty row (a term with no summation
-/// sets contributes no rows to scan).
 fn indices_in_range(idx: &[i64], m: usize) -> bool {
     let hi = m as i64;
     idx.iter().all(|&v| v >= 0 && v < hi)
@@ -336,13 +319,6 @@ fn bin_accum<'py>(
     let out = py.allow_threads(|| {
         let mut wb = vec![0.0f64; m];
         if m == 1 {
-            // Single bin ⇒ every row lands on `wb[0]`. Written as a scatter
-            // (the general branch below) the accumulator round-trips through
-            // memory each row, so the loop runs at store-to-load-forward +
-            // FP-add latency instead of FP-add latency alone — measured 2×
-            // at n = 110k, and the intercept marginal hits it on every fit.
-            // A register accumulator adds the SAME values in the SAME
-            // row-ascending order, so the result is bit-identical.
             let mut s = 0.0f64;
             if u_f.is_empty() {
                 for row in 0..n {
@@ -376,8 +352,6 @@ fn bin_accum<'py>(
     Ok(numpy::PyArray1::from_vec(py, out))
 }
 
-/// Column-major (`m`, `p`) copy of a row-major buffer — the layout mgcv's
-/// marginal bases already have (`Xj = X + off[jm] + q * mjm`).
 fn to_col_major(src: &[f64], m: usize, p: usize) -> Vec<f64> {
     let mut out = vec![0.0f64; m * p];
     for a in 0..m {
@@ -413,8 +387,6 @@ fn xwx_smooth_block<'py>(
     let ndi = tti.shape()[1];
     let ndj = ttj.shape()[1];
 
-    // Borrowed in logical order → unit-stride inner loops, no per-call copy of
-    // the n-long index/weight rows.
     let xim_f = borrow_flat!(xim, f64); // (mim, pim)
     let xjm_f = borrow_flat!(xjm, f64); // (mjm, pjm)
     let ki_f = borrow_flat!(ki, i64); // (si, n)
@@ -422,13 +394,10 @@ fn xwx_smooth_block<'py>(
     let tti_f = borrow_flat!(tti, f64); // (si, ndi, n)
     let ttj_f = borrow_flat!(ttj, f64); // (sj, ndj, n)
     let w_f = borrow_flat!(w, f64);
-    // AR1 tridiagonal off-diagonal (length n-1); empty ⇒ plain diag(w) weight.
     let woff_f = borrow_flat!(woff, f64);
     let tri = !woff_f.is_empty();
 
     let msize = mim * mjm;
-    // s_i·s_j summation sets, ×3 for the AR1 tri scatters (diag+super+sub) so this
-    // matches `len(Ki_list)` in the numpy `_wbar_contract` spec.
     let nst = if tri { 3 * si * sj } else { si * sj };
     // mgcv acc_w = (n > mjm*mim), strict (discrete.c:1801) OR the !acc_w large-p
     // `indReduce` branch (1884/1922): both collapse the (K_i,K_j) duplicates into
@@ -443,10 +412,6 @@ fn xwx_smooth_block<'py>(
     let rfac = pjm <= pim; // form C (m_im×p_jm) else D (m_jm×p_im)
     let nrow = ndi * pim;
     let ncol = ndj * pjm;
-    // Column-major marginals for the direct-factor branches: mgcv's own layout
-    // (`Xj = X + off[jm] + q*mjm`), so one contiguous m-length column is live
-    // per accumulation pass. Skipped on the dense branch, which reads xjm/xim
-    // row-major.
     let (xim_cm, xjm_cm) = if dense {
         (Vec::new(), Vec::new())
     } else {
@@ -474,12 +439,8 @@ fn xwx_smooth_block<'py>(
         )));
     }
 
-    // One sub-block (r,c) → its p_im×p_jm cross-product, row-major. Read-only
-    // over the shared flat inputs ⇒ the (r,c) map is embarrassingly parallel.
     let compute_sub = |r: usize, c: usize| -> Vec<f64> {
         let mut sub = vec![0.0f64; pim * pjm];
-        // Shared row-scan parameters; `accumulate_wbar` is generic over the
-        // deposit closure so each branch's body inlines into the row loop.
         let acc = Acc {
             si,
             sj,
@@ -497,7 +458,6 @@ fn xwx_smooth_block<'py>(
         if dense {
             let mut wbar = vec![0.0f64; msize];
             accumulate_wbar(&acc, r, c, |a, b, v| wbar[a * mjm + b] += v);
-            // sub = Xim' W̄ Xjm  (via tmp = W̄ Xjm), iterating only nonzero W̄.
             let mut tmp = vec![0.0f64; mim * pjm];
             for a in 0..mim {
                 for b in 0..mjm {
@@ -523,8 +483,6 @@ fn xwx_smooth_block<'py>(
             // C = W̄ Xjm, m_im×p_jm, COLUMN-major — mgcv discrete.c:1925-1963.
             let mut cfac = vec![0.0f64; mim * pjm];
             if tri {
-                // AR1 keeps the generic three-scatter row pass; `tri` is rare
-                // and the row-major-style deposit is dwarfed by the scatters.
                 accumulate_wbar(&acc, r, c, |a, b, v| {
                     for bj in 0..pjm {
                         cfac[bj * mim + a] += v * xjm_cm[bj * mjm + b];
@@ -546,8 +504,6 @@ fn xwx_smooth_block<'py>(
                     }
                 }
             }
-            // sub = Xim' C, both column-major ⇒ contiguous dot products, and
-            // each sub[ai,bj] still folds over `a` ascending as before.
             for bj in 0..pjm {
                 let cq = &cfac[bj * mim..bj * mim + mim];
                 for ai in 0..pim {
@@ -560,7 +516,6 @@ fn xwx_smooth_block<'py>(
                 }
             }
         } else {
-            // Mirror image: D = W̄' Xim, m_jm×p_im, column-major (mgcv :1965).
             let mut dfac = vec![0.0f64; mjm * pim];
             if tri {
                 accumulate_wbar(&acc, r, c, |a, b, v| {
@@ -584,7 +539,6 @@ fn xwx_smooth_block<'py>(
                     }
                 }
             }
-            // sub = D' Xjm
             for ai in 0..pim {
                 let dq = &dfac[ai * mjm..ai * mjm + mjm];
                 for bj in 0..pjm {
@@ -601,8 +555,6 @@ fn xwx_smooth_block<'py>(
     };
 
     let block = py.allow_threads(|| {
-        // Enumerate the upper (or full) sub-block tasks, compute in parallel,
-        // then assemble — disjoint writes, so no races on the output.
         let mut tasks: Vec<(usize, usize)> = Vec::new();
         for r in 0..ndi {
             let c0 = if diag_term { r } else { 0 };
@@ -623,7 +575,6 @@ fn xwx_smooth_block<'py>(
                 }
             }
             if diag_term && c > r {
-                // (c,r) sub-block is the transpose (same term ⇒ p_im==p_jm)
                 for ai in 0..pim {
                     for bj in 0..pjm {
                         block[(c * pim + bj) * ncol + (r * pjm + ai)] = sub[ai * pjm + bj];
@@ -683,7 +634,6 @@ fn rw_matrix<'py>(
             let jj = j as usize;
             let weight = w_f[jj];
             let rj = row_f[jj] as usize;
-            // forward: out[i] += w·x[row[j]];  trans: out[row[j]] += w·x[i]
             let (src_row, dst_row) = if trans { (i, rj) } else { (rj, i) };
             let src = &x_f[src_row * p..src_row * p + p];
             let dst = &mut out[dst_row * p..dst_row * p + p];

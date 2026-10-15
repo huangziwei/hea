@@ -15,17 +15,11 @@ from dataclasses import dataclass, field
 from ..aes import split_layer_kwargs
 from .geom import Geom
 
-# ggplot2 sizes (incl. ``outlier.size``) are in mm; matplotlib's Line2D
-# ``markersize`` is the marker DIAMETER in points. R/TeX convention:
-# 72.27 pt/inch, 25.4 mm/inch.
 _PT_PER_MM = 72.27 / 25.4
 
 
 @dataclass
 class GeomBoxplot(Geom):
-    # Mirrors ggplot2's ``GeomBoxplot$default_aes`` (R/geom-boxplot.R):
-    # ``colour = col_mix(ink, paper, 0.2)`` ≈ ``"grey20"`` (the dark-grey
-    # box outline that R uses by default — NOT pure black).
     default_aes: dict = field(
         default_factory=lambda: {
             "colour": "grey20",
@@ -46,13 +40,12 @@ class GeomBoxplot(Geom):
     def draw_panel(self, data, ax) -> None:
         import polars as pl
 
+        from ..._polars_compat import cat_pool
         from .._util import r_color
 
         if len(data) == 0:
             return
 
-        # ``flipped_aes=True`` rows come from ``aes(x=…)`` (no y) and carry
-        # x-prefixed stat columns; the cross-axis position is in ``y``.
         flipped = "flipped_aes" in data.columns and bool(data["flipped_aes"].any())
         if flipped:
             pos_col = "y"
@@ -62,14 +55,6 @@ class GeomBoxplot(Geom):
             stat_cols = ("middle", "lower", "upper", "ymin", "ymax")
         med_c, q1_c, q3_c, lo_c, hi_c = stat_cols
 
-        # ``ax.bxp`` only takes numeric ``positions``. When the cross-axis
-        # column is discrete (``aes(x=species)``) we route the strings
-        # through matplotlib's category unit so the box positions line up
-        # with the axis labels. Register levels in the order R/ggplot2's
-        # ``factor()`` would produce (sorted for plain strings, category
-        # order for ``Categorical``/``Enum``); otherwise matplotlib uses
-        # first-appearance order, which can leave the axis labelled
-        # ``Adelie, Gentoo, Chinstrap`` instead of the expected sorted run.
         pos_series = data[pos_col]
         pos_is_discrete = pos_series.dtype in (
             pl.Utf8,
@@ -82,7 +67,7 @@ class GeomBoxplot(Geom):
         if pos_is_discrete:
             string_values = [str(v) for v in pos_series.to_list()]
             if pos_series.dtype in (pl.Categorical, pl.Enum):
-                levels = [str(v) for v in pos_series.cat.get_categories().to_list()]
+                levels = [str(v) for v in cat_pool(pos_series).to_list()]
             else:
                 levels = sorted(set(string_values))
             pos_axis.update_units(levels)
@@ -90,13 +75,6 @@ class GeomBoxplot(Geom):
         else:
             positions = [float(v) for v in pos_series.to_list()]
 
-        # ``ax.bxp`` applies a single ``boxprops`` dict to every box in the
-        # call — there's no per-box style sheet. So when the layer maps a
-        # discrete aesthetic (``aes(colour=drv)`` produces one row per
-        # level, each with its own colour) we have to call ``bxp`` once
-        # per row to get per-box styling. The grouped-by-style fast path
-        # is a tempting optimisation, but boxes per panel are typically
-        # ≤ 10 so the per-row call is cheap and keeps the code linear.
         rows = list(data.iter_rows(named=True))
         for row, position in zip(rows, positions):
             box_dict = {

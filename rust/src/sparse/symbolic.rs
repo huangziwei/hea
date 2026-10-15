@@ -39,17 +39,17 @@ use super::amd::{self, AmdInfo, IntWidth, DEFAULT_AGGRESSIVE, DEFAULT_DENSE};
 use super::metis_order;
 use super::ws::{columns_are_sorted, validate_csc, CscError, Work, WorkRef, Ws, EMPTY};
 
-/// Why an analysis could not be performed.
 #[derive(Debug)]
 pub enum SymbolicError {
-    /// The input pattern was malformed.
     Csc(CscError),
-    /// `A->stype == 0`; see the module docs.
     Unsymmetric,
     /// `cholmod_postorder` returned fewer than `n` nodes, which means the
     /// elimination tree it was handed was not a tree
     /// (`cholmod_analyze.c:337-341` turns this into `CHOLMOD_INVALID`).
-    NotATree { got: usize, want: usize },
+    NotATree {
+        got: usize,
+        want: usize,
+    },
 }
 
 impl From<CscError> for SymbolicError {
@@ -76,44 +76,13 @@ impl core::fmt::Display for SymbolicError {
     }
 }
 
-/// A `cholmod_sparse`, restricted to the two xtypes this crate builds:
-/// `CHOLMOD_PATTERN` (`x` empty) and `CHOLMOD_REAL` + `CHOLMOD_DOUBLE`.
-///
-/// Always packed with `nz == NULL`: that is what `cholmod_allocate_sparse`
-/// produces, and what arrives from scipy. The upstream templates select their
-/// `pend` with `#ifdef PACKED` at compile time, so the unpacked arms are a
-/// different instantiation rather than a branch, and are simply not built here.
-///
-/// **Ownership.** `cholmod_sparse` declares `void *p ; void *i ; void *x ;` and
-/// leaves it to the caller whether it owns them: `cholmod_allocate_sparse` mallocs,
-/// and `scikit-sparse` builds one pointing straight at the numpy buffers.
-/// The [`Cow`] is that choice made explicit — `transpose_sym` and friends
-/// *build* matrices and hand back `Sparse<'static>`, while the one the caller
-/// passes in borrows. Owning unconditionally was 760 MiB of copied input on a
-/// 3.4M-row system, and it read as faithful because the C's declaration does
-/// not say which it is.
 pub struct Sparse<'a> {
-    /// `A->nrow`. Equal to [`Sparse::n`] for every symmetric matrix, which is
-    /// every matrix reaching the factorization; they differ only on the
-    /// rectangular `A` that `stype == 0` takes, where `C = A A'` is
-    /// `nrow`-by-`nrow` and `A->p` is still indexed by column.
     pub nrow: usize,
-    /// `A->ncol`. Named `n` because for a symmetric `A` it is *the* dimension
-    /// and upstream calls it `n` throughout; read it as the column count
-    /// wherever a matrix may be rectangular.
     pub n: usize,
-    /// `A->p`, size `n + 1`.
     pub p: Cow<'a, [i64]>,
-    /// `A->i`, size `p[n]`.
     pub i: Cow<'a, [i64]>,
-    /// `A->x`, size `p[n]`, and empty when [`Sparse::numeric`] is false.
     pub x: Cow<'a, [f64]>,
-    /// `A->xtype != CHOLMOD_PATTERN`. A field rather than `!x.is_empty()`,
-    /// because upstream's discriminator is `A->xtype` and a real matrix with no
-    /// entries still has a non-NULL `A->x`; deriving it would make an empty
-    /// matrix un-factorizable.
     pub numeric: bool,
-    /// `A->stype`: `> 0` upper triangle stored, `< 0` lower.
     pub stype: i32,
     /// `A->sorted`: row indices ascend within every column. A field the caller
     /// sets and CHOLMOD trusts; `cholmod_rowfac` is the one routine here that
@@ -249,11 +218,6 @@ pub fn transpose_sym(
     }
 }
 
-/// `C = A'` — `t_cholmod_transpose_sym_unpermuted.c`.
-///
-/// `LO`, `NUMERIC` and `VALUES` are the template's `#ifdef LO` / `#ifdef
-/// NUMERIC` and its xtype, so they are const: upstream instantiates this body
-/// once per combination rather than testing any of them per entry.
 #[inline]
 fn transpose_unpermuted<const LO: bool, const NUMERIC: bool, const VALUES: bool>(
     n: usize,
@@ -292,7 +256,6 @@ fn transpose_unpermuted<const LO: bool, const NUMERIC: bool, const VALUES: bool>
     }
 }
 
-/// `C = A(p,p)'` — `t_cholmod_transpose_sym_permuted.c`.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn transpose_permuted<const LO: bool, const NUMERIC: bool, const VALUES: bool>(
@@ -777,8 +740,6 @@ fn initialize_node(k: i64, post: &Ws, parent: &Ws, colcount: &mut Ws, prevnbr: &
     p
 }
 
-/// Workspace and outputs of [`rowcolcounts`], grouped so the argument list
-/// stays the shape the C's is.
 struct RowColWork<'a> {
     first: &'a mut Ws,
     level: &'a mut Ws,
@@ -847,12 +808,6 @@ fn process_edge<const ROWCOUNT: bool>(
     w.prevnbr[u] = k;
 }
 
-/// The symmetric branch of `cholmod_rowcolcounts` (`:414-446`), returning
-/// `Common->anz`.
-///
-/// Split out only so that `ROWCOUNT` — the C's `RowCount != NULL`, which is
-/// loop-invariant across the whole call — is chosen once here rather than per
-/// edge. See [`process_edge`].
 #[inline]
 fn sym_pass<const ROWCOUNT: bool>(
     nrow: usize,
@@ -882,17 +837,6 @@ fn sym_pass<const ROWCOUNT: bool>(
     anz
 }
 
-/// The unsymmetric branch of `cholmod_rowcolcounts` (`:446-482`).
-///
-/// `LL' = AA'`, so the edges come from `A`'s columns rather than its triangle:
-/// column `j` contributes an edge from the current node to every row `i` it
-/// holds, once per step `k`. `Head[k]` is the list of columns whose *first
-/// postordered* row is `k`, which is what makes each column reachable at
-/// exactly the step where it first matters, and `PrevNbr[i] < k` is what stops
-/// a row being processed twice within one step.
-///
-/// Unlike [`sym_pass`] there is no `anz` to accumulate: upstream leaves
-/// `Common->anz` alone here.
 #[inline]
 fn unsym_pass<const ROWCOUNT: bool>(
     nrow: usize,
@@ -939,34 +883,14 @@ fn finalize_node(p: i64, parent: &Ws, setparent: &mut Ws) {
     }
 }
 
-/// What `cholmod_rowcolcounts` leaves in `Common` besides its array outputs.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RowColCounts {
-    /// `Common->anz` — entries in `triu(A)` including the diagonal
-    /// (`:445`). Overwrites whatever `cholmod_amd` left there.
     pub anz: f64,
-    /// `Common->lnz` — `Σ ColCount[j]`, i.e. nnz(L) including the diagonal.
     pub lnz: f64,
-    /// `Common->fl` — `Σ ColCount[j]²` (`:517-524`).
     pub fl: f64,
-    /// `Common->aatfl` (`:514`) — `Σ_j |A_j|² + |A_j|` over the columns of `A`,
-    /// accumulated only on the `stype == 0` path and left at zero otherwise.
-    /// It is the flop count of forming `AA'`, which is a different quantity
-    /// from [`RowColCounts::fl`], the count of factorizing it.
     pub aatfl: f64,
 }
 
-/// Row and column counts of `L` where `LL' = A` — `cholmod_rowcolcounts.c`.
-///
-/// `A` must be symmetric **lower** (`stype < 0`): upstream rejects the upper
-/// form (`:223-228`), which is the mirror image of [`etree`]'s requirement.
-/// `parent` and `post` are the outputs of [`etree`] and an unweighted
-/// [`postorder`] of it.
-///
-/// Fills `colcount`, and `first`/`level` — `Level` is the caller's workspace
-/// upstream but is computed unconditionally, and `cholmod_analyze` reuses both
-/// buffers afterwards. `row_count`, when given, gets nnz per row of `L`
-/// including the diagonal; `cholmod_analyze` never asks for it.
 #[allow(clippy::too_many_arguments)]
 pub fn rowcolcounts(
     a: &Sparse,
@@ -1145,23 +1069,14 @@ pub fn rowcolcounts(
 /* === cholmod_analyze ===================================================== */
 /* ========================================================================= */
 
-/// Which fill-reducing ordering [`analyze`] should use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ordering {
     /// `CHOLMOD_NATURAL` — no permutation. The weighted postorder still runs,
     /// so the stored permutation is the postorder itself and upstream relabels
     /// the result `CHOLMOD_POSTORDERED` (`cholmod_analyze.c:875-878`).
     Natural,
-    /// `CHOLMOD_AMD`.
     Amd,
-    /// `CHOLMOD_METIS` — `METIS_NodeND` through
-    /// [`super::metis_order::cholmod_metis`].
     Metis,
-    /// `CHOLMOD_POSTORDERED` — what [`Ordering::Natural`] becomes once the
-    /// weighted postorder has been composed in. Never requested; it is only an
-    /// output. The distinction is load-bearing: `permute_matrices` tests
-    /// `ordering == CHOLMOD_NATURAL` to decide whether to apply `L->Perm`, so a
-    /// factor left labelled natural would be re-analyzed unpermuted.
     Postordered,
 }
 
@@ -1198,13 +1113,10 @@ pub const DEFAULT_METHODS: [Ordering; 2] = [Ordering::Amd, Ordering::Metis];
 struct Permuted {
     a1: Option<Sparse<'static>>,
     a2: Option<Sparse<'static>>,
-    /// `S`, the upper form `cholmod_etree` needs.
     s: Handle,
-    /// `F`, the lower form `cholmod_rowcolcounts` needs.
     f: Handle,
 }
 
-/// Which of the three matrices an alias points at.
 #[derive(Clone, Copy)]
 enum Handle {
     A,
@@ -1324,36 +1236,20 @@ pub fn analyze_ordering(
     rowcolcounts(for_counts, parent, post, None, colcount, first, level, work)
 }
 
-/// What [`analyze`] computed. The three arrays are in the *final* ordering,
-/// i.e. after the weighted postorder has been composed into them.
 #[derive(Debug, Clone)]
 pub struct Symbolic {
-    /// `L->Perm` — the fill-reducing ordering composed with the weighted
-    /// postorder. This is `scikit-sparse`'s `F.perm`.
     pub perm: Vec<i64>,
-    /// `L->ColCount` — nnz in each column of `L`, including the diagonal.
     pub colcount: Vec<i64>,
-    /// `Lparent` — the elimination tree. Not stored in `L` upstream; kept
-    /// because the supernodal analysis needs it.
     pub parent: Vec<i64>,
-    /// The weighted postorder that was composed in, `EMPTY`-free and a
-    /// permutation, or all zeros if it was skipped.
     pub post: Vec<i64>,
-    /// `Common->fl` and `Common->lnz` after the analysis: `Σ ColCount[j]²` and
-    /// `Σ ColCount[j]`. `cholmod_analyze` picks supernodal over simplicial when
-    /// `fl / lnz >= 40`.
     pub fl: f64,
     pub lnz: f64,
-    /// `Common->anz` — nnz of the stored triangle of the permuted `A`,
-    /// diagonal included.
     pub anz: f64,
     /// `Common->aatfl` — the flop count of forming `A A'`, which
     /// `cholmod_rowcolcounts` reports on the `stype == 0` path and leaves at
     /// zero otherwise. Nothing inside CHOLMOD reads it; it is a statistic for
     /// the caller, and it is carried out here for the same reason.
     pub aatfl: f64,
-    /// The ordering the trial loop selected, after upstream's relabel of
-    /// [`Ordering::Natural`] to [`Ordering::Postordered`] — `L->ordering`.
     pub ordering: Ordering,
     /// AMD's own statistics, whenever AMD *ran* — which under
     /// [`Method::Default`] is always, even on a matrix where another method
@@ -1673,9 +1569,6 @@ pub fn analyze_sparse(
 
 #[cfg(test)]
 mod tests {
-    //! Memory safety and structural invariants, run against
-    //! [`crate::sparse::testcorpus`] in a build where [`Ws`] still checks its
-    //! bounds. Agreement with upstream's C is checked from the Python suite.
 
     use super::*;
     use crate::sparse::testcorpus::{corpus, triangle_csc};
@@ -1701,9 +1594,6 @@ mod tests {
         }
     }
 
-    /// The whole point of the module: every subscript these kernels form, under
-    /// a build where [`Ws`] still checks them, for both triangles and both
-    /// orderings.
     #[test]
     fn analyze_never_indexes_out_of_bounds() {
         for (name, n, edges) in corpus() {
@@ -1734,8 +1624,6 @@ mod tests {
         }
     }
 
-    /// `stype` picks which triangle is stored, not which matrix it is, so the
-    /// analysis of a matrix must not depend on it.
     #[test]
     fn both_triangles_of_one_matrix_analyze_alike() {
         for (name, n, edges) in corpus() {
@@ -1810,10 +1698,6 @@ mod tests {
         }
     }
 
-    /// `transpose_sym` is an involution up to `stype`, and the permuted form
-    /// has to agree with permuting the unpermuted one. Run with values, so the
-    /// `VALUES` instantiation is walked under `debug_assertions` too — that is
-    /// what licenses its unchecked indexing.
     #[test]
     fn transpose_sym_round_trips() {
         for (name, n, edges) in corpus() {
@@ -1859,9 +1743,6 @@ mod tests {
         }
     }
 
-    /// The row counts are only reachable through the `ROWCOUNT` instantiation
-    /// that `cholmod_analyze` never asks for, so exercise it here: nnz(L) has
-    /// to come out the same counted by row as by column.
     #[test]
     fn row_counts_and_column_counts_agree() {
         for (name, n, edges) in corpus() {
@@ -1911,8 +1792,6 @@ mod tests {
         }
     }
 
-    /// `stype == 0` is out of scope rather than silently mis-analyzed, and the
-    /// two kernels that require a particular triangle say so.
     #[test]
     fn unsupported_stypes_are_rejected() {
         assert!(matches!(

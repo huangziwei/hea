@@ -26,9 +26,6 @@ def _dense_inv(A):
     return np.linalg.inv(np.asarray(A.todense()))
 
 
-# --- the diagonal --------------------------------------------------------------
-
-
 @pytest.mark.parametrize("n", [1, 2, 5, 30, 120])
 def test_inv_diagonal_matches_a_dense_inverse(n):
     A = _spd(n)
@@ -39,10 +36,6 @@ def test_inv_diagonal_matches_a_dense_inverse(n):
 
 @pytest.mark.parametrize("order", ["amd", "metis", "natural", "best"])
 def test_inv_diagonal_is_in_a_s_ordering_not_the_factors(order):
-    # The trap: `L` factors `P A P'`, so the sweep's entry `i` is `A`'s row
-    # `perm[i]`. A missing unpermute still agrees with a dense inverse whenever
-    # the ordering happens to be an automorphism, so this needs a matrix where
-    # it is not -- asserted below rather than hoped for.
     A = _spd(60, seed=3)
     F = cho_factor(A, order=order)
     if order != "natural":
@@ -53,8 +46,6 @@ def test_inv_diagonal_is_in_a_s_ordering_not_the_factors(order):
 
 
 def test_a_permuted_answer_would_be_visibly_wrong():
-    # Guards the guard: if the diagonal of inv(A) were constant, permuting it
-    # would be undetectable. It is not.
     A = _spd(60, seed=3)
     d = np.diag(_dense_inv(A))
     assert d.max() / d.min() > 1.5
@@ -68,9 +59,6 @@ def test_inv_diagonal_matches_n_solves(n):
     np.testing.assert_allclose(
         F.inv_diagonal(), np.diag(columns), rtol=1e-9, atol=1e-12
     )
-
-
-# --- the off-diagonals ---------------------------------------------------------
 
 
 @pytest.mark.parametrize("n", [5, 30, 120])
@@ -106,8 +94,6 @@ def test_selected_inverse_has_sorted_indices():
 
 
 def test_the_pattern_contains_a_s_own_pattern():
-    # pattern(A) is inside pattern(L + L'), which is what makes tr(inv(A) @ B)
-    # exact for any B on A's pattern.
     A = _spd(60, seed=6)
     Z = cho_factor(A).selected_inverse()
     inside = set(zip(*sp.coo_array(Z).nonzero(), strict=True))
@@ -116,8 +102,6 @@ def test_the_pattern_contains_a_s_own_pattern():
 
 
 def test_the_trace_of_inv_a_times_b_is_exact_on_the_pattern():
-    # The property the effective-degrees-of-freedom use rests on: no probes,
-    # no seed, no tolerance beyond arithmetic.
     A = _spd(60, seed=7)
     Z = cho_factor(A).selected_inverse()
     B = sp.csc_array(A)  # any B whose pattern fits inside Z's
@@ -127,12 +111,7 @@ def test_the_trace_of_inv_a_times_b_is_exact_on_the_pattern():
     assert abs(selected - exact) <= 1e-9 * abs(exact)
 
 
-# --- both factorization paths --------------------------------------------------
-
-
 def test_the_supernodal_and_simplicial_paths_agree():
-    # The supernodal factor reaches the sweep only through the conversion the
-    # `.L` property already uses, so the two paths must produce the same sweep.
     A = _spd(150, seed=8, density=0.08)
     want = np.diag(_dense_inv(A))
     simp = cho_factor(A, supernodal="simplicial")
@@ -150,8 +129,6 @@ def test_the_supernodal_and_simplicial_paths_agree():
 
 
 def test_an_ll_factor_is_converted_rather_than_refused():
-    # `cho_factor` returns LL'; upstream's recursion wants LDL'. The conversion
-    # is the library's job, not the caller's.
     A = _spd(40, seed=9)
     F = cho_factor(A)
     assert F.is_ll is True
@@ -161,8 +138,6 @@ def test_an_ll_factor_is_converted_rather_than_refused():
 
 
 def test_the_factor_still_solves_after_a_selected_inverse():
-    # The conversion to LDL' runs on a copy, so the caller's factor is
-    # untouched and still the one they factorized.
     A = _spd(40, seed=10)
     F = cho_factor(A)
     b = np.arange(1.0, 41.0)

@@ -21,7 +21,6 @@
 
 use super::{metis_nodend, Idx};
 
-/// FNV-1a over the permutation's little-endian `i64` bytes.
 fn fnv(a: &[Idx]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for v in a {
@@ -32,8 +31,6 @@ fn fnv(a: &[Idx]) -> u64 {
     h
 }
 
-/// A 2D 5-point Laplacian pattern on an `m x m` grid, as the symmetric
-/// adjacency `METIS_NodeND` takes: both halves, no diagonal.
 fn grid2d(m: usize) -> (Idx, Vec<Idx>, Vec<Idx>) {
     graph(m * m, |v, push| {
         let (i, j) = (v / m, v % m);
@@ -52,7 +49,6 @@ fn grid2d(m: usize) -> (Idx, Vec<Idx>, Vec<Idx>) {
     })
 }
 
-/// A 3D 7-point Laplacian pattern on an `m x m x m` grid.
 fn grid3d(m: usize) -> (Idx, Vec<Idx>, Vec<Idx>) {
     graph(m * m * m, |v, push| {
         let (k, r) = (v / (m * m), v % (m * m));
@@ -78,11 +74,6 @@ fn grid3d(m: usize) -> (Idx, Vec<Idx>, Vec<Idx>) {
     })
 }
 
-/// A banded pattern with half-bandwidth `w`.
-///
-/// Neighbours ascending, like every other generator here: the order *within* a
-/// vertex's list is part of the input, because `Match_RM` takes the first
-/// unmatched neighbour it sees.
 fn band(n: usize, w: usize) -> (Idx, Vec<Idx>, Vec<Idx>) {
     graph(n, |v, push| {
         for d in (1..=w).rev() {
@@ -98,8 +89,6 @@ fn band(n: usize, w: usize) -> (Idx, Vec<Idx>, Vec<Idx>) {
     })
 }
 
-/// One vertex adjacent to every other, and nothing else — the shape that makes
-/// `Match_RM`'s island handling and the dense-row branches run.
 fn arrow(n: usize) -> (Idx, Vec<Idx>, Vec<Idx>) {
     graph(n, |v, push| {
         if v == 0 {
@@ -112,8 +101,6 @@ fn arrow(n: usize) -> (Idx, Vec<Idx>, Vec<Idx>) {
     })
 }
 
-/// `A @ A.T + shift*I`'s pattern for a sparse random `A`, generated with the
-/// same LCG on both sides so the shape is reproducible without a fixture.
 fn spd(n: usize, per_col: usize, seed: u64) -> (Idx, Vec<Idx>, Vec<Idx>) {
     let mut state = seed;
     let mut rand = move || {
@@ -122,7 +109,6 @@ fn spd(n: usize, per_col: usize, seed: u64) -> (Idx, Vec<Idx>, Vec<Idx>) {
             .wrapping_add(1442695040888963407);
         (state >> 33) as usize
     };
-    // columns of A, then the pattern of A A' is "share a row"
     let mut rows: Vec<Vec<usize>> = vec![Vec::new(); n];
     for col in rows.iter_mut() {
         for _ in 0..per_col {
@@ -156,8 +142,6 @@ fn spd(n: usize, per_col: usize, seed: u64) -> (Idx, Vec<Idx>, Vec<Idx>) {
     (n as Idx, xadj, adjncy)
 }
 
-/// Build CSR/CSC (they coincide, the pattern being symmetric) from a per-vertex
-/// neighbour generator.
 fn graph(
     n: usize,
     mut nbrs: impl FnMut(usize, &mut dyn FnMut(usize)),
@@ -216,10 +200,6 @@ fn the_ordering_is_the_one_upstream_metis_computes() {
     }
 }
 
-/// Whatever it returns must at least be a permutation, and `iperm` its inverse.
-/// Runs over the whole corpus, including the shapes with no pin, because the
-/// point of the wider sweep is to walk every `Ws` access under
-/// `debug_assertions`.
 #[test]
 fn nodend_never_indexes_out_of_bounds() {
     for (name, (n, xadj, adjncy)) in corpus() {
@@ -240,8 +220,6 @@ fn nodend_never_indexes_out_of_bounds() {
     }
 }
 
-/// The generator is re-seeded by `SetupCtrl`, so two calls in one process must
-/// agree — the property the whole port's reproducibility rests on.
 #[test]
 fn the_ordering_does_not_depend_on_what_ran_before_it() {
     let (n, xadj, adjncy) = grid3d(6);

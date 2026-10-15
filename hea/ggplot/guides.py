@@ -33,19 +33,11 @@ from .scales.color_continuous import ScaleContinuousColor
 from .scales.discrete import ScaleDiscreteColor, ScaleIdentity
 from .theme import element_blank, element_rect, element_text
 
-# ggplot2 sizes are in mm; matplotlib widths/lengths are in pt. R's TeX
-# convention: 72.27 pt/inch, 25.4 mm/inch → ≈ 2.8454 pt/mm.
 _PT_PER_MM = 72.27 / 25.4
 
 
 def _add_key_bg(handlebox, fontsize, *, fc, ec, lw):
-    """Paint ``legend.key`` (panel-colour rect) into ``handlebox`` first.
-
-    Returns the (xdescent, ydescent, width, height, trans) tuple so the
-    caller can position glyphs in the same coordinate space. Used by the
-    Line2D and Patch key handlers to keep a ggplot2-style gray bg behind
-    each legend key.
-    """
+    """Paint ``legend.key`` (panel-colour rect) into ``handlebox`` first."""
     xdescent = handlebox.xdescent
     ydescent = handlebox.ydescent
     width = handlebox.width
@@ -143,10 +135,6 @@ class _HandlerPatchKeyBg(HandlerPatch):
 def _legend_key_handler(theme):
     """Return a ``handler_map`` that paints ``legend.key`` behind each glyph,
     or ``None`` if the theme blanks/omits the key.
-
-    Two handler entries: ``Line2D`` (point/path glyphs) and ``Patch``
-    (polygon glyph for bar/ribbon/etc.). ggplot2's key element shows
-    behind both kinds.
     """
     elem = theme.get("legend.key")
     if isinstance(elem, element_blank):
@@ -176,7 +164,6 @@ def _legend_title_alignment(theme) -> str:
     return "center"
 
 
-# Aesthetics that contribute to ``guide_legend`` entries.
 _LEGEND_AES = ("colour", "fill", "shape", "linetype", "size", "alpha")
 
 
@@ -188,28 +175,10 @@ class LegendGroup:
     title: str
     levels: list = field(default_factory=list)
     labels: list[str] = field(default_factory=list)
-    # ``aes_values[aesthetic]`` is a list of mapped values, one per level
-    # (e.g. ``{"colour": ["#FF0000", "#00FF00"], "shape": ["o", "^"]}``).
     aes_values: dict = field(default_factory=dict)
-    # Aesthetic names this group represents — multi-entry when multiple
-    # aes share the same source/levels and merge into one legend (e.g.
-    # ``aes(colour=g, shape=g)``). Used to look up ``guides(colour=...)``
-    # overrides; an override on any merged aes applies to the group.
     aes_names: list[str] = field(default_factory=list)
-    # Geom that contributed to this legend — drives the legend key glyph
-    # (rectangle for bar, line for path, circle for point). ``"point"``
-    # is the safe default when no contributor is found.
     key_glyph: str = "point"
-    # Layer-level constants the user passed via geom kwargs
-    # (``geom_bar(alpha=1/5, fill=None)``). Applied on top of the
-    # scale-mapped values when building the key, so the legend reflects
-    # the actual layer style — matches ggplot2's ``draw_key_*`` reading
-    # of layer aesthetics.
     layer_aes_params: dict = field(default_factory=dict)
-    # Geom-level defaults (``geom_bar.default_aes`` etc.). Used as a
-    # fallback when an aesthetic isn't mapped and isn't in
-    # ``aes_params``, so e.g. ``aes(colour=drv)`` on ``geom_bar`` shows
-    # legend keys with grey35 fill (the bar default), matching R.
     layer_default_aes: dict = field(default_factory=dict)
 
 
@@ -227,8 +196,6 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
     plot_labels = getattr(plot, "labels", {}) or {}
     scales = build_output.scales
 
-    # Group key → LegendGroup. Use insertion order so the visual order of
-    # the legends matches the user's aes order.
     groups: dict[tuple, LegendGroup] = {}
     seen_scales: set[int] = set()
 
@@ -240,8 +207,6 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
         if isinstance(scale, ScaleIdentity):
             continue
         if not isinstance(scale, ScaleDiscreteColor):
-            # Continuous scales for non-positional aes would need a colourbar
-            # or a sample-point legend; neither is rendered here.
             continue
         if not getattr(scale, "levels", None):
             continue
@@ -251,12 +216,6 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
         levels = list(scale.levels)
         key = (source, tuple(levels))
 
-        # Title precedence: labs() override > scale.name > aes-source > aes name.
-        # ``scale.name`` may be the ``_NAME_MISSING`` sentinel (factory wasn't
-        # called with name=) — treat that as "no override". An explicit
-        # ``name=None`` (suppress) yields ``""`` here, which is falsy and
-        # falls through to the source name — for legend titles that's fine
-        # since no axis-style suppression UI exists yet.
         title = (
             plot_labels.get(aes_name)
             or _scale_name_or_none(scale)
@@ -271,16 +230,10 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
             visible_only=True,
         )
         if contributor is None:
-            # Every contributing layer has ``show_legend=False`` — ggplot2's
-            # rule: the scale is still trained, but no guide is produced.
             continue
 
         if key not in groups:
             geom = getattr(contributor, "geom", None)
-            # Effective ``aes_params`` (post-promotion) drops column-shaped
-            # entries that were promoted into the mapping; those aren't
-            # constants for the key glyph. Falls back to the raw layer
-            # field for legacy callers without a build_output.
             eff_params_list = getattr(build_output, "layer_aes_params", None)
             if (
                 eff_params_list is not None
@@ -312,18 +265,12 @@ def build_legend_groups(plot, build_output) -> list[LegendGroup]:
 def _stat_default_label_for(plot, aes_name):
     """If any layer's stat declares a ``default_<aes>_label`` (e.g.
     ``StatBin2d.default_fill_label = "count"``), return it.
-
-    Mirrors ggplot2's behaviour: ``geom_bin2d()`` auto-maps fill to
-    ``after_stat(count)`` and the colorbar reads "count" by default,
-    not the bare aesthetic name "fill".
     """
     attr = f"default_{aes_name}_label"
     for layer in getattr(plot, "layers", []):
         stat = getattr(layer, "stat", None)
         if stat is None:
             continue
-        # If the user explicitly mapped this aesthetic on the layer,
-        # don't override their choice with the stat default.
         mapping = getattr(layer, "mapping", None) or {}
         if aes_name in mapping:
             continue
@@ -334,11 +281,7 @@ def _stat_default_label_for(plot, aes_name):
 
 
 def _scale_name_or_none(scale):
-    """Return ``scale.name`` if it was explicitly set, else ``None``.
-
-    Filters the ``_NAME_MISSING`` sentinel (factory wasn't called with
-    name=) so legend / colorbar title fallbacks treat it as "no override".
-    """
+    """Return ``scale.name`` if it was explicitly set, else ``None``."""
     from .scales.scale import _NAME_MISSING
 
     nm = getattr(scale, "name", None)
@@ -348,19 +291,7 @@ def _scale_name_or_none(scale):
 
 
 def _resolve_discrete_labels(scale, levels):
-    """Apply ``scale.labels`` to a discrete scale's levels for legend display.
-
-    Mirrors ggplot2's ``labels`` semantics on discrete scales:
-
-    * ``"default"`` (or attr missing) → ``str(level)`` for each level.
-    * ``None`` → blank labels (``labels = NULL`` in R hides the legend
-      entries' text but keeps the keys).
-    * dict → per-level lookup; missing keys fall back to ``str(level)``,
-      matching R's named-vector behaviour for partial overrides.
-    * callable → invoked once with the levels list, return the labels.
-    * list / tuple → used positionally; padded / truncated to match
-      ``len(levels)``.
-    """
+    """Apply ``scale.labels`` to a discrete scale's levels for legend display."""
     labels = getattr(scale, "labels", "default")
     if isinstance(labels, str) and labels == "default":
         return [str(level) for level in levels]
@@ -381,20 +312,6 @@ def _find_layer_for_aes(
 ):
     """Return ``(idx, layer)`` for the first layer whose mapping uses
     ``aes_name`` — or ``(None, None)`` if none does.
-
-    Looks at the layer's own mapping first, then falls back to the plot-
-    level mapping (when ``inherit_aes=True``) — matches ggplot2's lookup
-    order. The contributing layer drives the legend key glyph + any
-    layer-level aes constants the user supplied via geom kwargs.
-
-    ``layer_mappings`` (preferred): per-layer effective mapping from
-    ``BuildOutput.layer_mappings`` — already includes column-shaped
-    ``aes_params`` promoted by ``_promote_string_aes_params``. Without
-    this, ``geom_point(color="species")`` would have an empty
-    ``layer.mapping`` and the legend would be silently dropped.
-
-    ``visible_only=True`` skips layers with ``show_legend=False`` —
-    ggplot2's rule for whether a scale should produce a guide.
     """
     plot_mapping = getattr(plot, "mapping", None) or {}
     for i, layer in enumerate(plot.layers):
@@ -412,19 +329,13 @@ def _find_layer_for_aes(
 
 
 def _scale_mapped_values(scale, levels):
-    """Return per-level mapped values from the scale.
-
-    Calls the palette directly when available — :meth:`ScaleDiscreteColor.map`
-    hardcodes ``return_dtype=pl.Utf8`` which would coerce numeric outputs
-    (size, alpha) to strings.
-    """
+    """Return per-level mapped values from the scale."""
     n = len(levels)
     if isinstance(getattr(scale, "values", None), dict):
         return [scale.values.get(level) for level in levels]
     palette = getattr(scale, "palette", None)
     if palette is not None:
         return list(palette(n))
-    # Fallback (no palette set yet): defer to scale.map.
     mapped = scale.map(pl.Series(levels))
     return mapped.to_list() if hasattr(mapped, "to_list") else list(mapped)
 
@@ -530,24 +441,16 @@ def apply_legends(
 
     target = axes_list[0]
 
-    # Colorbars first — they reserve space on the figure edge.
     for i, spec in enumerate(cbar_specs):
         cax = colorbar_caxes[i] if colorbar_caxes and i < len(colorbar_caxes) else None
         _render_colorbar(fig, axes_list, target, spec, pos, direction, cax=cax)
 
-    # Then discrete legends. When the block engine pre-allocates a host
-    # axes per legend group (``legend_host_axes``), render INTO that
-    # axes — the legend stays bounded by the host's bbox, so it can't
-    # extend into a sibling plot's panel area in a patchwork
-    # composition. Falls back to ``target.legend(bbox_to_anchor=...)``
-    # for legacy callers without the block engine.
     legends = []
     for i, group in enumerate(groups):
         handles = [_make_handle(group, j) for j in range(len(group.levels))]
         labels = list(group.labels)
         title = group.title
 
-        # Apply ``guides(<aes>=guide_legend(...))`` overrides.
         gl = _find_guide_legend(group, plot)
         if gl is not None:
             if gl.title is not None:
@@ -559,8 +462,6 @@ def apply_legends(
                 for k, v in (gl.override_aes or {}).items():
                     _apply_handle_override(h, k, v, group.key_glyph)
 
-        # Resolve column count: explicit ``ncol`` wins; ``nrow`` is
-        # converted to ``ceil(n/nrow)``; otherwise default by direction.
         if gl is not None and gl.ncol is not None:
             ncols = max(1, int(gl.ncol))
         elif gl is not None and gl.nrow is not None:
@@ -575,30 +476,12 @@ def apply_legends(
             if legend_host_axes and i < len(legend_host_axes)
             else None
         )
-        # Per-glyph spacing: polygon keys are filled rectangles that
-        # *cover* the panel-colour bg, so they need visible vertical gaps
-        # between rows or adjacent colour blocks would butt together.
-        # Point/path keys are small glyphs sitting on the bg, so
-        # ``labelspacing=0`` (between rows) and ``columnspacing=0``
-        # (between columns) let the per-key bgs abut into one
-        # continuous gray block — matches ggplot2 regardless of whether
-        # the user added ``guides(... = guide_legend(nrow=...))``. Without
-        # the columnspacing override, multi-column / wrapped layouts
-        # split the bg into separate cells and the legend "style" visibly
-        # changes when guides() introduces wrapping.
         if group.key_glyph == "polygon":
             labelspacing = 0.4
             columnspacing = 1.0  # match matplotlib default-ish
         else:
             labelspacing = 0.0
             columnspacing = 0.0
-        # ggplot2's ``legend.key.size = unit(1.2, "lines")`` produces
-        # square keys. matplotlib's ``handlelength`` and ``handleheight``
-        # are both in font-size units but use different reference
-        # dimensions (length is per-em horizontal, height is per-em
-        # vertical incl. line spacing), so the same numeric value yields
-        # a non-square box — empirically ``(1.2, 1.5)`` gives a square
-        # ~12×12 px bbox at the default 10 pt fontsize.
         sizing = {
             "handlelength": 1.2,
             "handleheight": 1.5,
@@ -607,11 +490,6 @@ def apply_legends(
         }
         if host is not None:
             host.set_axis_off()
-            # Anchor the legend against the panel-facing edge of the
-            # host so the legend hugs the plot. For a right-margin host
-            # that's the LEFT edge; for left-margin host it's the
-            # RIGHT edge; for bottom-margin host it's the TOP edge;
-            # for top-margin host it's the BOTTOM edge.
             if pos == "left":
                 host_loc, host_anchor = "center right", (1.0, 0.5)
             elif pos == "top":
@@ -647,22 +525,13 @@ def apply_legends(
             )
         legends.append(leg)
         if host is None and i < len(groups) - 1:
-            # ax.legend replaces the previous legend artist on each call.
-            # Re-add to keep earlier legends visible when stacking. Only
-            # relevant for the legacy bbox_to_anchor path; the host-axes
-            # path uses one host per group so no re-adding needed.
             target.add_artist(leg)
 
 
 def _render_colorbar(
     fig, axes_list, target, spec: ColorbarSpec, pos: str, direction: str, *, cax=None
 ) -> None:
-    """Render one colorbar with theme-aware location.
-
-    ``cax``: a pre-allocated dedicated axes. When given, the colorbar
-    fills it exactly and the host ``axes_list`` is left untouched
-    (block-engine path); otherwise matplotlib's auto-shrink applies.
-    """
+    """Render one colorbar with theme-aware location."""
     import matplotlib as mpl
 
     cmap = _palette_to_cmap(spec.palette, name=f"hea_{spec.aesthetic}")
@@ -670,8 +539,6 @@ def _render_colorbar(
     mappable = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
     mappable.set_array([])
 
-    # matplotlib's location accepts: "left"/"right"/"top"/"bottom"
-    # — same vocab as ggplot2's legend.position.
     location = pos if pos in ("right", "left", "top", "bottom") else "right"
     orientation = "horizontal" if location in ("top", "bottom") else "vertical"
     if cax is not None:
@@ -685,11 +552,6 @@ def _render_colorbar(
             shrink=0.6,
             pad=0.05,
         )
-    # ggplot2 places the colorbar title ABOVE the bar (not to its side
-    # rotated 90° — matplotlib's default ``cb.set_label``). We use
-    # ``cb.ax.set_title`` so the title sits on top of the cax, matching
-    # R/ggplot2's layout. For horizontal colorbars matplotlib's default
-    # is already on top, but ``set_title`` works there too.
     cb.ax.set_title(spec.title, fontsize=10, pad=4)
 
 
@@ -705,24 +567,15 @@ def _find_guide_legend(group, plot):
             if isinstance(spec, GuideLegend):
                 return spec
             if spec is None or spec is False:
-                # ``guides(colour = "none")`` / ``guides(colour = NULL)``
-                # suppress — we already handle suppression at draw time
-                # by returning a sentinel; treat None/False as "no extra
-                # override settings" here.
                 return None
     return None
 
 
 def _apply_handle_override(handle, key, value, key_glyph):
-    """Apply one ``override.aes`` entry to a legend handle in-place.
-
-    Mirrors the per-glyph property mapping used by :func:`_make_point_handle`
-    et al. ``size`` is interpreted in ggplot2's mm units and converted to
-    matplotlib's pt; colour names go through :func:`r_color`."""
+    """Apply one ``override.aes`` entry to a legend handle in-place."""
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
 
-    # Canonical names.
     if key == "color":
         key = "colour"
     if key == "linetype":
@@ -782,12 +635,7 @@ def _apply_handle_override(handle, key, value, key_glyph):
 
 
 def _make_handle(group: LegendGroup, idx: int):
-    """Build one legend handle for the i-th level.
-
-    Dispatches by the contributing geom's ``key_glyph`` (mirrors R's
-    ``draw_key_*`` family). Defaults to a circle marker for unrecognised
-    glyphs.
-    """
+    """Build one legend handle for the i-th level."""
     if group.key_glyph == "polygon":
         return _make_polygon_handle(group, idx)
     if group.key_glyph == "path":
@@ -796,20 +644,8 @@ def _make_handle(group: LegendGroup, idx: int):
 
 
 def _resolve_aes(group: LegendGroup, idx: int, name: str, default):
-    """Resolve aesthetic ``name`` at level ``idx``.
-
-    Precedence (highest to lowest):
-      1. layer ``aes_params`` — user-supplied constants
-         (``geom_bar(alpha=0.2)``) win over the scale.
-      2. scale-mapped value — when the aes is mapped (``aes(fill=drv)``).
-      3. geom ``default_aes`` — fills in unmapped aes (e.g. ``fill`` is
-         ``grey35`` when only ``colour=drv`` is mapped on ``geom_bar``).
-         Without this fallback, the legend key would render with no
-         fill while the bars show grey35 — the legend would lie.
-      4. caller-supplied ``default``.
-    """
+    """Resolve aesthetic ``name`` at level ``idx``."""
     lap = group.layer_aes_params or {}
-    # American spelling alias.
     for k in (name, "color" if name == "colour" else None):
         if k and k in lap:
             return lap[k]
@@ -873,10 +709,6 @@ def _make_point_handle(group: LegendGroup, idx: int) -> Line2D:
 
     size = _resolve_aes(group, idx, "size", None)
     if size is not None:
-        # ggplot2 ``size`` is in mm; matplotlib ``markersize`` is in pt.
-        # Without the conversion, geom_point's default ``size=1.5`` renders
-        # the legend marker at 1.5 pt, too small to tell shapes apart when
-        # ``aes(colour=x, shape=x)`` merges into one legend.
         kwargs["markersize"] = float(size) * _PT_PER_MM
 
     alpha = _resolve_aes(group, idx, "alpha", None)
@@ -887,23 +719,7 @@ def _make_point_handle(group: LegendGroup, idx: int) -> Line2D:
 
 
 def _make_polygon_handle(group: LegendGroup, idx: int) -> _MplPatch:
-    """Filled rectangle key — for ``geom_bar``/``rect``/``ribbon``/etc.
-
-    Mirrors R's ``draw_key_polygon``: fills with the layer's ``fill``
-    (or ``colour`` when no fill is mapped — for hollow-bar plots), edges
-    with ``colour``, applies ``alpha`` to both. ``fill=NA`` (Python
-    ``None``/NaN) becomes ``"none"`` (transparent), so the panel-colour
-    key bg shows through, matching the ``geom_bar(fill=NA)`` look.
-
-    Border thickness reads the layer's ``size`` aes in mm and converts
-    to matplotlib points (``size_mm * 72.27/25.4``), so ``geom_bar``'s
-    default ``size=0.5 mm`` renders as ~1.42 pt — the same border R
-    paints on the legend key.
-
-    Colour names go through ``r_color()`` so R-flavoured greys
-    (``"grey35"``) — which appear as defaults from geom ``default_aes``
-    — translate to matplotlib-friendly ``"0.35"`` form.
-    """
+    """Filled rectangle key — for ``geom_bar``/``rect``/``ribbon``/etc."""
     fill = _resolve_aes(group, idx, "fill", None)
     colour = _resolve_aes(group, idx, "colour", None)
     alpha = _resolve_aes(group, idx, "alpha", 1.0)
@@ -941,13 +757,7 @@ def _make_path_handle(group: LegendGroup, idx: int) -> Line2D:
 
 
 def _legend_position_kwargs(pos: str, idx: int, total: int) -> dict:
-    """Position kwargs for the i-th legend in a stack of ``total``.
-
-    For right/left: stack vertically; legend i sits below legend i-1.
-    For top/bottom: stack horizontally; legend i sits to the right of i-1.
-    Spacing is approximate — ggplot2 measures legend extents and packs;
-    we use a fixed offset that's good enough for the common 1-2 legend case.
-    """
+    """Position kwargs for the i-th legend in a stack of ``total``."""
     spacing = 0.18
     centre = 0.5 + (total - 1) * spacing / 2
     y_for_idx = centre - idx * spacing
@@ -962,11 +772,6 @@ def _legend_position_kwargs(pos: str, idx: int, total: int) -> dict:
     if pos == "bottom":
         return {"loc": "upper center", "bbox_to_anchor": (x_for_idx, -0.02)}
     return {}
-
-
-# ---------------------------------------------------------------------------
-# guide_legend / guides factories
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -1086,12 +891,6 @@ def _apply_n_dodge(ax, axis_name: str, n: int) -> None:
     """Stack tick labels across ``n`` rows: position ``i`` (in tick
     order) lands in row ``i % n``. Mirrors ggplot2's
     ``guide_axis(n.dodge = N)``.
-
-    Implementation: shift each row's labels outward by an integer
-    multiple of the line height via matplotlib's per-tick ``set_pad``.
-    Same approach for x and y — pad always means "perpendicular
-    distance from the axis spine to the label" so dodging y labels
-    leftward / rightward just works.
     """
     target_axis = ax.xaxis if axis_name == "x" else ax.yaxis
     ticks = target_axis.get_major_ticks()
@@ -1099,9 +898,6 @@ def _apply_n_dodge(ax, axis_name: str, n: int) -> None:
         return
     label = ticks[0].label1
     font_size = float(label.get_fontsize())
-    # 1.2× font size is matplotlib's default line spacing — gives the
-    # alternate row enough clearance to sit fully below (or beside) the
-    # primary row without colliding.
     line_step = font_size * 1.2
     base_pad = ticks[0].get_pad()
     for i, tick in enumerate(ticks):
@@ -1114,10 +910,6 @@ def _apply_check_overlap(ax, axis_name: str) -> None:
     order along ``axis_name``; hides any whose bbox would intersect
     the previously kept one. Mirrors ggplot2's
     ``guide_axis(check.overlap = TRUE)``.
-
-    Forces a draw so the bboxes reflect the post-rotation /
-    post-n_dodge layout (otherwise this would test pre-layout
-    extents and miss most collisions on rotated axes).
     """
     fig = ax.figure
     fig.canvas.draw()
@@ -1132,7 +924,6 @@ def _apply_check_overlap(ax, axis_name: str) -> None:
     if len(labels) <= 1:
         return
 
-    # Spatial order along the axis (display coords).
     if axis_name == "x":
         labels.sort(key=lambda lbl: lbl.get_window_extent(renderer).x0)
     else:

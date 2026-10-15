@@ -1,8 +1,3 @@
-//! `libmetis/compress.c`.
-//!
-//! `PruneGraph` is gated on `ctrl->pfactor > 0`, which is 0 by default and which
-//! `cholmod_metis` never sets, so it is not ported.
-
 use super::super::ws::Ws;
 use super::gklib::{ikvsorti, Ikv};
 use super::graph::Graph;
@@ -11,12 +6,6 @@ use super::Idx;
 /// `defs.h:50`.
 const COMPRESSION_FRACTION: f64 = 0.85;
 
-/// `CompressGraph` (`compress.c:...`) — collapse vertices with identical
-/// adjacency structure (including the diagonal) into one.
-///
-/// Returns `None` when the compression is not worth it, which is upstream's
-/// `NULL` and the signal to fall back to `SetupGraph`. `cptr`/`cind` are filled
-/// either way, and `METIS_NodeND` needs them to expand the ordering afterwards.
 pub fn compress_graph(
     nvtxs: Idx,
     xadj: &[Idx],
@@ -27,8 +16,6 @@ pub fn compress_graph(
 ) -> Option<Graph> {
     let n = nvtxs as usize;
 
-    // The C's prologue, taken through `Ws`; see `sparse::ws`. This runs once
-    // over the whole input graph, so its per-access cost is `nnz(A)`-sized.
     let xadj = Ws::new_ref(xadj);
     let adjncy = Ws::new_ref(adjncy);
     let cptr = Ws::new(cptr);
@@ -40,7 +27,6 @@ pub fn compress_graph(
     let map = Ws::new(&mut map_);
     let mut keys = vec![Ikv::default(); n];
 
-    // "Compute a key for each adjacency list"
     for i in 0..n {
         let mut k: Idx = 0;
         for j in xadj[i] as usize..xadj[i + 1] as usize {

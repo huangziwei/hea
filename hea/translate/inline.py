@@ -10,12 +10,8 @@ Pass ``execute=True`` to also run the translation:
 
 ::
 
-    # Translate only (default) — inspect the generated Python.
     print(hea.from_R('flights |> filter(dest == "IAH")'))
 
-    # Translate + run. Names referenced by the translated code (here
-    # ``flights``) must already exist in the caller's namespace, the same
-    # as if you had written the translated Python in this cell yourself.
     flights = hea.data("flights", package="nycflights13")
     df = hea.from_R('flights |> filter(dest == "IAH")', execute=True)
 
@@ -95,9 +91,6 @@ class Result:
     gaps: list[Gap] = field(default_factory=list)
 
     def __repr__(self) -> str:
-        # When the call was translate-only (or the script had no
-        # trailing expression), show the translated source directly so
-        # ``hea.from_R(...)`` in a notebook cell prints something useful.
         if self.value is None:
             return self.source.rstrip()
         return repr(self.value)
@@ -160,7 +153,6 @@ def from_R(
     if not execute:
         return Result(value=None, source=py_source, gaps=[])
 
-    # Capture caller frame for variable lookup.
     caller = inspect.currentframe().f_back  # type: ignore[union-attr]
     if caller is None:
         raise RuntimeError("hea.from_R could not determine caller frame")
@@ -221,11 +213,6 @@ def to_R(
     return Result(value=value, source=r_source, gaps=[])
 
 
-# ---------------------------------------------------------------------------
-# Internals
-# ---------------------------------------------------------------------------
-
-
 def _rewrite_trailing_expr(tree: ast.Module, sentinel: str) -> None:
     """Mutate ``tree`` so the last top-level ``Expr`` binds its value to
     ``sentinel``. If the last statement isn't a bare expression (it's an
@@ -243,29 +230,15 @@ def _rewrite_trailing_expr(tree: ast.Module, sentinel: str) -> None:
 
 
 def _build_exec_namespace(caller) -> dict:
-    """Merge caller's globals + locals + hea's public names into one dict.
-
-    Order matters — caller globals first (broadest), then locals (most
-    specific), then hea names if not already shadowed. This lets the user
-    override a hea name in their own scope without surprise.
-
-    Translated Python uses bare names (``col``, ``lit``, ``lm``, ``data``,
-    ``case_when``, …) because that's how the source R script writes them.
-    The top-level ``hea.*`` only exposes sub-modules now, so we pull names
-    out of every user-facing sub-namespace and seed them into the exec
-    namespace.
-    """
+    """Merge caller's globals + locals + hea's public names into one dict."""
     import hea  # local to avoid import-time cycles
 
     ns: dict = dict(caller.f_globals)
     ns.update(caller.f_locals)
-    # Top-level hea attrs (the sub-modules themselves: hea.tidy, hea.models, …).
     for name in dir(hea):
         if name.startswith("_"):
             continue
         ns.setdefault(name, getattr(hea, name))
-    # Names from every user-facing sub-namespace — col / lit / DataFrame /
-    # lm / Binomial / anova / t_test / data / etc.
     for sub in (
         hea.tidy,
         hea.dtypes,
@@ -283,14 +256,7 @@ def _build_exec_namespace(caller) -> dict:
 
 
 def _propagate_to_caller(caller, ns: dict) -> None:
-    """Push assignments back into the caller's namespace, when possible.
-
-    For module-level callers (notebook cells), ``f_locals is f_globals`` —
-    we can mutate the dict directly. For function-level callers, locals
-    are a snapshot the runtime won't reread; nothing we do here actually
-    changes the caller's bindings.
-    """
-    # Don't push back hea names or dunders we added.
+    """Push assignments back into the caller's namespace, when possible."""
     import hea
 
     hea_names = {n for n in dir(hea) if not n.startswith("_")}
@@ -326,15 +292,6 @@ def _save_translated(
 def _execute_r_and_load(r_source: str):
     """Run translated R via the parity runner's :func:`run_r`, then
     return:
-
-    - a polars DataFrame when the final expression is frame-shaped
-      (``data.frame`` / atomic / ``ggplot$data``),
-    - the R subprocess's captured stdout (as a string) for any other
-      result class — model fits, ``summary.lm``, ``aov``, lists, etc.
-      The R driver auto-prints these so the caller sees the same output
-      an R REPL would show.
-
-    Used only when the user asks ``to_R(..., execute=True)``.
     """
     import tempfile
 
@@ -353,7 +310,4 @@ def _execute_r_and_load(r_source: str):
             )
         if result.captured:
             return pl.read_csv(result.out_csv)
-        # No frame captured — driver printed the result to stdout. Wrap
-        # in RConsoleOutput so Jupyter / IPython renders the multi-line
-        # R-console text unquoted instead of as a Python ``'...'`` repr.
         return RConsoleOutput(result.stdout.rstrip("\n"))

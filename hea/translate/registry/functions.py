@@ -38,7 +38,6 @@ class Func:
 
 # fmt: off
 FUNCTION_TABLE: dict[str, Func] = {
-    # ---- aggregators / reductions (method form, .name() on a column) ----
     "mean":     Func("mean",     "method"),
     "median":   Func("median",   "method"),
     "sum":      Func("sum",      "method"),
@@ -51,11 +50,8 @@ FUNCTION_TABLE: dict[str, Func] = {
     "quantile": Func("quantile", "method"),
     "n":        Func("n",        "function", Slot.NONE),
     "n_distinct": Func("n_distinct", "function"),
-    # ``length`` on a column expr → ``.len()`` (polars Expr method); on a
-    # list/vector eagerly it's still Python ``len()`` via the fallback.
     "length":   Func("len",      "method"),
 
-    # ---- elementwise math (method form on the column) ----
     "log":      Func("log",      "method"),
     "log2":     Func("log",      "method"),   # arg=2 handled in emitter
     "log10":    Func("log10",    "method"),
@@ -66,7 +62,6 @@ FUNCTION_TABLE: dict[str, Func] = {
     "ceiling":  Func("ceil",     "method"),
     "sign":     Func("sign",     "method"),
 
-    # ---- dplyr helpers ----
     "desc":     Func("desc",     "function", Slot.COLUMN_NAME),
     "across":   Func("across",   "function", Slot.COLUMN_NAME),
     "if_else":  Func("if_else",  "function"),
@@ -77,7 +72,6 @@ FUNCTION_TABLE: dict[str, Func] = {
     "between":  Func("between",  "function"),
     "near":     Func("near",     "function"),
 
-    # ---- ranking / cumulative ----
     "row_number":  Func("row_number",  "function", Slot.NONE),
     "min_rank":    Func("min_rank",    "method"),
     "dense_rank":  Func("dense_rank",  "method"),
@@ -95,7 +89,6 @@ FUNCTION_TABLE: dict[str, Func] = {
     "cummin":      Func("cummin",      "method"),
     "cummean":     Func("cummean",     "method"),
 
-    # ---- tidy-select helpers ----
     "starts_with":  Func("selectors.starts_with",  "function"),
     "ends_with":    Func("selectors.ends_with",    "function"),
     "contains":     Func("selectors.contains",     "function"),
@@ -103,21 +96,12 @@ FUNCTION_TABLE: dict[str, Func] = {
     "everything":   Func("selectors.all",          "function"),
     "all_of":       Func("all_of",                 "function"),
     "any_of":       Func("any_of",                 "function"),
-    # ``where(is.X)`` — tidyselect predicate selector. Bespoke handler
-    # (``_emit_where_call``) maps known R-predicate identifiers to the
-    # equivalent ``polars.selectors`` constructor.
     "where":        Func("__where__",              "function"),
-    # ``join_by(col1, col2 == col3, ...)`` — bare name → string,
-    # comparison expr → ``col(lhs) op col(rhs)``. Bespoke handler.
     "join_by":      Func("__join_by__",            "function"),
-    # ``quote(expr)`` — R's plotmath. Translator emits the inner expr
-    # as R source text (string); hea ``quote()`` parses and renders to
-    # matplotlib mathtext (``$...$``). Bespoke handler.
     "quote":        Func("__quote__",              "function"),
     "expression":   Func("__quote__",              "function"),
     "bquote":       Func("__quote__",              "function"),
 
-    # ---- base R that maps directly to hea ----
     "c":        Func("__list__",   "function"),  # bespoke — emit as a list/Series
     "list":     Func("__list__",   "function"),
     "is.na":    Func("is_na",      "method"),    # R's is.na — element-wise NA
@@ -127,39 +111,18 @@ FUNCTION_TABLE: dict[str, Func] = {
     "sessionInfo": Func("session_info", "function"),  # R's sessionInfo() -> hea.session_info()
     "is.finite": Func("is_finite", "method"),
 
-    # ---- tibble / data.frame literal — bespoke handler ----
-    # Translates to ``hea.DataFrame({"col": [values], ...})``. See
-    # ``r_to_py._emit_data_frame_call`` for the implementation. The
-    # ``__data_frame__`` marker steers the dispatch.
     "data.frame":     Func("__data_frame__", "function"),
     "tibble":         Func("__data_frame__", "function"),
     "data_frame":     Func("__data_frame__", "function"),
     "as_tibble":      Func("__data_frame__", "function"),
     "as.data.frame":  Func("__data_frame__", "function"),
 
-    # tribble — row-form literal. ``tribble(~col, ~col, val, val, val, val)``
-    # → reshape to column-major then dispatch to ``hea.DataFrame``. The
-    # ``__tribble__`` marker steers the dispatch in ``_emit_call``.
     "tribble":        Func("__tribble__", "function"),
 
-    # ---- readr ----
-    # ``col_types = cols(month = col_factor(...))`` is meaningful in R but
-    # has no clean hea analog (polars infers; use ``schema_overrides=`` if
-    # a manual hint is needed). Drop the kwarg at translate time so the
-    # .py output stays meaningful. ``id=`` (multi-file id-column) and
-    # ``locale=`` (locale-aware parsing) are similarly out of scope.
     "read_csv":     Func("read_csv", "function", drop_kwargs=frozenset({"col_types", "id", "locale", "trim_ws", "show_col_types"})),
     "read_tsv":     Func("read_csv", "function", drop_kwargs=frozenset({"col_types", "id", "locale", "trim_ws", "show_col_types"})),
     "read_delim":   Func("read_csv", "function", drop_kwargs=frozenset({"col_types", "id", "locale", "trim_ws", "show_col_types"})),
 
-    # ---- forcats ----
-    # All hea ``fct_*`` helpers are lazy — they take the COLUMN NAME (a
-    # string) and return a callable that resolves against the receiving
-    # ``mutate()`` / ``select()`` at evaluation time. Put their first
-    # arg in COLUMN_NAME slot so bare ``marital`` becomes ``"marital"``,
-    # not ``col("marital")``. The downstream args (``by``/``x``/``y``
-    # in fct_reorder*; the rename dict in fct_recode/fct_collapse) are
-    # already string-shaped from R's NSE.
     "fct_infreq":      Func("fct_infreq",      "function", Slot.COLUMN_NAME),
     "fct_relevel":     Func("fct_relevel",     "function", Slot.COLUMN_NAME),
     "fct_recode":      Func("fct_recode",      "function", Slot.COLUMN_NAME),
@@ -191,13 +154,7 @@ class KwargAlias:
     value_slot: Slot | None = None
 
 
-# Kwarg name aliases — R-side dotted form → (Python-side name, value slot).
-# Looked up per call: any kwarg whose R name matches a key here gets the
-# entry's settings. Unknown kwargs default to dot→underscore name with the
-# surrounding slot inherited.
 KWARG_ALIASES: dict[str, KwargAlias] = {
-    # dplyr's dot-prefixed kwargs map to underscore-prefixed in hea, by
-    # convention (so we don't collide with positional/expression args).
     ".by": KwargAlias("_by", Slot.COLUMN_NAME),
     ".keep": KwargAlias(
         "_keep", Slot.NONE
@@ -210,10 +167,6 @@ KWARG_ALIASES: dict[str, KwargAlias] = {
     ".fns": KwargAlias("fns", None),  # across() function list
     ".names": KwargAlias("names", Slot.NONE),  # across() name pattern
     ".names_sep": KwargAlias("names_sep", Slot.NONE),
-    # pivot_* kwargs (no dot prefix in R). cols / id_cols / names_from /
-    # values_from are column lists → COLUMN_NAME. Everything else is a
-    # literal string / bool → Slot.NONE so we don't strip the quotes on
-    # reverse-direction emission.
     "cols": KwargAlias("cols", Slot.COLUMN_NAME),
     "id_cols": KwargAlias("id_cols", Slot.COLUMN_NAME),
     "names_from": KwargAlias("names_from", Slot.COLUMN_NAME),
@@ -250,6 +203,5 @@ def resolve_kwarg(r_name: str) -> KwargAlias:
     return KwargAlias(py_name, None)
 
 
-# Backwards-compat shim for existing import sites — returns just the name.
 def normalize_kwarg_name(r_name: str) -> str:
     return resolve_kwarg(r_name).py_name

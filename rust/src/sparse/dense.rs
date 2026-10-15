@@ -96,44 +96,14 @@ use crate::nmath::util::rfma;
 
 use super::ws::Ws;
 
-/// `C := A * A'`, lower triangle only — `dsyrk ("L", "N", n, k, 1.0, a, lda,
-/// 0.0, c, ldc)`.
-///
-/// `a` is `n`-by-`k` and `c` is `n`-by-`n`; `beta` is 0, so `c`'s lower
-/// triangle is overwritten rather than accumulated into. Parts of the strict
-/// upper triangle are overwritten too, which a real `dsyrk ("L", ...)` would
-/// not do — see the block comment below for why that is sound here.
-///
-/// The factorization reaches this through [`syrk_ln_strip`], which is the same
-/// call over a range of block columns. This is the whole-matrix name the `dsyrk`
-/// mapping above refers to, and what the parity harness's `dsyrk_` exports.
 #[allow(dead_code)]
 pub fn syrk_ln(n: usize, k: usize, a: &[f64], lda: usize, c: &mut [f64], ldc: usize) {
     debug_assert!(n == 0 || c.len() >= (n - 1) * ldc + n);
     syrk_ln_strip(n, k, a, lda, c, ldc, 0, n);
 }
 
-/// [`syrk_ln`]'s block width. A strip that starts on a multiple of it decomposes
-/// into the same blocks the whole call would use.
 pub const SYRK_NB: usize = 8;
 
-/// Block columns `j0 .. j0+jn` of [`syrk_ln`], with `c` the strip of `C` that
-/// starts at column `j0` — its own contiguous `jn * ldc` slice, so a caller can
-/// hand several strips to several threads without any of them aliasing.
-///
-/// `j0` must be a multiple of [`SYRK_NB`]. Every element is one `gemm_nt` entry
-/// accumulated over `l` ascending wherever the strip boundary and the block
-/// decomposition fall, so both are scheduling decisions rather than numerical
-/// ones.
-///
-/// **The strip is a trapezoid split into one rectangle and a triangle.** The
-/// rows below the strip's own square are a plain `A * B'` on the strip's whole
-/// width, which is what lets [`gemm_nt`] pack: a block column `SYRK_NB` wide
-/// would re-stream all of `A` once per eight columns, and on a supernode with
-/// `ndrow1` in the thousands that is one byte of traffic per flop. The square
-/// that is left is halved recursively — rectangle in the middle, two triangles
-/// at the ends — down to [`SYRK_LEAF`], below which the eight-wide ladder costs
-/// nothing because the operand is small.
 #[allow(clippy::too_many_arguments)]
 pub fn syrk_ln_strip(
     n: usize,
@@ -189,14 +159,8 @@ pub fn syrk_ln_strip(
     syrk_tri(k, a, lda, c, ldc, j0, j0, j0 + jn);
 }
 
-/// Width at which [`syrk_tri`] stops halving. The leaf re-streams its `A`
-/// (`SYRK_LEAF`-by-`k`) once per [`SYRK_NB`] columns, so it is chosen small
-/// enough that those re-reads come out of cache, and the leaves are a
-/// `2 * SYRK_LEAF / n` share of the triangle's flops.
 const SYRK_LEAF: usize = 64;
 
-/// The lower triangle of `C [lo..hi, lo..hi]`, where `c` is the strip that
-/// starts at column `j0`.
 fn syrk_tri(
     k: usize,
     a: &[f64],
@@ -257,46 +221,6 @@ fn syrk_tri(
     syrk_tri(k, a, lda, c, ldc, j0, mid, hi);
 }
 
-/// One `MR`-by-`NR` tile of `C := A * B'`, accumulated in registers.
-///
-/// `MR` and `NR` are `const` so the two innermost loops unroll fully and `acc`
-/// stays in the register file: the `i` extent is contiguous in both `A` and
-/// `C`, so `acc[jj]` is `MR/2` NEON `f64x2`s and each step of `l` is one
-/// contiguous load of `A` plus `NR` broadcasts of `B`.
-///
-/// That is the whole optimization, and it does not move a single rounding:
-/// each `C(i,j)` still accumulates over `l` ascending, exactly as the netlib
-/// reference does. Writing `C` once at the end rather than `k` times is what
-/// the register file buys.
-///
-/// **The `MR` values of `A` are read into `av` before the `jj` loop, and that
-/// is load-bearing rather than tidy.** Written as `a[ao + ii]` inside the two
-/// nested loops — where it is invariant in `jj`, so any reader would expect it
-/// hoisted — LLVM instead half-vectorized the tile: at `MR = 8, NR = 4` it
-/// emitted 12 `fmla.2d` *plus 8 scalar* `fmla.d`/`fmadd`, two `ext.16b` lane
-/// shuffles to realign, and 7 loads, for arithmetic that wants 16 `fmla.2d`
-/// and 4 loads. It could not prove the base 16-byte aligned, so it fell back
-/// to `ldur` at odd offsets and gave up on the tail. That is 22 FP-pipe ops
-/// where 16 will do, and it capped the kernel at ~69% of this machine's
-/// measured f64 FMA ceiling — while [`tile_sub`], structurally the same loop,
-/// got the clean form. Hoisting by hand removes the choice. [`tile_tn`] has
-/// always been written this way.
-///
-/// Pure code motion: `A (i,l)` is the same value however many times it is
-/// read, so the loads move and no rounding does.
-///
-/// `ACC` starts the accumulators from `C` instead of from zero, which is what
-/// lets [`gemm_nt`] cut `k` into blocks: the running sum is stored and reloaded
-/// between blocks, and an `f64` store/reload is exact, so `C (i,j)` still sees
-/// its sources in one unbroken ascending-`l` chain. The same argument
-/// [`KB_SUB`] makes for `C -= A B'`.
-///
-/// `SUB` negates `B (j,l)` before the multiply-add, which turns `C += A B'`
-/// into `C -= A B'` — the form [`tile_sub`] computes, one negation per
-/// `(l, j)` and then the same `rfma`. With `SUB` and `ACC` both set this tile
-/// *is* `tile_sub`, entry for entry, on operands that have been packed rather
-/// than read where they lie; the hoist of `A` into `av` is pure code motion and
-/// moves no rounding either.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn tile_nt<const MR: usize, const NR: usize, const ACC: bool, const SUB: bool>(
@@ -339,7 +263,6 @@ fn tile_nt<const MR: usize, const NR: usize, const ACC: bool, const SUB: bool>(
     }
 }
 
-/// The `m` direction of one `NR`-wide column block, tiled 8/4/2/1.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn cols_nt<const NR: usize, const ACC: bool, const SUB: bool>(
@@ -373,7 +296,6 @@ fn cols_nt<const NR: usize, const ACC: bool, const SUB: bool>(
     }
 }
 
-/// The `n` direction, tiled 4/2/1 over [`cols_nt`].
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn block_nt<const ACC: bool>(
@@ -404,18 +326,6 @@ fn block_nt<const ACC: bool>(
     }
 }
 
-/// `C := A * B'` — `dgemm ("N", "C", m, n, k, 1.0, a, lda, b, ldb, 0.0, c,
-/// ldc)`.
-///
-/// `a` is `m`-by-`k`, `b` is `n`-by-`k`, `c` is `m`-by-`n`. `beta` is 0.
-///
-/// Two paths over the same register tile. The direct one walks `C` in tiles and
-/// re-streams the whole of `A` once per four columns of `B`; that is right while
-/// `A` and `B` stay resident, and it is what the supernodal update issues for
-/// the overwhelming majority of its calls. The blocked one — [`gemm_nt_packed`]
-/// — is for the handful that do not: on a 3.4M-row system the largest thousand
-/// of 2.26M `dgemm`/`dsyrk` calls carry 83% of the flops, with `m`, `n` and `k`
-/// all in the thousands and operands tens of megabytes wide.
 pub fn gemm_nt(
     m: usize,
     n: usize,
@@ -440,7 +350,6 @@ pub fn gemm_nt(
     }
 }
 
-/// [`gemm_nt`] with the operands read where they lie.
 fn gemm_nt_direct(
     m: usize,
     n: usize,
@@ -457,21 +366,11 @@ fn gemm_nt_direct(
     block_nt::<false>(m, n, k, a, 0, lda, b, 0, ldb, c, 0, ldc);
 }
 
-//------------------------------------------------------------------------------
-// gemm_nt for operands that do not fit a cache
-//------------------------------------------------------------------------------
-
-/// The `MR` and `NR` of the packed path — the register tile [`cols_nt`] leads
-/// its ladder with, so a packed panel is exactly what [`tile_nt`] already reads
-/// with `lda` set to the panel's row count.
 const PACK_MR: usize = 8;
 const PACK_NR: usize = 4;
 
-/// Rows of `A` per packed block. `PACK_MC * PACK_KC * 8` bytes have to sit in
-/// L2 while every column panel of `B` is driven past them.
 const PACK_MC: usize = 256;
 
-/// Columns of `C` per pass. Bounds the packed `B` at `PACK_NC * PACK_KC * 8`.
 const PACK_NC: usize = 1024;
 
 /// Length of the `k` block. Bounds both packed operands, and bounds the
@@ -502,31 +401,6 @@ const PACK_KC: usize = 256;
 /// [`strides_want_packing`]'s.
 const PACK_MIN_BYTES: usize = 1 << 20;
 
-/// Whether [`gemm_nt`] should pack because its operands are too big to stay
-/// resident.
-///
-/// [`PACK_MIN_BYTES`] asks whether the operand *survives* between re-reads; the
-/// shape tests ask whether the copy is *amortised*, and they are not the same
-/// question. The direct path re-streams `A` once per [`PACK_NR`] columns of
-/// `B`, so a call reuses each copied element of `A` about `n / PACK_NR` times
-/// against a copy that costs one write plus one read. At `n = PACK_NR * 2` that
-/// is two re-streams against a copy of two: packing cannot win there however
-/// large the operand, and a size test alone lets it try.
-///
-/// A size test alone does let it try. On several threads `strip_width` cuts a
-/// descendant's update into narrow strips, and [`syrk_ln_strip`]'s rectangle
-/// then issues `gemm_nt` with `n` equal to the strip width — commonly a median
-/// `n` of 8 against an `m` in the hundreds, so `m · k · n` clears a megabyte on
-/// its own while the copy is spread over only eight uses. Timed inside the real
-/// factorization, a floor on `n` is worth ~20% of those calls and the curve is
-/// flat from 16 up, so the whole effect is the `n = 8` calls and `PACK_NR * 4`
-/// is the crossing rather than a fitted constant. Not packing at all is worse
-/// than either, on one thread by 20%, so the floor is the fix and switching the
-/// arm off is not.
-///
-/// [`strides_want_packing`] already required `PACK_NR * 4`, measured (0.83 at
-/// 8, 1.08 at 16). The two arms now agree, which they had no reason not to: the
-/// amortisation argument is about the copy, and both arms make the same copy.
 fn wants_packing(m: usize, n: usize, k: usize) -> bool {
     m >= PACK_MR * 4
         && n >= PACK_NR * 4
@@ -538,8 +412,6 @@ fn wants_packing(m: usize, n: usize, k: usize) -> bool {
 /// over its associativity, 128 KB / 8 on an M-series performance core.
 const L1_WAY_BYTES: usize = 16 << 10;
 
-/// The associativity. A stride that repeats a set only after this many columns
-/// still has one way for each of them, so it does not thrash.
 const L1_WAYS: usize = 8;
 
 /// How close two columns of a `k` walk may land, in bytes, before the operands
@@ -605,18 +477,11 @@ fn strides_want_packing(m: usize, n: usize, k: usize, lda: usize, ldb: usize) ->
         && (strides_alias(lda) || strides_alias(ldb))
 }
 
-/// `ceil (x / q) * q`.
 #[inline]
 fn round_up(x: usize, q: usize) -> usize {
     x.div_ceil(q) * q
 }
 
-/// Copy `a [i0 .. i0+mb, l0 .. l0+kb]` into `PACK_MR`-row panels.
-///
-/// Panel `p` occupies `out [p*PACK_MR*kb ..]` and is column-major with leading
-/// dimension `PACK_MR`, which is the layout [`tile_nt`] reads when it is handed
-/// `lda = PACK_MR`. The last panel may hold fewer than `PACK_MR` rows; the
-/// ladder that consumes it never reads past them.
 fn pack_rows(
     mb: usize,
     kb: usize,
@@ -642,9 +507,6 @@ fn pack_rows(
     }
 }
 
-/// [`pack_rows`] with `PACK_NR`, for `B`. Same layout, different panel height:
-/// `B` is `n`-by-`k` and enters the tile the same way `A` does, one contiguous
-/// run of rows per column.
 fn pack_cols(
     nb: usize,
     kb: usize,
@@ -670,8 +532,6 @@ fn pack_cols(
     }
 }
 
-/// The `m` ladder over one packed column panel — 8, then 4/2/1 for whatever the
-/// last row panel holds.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn rows_packed_nt<const NR: usize, const ACC: bool, const SUB: bool>(
@@ -738,7 +598,6 @@ fn rows_packed_nt<const NR: usize, const ACC: bool, const SUB: bool>(
     }
 }
 
-/// One packed `mb`-by-`nb`-by-`kb` block into `C [ic0 ..]`.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn block_packed_nt<const ACC: bool, const SUB: bool>(
@@ -771,22 +630,10 @@ fn block_packed_nt<const ACC: bool, const SUB: bool>(
 }
 
 thread_local! {
-    /// The two packing buffers, kept per thread across calls.
-    ///
-    /// A `RefCell` and not a pool: [`gemm_nt`] forks nothing and calls nothing
-    /// that could re-enter it, so the borrow cannot overlap with itself the way
-    /// `super_numeric`'s task workspace can.
     static PACK_BUF: core::cell::RefCell<(Vec<f64>, Vec<f64>)> =
         const { core::cell::RefCell::new((Vec::new(), Vec::new())) };
 }
 
-/// [`gemm_nt`] with both operands copied into contiguous register-tile panels
-/// and the loop nest blocked so the copies are what the tile reads.
-///
-/// The order is `jc` (columns of `C`), then `pc` (the `k` block), then `ic`
-/// (rows of `C`): `B`'s panel is packed once per `(jc, pc)` and `A`'s once per
-/// `(jc, pc, ic)`, and the `pc` loop ascends so the accumulation into `C` stays
-/// in index order — see [`PACK_KC`].
 fn gemm_nt_packed(
     m: usize,
     n: usize,
@@ -834,26 +681,6 @@ fn gemm_nt_packed(
     });
 }
 
-/// One `MR`-by-`NR` tile of `C -= A * B'`, where `A`, `B` and `C` are three
-/// disjoint sub-blocks of the *same* array.
-///
-/// This is the shape [`potrf_l`] and [`trsm_rlt`] are blocked around, and it is
-/// the one configuration in this file that upstream never calls: LAPACK's
-/// `dpotrf` and the reference `dtrsm` do the equivalent work as a long rank-1
-/// ladder, one source column at a time. That ladder is load-bound — it reloads
-/// its destination strip every few sources — and it is why those two ran at
-/// well under half [`gemm_nt`]'s rate.
-///
-/// The destination is loaded into the accumulators *before* the loop, and each
-/// source is subtracted in turn, `l` ascending. That is the same rounding
-/// sequence [`strip_sub`] produces, so blocking moves work between the two
-/// without moving a rounding: a destination entry still sees
-/// `(((c - a₀b₀) - a₁b₁) - …)` over all its sources in index order, whether the
-/// early ones arrive here and the late ones in the panel or not.
-///
-/// One array rather than three because that is how the callers hold it — a
-/// supernode's diagonal block and the rows under it share one `L->x` and one
-/// leading dimension, and no `&mut` split expresses that.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn tile_sub<const MR: usize, const NR: usize>(
@@ -999,8 +826,6 @@ fn tile_scat<const MR: usize, const NR: usize>(
     }
 }
 
-/// One `MR`-row slab of [`tile_scat`] across every column, grouped 4/2/1 —
-/// [`slab_sub`]'s nesting, and the same reason for it.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn slab_scat<const MR: usize>(
@@ -1060,7 +885,6 @@ fn block_scat(
     }
 }
 
-/// [`block_scat`] with the operands read where they lie.
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(feature = "profiling", inline(never))]
 fn block_scat_direct(
@@ -1098,13 +922,6 @@ fn block_scat_direct(
     }
 }
 
-/// [`rows_packed_nt`]'s ladder writing through column slices instead of a flat
-/// `C`, so a [`gemm_sub_par`] task can use the packed kernel.
-///
-/// [`tile_scat`] is already `C -= A B'` accumulated from `C` — the `ACC` and
-/// `SUB` [`tile_nt`] takes as parameters, fixed — and a packed panel is what it
-/// reads with `lda` set to [`PACK_MR`] and `ldb` to [`PACK_NR`]. So the packed
-/// and direct scattered paths share their tile, exactly as the flat pair do.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn rows_packed_scat<const NR: usize>(
@@ -1140,7 +957,6 @@ fn rows_packed_scat<const NR: usize>(
     }
 }
 
-/// [`block_packed_nt`]'s column ladder over [`rows_packed_scat`].
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn block_packed_scat(
@@ -1170,15 +986,6 @@ fn block_packed_scat(
     }
 }
 
-/// [`block_scat`] with both operands copied into [`tile_scat`]'s panel layout.
-///
-/// [`gemm_sub_packed`]'s loop nest with the destination reached through column
-/// slices, so the rounding argument is the same one: the `pc` loop ascends, each
-/// block loads `C`, subtracts its sources in ascending `l`, and stores, and an
-/// `f64` store and reload is exact.
-///
-/// [`PACK_BUF`] is thread-local, so every task packs into its own pair of
-/// buffers and no two tasks contend for one.
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(feature = "profiling", inline(never))]
 fn block_scat_packed(
@@ -1221,8 +1028,6 @@ fn block_scat_packed(
     });
 }
 
-/// How many flops a `C -= A B'` must carry before [`gemm_sub_par`] is worth a
-/// fork/join. Below it the serial [`gemm_sub`] runs.
 const GEMM_PAR_FLOPS: f64 = 2.0e6;
 
 /// How many row blocks [`gemm_sub_par`] cuts per thread.
@@ -1264,30 +1069,6 @@ const PAR_OVER: usize = 4;
 /// pass walks, and `n` does not enter that.
 const KB_SUB: usize = 16;
 
-/// [`gemm_sub`] with the rows of `C` split across threads.
-///
-/// **Row blocks, not column blocks.** A row block reads only its own rows of
-/// `A`, so the traffic through `A` scales with the block; splitting the other
-/// way would stream all of `A` through every task.
-///
-/// Sound without `unsafe` because of a property both callers have: **everything
-/// read lies below `ic` and everything written at or above it.** `potrf_l`'s
-/// `A` and `B` are columns `0..j0` and its `C` is columns `j0..j0+nb`;
-/// `trsm_rlt`'s are the same shape one block down. So the array splits once at
-/// `ic` into a head every task shares and a tail carved into disjoint pieces.
-///
-/// A task is a **row block across every column**, and the width is most of the
-/// point. `C` narrower than the register tile is the same arithmetic against
-/// more traffic: [`tile_scat`] at `NR = 4` does 32 multiply-adds per 12 loads
-/// where `NR = 1` does 8 per 9, and a task holding one column at a time also
-/// gives up [`slab_sub`]'s reuse of `A`. Measured on `gmm`'s `M`, one column
-/// per task ran *slower on two threads than on one* — the kernel lost more than
-/// the second core won.
-///
-/// The narrow version's one advantage was that a single column's rows are a
-/// contiguous slice; carrying all of them means carrying a slice each, which is
-/// what [`tile_scat`] takes. It costs an indirection twice per tile, against
-/// `k` iterations of useful work.
 #[allow(clippy::too_many_arguments)]
 fn gemm_sub_par(
     m: usize,
@@ -1444,10 +1225,6 @@ fn gemm_sub_packed(
     });
 }
 
-/// [`gemm_sub`] with the operands read where they lie.
-///
-/// Row slabs outside, column groups inside — see [`slab_sub`] for why that way
-/// round.
 #[allow(clippy::too_many_arguments)]
 fn gemm_sub_direct(
     m: usize,
@@ -1485,18 +1262,6 @@ fn gemm_sub_direct(
     }
 }
 
-/// `x [yo .. yo+m] -= Σ_q t[q] * x [xo[q] .. xo[q]+m]`, for `q` ascending.
-///
-/// The rank-`LR` form of the rank-1 update both [`potrf_l`] and [`trsm_rlt`]
-/// spend their time in. It exists to keep the destination strip in registers
-/// across `LR` sources instead of storing and re-loading it `LR` times, and
-/// because `LR` is `const` the compiler can see that.
-///
-/// Subtracting the sources one at a time, in order, is what makes this
-/// bit-identical to the un-unrolled loop rather than merely equivalent: the
-/// rounding sequence `(((y - t0 x0) - t1 x1) - t2 x2) - t3 x3` is unchanged.
-/// Summing the products first and subtracting once would be faster still and
-/// would move the last bit, so it is not done.
 #[inline(always)]
 fn strip_sub<const LR: usize>(
     m: usize,
@@ -1637,8 +1402,6 @@ pub fn potrf_l(n: usize, a: &mut [f64], lda: usize, nt: usize) -> i64 {
     0
 }
 
-/// The widest panel [`potrf_l`] and [`trsm_rlt`] use, and the bound on
-/// `potrf_l`'s save buffer. [`panel_width`] picks the actual width.
 const POTRF_NB: usize = 32;
 
 /// How many columns of an `n`-column block go through the rank-1 ladder before
@@ -1667,11 +1430,6 @@ fn panel_width(n: usize) -> usize {
     }
 }
 
-/// The unblocked `dpotf2 ("L")` on an `m`-by-`n` panel whose leading `n` rows
-/// are its diagonal block, using only the panel's own columns as sources.
-///
-/// Returns `dpotf2`'s `info`, 1-based *within the panel*; [`potrf_l`] adds the
-/// panel's offset, which is what `dpotrf` does.
 fn potf2_panel(m: usize, n: usize, a: &mut Ws<f64>, off: usize, lda: usize) -> i64 {
     for j in 0..n {
         /* ajj = A (j,j) - A (j, 0:j-1) * A (j, 0:j-1)' */
@@ -1728,19 +1486,6 @@ fn potf2_panel(m: usize, n: usize, a: &mut Ws<f64>, off: usize, lda: usize) -> i
     0
 }
 
-/// `B := B * A'^{-1}` with `A` lower triangular and non-unit — `dtrsm ("R",
-/// "L", "C", "N", m, n, 1.0, a, lda, b, ldb)`.
-///
-/// `a` is `n`-by-`n`, `b` is `m`-by-`n`. The worker always passes the *same*
-/// array for both, with `a` the supernode's leading `n`-by-`n` diagonal block
-/// and `b` the `m` rows directly below it at the same leading dimension
-/// (`Lx + psx` and `Lx + psx + nscol2`, both with `LDA = LDB = nsrow`,
-/// `:1210-1216`) — so that is the signature: one block, split by row.
-///
-/// Blocked the same way [`potrf_l`] is, and for the same reason: the columns to
-/// the left of a panel arrive through one [`gemm_sub`], the panel's own through
-/// the rank-1 ladder, and every destination entry still sees its sources once
-/// in index order.
 pub fn trsm_rlt(m: usize, n: usize, x: &mut [f64], ld: usize, nt: usize) {
     debug_assert!(n == 0 || x.len() >= (n - 1) * ld + n + m);
     #[cfg(vendor_blas)]
@@ -1886,7 +1631,6 @@ pub fn gemv_n(m: usize, n: usize, a: &[f64], lda: usize, x: &[f64], y: &mut [f64
     }
 }
 
-/// [`gemv_n`] for a block of exactly `NR` columns.
 #[inline(always)]
 fn gemv_n_nb<const NR: usize>(
     m: usize,
@@ -1962,7 +1706,6 @@ pub fn gemv_t(m: usize, n: usize, a: &[f64], lda: usize, x: &[f64], y: &mut [f64
     }
 }
 
-/// [`gemv_t`] for a block of exactly `NR` columns.
 #[inline(always)]
 fn gemv_t_nb<const NR: usize>(
     m: usize,
@@ -2022,7 +1765,6 @@ pub fn trsm_lln(m: usize, n: usize, a: &[f64], lda: usize, b: &mut [f64], ldb: u
     }
 }
 
-/// [`trsm_lln`] for a block of exactly `NR` right-hand sides.
 #[inline(always)]
 fn trsm_lln_nb<const NR: usize>(
     m: usize,
@@ -2083,7 +1825,6 @@ pub fn trsm_llt(m: usize, n: usize, a: &[f64], lda: usize, b: &mut [f64], ldb: u
     }
 }
 
-/// [`trsm_llt`] for a block of exactly `NR` right-hand sides.
 #[inline(always)]
 fn trsm_llt_nb<const NR: usize>(
     m: usize,
@@ -2160,7 +1901,6 @@ pub fn gemm_nn(
     }
 }
 
-/// One `MR`-by-`NR` tile of `C := C - A * B`, accumulated in registers.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn tile_nn<const MR: usize, const NR: usize>(
@@ -2197,7 +1937,6 @@ fn tile_nn<const MR: usize, const NR: usize>(
     }
 }
 
-/// The `m` direction of one `NR`-wide column block of [`gemm_nn`], tiled 8/4/2/1.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn cols_nn<const NR: usize>(
@@ -2275,11 +2014,6 @@ pub fn gemm_tn(
     }
 }
 
-/// One `MR`-by-`NR` tile of `C := C - A' * B`, accumulated in registers.
-///
-/// The `MR` loads of `a` are strided by `lda` — that is what a transposed
-/// operand costs, and the reference pays it too. What the tile buys is that
-/// each of them is used `NR` times.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn tile_tn<const MR: usize, const NR: usize>(
@@ -2314,7 +2048,6 @@ fn tile_tn<const MR: usize, const NR: usize>(
     }
 }
 
-/// The `m` direction of one `NR`-wide column block of [`gemm_tn`], tiled 4/2/1.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn cols_tn<const NR: usize>(
@@ -2347,9 +2080,6 @@ fn cols_tn<const NR: usize>(
 mod tests {
     use super::*;
 
-    /// A deterministic pseudo-random dense matrix, column-major with a leading
-    /// dimension deliberately larger than the block, so a kernel that ignores
-    /// `lda` fails.
     fn mat(rows: usize, cols: usize, ld: usize, seed: u64) -> Vec<f64> {
         let mut s = seed;
         let mut v = vec![f64::NAN; ld * cols + rows];
@@ -2414,11 +2144,6 @@ mod tests {
         }
     }
 
-    /// `C (i,j)` as the reference computes it: an ascending-`l` chain of
-    /// [`rfma`] from zero. Both `gemm_nt` paths and every `syrk_ln_strip`
-    /// block decomposition have to reproduce it bit for bit, which is a
-    /// stronger statement than any tolerance and the one the module's
-    /// summation-order contract actually makes.
     #[cfg(not(vendor_blas))]
     fn dot_nt(k: usize, a: &[f64], ia: usize, lda: usize, b: &[f64], jb: usize, ldb: usize) -> f64 {
         let mut acc = 0.0f64;
@@ -2428,28 +2153,6 @@ mod tests {
         acc
     }
 
-    /// # The blocking contract, and why this whole group is portable-arm only
-    ///
-    /// The tests below assert that *hea's own* blocking is a scheduling
-    /// decision and never a numerical one: every arm sums a destination entry
-    /// over `l` ascending in one place, so each reproduces `dot_nt`'s reference
-    /// FMA chain bit for bit. That is a stronger statement than any tolerance
-    /// and it is the contract `dense.rs` actually makes.
-    ///
-    /// **It is a statement about code the vendor build does not run.** Above
-    /// [`super::blas::MIN_FLOPS`] the call goes to Accelerate or OpenBLAS,
-    /// whose summation order is not ours to pin — so on a vendor build these
-    /// ask whether someone else's BLAS happens to round like our chain.
-    /// Whether it does is luck, and the luck is per-machine: on one arm three
-    /// of these failed and on another only one, because OpenBLAS is
-    /// `DYNAMIC_ARCH` and picks a different kernel per CPU. Gating the ones
-    /// that happened to fail would leave the rest waiting to fail somewhere
-    /// else, so the whole class is gated.
-    ///
-    /// The portable arm is not a second-class run: `cargo test
-    /// --no-default-features` is in CI beside the default one for exactly this,
-    /// and hea's kernels still execute on a vendor build for every call below
-    /// the cutoff, which is most of a sparse factorization.
     #[cfg(not(vendor_blas))]
     #[test]
     fn gemm_is_bit_identical_across_the_blocking() {
@@ -2476,13 +2179,6 @@ mod tests {
         }
     }
 
-    /// The recursive trapezoid has to agree with the same chain, at every strip
-    /// boundary and across `SYRK_LEAF`.
-    /// Not run against a vendor BLAS: the property is that *hea's own* blocking
-    /// is a scheduling decision and never a numerical one, which holds because
-    /// every arm sums a destination entry over `l` ascending in one place. A
-    /// vendor's summation order is not ours to pin, and under `blas` the
-    /// blocking this asserts about is not compiled in.
     #[cfg(not(vendor_blas))]
     #[test]
     fn syrk_is_bit_identical_across_the_blocking() {
@@ -2515,11 +2211,6 @@ mod tests {
         }
     }
 
-    /// Packing must not move a rounding: it copies operands and cuts the loop
-    /// nest, and the `k` blocks accumulate into `C` in ascending order, so every
-    /// entry sees the same sources in the same sequence as the direct path.
-    /// Sizes cross `PACK_MC`, `PACK_NC` and `PACK_KC` and land off every
-    /// multiple, which is where a mis-set panel offset shows up.
     #[cfg(not(vendor_blas))]
     #[test]
     fn packed_gemm_is_bit_identical_to_the_direct_one() {
@@ -2550,14 +2241,6 @@ mod tests {
         }
     }
 
-    /// The same question for `C -= A B'`, which has its own pair of paths and
-    /// its own reason to be blind-spotted: the whole point of the packed one is
-    /// that it is value-identical, so nothing the solve corpus checks can see it
-    /// go wrong.
-    ///
-    /// The three blocks are sub-blocks of one array, in the layout both callers
-    /// use — `A` and `B` in columns left of the panel, `C` in the panel — so the
-    /// test also pins the non-overlap [`gemm_sub_packed`] relies on.
     #[cfg(not(vendor_blas))]
     #[test]
     fn packed_gemm_sub_is_bit_identical_to_the_direct_one() {
@@ -2583,13 +2266,6 @@ mod tests {
         }
     }
 
-    /// Both dispatchers change path on the *address* of their operands, which
-    /// nothing about the values can predict: two calls with identical `m`, `n`,
-    /// `k` and identical contents run different code because one supernode is a
-    /// row taller. So the aliasing arm needs its own entry-for-entry check,
-    /// against the explicit ascending-`l` chain rather than against the other
-    /// path, and the assertion that the gate fired at all — without it the test
-    /// would pass by never reaching the code it names.
     #[cfg(not(vendor_blas))]
     #[test]
     fn the_aliasing_dispatch_does_not_move_a_rounding() {
@@ -2634,10 +2310,6 @@ mod tests {
         }
     }
 
-    /// The scattered path has two arms of its own now, and the same blind spot:
-    /// both compute the same values, so only a direct comparison can see one of
-    /// them go wrong. `C` is carved into per-column slices exactly as
-    /// [`gemm_sub_par`] carves it for a task.
     #[cfg(not(vendor_blas))]
     #[test]
     fn the_packed_scattered_block_matches_the_direct_one() {
@@ -2677,12 +2349,6 @@ mod tests {
         }
     }
 
-    /// Threading a call must not change which kernel runs it. It did: the
-    /// serial path packed on an aliasing stride and the parallel one could not,
-    /// so two threads ran slower than one. The `rows` here is
-    /// [`gemm_sub_par`]'s own block height, so the assertion is that this shape
-    /// really does reach the packed arm — a test that silently missed it would
-    /// pass for the wrong reason.
     #[cfg(not(vendor_blas))]
     #[test]
     fn the_parallel_update_packs_like_the_serial_one_at_an_aliasing_stride() {
@@ -2700,9 +2366,6 @@ mod tests {
         }
     }
 
-    /// Where the measured gain crosses 1, one bound at a time. Each pair is the
-    /// last shape that did not pay for packing and the first that did, at an
-    /// aliasing `lda`; moving one is moving a measurement.
     #[test]
     fn the_packing_bounds_sit_where_the_gain_crosses_one() {
         let al = 2048; /* aliases */
@@ -2753,10 +2416,6 @@ mod tests {
         }
     }
 
-    /// The leading dimensions the `dpotrf`/`dtrsm` sweep measured, and which
-    /// side of the cliff each landed on. A change to [`ALIAS_BYTES`] or to
-    /// [`L1_WAYS`] that reclassifies one of these is a change to a measurement,
-    /// not to a constant.
     #[test]
     fn the_aliasing_test_agrees_with_the_measured_cliff() {
         /* direct path 13.7-38.3 GFLOP/s, packed 38.4-44.5 */
@@ -2788,24 +2447,12 @@ mod tests {
         }
     }
 
-    /// The entries of an `m`-by-`n` column-major block, skipping the padding
-    /// between columns — which the helpers above leave as `NaN`, and `NaN` is
-    /// never equal to itself.
     fn block(x: &[f64], m: usize, n: usize, ld: usize) -> Vec<f64> {
         (0..n)
             .flat_map(|j| x[j * ld..j * ld + m].iter().copied())
             .collect()
     }
 
-    /// Going wide across the rows of the panel update must not move a bit.
-    ///
-    /// [`gemm_sub_par`] splits `C -= A B'` by rows of `C` and drops to
-    /// [`tile_col`], one column of `C` at a time, where the serial path keeps
-    /// four in registers. Neither changes what any destination entry
-    /// accumulates or the order it accumulates it in, so `==` is the right
-    /// comparison and a tolerance would be hiding something. Sizes straddle
-    /// [`GEMM_PAR_FLOPS`], so the threshold is exercised from both sides, and
-    /// the row tiling's 8/4/2/1 tail from several remainders.
     #[test]
     fn the_parallel_panel_update_is_bit_identical() {
         for &n in &[9usize, 33, 64, 130, 257] {
@@ -2840,8 +2487,6 @@ mod tests {
         }
     }
 
-    /// `info` is 1-based and names the column that failed, which is what
-    /// `L->minor = k1 + info - 1` depends on.
     #[test]
     fn potrf_reports_the_column_that_is_not_positive_definite() {
         let n = 4;
@@ -2865,9 +2510,6 @@ mod tests {
         assert_eq!(potrf_l(3, &mut a, 3, 1), 1);
     }
 
-    /// The two vector solves invert `L` and `L'`, and the two matrix solves
-    /// agree with them column by column — to a tolerance, because netlib's own
-    /// `trsv` and `trsm` sum the transposed solve in opposite directions.
     #[test]
     fn the_solve_kernels_invert_the_triangle() {
         for &n in &[1usize, 2, 5, 17] {
@@ -2914,9 +2556,6 @@ mod tests {
         }
     }
 
-    /// `gemv`/`gemm` in both transpositions, against the definition. Both
-    /// subtract from what the destination already holds, so a kernel that
-    /// overwrote it (`beta = 0`) would fail here.
     #[test]
     fn the_update_kernels_subtract_from_the_destination() {
         for &(m, n, k) in &[(1usize, 1usize, 1usize), (6, 3, 4), (11, 5, 9), (3, 8, 2)] {

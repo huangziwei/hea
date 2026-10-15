@@ -24,9 +24,6 @@ import sys
 from dataclasses import dataclass, field
 from importlib import metadata
 
-# Packages worth showing in the "attached" section when loaded. These
-# are the libraries a hea user is likely to be using directly — the
-# rest are deps that landed via transitive imports.
 _CORE_PACKAGES: tuple[str, ...] = (
     "hea",
     "polars",
@@ -158,9 +155,6 @@ def session_info() -> SessionInfo:
     )
 
 
-# ---- internals ------------------------------------------------------
-
-
 def _os_descriptive(uname: platform.uname_result) -> str:
     """Friendly OS line — matches R's ``Running under:`` style."""
     sys_name = uname.system
@@ -189,12 +183,7 @@ def _numpy_blas_lapack() -> tuple[str, str]:
 
 
 def _fmt_pkg_list(pkgs: dict[str, str], *, width: int = 80) -> list[str]:
-    """Format a name→version mapping as R's ``[N] name_ver  ...`` lines.
-
-    Entries are sorted alphabetically, padded to the longest, and packed
-    into ``width``-column lines prefixed by the 1-based index of the
-    first entry on the line (R's convention).
-    """
+    """Format a name→version mapping as R's ``[N] name_ver  ...`` lines."""
     entries = [f"{name}_{ver}" for name, ver in sorted(pkgs.items())]
     if not entries:
         return []

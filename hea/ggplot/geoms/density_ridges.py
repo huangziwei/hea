@@ -36,9 +36,6 @@ from .geom import Geom
 
 @dataclass
 class GeomDensityRidges(Geom):
-    # Mirrors ggridges' ``GeomDensityRidges$default_aes``
-    # (R/geoms.R): colour=black, fill=grey70, scale=1.8,
-    # rel_min_height=0, alpha=NA.
     default_aes: dict = field(
         default_factory=lambda: {
             "colour": "black",
@@ -55,17 +52,12 @@ class GeomDensityRidges(Geom):
     scale: float = 1.8
     rel_min_height: float = 0.0
     panel_scaling: bool = True
-    # geom_density_ridges (False) draws the top line only; geom_density_ridges2
-    # (True) closes the polygon and outlines the whole boundary.
     closed: bool = False
 
     def setup_data(self, data: pl.DataFrame) -> pl.DataFrame:
         if len(data) == 0 or "y" not in data.columns or "height" not in data.columns:
             return data
 
-        # Discrete y → 0-based integer positions so iscale arithmetic
-        # works and ridges land on the ordinal axis ticks the y scale
-        # produces. Numeric y passes through.
         y = data["y"]
         if y.dtype in (pl.Utf8, pl.Categorical, pl.Enum, pl.Boolean):
             y_num = to_numeric_positions(y)
@@ -80,11 +72,6 @@ class GeomDensityRidges(Geom):
         else:
             yrange = 1.0
 
-        # ``panel_scaling = True`` (ggridges default) computes ``hmax``
-        # per-PANEL. setup_data runs before facet.map_data assigns
-        # PANEL, so for now we use a global ``hmax`` (correct for
-        # non-faceted plots; for faceted plots this matches
-        # ``panel_scaling = False``).
         h = data["height"].cast(pl.Float64, strict=False)
         h_finite = h.drop_nulls().drop_nans()
         hmax = float(h_finite.max()) if len(h_finite) else 1.0
@@ -108,13 +95,6 @@ class GeomDensityRidges(Geom):
         if len(data) == 0:
             return
 
-        # One ridge per (group, y) — ``y`` is the baseline so two
-        # ridgelines at different y values are different polygons even
-        # when they share the auto-assigned ``group = -1`` (hea's
-        # ``_add_group`` only splits on colour/fill/shape/linetype, not
-        # discrete y). ggridges draws highest-y first so lower ridges
-        # overlap on top (R/geoms.R::GeomRidgeline$draw_panel orders by
-        # ymin descending).
         groupby_cols = ["y"]
         if "group" in data.columns and data["group"].n_unique() > 1:
             groupby_cols = ["group", "y"]
@@ -175,8 +155,6 @@ class GeomDensityRidges(Geom):
                 linewidth=0,
             )
             polar_arc_interp(ax, poly)
-            # Top line only — drop NaN segments so rel_min_height cuts
-            # don't connect across the gap.
             line_y = np.where(np.isnan(ymax), np.nan, ymax)
             lines = ax.plot(x, line_y, color=edge, linewidth=lw * 2.83, alpha=alpha)
             polar_arc_interp(ax, *lines)

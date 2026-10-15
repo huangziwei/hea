@@ -1,16 +1,3 @@
-//! `RsMt` — R's Mersenne-Twister RNG (`set.seed` stream) + the nmath `r*`
-//! samplers, as a single stateful PyO3 class.
-//!
-//! Line-by-line mirror of `hea/R/rng.py`'s `RMersenneTwister`, which is itself a
-//! mirror of R's `src/main/RNG.c` / `src/main/random.c` and `src/nmath/{snorm,
-//! sexp,rpois,rbinom,rgamma,rbeta}.c`. The Python class is the spec AND the
-//! fallback/oracle: `python == R` is pinned, so `rs == python` (and the live-R
-//! gate) transitively pins `rs == R`.
-//!
-//! The whole point of this port is to run the rejection-sampling *loops* in Rust
-//! so the family `$rd` hooks don't pay Python per-draw overhead. The stream is
-//! inherently serial — NEVER parallelize draws (would reorder them).
-
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -28,13 +15,11 @@ const LOWER: u32 = 0x7fff_ffff;
 const INV_2P32: f64 = 2.3283064365386963e-10;
 // fixup() boundary epsilon (RNG.c:86) — R's i2_32m1.
 const I2_32M1: f64 = 2.328306437080797e-10;
-// rbeta overflow guard: expmax = DBL_MAX_EXP * M_LN2, and DBL_MAX.
 const EXPMAX: f64 = 1024.0 * 0.6931471805599453;
 const DBL_MAX: f64 = f64::MAX;
 const M_1_SQRT_2PI: f64 = 0.398942280401432677939946059934;
 const BIG: f64 = 134217728.0; // 2^27 (snorm.c INVERSION)
 
-/// R's default RNG after `set.seed(seed)`, bit-exact and platform-independent.
 #[pyclass]
 pub struct RsMt {
     mt: [u32; N],
@@ -42,12 +27,7 @@ pub struct RsMt {
     pos: usize,
 }
 
-// --- internal (non-Python) helpers ------------------------------------------
 impl RsMt {
-    /// One MT19937 twist of the 624-word state (R's `MT_genrand` block
-    /// generation, in place), then temper+fixup all 624 words into `buf`.
-    /// Block-tempering equals R's per-draw tempering bit-for-bit (tempering is a
-    /// pure function of the stored word).
     fn refill(&mut self) {
         {
             let mt = &mut self.mt;
@@ -81,7 +61,6 @@ impl RsMt {
         self.pos = 0;
     }
 
-    /// One uniform from the open interval (0, 1) — R's `unif_rand` (MT case).
     fn next_unif(&mut self) -> f64 {
         if self.pos >= N {
             self.refill();
@@ -91,8 +70,6 @@ impl RsMt {
         v
     }
 
-    /// `n` uniforms, drawn as one bulk pull off the same buffer (identical
-    /// values + refill boundaries to `n` scalar pulls — mirror of rng.py).
     fn unif_vec(&mut self, n: usize) -> Vec<f64> {
         let mut out = Vec::with_capacity(n);
         let mut filled = 0;
@@ -108,15 +85,12 @@ impl RsMt {
         out
     }
 
-    /// One standard normal via R's Inversion: `qnorm((floor(2^27 u1) + u2)/2^27)`
-    /// (snorm.c INVERSION). Consumes two uniforms.
     fn next_norm(&mut self) -> f64 {
         let u1 = self.next_unif();
         let u1 = (BIG * u1).trunc() + self.next_unif();
         qnorm5_scalar(u1 / BIG, 0.0, 1.0, true, false)
     }
 
-    /// R's `exp_rand` (standard exponential) — sexp.c (Ahrens-Dieter).
     fn next_exp(&mut self) -> f64 {
         let q = EXP_Q[0];
         let mut a = 0.0;
@@ -151,7 +125,6 @@ impl RsMt {
         rfma(umin, q, a)
     }
 
-    /// R's `R_unif_index(dn)` (REJECTION) — integer in [0, dn).
     fn next_unif_index(&mut self, dn: i64) -> i64 {
         if dn <= 0 {
             return 0;
@@ -179,8 +152,6 @@ impl RsMt {
     }
 }
 
-/// Horner with R-parity FMA (see `nmath::util::rfma`): `((c[0]*x+c[1])*x+…)`.
-/// Used for rgamma's GD `q0`/`a()` series, fused to match R's clang on arm64.
 #[inline]
 fn horner(x: f64, c: &[f64]) -> f64 {
     let mut v = c[0];
@@ -190,7 +161,6 @@ fn horner(x: f64, c: &[f64]) -> f64 {
     v
 }
 
-// Cheng's v/w step shared by rbeta's BB and BC branches (rbeta.c).
 fn beta_vw(aa: f64, u1: f64, beta: f64) -> (f64, f64) {
     let v = beta * (u1 / (1.0 - u1)).ln();
     let w = if v <= EXPMAX {
@@ -219,9 +189,6 @@ impl RsMt {
         s
     }
 
-    /// R's `set.seed(seed)` (Mersenne-Twister kind): 50× LCG warm-up, then 625
-    /// further LCG draws; the first (the `mti` slot) is discarded and `mti` is
-    /// set to N so the first draw regenerates the state (FixupSeeds initial).
     fn set_seed(&mut self, seed: i64) {
         let mut s = seed as u32;
         for _ in 0..50 {
@@ -236,28 +203,20 @@ impl RsMt {
         self.pos = N; // mti = 624 >= N ⇒ first draw refills
     }
 
-    /// One `runif()` draw.
     fn unif_rand(&mut self) -> f64 {
         self.next_unif()
     }
 
-    /// A length-`n` `runif()` array (same stream as `n` scalar draws).
     fn unif_rand_n<'py>(&mut self, py: Python<'py>, n: usize) -> Bound<'py, PyArray1<f64>> {
         self.unif_vec(n).into_pyarray(py)
     }
 
-    /// One standard-normal `norm_rand()` (Inversion).
     fn norm_rand(&mut self) -> f64 {
         self.next_norm()
     }
 
-    /// `n` standard normals, drawing the 2n Inversion uniforms in one batch
-    /// (same stream as 2n scalar draws; bit-identical to the per-draw path).
     fn rnorm_n<'py>(&mut self, py: Python<'py>, n: usize) -> Bound<'py, PyArray1<f64>> {
         let u = self.unif_vec(2 * n);
-        // Uniforms are drawn serially (stream order); the qnorm transform of the
-        // already-materialized uniforms is an independent per-index map, so it
-        // parallelizes above the threshold — bit-for-bit identical to serial.
         let out = crate::par::map_index(py, n, |i| {
             let comb = (BIG * u[2 * i]).trunc() + u[2 * i + 1];
             qnorm5_scalar(comb / BIG, 0.0, 1.0, true, false)
@@ -265,17 +224,14 @@ impl RsMt {
         out.into_pyarray(py)
     }
 
-    /// R's `exp_rand` (standard exponential).
     fn exp_rand(&mut self) -> f64 {
         self.next_exp()
     }
 
-    /// `R_unif_index(dn)` (REJECTION) — integer in [0, dn).
     fn unif_index(&mut self, dn: i64) -> i64 {
         self.next_unif_index(dn)
     }
 
-    /// R's `sample(1:n, k, replace=)` as 0-based indices (do_sample, random.c).
     fn sample_int<'py>(
         &mut self,
         py: Python<'py>,
@@ -302,14 +258,11 @@ impl RsMt {
         Ok(out.into_pyarray(py))
     }
 
-    /// R's `rpois(mu)` — rpois.c. Inversion for mu<10 (1 uniform, CDF walk),
-    /// transformed rejection (Ahrens-Dieter PD) for mu>=10.
     fn rpois(&mut self, mu: f64) -> f64 {
         if mu <= 0.0 {
             return 0.0;
         }
         if mu < 10.0 {
-            // inversion (consumes 1 uniform)
             let u = self.next_unif();
             let p0 = (-mu).exp();
             let mut p = p0;
@@ -335,7 +288,6 @@ impl RsMt {
                 }
             }
         }
-        // big mu (>= 10): Ahrens-Dieter (1982) "PD" algorithm — rpois.c.
         const A0: f64 = -0.5;
         const A1: f64 = 0.3333333;
         const A2: f64 = -0.2500068;
@@ -389,7 +341,6 @@ impl RsMt {
             (px, py, fx, fy)
         };
 
-        // Step N — normal candidate (immediate / squeeze acceptance)
         let g = mu + s * self.next_norm();
         if g >= 0.0 {
             let pois = g.floor();
@@ -407,7 +358,6 @@ impl RsMt {
                 return pois;
             }
         }
-        // Step E — exponential candidates
         loop {
             let e = self.next_exp();
             let u = 2.0 * self.next_unif() - 1.0;
@@ -425,8 +375,6 @@ impl RsMt {
         }
     }
 
-    /// R's `rbinom(size, prob)` — rbinom.c. Inversion (BINV) for n·min(p,1-p)<30,
-    /// BTPE rejection otherwise. `qn = R_pow_di(q, n)` (NOT libm pow).
     #[pyo3(signature = (size, prob))]
     fn rbinom(&mut self, size: f64, prob: f64) -> f64 {
         let n = crate::nmath::util::round_half_even(size) as i64;
@@ -440,7 +388,6 @@ impl RsMt {
         let q = 1.0 - p;
         let np_ = n as f64 * p;
         if np_ < 30.0 {
-            // inversion (BINV)
             let qn = r_pow_di(q, n);
             let r = p / q;
             let g = r * (n as f64 + 1.0);
@@ -465,7 +412,6 @@ impl RsMt {
                 }
             }
         }
-        // BTPE (Kachitvichyanukul & Schmeiser)
         let ffm = np_ + p;
         let m = ffm as i64;
         let fm = m as f64;
@@ -580,12 +526,10 @@ impl RsMt {
         }
     }
 
-    /// R's `rgamma(shape, scale=)` — rgamma.c (GD for a>=1, GS for a<1).
     #[pyo3(signature = (shape, scale=1.0))]
     fn rgamma(&mut self, shape: f64, scale: f64) -> f64 {
         let a = shape;
         if a < 1.0 {
-            // GS algorithm
             if a == 0.0 {
                 return 0.0;
             }
@@ -606,7 +550,6 @@ impl RsMt {
                 }
             }
         }
-        // GD algorithm (a >= 1)
         let sqrt32 = 5.656854;
         let s2 = a - 0.5;
         let s = s2.sqrt();
@@ -671,8 +614,6 @@ impl RsMt {
         loop {
             let e = self.next_exp();
             let u = 2.0 * self.next_unif() - 1.0;
-            // R: `t = b - si*e` / `b + si*e` — clang fuses `b ± si*e` to fma on
-            // arm64. copysign(si*e, u) rounds si*e first (two roundings) → 4-ulp off.
             let t = if u < 0.0 {
                 rfma(-si, e, b)
             } else {
@@ -707,7 +648,6 @@ impl RsMt {
         }
     }
 
-    /// R's `rnbinom(size, mu=)` — Poisson-Gamma mixture (rnbinom.c).
     fn rnbinom(&mut self, size: f64, mu: f64) -> f64 {
         if mu <= 0.0 {
             return 0.0;
@@ -716,7 +656,6 @@ impl RsMt {
         self.rpois(g)
     }
 
-    /// R's `rchisq(df, ncp=0)` — central rgamma(df/2, 2); noncentral via rpois.
     #[pyo3(signature = (df, ncp=0.0))]
     fn rchisq(&mut self, df: f64, ncp: f64) -> f64 {
         if ncp == 0.0 {
@@ -734,7 +673,6 @@ impl RsMt {
         out
     }
 
-    /// R's central `rt(df)` = norm_rand() / sqrt(rchisq(df)/df) (rt.c).
     fn rt(&mut self, df: f64) -> f64 {
         if !df.is_finite() {
             return self.next_norm();
@@ -742,7 +680,6 @@ impl RsMt {
         self.next_norm() / (self.rchisq(df, 0.0) / df).sqrt()
     }
 
-    /// R's central `rf(df1, df2)` = (rchisq(df1)/df1)/(rchisq(df2)/df2) (rf.c).
     fn rf(&mut self, df1: f64, df2: f64) -> f64 {
         let v1 = if df1.is_finite() {
             self.rchisq(df1, 0.0) / df1
@@ -757,7 +694,6 @@ impl RsMt {
         v1 / v2
     }
 
-    /// R's `rbeta(aa, bb)` — Cheng's BB (min>1) / BC (min<=1) algorithm (rbeta.c).
     fn rbeta(&mut self, aa: f64, bb: f64) -> PyResult<f64> {
         if aa < 0.0 || bb < 0.0 {
             return Err(PyValueError::new_err("rbeta: shapes must be >= 0"));
@@ -769,7 +705,6 @@ impl RsMt {
         let b = if aa < bb { bb } else { aa }; // max(aa, bb)
         let alpha = a + b;
         if a <= 1.0 {
-            // --- Algorithm BC ---
             let beta = 1.0 / a;
             let delta = 1.0 + b - a;
             let k1 = delta * (0.0138889 + 0.0416667 * a) / (b * beta - 0.777778);
@@ -801,7 +736,6 @@ impl RsMt {
             };
             return Ok(if aa == a { a / (a + w) } else { w / (a + w) });
         }
-        // --- Algorithm BB ---
         let beta = ((alpha - 2.0) / (2.0 * a * b - alpha)).sqrt();
         let gamma = a + 1.0 / beta;
         let w = loop {
@@ -825,12 +759,6 @@ impl RsMt {
         Ok(if aa != a { b / (b + w) } else { w / (b + w) })
     }
 
-    // --- batch samplers: the whole per-element loop runs in Rust, so the family
-    // `$rd` hooks (via RGenerator) pay ONE Python↔Rust crossing per vector
-    // instead of n. Each element is bit-identical to the scalar method; the draw
-    // order (and thus the stream) is the same as n scalar calls. ---
-
-    /// `rpois` over an array of means.
     fn rpois_n<'py>(
         &mut self,
         py: Python<'py>,
@@ -841,7 +769,6 @@ impl RsMt {
         out.into_pyarray(py)
     }
 
-    /// `rbinom` over arrays of (size, prob).
     fn rbinom_n<'py>(
         &mut self,
         py: Python<'py>,
@@ -853,7 +780,6 @@ impl RsMt {
         out.into_pyarray(py)
     }
 
-    /// `rgamma` over arrays of (shape, scale).
     fn rgamma_n<'py>(
         &mut self,
         py: Python<'py>,
@@ -865,7 +791,6 @@ impl RsMt {
         out.into_pyarray(py)
     }
 
-    /// central `rt` over an array of df.
     fn rt_n<'py>(
         &mut self,
         py: Python<'py>,
@@ -876,7 +801,6 @@ impl RsMt {
         out.into_pyarray(py)
     }
 
-    /// central `rf` over arrays of (df1, df2).
     fn rf_n<'py>(
         &mut self,
         py: Python<'py>,
@@ -888,7 +812,6 @@ impl RsMt {
         out.into_pyarray(py)
     }
 
-    /// `rchisq` over arrays of (df, ncp) — each element a full `rnchisq`.
     fn rchisq_n<'py>(
         &mut self,
         py: Python<'py>,
@@ -900,7 +823,6 @@ impl RsMt {
         out.into_pyarray(py)
     }
 
-    /// `rnbinom` over arrays of (size, mu).
     fn rnbinom_n<'py>(
         &mut self,
         py: Python<'py>,
@@ -912,13 +834,11 @@ impl RsMt {
         out.into_pyarray(py)
     }
 
-    /// `n` standard exponentials (`exp_rand`).
     fn exp_rand_n<'py>(&mut self, py: Python<'py>, n: usize) -> Bound<'py, PyArray1<f64>> {
         let out: Vec<f64> = (0..n).map(|_| self.next_exp()).collect();
         out.into_pyarray(py)
     }
 
-    /// `rbeta` over arrays of (aa, bb).
     fn rbeta_n<'py>(
         &mut self,
         py: Python<'py>,
@@ -934,7 +854,6 @@ impl RsMt {
     }
 }
 
-// rgamma coefficients (rgamma.c) — q1..q7 and a1..a7.
 const GA_Q: [f64; 7] = [
     0.04166669, 0.02083148, 0.00801191, 0.00144121, -7.388e-5, 2.4511e-4, 2.424e-4,
 ];
@@ -942,7 +861,6 @@ const GA_A: [f64; 7] = [
     0.3333333, -0.250003, 0.2000062, -0.1662921, 0.1423657, -0.1367177, 0.1233795,
 ];
 
-// cumulative ln(2)^k / k! — sexp.c (rng.py `_EXP_Q`)
 const EXP_Q: [f64; 16] = [
     0.6931471805599453,
     0.9333736875190459,

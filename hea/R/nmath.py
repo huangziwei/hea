@@ -30,15 +30,11 @@ from .._dispatch import rs_fn
 from ._shared import _rfma, _rfma_vec
 from .rng import _QN_A, _QN_B, _QN_C, _QN_D, _QN_E, _QN_F, _qn_horner
 
-# Rust kernels — None when the extension is absent/disabled, in which
-# case the pure-Python kernels below run unchanged (bit-identical, just slower).
 _rs_pnorm = rs_fn("pnorm")
 _rs_qnorm = rs_fn("qnorm")
 _rs_dnorm = rs_fn("dnorm")
 _rs_psigamma = rs_fn("psigamma")
 
-# name -> numpy-vectorized pure-Python kernel, used by _disp as the no-native
-# fallback (populated at end of module, after the kernels are defined).
 _PY_VEC = {}
 
 
@@ -46,13 +42,7 @@ def _norm_rs(kern, x, mu, sigma, flags):
     """Broadcast (x, mu, sigma), run the native norm kernel, reshape. The native
     norm kernels take mu/sigma as arrays (uniform with the rest of the surface),
     so array mean/sd route through Rust too — no scalar-loop special case.
-
-    Scalar mean/sd (the overwhelmingly common case — ``dnorm(x)``, ``qnorm(p)``,
-    the probit link surface) is passed straight through as length-1 mu/sigma:
-    the Rust kernel broadcasts the scalar over x with a unary map, so we skip
-    materialising two throwaway length-n constant arrays here every call. The
-    flat result is bit-identical to the broadcast path (the Rust scalar map and
-    map3-over-constants call the same per-element kernel)."""
+    """
     xa = np.asarray(x, dtype=float)
     ma = np.asarray(mu, dtype=float)
     sa = np.asarray(sigma, dtype=float)
@@ -70,7 +60,6 @@ def _norm_rs(kern, x, mu, sigma, flags):
     ).reshape(xa.shape)
 
 
-# --- R constants (Rmath.h) ----------------------------------------------------
 _M_SQRT_32 = 5.656854249492380195206754896838  # sqrt(32)
 _M_1_SQRT_2PI = 0.398942280401432677939946059934  # 1/sqrt(2pi)
 _M_LN_SQRT_2PI = 0.918938533204672741780329736406  # log(sqrt(2pi))
@@ -88,15 +77,7 @@ _NAN = math.nan
 
 
 def _disp(name, scalar_fn, num_args, flags=()):
-    """Native-accelerated vectorised dispatch with pure-Python fallback.
-
-    ``name`` is the :mod:`hea._rs` kernel (e.g. ``"pgamma"``); ``scalar_fn``
-    is the matching :mod:`hea.R.nmath` scalar kernel; ``num_args`` are the
-    numeric (array-or-scalar) arguments in native-call order; ``flags`` are the
-    trailing bool flags (lower_tail/log_p/give_log). When the extension is built
-    the kernel runs in Rust (broadcast → flat → reshape, 0-ulp to the Python
-    path); otherwise the scalar loop runs. Scalar inputs → Python float.
-    """
+    """Native-accelerated vectorised dispatch with pure-Python fallback."""
     kern = rs_fn(name)
     arrs = [np.asarray(a, dtype=float) for a in num_args]
     scalar = all(a.ndim == 0 for a in arrs)
@@ -108,9 +89,6 @@ def _disp(name, scalar_fn, num_args, flags=()):
         shape = barr[0].shape
         flat = [np.ascontiguousarray(a.reshape(-1)) for a in barr]
         return kern(*flat, *flags).reshape(shape)
-    # No native extension: use the numpy-vectorized pure-Python kernel if one is
-    # registered (bit-identical, ~C-speed); else the scalar loop (the bratio /
-    # Newton-quantile kernels are not vectorizable cheaply).
     py_vec = _PY_VEC.get(name)
     if py_vec is not None:
         r = py_vec(*num_args, *flags)
@@ -119,11 +97,7 @@ def _disp(name, scalar_fn, num_args, flags=()):
 
 
 def _vec(fn, *args):
-    """Apply scalar nmath ``fn`` over R-recycled/broadcast ``args``.
-
-    Scalar args + scalar result → Python float (matches scipy's scalar return);
-    otherwise broadcast to a numpy array, mirroring R's vectorised recycling.
-    """
+    """Apply scalar nmath ``fn`` over R-recycled/broadcast ``args``."""
     arrs = [np.asarray(a, dtype=float) for a in args]
     if all(a.ndim == 0 for a in arrs):
         return float(fn(*[float(a) for a in arrs]))
@@ -136,7 +110,6 @@ def _vec(fn, *args):
     return out.reshape(shape)
 
 
-# === qnorm5 — normal quantile (nmath/qnorm.c, Wichura AS-241) =================
 def qnorm5(
     p: float,
     mu: float = 0.0,
@@ -153,7 +126,6 @@ def qnorm5(
     """
     if math.isnan(p) or math.isnan(mu) or math.isnan(sigma):
         return p + mu + sigma
-    # R_Q_P01_boundaries(p, ML_NEGINF, ML_POSINF)
     if log_p:
         if p > 0:
             return _NAN
@@ -173,7 +145,6 @@ def qnorm5(
     if sigma == 0:
         return mu
 
-    # p_ = R_DT_qIv(p): real lower-tail probability
     if log_p:
         p_ = math.exp(p) if lower_tail else -math.expm1(p)
     else:
@@ -185,12 +156,10 @@ def qnorm5(
         val = q * _qn_horner(r, _QN_A) / _qn_horner(r, _QN_B)
         return mu + sigma * val
 
-    # closer than 0.075 from {0,1}: r := log(min(p, 1-p))
     if log_p and ((lower_tail and q <= 0) or ((not lower_tail) and q > 0)):
         lp = p
     else:
         if q > 0:
-            # R_DT_CIv(p) == 1 - p
             if log_p:
                 civ = -math.expm1(p) if lower_tail else math.exp(p)
             else:
@@ -249,8 +218,6 @@ def qnorm5(
     return mu + sigma * val
 
 
-# === dnorm5 — normal density (nmath/dnorm.c) =================================
-# sqrt(-2*ln2*(DBL_MIN_EXP+1-DBL_MANT_DIG)) with DBL_MIN_EXP=-1021, MANT_DIG=53
 _DNORM_BIG = math.sqrt(-2.0 * _M_LN2 * (-1021 + 1 - 53))
 _TWO_SQRT_DBL_MAX = 2.0 * math.sqrt(1.7976931348623157e308)
 
@@ -334,7 +301,6 @@ def dnorm5_vec(x, mu=0.0, sigma=1.0, give_log=False):
     return out
 
 
-# === pnorm5 — normal CDF (nmath/pnorm.c, Cody 1993) ==========================
 _PN_A = (
     2.2352520354606839287,
     161.02823106855587881,
@@ -387,11 +353,7 @@ _PN_Q = (
 
 
 def _pnorm_both(x: float, i_tail: int, log_p: bool):
-    """R's ``pnorm_both(x, &cum, &ccum, i_tail, log_p)`` (nmath/pnorm.c).
-
-    ``i_tail`` in {0,1,2} = {lower, upper, both}. Returns ``(cum, ccum)``;
-    the entry not requested by ``i_tail`` may be left as ``nan``.
-    """
+    """R's ``pnorm_both(x, &cum, &ccum, i_tail, log_p)`` (nmath/pnorm.c)."""
     if math.isnan(x):
         return x, x
     eps = _DBL_EPSILON * 0.5
@@ -423,14 +385,12 @@ def _pnorm_both(x: float, i_tail: int, log_p: bool):
         return cum, ccum
 
     if y <= _M_SQRT_32:
-        # qnorm(3/4) < |x| <= sqrt(32) ~ 5.657
         xnum = _PN_C[8] * y
         xden = y
         for i in range(7):
             xnum = (xnum + _PN_C[i]) * y
             xden = (xden + _PN_D[i]) * y
         temp = (xnum + _PN_C[7]) / (xden + _PN_D[7])
-        # do_del(y); swap_tail
         xsq = math.ldexp(math.trunc(math.ldexp(y, 4)), -4)
         del_ = (y - xsq) * (y + xsq)
         if log_p:
@@ -455,7 +415,6 @@ def _pnorm_both(x: float, i_tail: int, log_p: bool):
             ccum = temp
         return cum, ccum
 
-    # |x| > sqrt(32)
     if (
         (log_p and y < 1e170)
         or (lower and -38.4674 < x < 8.2924)
@@ -469,7 +428,6 @@ def _pnorm_both(x: float, i_tail: int, log_p: bool):
             xden = (xden + _PN_Q[i]) * xsq
         temp = xsq * (xnum + _PN_P[4]) / (xden + _PN_Q[4])
         temp = (_M_1_SQRT_2PI - temp) / y
-        # do_del(x); swap_tail
         xsq = math.ldexp(math.trunc(math.ldexp(x, 4)), -4)
         del_ = (x - xsq) * (x + xsq)
         if log_p:
@@ -494,7 +452,6 @@ def _pnorm_both(x: float, i_tail: int, log_p: bool):
             ccum = temp
         return cum, ccum
 
-    # large |x|: probs are 0 or 1.  R_D__1 = log_p?0:1 ; R_D__0 = log_p?-inf:0
     rd0 = _NEGINF if log_p else 0.0
     rd1 = 0.0 if log_p else 1.0
     if x > 0:
@@ -519,12 +476,10 @@ def pnorm5(
     if sigma <= 0:
         if sigma < 0:
             return _NAN
-        # sigma == 0 : return (x < mu) ? R_DT_0 : R_DT_1
         return _dt0(lower_tail, log_p) if x < mu else _dt1(lower_tail, log_p)
     p = (x - mu) / sigma
     if math.isinf(p):
         below = x < mu
-        # R_DT_0 if below else R_DT_1
         if below:
             return _dt0(lower_tail, log_p)
         return _dt1(lower_tail, log_p)
@@ -534,43 +489,31 @@ def pnorm5(
 
 
 def _dt0(lower_tail, log_p):
-    # R_DT_0 = lower_tail ? R_D__0 : R_D__1
     if lower_tail:
         return _NEGINF if log_p else 0.0
     return 0.0 if log_p else 1.0
 
 
 def _dt1(lower_tail, log_p):
-    # R_DT_1 = lower_tail ? R_D__1 : R_D__0
     if lower_tail:
         return 0.0 if log_p else 1.0
     return _NEGINF if log_p else 0.0
 
 
 def _dt_val(x, lower_tail, log_p):
-    # R_DT_val(x) = lower_tail ? R_D_val(x) : R_D_Clog(x)
     if lower_tail:
         return math.log(x) if log_p else x
     return math.log1p(-x) if log_p else (0.5 - x + 0.5)
 
 
 def _dt_qiv(p, lower_tail, log_p):
-    # R_DT_qIv(p): map (lower_tail, log_p) p back to the lower-tail identity prob
     if log_p:
         return math.exp(p) if lower_tail else -math.expm1(p)
     return p if lower_tail else (0.5 - p + 0.5)
 
 
 def _r_forceint(x):
-    # R_forceint(x) = (double) nearbyint(x); Python round() is round-half-to-even
     return float(round(x))
-
-
-# === Vectorised fast paths (numpy) ===========================================
-# The common case (log_p=False, finite/in-range argument, non-extreme tail) is
-# evaluated with numpy across the whole array; the rare lanes (nan, boundaries,
-# log_p=True, qnorm r>27 extreme tail) fall back to the bit-exact scalar
-# functions above, so the result is identical to a scalar loop but ~elementwise.
 
 
 def qnorm5_vec(p, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
@@ -594,9 +537,6 @@ def qnorm5_vec(p, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
     central = np.abs(q) <= 0.425
     qc = q[central]
     rc = _rfma_vec(-qc, qc, 0.180625)
-    # vector path: pass the per-arch ARRAY fma (`_rfma_vec`); the default scalar
-    # `_rfma` is `math.fma` on arm64, which rejects array args (rng.py qnorm does
-    # the same). x86's default `_rfma` is `a*b+c` so this was latent there.
     res[central] = (
         qc * _qn_horner(rc, _QN_A, _rfma_vec) / _qn_horner(rc, _QN_B, _rfma_vec)
     )
@@ -615,8 +555,6 @@ def qnorm5_vec(p, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
     valt = np.where(qt < 0.0, -valt, valt)
     res[tail] = valt
     out[reg] = mu + sigma * res
-    # fallback (scalar, bit-exact) for nan lanes: p<=0, p>=1, nan input, or the
-    # r>27 extreme-tail lanes left nan above.
     fb = np.isnan(out)
     if fb.any():
         pb = p[fb]
@@ -650,7 +588,6 @@ def pnorm5_vec(x, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
     eps = _DBL_EPSILON * 0.5
     out[:] = np.nan
 
-    # region 1: y <= 0.67448975 (no swap_tail)
     m1 = y <= 0.67448975
     if m1.any():
         x1 = z[m1]
@@ -664,20 +601,16 @@ def pnorm5_vec(x, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
         temp = x1 * (xnum + _PN_A[3]) / (xden + _PN_B[3])
         out[m1] = (0.5 + temp) if lower else (0.5 - temp)
 
-    # do_del epilogue (non-log path) returning (c, cc) = (cum0, ccum0)
     def _do_del(xv, temp):
         xsq = np.ldexp(np.trunc(np.ldexp(xv, 4)), -4)
         del_ = (xv - xsq) * (xv + xsq)
         c = np.exp(-xsq * np.ldexp(xsq, -1)) * np.exp(-np.ldexp(del_, -1)) * temp
         return c, 1.0 - c
 
-    # swap_tail picks the requested tail: lower -> where(x>0, cc, c);
-    #                                     upper -> where(x>0, c, cc)
     def _sel(xv, c, cc):
         sw = xv > 0.0
         return np.where(sw, cc, c) if lower else np.where(sw, c, cc)
 
-    # region 2: 0.674.. < y <= sqrt(32)
     m2 = (~m1) & (y <= _M_SQRT_32)
     if m2.any():
         yv = y[m2]
@@ -690,7 +623,6 @@ def pnorm5_vec(x, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
         c, cc = _do_del(yv, temp)
         out[m2] = _sel(z[m2], c, cc)
 
-    # region 3: y > sqrt(32) within finite range for the requested tail
     m_rest = (~m1) & (~m2)
     in_rng = (
         ((-38.4674 < z) & (z < 8.2924)) if lower else ((-8.2924 < z) & (z < 38.4674))
@@ -709,7 +641,6 @@ def pnorm5_vec(x, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
         c, cc = _do_del(xv, temp)
         out[m3] = _sel(xv, c, cc)
 
-    # region 4: large |x| -> probs 0/1
     m4 = m_rest & (~in_rng)
     if m4.any():
         pos = z[m4] > 0
@@ -718,29 +649,6 @@ def pnorm5_vec(x, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
         else:
             out[m4] = np.where(pos, 0.0, 1.0)
     return out
-
-
-# === Loader saddlepoint kernels (stirlerr/bd0/ebd0 -> dpois_raw/
-# dbinom_raw), moved here from family.py so nmath stays the leaf module
-# that family/distributions build on. Bit-exact ports of nmath
-# stirlerr.c / bd0.c / dpois.c / dbinom.c. =========================
-
-# ---------------------------------------------------------------------------
-# R nmath ports — bit-exact ``dpois`` / ``dbinom`` (saddlepoint algorithm,
-# Loader 1999). Used by ``Poisson.aic`` and ``Binomial.aic`` so that the
-# Laplace deviance reported by hea matches ``rho$resp$aic()`` from lme4 at
-# the ULP level. scipy's ``poisson.logpmf`` / ``binom.logpmf`` use the
-# direct formula ``y·log(μ) - μ - lgamma(y+1)`` (and analog for binomial),
-# which differs from R's ``dpois`` / ``dbinom`` by ~1 ULP per call — and
-# that 1 ULP compounded over n obs is what propagates into deriv12's
-# numerator and produces visible SE / vcov gaps against R.
-#
-# Sources (R 4.5):
-# - /tmp/R-src/src/nmath/stirlerr.c
-# - /tmp/R-src/src/nmath/bd0.c   (both bd0 and ebd0)
-# - /tmp/R-src/src/nmath/dpois.c
-# - /tmp/R-src/src/nmath/dbinom.c
-# ---------------------------------------------------------------------------
 
 
 # stirlerr(n) = log(n!) - log(sqrt(2πn)·(n/e)ⁿ)
@@ -804,14 +712,7 @@ _STIRLERR_HALVES_ARR = np.array(_STIRLERR_HALVES, dtype=float)
 
 
 def _stirlerr(n):
-    """Port of nmath ``stirlerr(n)`` (stirlerr.c). Vectorized over ``n``.
-
-    Returns log(n!) - log(sqrt(2πn)·(n/e)ⁿ). The error term in
-    Stirling's formula. Used by Loader's saddlepoint algorithm for
-    dpois/dbinom. Accepts a scalar or array; returns the same shape.
-    Bit-identical to the scalar Fortran source — branches via
-    ``np.where``, all arithmetic ops in the same order.
-    """
+    """Port of nmath ``stirlerr(n)`` (stirlerr.c). Vectorized over ``n``."""
     n = np.asarray(n, dtype=float)
     scalar_input = n.ndim == 0
     n = np.atleast_1d(n)
@@ -820,15 +721,12 @@ def _stirlerr(n):
     nn2 = n + n
     nn2_int = np.rint(nn2).astype(np.int64)
 
-    # ---- n <= 23.5 ----
     le_235 = n <= 23.5
-    # Table path: n <= 15.0 and 2n is integer.
     table_mask = le_235 & (n <= 15.0) & (nn2 == nn2_int)
     if np.any(table_mask):
         idx = nn2_int[table_mask]
         out[table_mask] = _STIRLERR_HALVES_ARR[idx]
 
-    # MM2 (n>=1, n<=5.25, not in table)
     mm2_mask = le_235 & ~table_mask & (n <= 5.25) & (n >= 1.0)
     if np.any(mm2_mask):
         nm = n[mm2_mask]
@@ -836,7 +734,6 @@ def _stirlerr(n):
         lg = np.array([_c_lgamma(float(v)) for v in nm])
         out[mm2_mask] = _rfma_vec(nm, 1.0 - l_n, lg) + (l_n - _M_LN_2PI) * 0.5
 
-    # n < 1, not in table
     lt1_mask = le_235 & ~table_mask & ~mm2_mask & (n < 1.0)
     if np.any(lt1_mask):
         nm = n[lt1_mask]
@@ -844,13 +741,10 @@ def _stirlerr(n):
             _rfma_vec(-(nm + 0.5), np.log(nm), _lgamma1p_vec(nm)) + nm - _M_LN_SQRT_2PI
         )
 
-    # 5.25 < n <= 23.5 — asymptotic series, branches by n threshold.
     series_mask = le_235 & ~table_mask & ~mm2_mask & ~lt1_mask
     if np.any(series_mask):
         nm = n[series_mask]
         nn = nm * nm
-        # We need different series lengths per element. Compute the longest
-        # branch (k=16) and shorter ones; np.where picks per element.
         s_k7 = (
             _S0
             - (_S1 - (_S2 - (_S3 - (_S4 - (_S5 - _S6 / nn) / nn) / nn) / nn) / nn) / nn
@@ -1061,7 +955,6 @@ def _stirlerr(n):
             )
             / nn
         ) / nm
-        # Select per-element by threshold.
         ser = np.where(
             nm > 12.8,
             s_k7,
@@ -1081,7 +974,6 @@ def _stirlerr(n):
         )
         out[series_mask] = ser
 
-    # ---- n > 23.5 ----
     gt235 = ~le_235
     if np.any(gt235):
         nm = n[gt235]
@@ -1111,13 +1003,7 @@ def _stirlerr(n):
 
 
 def _bd0(x, np_):
-    """Port of nmath ``bd0(x, np)`` (bd0.c:48-87). Vectorized.
-
-    Evaluates ``M·D₀(x/M) = x·log(x/M) + M - x`` (where ``M = np_``) with
-    small relative error even when ``x/M ≈ 1``. Bit-identical per element
-    to the scalar Fortran source — Taylor series for the close branch,
-    direct evaluation otherwise.
-    """
+    """Port of nmath ``bd0(x, np)`` (bd0.c:48-87). Vectorized."""
     x = np.asarray(x, dtype=float)
     np_ = np.asarray(np_, dtype=float)
     scalar = x.ndim == 0 and np_.ndim == 0
@@ -1131,11 +1017,9 @@ def _bd0(x, np_):
     close = valid & (np.abs(x - np_) < 0.1 * (x + np_))
     far = valid & ~close
 
-    # Far branch: direct formula.
     if np.any(far):
         xf, nf = x[far], np_[far]
         xnp = xf / nf
-        # Safe log: fall back to log(x) - log(np_) if xnp non-finite.
         with np.errstate(invalid="ignore"):
             lg_x_n = np.where(
                 np.isfinite(xnp),
@@ -1146,12 +1030,10 @@ def _bd0(x, np_):
             xf > nf, _rfma_vec(xf, lg_x_n - 1.0, nf), _rfma_vec(xf, lg_x_n, nf) - xf
         )
 
-    # Close branch: Taylor series with per-element early exit.
     if np.any(close):
         xc, nc = x[close], np_[close]
         d = xc - nc
         v = d / (xc + nc)
-        # Underflow fix: scale by 2^-2 to avoid x+np overflow path.
         underflow = (d != 0.0) & (v == 0.0)
         if np.any(underflow):
             x_ = np.ldexp(xc[underflow], -2)
@@ -1159,12 +1041,10 @@ def _bd0(x, np_):
             v_uf = (x_ - n_) / (x_ + n_)
             v[underflow] = v_uf
         s = np.ldexp(d, -1) * v
-        # Underflow early-return: ldexp(s, 1) < tiny.
         s2 = np.ldexp(s, 1)
         early = np.abs(s2) < np.finfo(float).tiny
         ej = xc * v
         v2 = v * v
-        # Iterate Taylor series; mask out converged/early-returned elements.
         active = ~early
         for j in range(1, 1000):
             if not np.any(active):
@@ -1175,21 +1055,14 @@ def _bd0(x, np_):
             s_new = s[active] + ej_a / ((j << 1) + 1)
             s[active] = s_new
             still_changed = s_new != s_old
-            # Re-build active mask
             idx = np.where(active)[0]
             active = np.zeros_like(active)
             active[idx[still_changed]] = True
-        # Return 2*s for converged; 2*early-s for early.
         out[close] = np.where(early, s2, np.ldexp(s, 1))
 
     return float(out[0]) if scalar else out
 
 
-# === lgammafn / gammafn (nmath gamma.c / lgamma.c / lgammacor.c) =============
-# scipy.special.gammaln is NOT bit-exact to R's lgammafn at small args
-# (1-6 ulp at 0.5/1.1/1.5; large near the x=1 root), which leaks into
-# stirlerr's small-n branches, lgamma1p, and dpois_wrap -> pgamma. Port R's
-# Fullerton/Chebyshev lgammafn so the whole gamma family is 0-ulp.
 _M_LN_SQRT_PId2 = 0.225791352644727432363097614947  # log(sqrt(pi/2))
 
 _GAMCS = (
@@ -1435,15 +1308,11 @@ def _dpsifn_m1(x, n):
             if k >= 2:
                 t2 *= k  # t2 == k!
             if j >= 0:
-                # R fuses `ans + (t1/t2)*d_n_cot` to one fmadd on arm64 (clang
-                # -ffp-contract); the reflection cancels badly so the 1-ulp FMA
-                # diff amplifies (~45 ulp). _rfma matches R per-arch.
                 ans = s * _rfma(t1 / t2, _d_n_cot(x, k), ans)
             k += 1
             j += 1
             s = -s
         return ans
-    # x > 0
     xln = math.log(x)
     lrg = 1.0 / (2.0 * _DBL_EPSILON)
     if n == 0 and x * xln > lrg:
@@ -1501,7 +1370,6 @@ def _dpsifn_m1(x, n):
     tk = max(abs(t), abs(t1), abs(t2))
     if tk > elim:
         return 0.0  # underflow
-    # L10: asymptotic (Bernoulli) expansion in 1/xdmy^2
     tss = math.exp(-t)
     tt = 0.5 / xdmy
     t1 = tt
@@ -1605,7 +1473,6 @@ def gammafn(x):
         for i in range(1, n + 1):
             value *= y + i
         return value
-    # y = |x| > 10
     if x > _GAM_XMAX:
         return _INF
     if x < _GAM_XMIN:
@@ -1666,7 +1533,6 @@ def _lgammafn_arr(x):
     return out
 
 
-# --- gamma-family scalar foundations (pgamma.c) ------------------------------
 _PG_SCALEFACTOR = 2.0**256  # (2^32)^8
 _M_CUTOFF = _M_LN2 * 1024 / _DBL_EPSILON  # = 3.196577e18
 _DBL_MIN = 2.2250738585072014e-308
@@ -1678,7 +1544,6 @@ def _logcf(x, i, d, eps):
     c2 = i + d
     c4 = c2 + d
     a1 = c2
-    # C: `a*b - c*d` fuses the first product (clang fmadd/fnmul), `a - c` → fmsub.
     b1 = i * _rfma(-i, x, c2)  # i*(c2 - i*x)
     b2 = d * d * x
     a2 = _rfma(c4, c2, -b2)  # c4*c2 - b2
@@ -1724,7 +1589,6 @@ def _log1pmx(x):
     return r * _rfma(2 * y, _logcf(y, 3, 2, tol_logcf), -x)
 
 
-# coeffs[i] = (zeta(i+2)-1)/(i+2), i=0..39  (pgamma.c lgamma1p)
 _LGAMMA1P_COEFFS = (
     0.3224670334241132182362075833230126e-0,
     0.6735230105319809513324605383715000e-1,
@@ -1784,13 +1648,7 @@ def _lgamma1p(a):
 
 
 def _R_Log1_Exp(x):
-    """R's ``R_Log1_Exp(x) = log(1 - exp(x))`` (dpq.h), stable form.
-
-    C99 ``log`` edge semantics spelled out: ``log(±0) = -Inf`` and
-    ``log(negative) = NaN`` without raising — Python's ``math.log``
-    raises on both. Reachable: qbeta.c's swapped-tail ``u = R_Log1_Exp(u)``
-    with ``u == 0`` (xinbta pinned at 1) must yield ``-Inf`` like C.
-    """
+    """R's ``R_Log1_Exp(x) = log(1 - exp(x))`` (dpq.h), stable form."""
     if x > -_M_LN2:
         v = -math.expm1(x)
         if v > 0.0:
@@ -1813,7 +1671,6 @@ def _logspace_sub(logx, logy):
 # 2048). Decoded from hex-float to plain double values.
 
 
-# Hex-float decoder: each entry "+0x1.62e430p-1" → that float value.
 def _hex_to_float(s: str) -> float:
     return float.fromhex(s)
 
@@ -1959,12 +1816,7 @@ _BD0_SCALE_NP = np.array(
 
 
 def _ebd0(x, M):
-    """Port of nmath ``ebd0(x, M)`` (bd0.c:241-355). Vectorized.
-
-    Computes ``x·log(x/M) + (M - x)`` with extended precision. Returns
-    ``(yh, yl)`` arrays such that ``yh + yl`` is the value. Welinder's
-    improved algorithm (R Bugzilla PR#15628).
-    """
+    """Port of nmath ``ebd0(x, M)`` (bd0.c:241-355). Vectorized."""
     Sb = 10
     S = 1 << Sb  # = 1024
     N = 128
@@ -1978,14 +1830,12 @@ def _ebd0(x, M):
     yh = np.zeros_like(x)
     yl = np.zeros_like(x)
 
-    # Edge cases.
     eq = x == M
     x_zero = ~eq & (x == 0.0)
     M_zero = ~eq & ~x_zero & (M == 0.0)
     yh[x_zero] = M[x_zero]
     yh[M_zero] = np.inf
 
-    # M/x → ∞ (M >> x).
     Mox = np.where(eq | x_zero | M_zero, 1.0, M / np.where(x == 0.0, 1.0, x))
     inf_Mox = ~eq & ~x_zero & ~M_zero & (Mox == np.inf)
     yh[inf_Mox] = M[inf_Mox]
@@ -1998,10 +1848,8 @@ def _ebd0(x, M):
     Ma = M[active]
     Mox_a = Ma / xa
 
-    # M/x = r · 2^e
     r, e = np.frexp(Mox_a)
 
-    # Overflow check (rare): M_LN2 * (-e) > 1 + DBL_MAX/x → yh = +inf
     with np.errstate(over="ignore"):
         overflow = _M_LN2 * (-e.astype(float)) > (1.0 + np.finfo(float).max / xa)
     if np.any(overflow):
@@ -2037,7 +1885,6 @@ def _ebd0(x, M):
     if xa.size == 0:
         return (float(yh[0]), float(yl[0])) if scalar else (yh, yl)
 
-    # Local accumulators (we update yh/yl only via these arrays).
     lh = np.zeros_like(xa)
     ll = np.zeros_like(xa)
 
@@ -2047,7 +1894,6 @@ def _ebd0(x, M):
         np.add(lh, d1, out=lh)
         np.add(ll, d2, out=ll)
 
-    # ADD1(-x * log1pmx((M*fg - x) / x))
     arg = _rfma_vec(Ma, fg, -xa) / xa
     log1pmx_val = _log1pmx_vec(
         arg
@@ -2056,9 +1902,6 @@ def _ebd0(x, M):
 
     fg_ne_1 = fg != 1.0
     if np.any(fg_ne_1):
-        # Process the 4-iteration table corrections only where fg != 1.
-        # We compute updates for the WHOLE active set; for fg==1 elements
-        # the increments are 0 (since x * 0 = 0 with proper masking).
         for j in range(4):
             tbl_i = _BD0_SCALE_NP[i, j]
             tbl_0 = _BD0_SCALE_NP[0, j]
@@ -2066,23 +1909,15 @@ def _ebd0(x, M):
             inc2 = np.where(fg_ne_1, -xa * tbl_0 * e, 0.0)
             add1(inc1)
             add1(inc2)
-            # Per-iter overflow check: any !isfinite → set to inf and freeze.
             nonfinite = ~np.isfinite(lh)
             if np.any(nonfinite):
                 lh[nonfinite] = np.inf
                 ll[nonfinite] = 0.0
                 fg_ne_1 = fg_ne_1 & ~nonfinite
 
-    # ADD1(M); ADD1(-M·fg) only where fg != 1; for fg==1, the original
-    # scalar code returns early before these — match that exactly.
-    # But: the scalar code returns IMMEDIATELY for fg==1 after the first
-    # add1(-x·log1pmx). For fg==1, lh/ll already have the right value,
-    # so skip the M / -M·fg adds.
     fg_eq_1 = fg == 1.0
     fg_ne_1 = ~fg_eq_1
     if np.any(fg_ne_1):
-        # Apply M / -M·fg adds only for fg != 1 (otherwise scalar returns
-        # early so we shouldn't add).
         i_ne = np.where(fg_ne_1)[0]
         d = Ma[i_ne]
         d1 = np.floor(d + 0.5)
@@ -2105,7 +1940,6 @@ def _pow1p(x, y):
     y = np.asarray(y, dtype=float)
     x, y = np.broadcast_arrays(x, y)
     out = np.empty(x.shape, dtype=float)
-    # small non-negative integer y in {0,1,2,3,4}: exact polynomial
     is_int = (y == np.trunc(y)) & (y >= 0) & (y <= 4.0)
     done = np.zeros(x.shape, dtype=bool)
     for k, poly in enumerate(
@@ -2132,7 +1966,6 @@ def _pow1p(x, y):
         naive = (x_ == xr) | (np.abs(xr) > 0.5) | np.isnan(xr)
         res = np.where(naive, np.power(xp1, yr), np.exp(yr * np.log1p(xr)))
         out[rest] = res
-    # NaN y handling: (0+1)^NaN := 1 ; else y
     nan_y = np.isnan(y)
     if nan_y.any():
         out[nan_y] = np.where(x[nan_y] == 0.0, 1.0, y[nan_y])
@@ -2140,11 +1973,7 @@ def _pow1p(x, y):
 
 
 def _dpois_raw(x, lambda_, give_log: bool = True):
-    """Port of nmath ``dpois_raw(x, lambda, give_log)`` (dpois.c:43-69).
-
-    Vectorized over ``x`` and ``lambda``. Uses Loader's saddlepoint with
-    ebd0 (R 4.5). Returns the same shape as the broadcast of inputs.
-    """
+    """Port of nmath ``dpois_raw(x, lambda, give_log)`` (dpois.c:43-69)."""
     x_in = np.asarray(x, dtype=float)
     l_in = np.asarray(lambda_, dtype=float)
     scalar = x_in.ndim == 0 and l_in.ndim == 0
@@ -2154,7 +1983,6 @@ def _dpois_raw(x, lambda_, give_log: bool = True):
     NEG_INF = float("-inf")
     out = np.empty_like(x)
 
-    # Edge cases (rare in PIRLS; cheap to test).
     lam_zero = lam == 0.0
     lam_inf = ~np.isfinite(lam)
     x_neg = x < 0
@@ -2163,7 +1991,6 @@ def _dpois_raw(x, lambda_, give_log: bool = True):
     lam_lt_xt = (lam < x * tiny) & ~lam_zero & ~lam_inf & ~x_neg & ~x_le_lt
     main = ~(lam_zero | lam_inf | x_neg | x_le_lt | lam_lt_xt)
 
-    # lam == 0: x==0 → log(1)=0; else -inf
     if np.any(lam_zero):
         out[lam_zero] = np.where(x[lam_zero] == 0.0, 0.0, NEG_INF)
     if np.any(lam_inf):
@@ -2182,7 +2009,6 @@ def _dpois_raw(x, lambda_, give_log: bool = True):
             _rfma_vec(xn, np.log(ln), -ln) - _lgammafn_arr(xn + 1.0),
         )
 
-    # Common (saddlepoint) path.
     m_yl = m_yh = m_r = m_Lrg = None
     if np.any(main):
         xm = x[main]
@@ -2208,17 +2034,12 @@ def _dpois_raw(x, lambda_, give_log: bool = True):
 
 
 def _dbinom_raw(x, n, p, q, give_log: bool = True):
-    """Port of nmath ``dbinom_raw(x, n, p, q, give_log)`` (dbinom.c:72-118).
-
-    Vectorized. Uses Loader's saddlepoint with the older (non-extended)
-    ``bd0`` — matches dbinom.c which calls ``bd0(...)`` not ``ebd0(...)``.
-    """
+    """Port of nmath ``dbinom_raw(x, n, p, q, give_log)`` (dbinom.c:72-118)."""
     x_in = np.asarray(x, dtype=float)
     n_in = np.asarray(n, dtype=float)
     p_in = np.asarray(p, dtype=float)
     q_in = np.asarray(q, dtype=float)
     scalar = x_in.ndim == 0 and n_in.ndim == 0 and p_in.ndim == 0 and q_in.ndim == 0
-    # Broadcast to common shape.
     shape = np.broadcast_shapes(x_in.shape, n_in.shape, p_in.shape, q_in.shape)
     x = np.broadcast_to(x_in, shape).astype(float).copy()
     n = np.broadcast_to(n_in, shape).astype(float).copy()
@@ -2249,9 +2070,7 @@ def _dbinom_raw(x, n, p, q, give_log: bool = True):
         n0 = n[edge_x0]
         p0 = p[edge_x0]
         q0 = q[edge_x0]
-        # n == 0 → log(1) = 0
         n_is_0 = n0 == 0.0
-        # else: n*log(q) if p>q, n*log1p(-p) otherwise.
         big_p = (p0 > q0) & ~n_is_0
         big_q = ~big_p & ~n_is_0
         val = np.empty_like(n0)
@@ -2305,7 +2124,6 @@ def _dbinom_raw(x, n, p, q, give_log: bool = True):
     return float(out.reshape(())) if scalar else out
 
 
-# === pgamma — gamma/chi-square CDF (nmath/pgamma.c, Welinder) ================
 def _dpois_wrap(x_plus_1, lambda_, give_log):
     if not math.isfinite(lambda_):
         return _NEGINF if give_log else 0.0
@@ -2388,7 +2206,6 @@ def _pd_lower_cf(y, d):
         c2 -= 1
         c3 = i * c2
         c4 += 2
-        # R's clang fuses `c4*X + c3*Y` to fmadd on arm64; `_rfma` mirrors per-arch.
         a1 = _rfma(c4, a2, c3 * a1)
         b1 = _rfma(c4, b2, c3 * b1)
         i += 1
@@ -2498,7 +2315,6 @@ def _ppois_asymp(x, lambda_, lower_tail, log_p):
 
 
 def pgamma_raw(x, alph, lower_tail, log_p):
-    # R_P_bounds_01(x, 0, +Inf)
     if x <= 0:
         return _dt0(lower_tail, log_p)
     if x >= _INF:
@@ -2548,7 +2364,6 @@ def pgamma(x, alph, scale, lower_tail=True, log_p=False):
     return pgamma_raw(x, alph, lower_tail, log_p)
 
 
-# === dgamma — gamma density (nmath/dgamma.c) =================================
 def dgamma(x, shape, scale, give_log=False):
     """R's ``dgamma(x, shape, scale, give_log)`` (nmath/dgamma.c), bit-exact."""
     if math.isnan(x) or math.isnan(shape) or math.isnan(scale):
@@ -2578,7 +2393,6 @@ def dgamma(x, shape, scale, give_log=False):
     return (pr - math.log(scale)) if give_log else pr / scale
 
 
-# === qgamma — gamma quantile (nmath/qgamma.c, AS 91 + Newton) ================
 def _R_D_log(p, log_p):
     return p if log_p else math.log(p)
 
@@ -2651,7 +2465,6 @@ def qgamma(p, alpha, scale, lower_tail=True, log_p=False):
     i420, i2520, i5040 = 1.0 / 420.0, 1.0 / 2520.0, 1.0 / 5040.0
     if math.isnan(p) or math.isnan(alpha) or math.isnan(scale):
         return p + alpha + scale
-    # R_Q_P01_boundaries(p, 0, +Inf)
     if log_p:
         if p > 0:
             return _NAN
@@ -2698,8 +2511,6 @@ def qgamma(p, alpha, scale, lower_tail=True, log_p=False):
             t = p2 * math.exp(_rfma(-c, math.log(ch), _rfma(alpha, _M_LN2, g) + p1))
             b = t / ch
             a = _rfma(0.5, t, -(b * c))
-            # Nested Horners; clang fuses every `acc*a + C` within the
-            # expression.
             s1 = (
                 _rfma(
                     a,
@@ -2734,7 +2545,6 @@ def qgamma(p, alpha, scale, lower_tail=True, log_p=False):
                 break
             if abs(q - ch) > 0.1 * ch:
                 ch = 0.9 * q if ch < q else 1.1 * q
-    # END:
     x = 0.5 * scale * ch
     if max_it_Newton:
         if not log_p:
@@ -2768,9 +2578,6 @@ def qgamma(p, alpha, scale, lower_tail=True, log_p=False):
     return x
 
 
-# === pbeta — incomplete beta (nmath/toms708.c, Morris ALGORITHM 708) =========
-# Direct port of bratio() + all its sub-algorithms. Feeds pbeta -> pt/pf/
-# pbinom/ppois and (via qbeta) the t/F/beta/binom quantiles.
 _TOMS_EPS = 2.220446049250313e-16  # = 2 * d1mach(3) = DBL_EPSILON
 _M_SQRT_PI = 1.772453850905516027298167483341
 
@@ -3268,7 +3075,6 @@ def _betaln(a0, b0):
                 w = math.log(w)
                 if b >= 8.0:
                     return w + _gamln(a) + _algdiv(a, b)
-                # else fall to L40
             else:
                 n = int(a - 1.0)
                 w = 1.0
@@ -3278,7 +3084,6 @@ def _betaln(a0, b0):
                 return _rfma(-float(n), math.log(b), math.log(w)) + (
                     _gamln(a) + _algdiv(a, b)
                 )
-        # L40: 1 < A <= B < 8 reduction of B
         n = int(b - 1.0)
         z = 1.0
         for _i in range(1, n + 1):
@@ -3907,9 +3712,6 @@ def _R_Log1_Exp_toms(x):
     place of libm ``expm1``). Every ``R_Log1_Exp`` reached from :func:`_bratio`
     is this variant — it differs from the stock macro by ~1 ulp on the
     ``x > -M_LN2`` branch, which the ``log_p`` beta tails expose.
-
-    Same C99 ``log`` edge semantics as :func:`_R_Log1_Exp`: ``log(±0)``
-    is ``-Inf`` (no exception), ``log(negative)`` is ``NaN``.
     """
     if x > -_M_LN2:
         v = -_rexpm1(x)
@@ -4036,7 +3838,6 @@ def _bratio(a, b, x, y, log_p):
             w1 = _bup(b0, a0, y0, x0, n, eps, False)
             did_bup = True
             b0 += n
-        # L131:
         w1, ierr1 = _bgrat(b0, a0, y0, x0, w1, 15 * eps, False)
         if w1 == 0 or (0 < w1 < _DBL_MIN):
             if did_bup:
@@ -4103,7 +3904,6 @@ def _bratio(a, b, x, y, log_p):
             if ierr1:
                 ierr = 10 + ierr1
             return end_from_w(w)
-        # basym (L180)
         w = _basym(a0, b0, lambda_, eps * 100.0, log_p)
         w1 = _R_Log1_Exp_toms(w) if log_p else 0.5 - w + 0.5
         return _end(w, w1)
@@ -4136,7 +3936,6 @@ def pbeta(x, a, b, lower_tail=True, log_p=False):
     return pbeta_raw(x, a, b, lower_tail, log_p)
 
 
-# === chains routed through pbeta / pgamma (pt/pf/ppois/pbinom; nmath) ========
 def lbeta(a, b):
     """R's ``lbeta(a, b)`` (nmath/lbeta.c) — log Beta, bit-exact."""
     if math.isnan(a) or math.isnan(b):
@@ -4152,7 +3951,6 @@ def lbeta(a, b):
         return _NEGINF
     if p >= 10:
         corr = _lgammacor(p) + _lgammacor(q) - _lgammacor(p + q)
-        # C one-liner; clang fuses each `mul (+/-) acc` left-to-right on arm64.
         s = _rfma(math.log(q), -0.5, _M_LN_SQRT_2PI) + corr
         s = _rfma(p - 0.5, math.log(p / (p + q)), s)
         return _rfma(q, math.log1p(-p / (p + q)), s)
@@ -4382,7 +4180,6 @@ def pnbinom(x, size, prob, lower_tail=True, log_p=False):
     return pbeta(prob, size, x + 1.0, lower_tail, log_p)
 
 
-# === qbeta — beta quantile (nmath/qbeta.c, AS 109 + Newton) ==================
 _DBL_very_MIN = 2.2250738585072014e-308 / 4.0
 _DBL_log_v_MIN = _M_LN2 * (-1021 - 2)
 _DBL_1__eps = float.fromhex("0x1.fffffffffffffp-1")
@@ -4406,7 +4203,6 @@ def _clog(x):
 
 
 def _qbeta_raw(alpha, p, q, lower_tail, log_p):
-    # public qbeta() always passes log_q_cut=-5, n_N=4 -> give_log_q=False
     log_q_cut = -5.0
     n_N = 4
     give_log_q = False
@@ -4424,7 +4220,6 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
     def _q1():
         return (1.0, 0.0)
 
-    # boundary cases
     if alpha == _dt0(lower_tail, log_p):
         return _q0()
     if alpha == _dt1(lower_tail, log_p):
@@ -4456,7 +4251,6 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
     n_maybe_swaps = 0
     goto_return = False
     converged = False
-    # values carried to L_return
     tx = 0.0
     a = la = pp = qq = u = xinbta = 0.0
 
@@ -4591,7 +4385,6 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
         if goto_return:
             break
 
-        # L_Newton
         r = 1 - pp
         t = 1 - qq
         wprev = 0.0
@@ -4686,10 +4479,8 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
                 wprev = w
         if jump_swap:
             continue
-        # (R warns ME_PRECISION here if not converged; warning omitted)
         break
 
-    # L_converged
     if not goto_return:
         log_ = log_p or use_log_x
         if (log_ and y == _NEGINF) or ((not log_) and y == 0):
@@ -4698,7 +4489,6 @@ def _qbeta_raw(alpha, p, q, lower_tail, log_p):
                 tx = _DBL_very_MIN
                 u_n = _DBL_log_v_MIN
             add_N_step = False
-    # L_return
     r = 1 - pp
     t = 1 - qq
     if use_log_x:
@@ -4738,7 +4528,6 @@ def qbeta(alpha, p, q, lower_tail=True, log_p=False):
     return _qbeta_raw(alpha, p, q, lower_tail, log_p)[0]
 
 
-# === dt / qt / qf (nmath dt.c / qt.c / qf.c) ================================
 def dt(x, n, give_log=False):
     """R's ``dt(x, df=n)`` (nmath/dt.c) — t-density via bd0/stirlerr, bit-exact."""
     if math.isnan(x) or math.isnan(n):
@@ -4804,7 +4593,6 @@ def qt(p, ndf, lower_tail=True, log_p=False):
     eps = 1.0e-12
     if math.isnan(p) or math.isnan(ndf):
         return p + ndf
-    # R_Q_P01_boundaries(p, -Inf, +Inf)
     if log_p:
         if p > 0:
             return _NAN
@@ -4844,8 +4632,6 @@ def qt(p, ndf, lower_tail=True, log_p=False):
             else:
                 lx = nx
             it += 1
-            # C99 `(ux-lx)/fabs(nx)` at nx == 0: ±Inf (or NaN for 0/0),
-            # never an exception — Python's `/` raises, so spell it out.
             d_ = ux - lx
             if nx != 0.0:
                 rel = d_ / abs(nx)
@@ -4974,7 +4760,6 @@ def qf(p, df1, df2, lower_tail=True, log_p=False):
         return p + df1 + df2
     if df1 <= 0.0 or df2 <= 0.0:
         return _NAN
-    # R_Q_P01_boundaries(p, 0, +Inf)
     if log_p:
         if p > 0:
             return _NAN
@@ -4999,9 +4784,7 @@ def qf(p, df1, df2, lower_tail=True, log_p=False):
     return p if not math.isnan(p) else _NAN
 
 
-# === public discrete/beta densities (dbinom/dpois/dbeta; nmath) =============
 def _R_nonint(x):
-    # R_nonint: |x - nearbyint(x)| > 1e-9*max(1,|x|); nearbyint == round-half-even
     return abs(x - float(round(x))) > 1e-9 * max(1.0, abs(x))
 
 
@@ -5070,9 +4853,7 @@ def dbeta(x, a, b, give_log=False):
     return lval if give_log else math.exp(lval)
 
 
-# === qbinom / qpois — discrete quantiles (nmath qDiscrete_search.h) ==========
 def _do_search(y, z, p, cdf, incr, lower_tail, log_p, y_max):
-    # z is a 1-element mutable list [z_val]; returns root y, updates z.
     left = (z[0] >= p) if lower_tail else (z[0] < p)
     if left:
         while True:
@@ -5182,7 +4963,6 @@ def qbinom(p, n, pr, lower_tail=True, log_p=False):
     n = float(round(n))
     if pr < 0 or pr > 1 or n < 0:
         return _NAN
-    # R_Q_P01_boundaries(p, 0, n)
     if log_p:
         if p > 0:
             return _NAN
@@ -5223,7 +5003,6 @@ def qnbinom_mu(p, size, mu, lower_tail=True, log_p=False):
         return 0.0
     if mu < 0 or size < 0:
         return _NAN
-    # R_Q_P01_boundaries(p, 0, ML_POSINF)
     if log_p:
         if p > 0:
             return _NAN
@@ -5260,7 +5039,6 @@ def qnbinom(p, size, prob, lower_tail=True, log_p=False):
         return _NAN
     if prob == 1 or size == 0:
         return 0.0
-    # R_Q_P01_boundaries(p, 0, ML_POSINF)
     if log_p:
         if p > 0:
             return _NAN
@@ -5287,7 +5065,6 @@ def qnbinom(p, size, prob, lower_tail=True, log_p=False):
     return _q_discrete(p, lower_tail, log_p, mu, sigma, gamma, _cdf, None)
 
 
-# === dexp / pexp / qexp (nmath dexp.c / pexp.c / qexp.c) =====================
 def dexp(x, scale, give_log=False):
     if math.isnan(x) or math.isnan(scale):
         return x + scale
@@ -5325,17 +5102,11 @@ def qexp(p, scale, lower_tail=True, log_p=False):
     return -scale * _R_DT_Clog(p, lower_tail, log_p)
 
 
-# === cauchy / logistic / log-normal / weibull / geom ========================
-# nmath dcauchy.c/pcauchy.c/qcauchy.c, dlogis.c/plogis.c/qlogis.c,
-# dlnorm.c/plnorm.c/qlnorm.c, dweibull.c/pweibull.c/qweibull.c,
-# dgeom.c/pgeom.c/qgeom.c. Closed-form (no LDOUBLE series) → 0-ulp to R.
 def _R_D_Clog(p, log_p):
-    # R_D_Clog(p) = log_p ? log1p(-p) : (0.5 - p + 0.5)
     return math.log1p(-p) if log_p else (0.5 - p + 0.5)
 
 
 def _log1pexp(x):
-    # R's log1pexp (plogis.c): overflow-safe log(1 + exp(x))
     if x <= 18.0:
         return math.log1p(math.exp(x))
     if x > 33.3:
@@ -5344,14 +5115,12 @@ def _log1pexp(x):
 
 
 def _c_log(x):
-    # C log() semantics (no exception): log(0) = -Inf, log(neg) = NaN.
     if x > 0:
         return math.log(x)
     return _NEGINF if x == 0 else _NAN
 
 
 def _c_div(a, b):
-    # C `/` semantics (no exception): x/0 = +-Inf by the sign rule, 0/0 = NaN.
     if b != 0.0 or math.isnan(a):
         return a / b
     if a == 0.0:
@@ -5360,7 +5129,6 @@ def _c_div(a, b):
 
 
 def _q_p01_boundaries(p, lower_tail, log_p, left, right):
-    # R_Q_P01_boundaries(p, left, right): boundary value, or None to continue.
     if log_p:
         if p > 0:
             return _NAN
@@ -5403,7 +5171,6 @@ def pcauchy(x, location=0.0, scale=1.0, lower_tail=True, log_p=False):
         return _dt0(lower_tail, log_p) if x < 0 else _dt1(lower_tail, log_p)
     if not lower_tail:
         x = -x
-    # Installed R (no HAVE_ATANPI) uses the atan(1/x)/M_PI branch.
     if abs(x) > 1:
         y = math.atan(1 / x) / math.pi
         if x > 0:
@@ -5617,19 +5384,9 @@ def qgeom(p, prob, lower_tail=True, log_p=False):
     b = _q_p01_boundaries(p, lower_tail, log_p, 0.0, _INF)
     if b is not None:
         return b
-    # add a fuzz to ensure left continuity, but value must be >= 0
     return max(
         0.0, math.ceil(_R_DT_Clog(p, lower_tail, log_p) / math.log1p(-prob) - 1 - 1e-12)
     )
-
-
-# ============================================================================
-# numpy-vectorized pure-Python fallbacks (bit-identical to the scalar kernels;
-# used by _disp when the native Rust extension is absent). Same float-op order,
-# masked per-element convergence. The TOMS-708 incomplete-beta core (pbeta ->
-# pt/pf/pbinom) and the Newton quantiles (qgamma/qbeta) are NOT vectorized
-# (deeply branched + per-element convergence) and keep the scalar loop.
-# ============================================================================
 
 
 def dgamma_vec(x, shape, scale, give_log=False):
@@ -6283,8 +6040,6 @@ def dbeta_vec(x, a, b, give_log=False):
         xm, am, bm = x[main], a[main], b[main]
         lval = np.empty(xm.shape)
         small = (am <= 2) | (bm <= 2)
-        # x in {0,1} feeds log(0) into the formula but is overwritten below by
-        # the boundary values — silence the (discarded) warnings.
         with np.errstate(divide="ignore", invalid="ignore"):
             if small.any():
                 lval[small] = (
@@ -6309,14 +6064,6 @@ def dbeta_vec(x, a, b, give_log=False):
 
 _PY_VEC["dbeta"] = dbeta_vec
 
-
-# === ptukey / qtukey — studentized range (nmath/ptukey.c, nmath/qtukey.c) ====
-# CDF (ptukey) and quantile (qtukey) of the maximum of ``rr`` studentized
-# ranges, each on ``cc`` means with ``df`` error d.f. (Copenhaver & Holland
-# 1988). ``wprob`` is Hartley's range integral by 12-point Gauss-Legendre
-# quadrature; ptukey wraps it in a 16-point outer quadrature over the chi
-# density of the error scale; qtukey inverts ptukey by the secant method with
-# an AS 70 (Odeh-Evans) starting value. All d/p flags follow R's dpq macros.
 
 _PTUKEY_XLEG = (  # wprob: 12-point Gauss-Legendre nodes (upper half)
     0.981560634246719250690549090149,
@@ -6355,9 +6102,6 @@ _PTUKEY_ALEGQ = (  # ptukey: 16-point Gauss-Legendre weights
     0.189450610455068496285396723208,
 )
 
-# R's ``LDOUBLE`` (== C ``long double``): 80-bit x87 extended on x86-64, plain
-# double on arm64. ``np.longdouble`` tracks the platform identically, so the
-# ``wprob`` quadrature accumulators round bit-for-bit to R on either arch.
 _LD = np.longdouble
 
 
@@ -6377,18 +6121,15 @@ def _wprob(w: float, rr: float, cc: float) -> float:
     aleg = _PTUKEY_ALEG
 
     qsqz = w * 0.5
-    # if w >= 16 the integral lower bound is ~1, so return 1.
     if qsqz >= bb:
         return 1.0
 
-    # first term in integral of Hartley's form: (f(w/2) - 1) ^ cc
     pr_w = 2 * pnorm5(qsqz, 0.0, 1.0, True, False) - 1.0
     if pr_w >= math.exp(C2 / cc):
         pr_w = math.pow(pr_w, cc)
     else:
         pr_w = 0.0
 
-    # fewer intervals when w is large (second component then small)
     wincr = wincr1 if w > wlar else wincr2
 
     blb = _LD(qsqz)
@@ -6472,7 +6213,6 @@ def ptukey(
     if q <= 0:
         return _dt0(lower_tail, log_p)
 
-    # df must be > 1 and there must be at least two values
     if df < 2 or rr < 1 or cc < 2:
         return _NAN
 
@@ -6482,9 +6222,6 @@ def ptukey(
     if df > dlarg:
         return _dt_val(_wprob(q, rr, cc), lower_tail, log_p)
 
-    # leading constant.  clang contracts the *leading* multiply of each
-    # `a*b ± c` into an fmadd on arm64, so `_rfma` (= plain `a*b+c` on x86)
-    # is what keeps this whole quadrature 0-ulp to R on both arches.
     f2 = df * 0.5
     f2lf = _rfma(f2, math.log(df), -(df * _M_LN2)) - _lgammafn(f2)
     f21 = f2 - 1.0
@@ -6518,18 +6255,14 @@ def ptukey(
                     ff4,
                     _rfma(f21, math.log(_rfma(-xlegq[j], ulen, twa1)), f2lf),
                 )
-            # if exp(t1) < 9e-14 it does not contribute to the integral
             if t1 >= eps1:
                 if ihalfq < jj:
                     qsqz = q * math.sqrt(_rfma(xlegq[j], ulen, twa1) * 0.5)
                 else:
-                    # `(-(xlegq[j]*ulen)) + twa1`: the negation makes the LHS an
-                    # fneg, not an fmul, so clang leaves this one uncontracted.
                     qsqz = q * math.sqrt(((-(xlegq[j] * ulen)) + twa1) * 0.5)
                 wprb = _wprob(qsqz, rr, cc)
                 rotsum = (wprb * alegq[j]) * math.exp(t1)
                 otsum += rotsum
-        # stop once converged, but do at least 1/ulen intervals
         if i * ulen >= 1.0 and otsum <= eps2:
             break
         ans += otsum
@@ -6558,7 +6291,6 @@ def _qtukey_qinv(p: float, c: float, v: float) -> float:
     c5 = 1.4142
     vmax = 120.0
 
-    # Every `a*b + c` below is one fmadd in R's arm64 build (see ptukey above).
     ps = 0.5 - 0.5 * p
     yi = math.sqrt(math.log(1.0 / (ps * ps)))
     t = yi + _rfma(_rfma(_rfma(_rfma(yi, p4, p3), yi, p2), yi, p1), yi, p0) / _rfma(
@@ -6592,7 +6324,6 @@ def qtukey(
     if df < 2 or rr < 1 or cc < 2:
         return _NAN
 
-    # R_Q_P01_boundaries(p, 0, ML_POSINF)
     if log_p:
         if p > 0:
             return _NAN
@@ -6608,7 +6339,6 @@ def qtukey(
         if p == 1:
             return _INF if lower_tail else 0.0
 
-    # p = R_DT_qIv(p): lower-tail, non-log probability
     if log_p:
         p = math.exp(p) if lower_tail else -math.expm1(p)
     else:
@@ -6617,7 +6347,6 @@ def qtukey(
     x0 = _qtukey_qinv(p, cc, df)
     valx0 = ptukey(x0, rr, cc, df, True, False) - p
 
-    # second iterate: 1 less than the first if it overshoots, else 1 more
     if valx0 > 0.0:
         x1 = max(0.0, x0 - 1.0)
     else:
@@ -6626,9 +6355,6 @@ def qtukey(
 
     ans = 0.0
     for _ in range(1, maxiter):
-        # `_c_div`: two equal successive ptukey values make the secant
-        # denominator 0, where C yields Inf/NaN (R then warns and returns NaN)
-        # rather than raising -- e.g. qtukey(0.5, nmeans=20, df=500, nranges=2).
         ans = x1 - _c_div(valx1 * (x1 - x0), valx1 - valx0)
         valx0 = valx1
         x0 = x1
@@ -6640,13 +6366,7 @@ def qtukey(
         if abs(x1 - x0) < eps:
             return ans
 
-    # did not converge in maxiter iterations
     return ans
-
-
-# === choose / lchoose — binomial coefficients (nmath/choose.c) ===============
-# Faithful port of R's choose/lchoose (generalized binomial: non-integer n,
-# integer k). Used to normalize the exact Wilcoxon rank-sum distribution.
 
 
 def _lfastchoose(n, k):
@@ -6688,7 +6408,6 @@ def lchoose(n, k):
         if n - k < 2:
             return lchoose(n, n - k)  # symmetry
         return _lfastchoose(n, k)
-    # non-integer n >= 0
     if n < k - 1:
         v, _s = _lfastchoose2(n, k)
         return v
@@ -6716,7 +6435,6 @@ def choose(n, k):
             r *= (n - j + 1) / j
             j += 1
         return _r_forceint(r) if not _R_nonint(n) else r
-    # k >= k_small_max
     if n < 0:
         r = choose(-n + k - 1, k)
         if k != 2 * math.floor(k / 2.0):  # ODD(k)
@@ -6729,17 +6447,12 @@ def choose(n, k):
         if n - k < _CHOOSE_K_SMALL_MAX:
             return choose(n, n - k)  # symmetry
         return _r_forceint(math.exp(_lfastchoose(n, k)))
-    # non-integer n >= 0
     if n < k - 1:
         r, s = _lfastchoose2(n, k)
         return s * math.exp(r)
     return math.exp(_lfastchoose(n, k))
 
 
-# === Wilcoxon signed-rank distribution (nmath/signrank.c) ====================
-# csignrank(k, n): number of subsets of {1,...,n} summing to k. The count array
-# w[0..floor(u/2)] (u = n(n+1)/2) is built by the partition recurrence and
-# cached per n (mirrors signrank.c's static w[] with w_init_maybe).
 _SIGNRANK_W: dict[int, list] = {}
 
 
@@ -6860,10 +6573,6 @@ def qsignrank(x, n, lower_tail=True, log_p=False):
     return float(q)
 
 
-# === Wilcoxon rank-sum (Mann-Whitney) distribution (nmath/wilcox.c) ==========
-# cwilcox(k, m, n): number of ways to choose the rank-sum statistic value k.
-# Loeffler recurrence with the divisor-sum sigma; w[] and sigma[] are cached per
-# reduced (i, j) = (min(m,n), max(m,n)), filled lazily up to k (w_fill_to_k).
 _WILCOX_CACHE: dict = {}
 
 
@@ -7012,10 +6721,6 @@ def qwilcox(x, m, n, lower_tail=True, log_p=False):
     return float(q)
 
 
-# === Noncentral chi-square (nmath/pnchisq.c, dnchisq.c, qnchisq.c) ===========
-# CDF (AS 275, Ding 1992), density (Poisson mixture of central chi-squares) and
-# quantile (bisection on the CDF). The series accumulators are C `long double`;
-# `_LD` (np.longdouble) tracks R's LDOUBLE and np.exp/np.log match expl/logl.
 _DBL_MAX = 1.7976931348623157e308
 _PNCH_DBL_MIN_EXP = _M_LN2 * (-1021)  # = M_LN2 * DBL_MIN_EXP (IEEE double)
 
@@ -7051,7 +6756,6 @@ def _pnchisq_raw(x, f, theta, errmax, reltol, itrmax, lower_tail, log_p):
             and math.log(x)
             < _M_LN2 + 2 / f * (_c_lgamma(f / 2.0 + 1) + _PNCH_DBL_MIN_EXP)
         ):
-            # everything would underflow: work in log scale
             lam = 0.5 * theta
             pr = -lam
             log_lam = math.log(lam)
@@ -7081,7 +6785,6 @@ def _pnchisq_raw(x, f, theta, errmax, reltol, itrmax, lower_tail, log_p):
         ans = sum_ / sum2
         return float(np.log(ans)) if log_p else float(ans)
 
-    # theta >= 80: AS 275 series
     lam = 0.5 * theta
     lamSml = -lam < _PNCH_DBL_MIN_EXP
     l_lam = -1.0
@@ -7171,7 +6874,6 @@ def pnchisq(x, df, ncp, lower_tail=True, log_p=False):
                 ans = 0.0
     if (not log_p) or ans < -1e-8:
         return ans
-    # log_p and ans near 0: recompute via the other tail
     ans = _pnchisq_raw(
         x, df, ncp, 1e-12, 8 * _DBL_EPSILON, 1000000, not lower_tail, False
     )
@@ -7212,7 +6914,6 @@ def dnchisq(x, df, ncp, give_log=False):
         return _NEGINF if give_log else 0.0
 
     sum_ = _LD(mid)
-    # upper tail
     term = _LD(mid)
     dfv = dfmid
     i = imax
@@ -7225,7 +6926,6 @@ def dnchisq(x, df, ncp, give_log=False):
         sum_ += term
         if not (q >= 1 or term * q > (1 - q) * eps or term > 1e-10 * sum_):
             break
-    # lower tail
     term = _LD(mid)
     dfv = dfmid
     i = imax
@@ -7253,7 +6953,6 @@ def qnchisq(p, df, ncp, lower_tail=True, log_p=False):
         return _NAN
     if df < 0 or ncp < 0:
         return _NAN
-    # R_Q_P01_boundaries(p, 0, ML_POSINF)
     if log_p:
         if p > 0:
             return _NAN
@@ -7273,7 +6972,6 @@ def qnchisq(p, df, ncp, lower_tail=True, log_p=False):
     if pp > 1 - _DBL_EPSILON:
         return _INF if lower_tail else 0.0
 
-    # Pearson (1959) approximation for the initial bracket
     b = (ncp * ncp) / (df + 3 * ncp)
     c = (df + 3 * ncp) / (df + 2 * ncp)
     ff = (df + 2 * ncp) / (c * c)
@@ -7337,13 +7035,6 @@ def qnchisq(p, df, ncp, lower_tail=True, log_p=False):
     return 0.5 * (ux + lx)
 
 
-# === Noncentral t / beta / F (nmath/{pnt,dnt,qnt,pnbeta,dnbeta,qnbeta,
-# pnf,dnf,qnf}.c) =============================================================
-# Noncentral t: Lenth (1989) AS 243 twin-series. Noncentral beta: AS 226/R84
-# incomplete-beta recursion (feeds noncentral F). Densities/quantiles follow.
-# Series accumulators are C `long double` -> `_LD`; the transcendentals here are
-# the plain double libm ones (no `expl`/`logl` macro in these files), so unlike
-# pnchisq these are fully bit-exact.
 _M_SQRT_2dPI = 0.797884560802865355879892119869  # sqrt(2/pi)
 _M_LN_SQRT_PI = 0.572364942924700087071713675677  # log(sqrt(pi)) = log(pi)/2
 
@@ -7444,9 +7135,6 @@ def dnt(x, df, ncp, give_log=False):
         _d = abs(
             pnt(x * math.sqrt((df + 2) / df), df + 2, ncp, 1, 0) - pnt(x, df, ncp, 1, 0)
         )
-        # R's dnt.c evaluates log(fabs(.)); C log(0) = -Inf (density 0), while
-        # Python's math.log(0.) raises — guard to preserve the R/C semantics
-        # when the two pnt values coincide (e.g. deep tails in double).
         u = math.log(df) - math.log(abs(x)) + (_NEGINF if _d == 0.0 else math.log(_d))
     else:
         u = (
@@ -7467,7 +7155,6 @@ def qnt(p, df, ncp, lower_tail=True, log_p=False):
         return _NAN
     if ncp == 0.0 and df >= 1.0:
         return qt(p, df, lower_tail, log_p)
-    # R_Q_P01_boundaries(p, ML_NEGINF, ML_POSINF)
     if log_p:
         if p > 0:
             return _NAN
@@ -7628,7 +7315,6 @@ def qnbeta(p, a, b, ncp, lower_tail=True, log_p=False):
         return _NAN
     if ncp < 0.0 or a <= 0.0 or b <= 0.0:
         return _NAN
-    # R_Q_P01_boundaries(p, 0, 1)
     if log_p:
         if p > 0:
             return _NAN
@@ -7726,7 +7412,6 @@ def qnf(p, df1, df2, ncp, lower_tail=True, log_p=False):
         return _NAN
     if not math.isfinite(df1) and not math.isfinite(df2):
         return _NAN
-    # R_Q_P01_boundaries(p, 0, ML_POSINF)
     if log_p:
         if p > 0:
             return _NAN
@@ -7745,10 +7430,6 @@ def qnf(p, df1, df2, ncp, lower_tail=True, log_p=False):
         return qnchisq(p, df1, ncp, lower_tail, log_p) / df1
     y = qnbeta(p, df1 / 2.0, df2 / 2.0, ncp, lower_tail, log_p)
     return y / (1 - y) * (df2 / df1)
-
-
-# === Hypergeometric (nmath/dhyper.c, phyper.c) ===============================
-# Sampling n balls from r red + b black; x are red. Feeds fisher.test (2x2).
 
 
 def dhyper(x, r, b, n, give_log=False):
@@ -7841,7 +7522,6 @@ def qhyper(p, NR, NB, n, lower_tail=True, log_p=False):
         return _NAN
     xstart = max(0.0, n - NB)
     xend = min(n, NR)
-    # R_Q_P01_boundaries(p, xstart, xend)
     if log_p:
         if p > 0:
             return _NAN
@@ -7881,7 +7561,6 @@ def qhyper(p, NR, NB, n, lower_tail=True, log_p=False):
     return xr
 
 
-# === Brent root-finder (src/zeroin.c R_zeroin2) — backs uniroot =============
 def _zeroin2(ax, bx, fa, fb, f, tol, maxit):
     """Port of R's ``R_zeroin2`` (src/zeroin.c) — Brent's method. Returns the
     root; ``fa``/``fb`` are the pre-computed endpoint values."""

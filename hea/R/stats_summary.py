@@ -98,8 +98,6 @@ def sd(x, na_rm=True):
     return float(np.std(arr, ddof=1))
 
 
-# R's ``quantile(..., type=k)`` maps to numpy's ``method=`` argument.
-# Indexed 1-9 to match R; index 0 is unused.
 _R_QUANTILE_METHOD = (
     None,  # 0 — unused (R types are 1..9)
     "inverted_cdf",  # 1
@@ -145,8 +143,6 @@ def IQR(x, na_rm=True, type=7):
     if not (1 <= int(type) <= 9):
         raise ValueError(f"IQR(type={type}): expected an integer in 1..9.")
 
-    # String column-name shorthand (polars convention; lets ``IQR("col")``
-    # work the same way ``pl.quantile("col", 0.5)`` does).
     if isinstance(x, str):
         x = pl.col(x)
 
@@ -225,7 +221,6 @@ def cor(x, y=None, na_rm=True):
         if na_rm:
             arr = arr[~np.isnan(arr).any(axis=1)]
         return np.corrcoef(arr, rowvar=False)
-    # Binary form. Expr/Series dispatch routes to pl.corr.
     if isinstance(x, (pl.Expr, pl.Series)) or isinstance(y, (pl.Expr, pl.Series)):
         a = (
             x
@@ -241,7 +236,6 @@ def cor(x, y=None, na_rm=True):
                 y.to_frame().to_series() if isinstance(y, pl.Series) else pl.Series(y)
             )
         )
-        # na_rm: drop pairs where either is null
         if na_rm and isinstance(a, pl.Expr) and isinstance(b, pl.Expr):
             mask = ~(a.is_null() | b.is_null())
             a, b = a.filter(mask), b.filter(mask)

@@ -53,18 +53,11 @@ def test_df_ggplot_chains_through_verbs(df):
     """``df.filter(...).ggplot(aes())`` — the natural tidyverse chain."""
     p = df.filter(hea.tidy.col("x") > 1).ggplot(aes("x", "y")) + geom_point()
     assert isinstance(p, ggplot_class)
-    # filter cut to 3 rows; ggplot snapshots the filtered frame.
     assert p.data.height == 3
 
 
 def test_df_ggplot_captures_caller_frame_env(df):
-    """``aes`` expressions reference user-defined helpers — must be captured.
-
-    Critical regression test for the ``_env=`` wrinkle on ``ggplot.__init__``:
-    without it, ``f_back`` from inside ``__init__`` would point at the
-    ``DataFrame.ggplot`` wrapper, not the test function, and ``my_helper``
-    would silently fail to resolve at build time.
-    """
+    """``aes`` expressions reference user-defined helpers — must be captured."""
 
     def my_helper(s):
         return s * 2
@@ -92,11 +85,6 @@ def test_function_form_still_works_after_env_kwarg(df):
     assert p.plot_env["helper"] is helper
 
 
-# ---------------------------------------------------------------------------
-# Auto-install: every layer-addable name in hea.ggplot.__all__ has a method
-# ---------------------------------------------------------------------------
-
-
 def _expected_fluent_names() -> set[str]:
     """Names from ``hea.ggplot.__all__`` that should be installed as methods."""
     return {n for n in hg.__all__ if _should_install_fluent(n)}
@@ -116,45 +104,31 @@ def test_fluent_methods_installed_for_every_addable_name():
         f"Auto-install missed: {sorted(missing)}\n"
         "Check the install loop in hea/ggplot/core.py:_install_fluent_methods."
     )
-    # Sanity: we matched a non-trivial number of names.
     assert len(expected) >= 30
 
 
 def test_fluent_skip_list_not_installed():
     """Names matching the skip rules must NOT have methods on ``ggplot``."""
     skipped = _expected_skipped_names()
-    # ``theme`` is a special case: it's NOT installed via the loop
-    # (collides with the ``_theme`` field) but IS exposed via a property
-    # + :class:`_PlotThemeHandle` that supports both ``plot.theme.get(...)``
-    # and ``plot.theme(...)``. Exclude from the leak check.
     skipped = skipped - {"theme"}
     leaked = {name for name in skipped if hasattr(ggplot_class, name)}
-    # ``ggplot`` is in __all__ and would otherwise leak (the class itself
-    # showing up as an attribute on instances). _FLUENT_SKIP_EXACT prevents it.
-    # Note: some bound methods that pre-exist on the class (e.g. ``draw``,
-    # ``show``) aren't in __all__ — they'd never enter this set.
     assert not leaked, f"These skipped names got installed: {sorted(leaked)}"
 
 
 def test_should_install_fluent_predicate():
     """Direct unit test of the install/skip predicate."""
-    # Install
     assert _should_install_fluent("geom_point")
     assert _should_install_fluent("stat_smooth")
     assert _should_install_fluent("scale_x_log10")
     assert _should_install_fluent("facet_wrap")
     assert _should_install_fluent("theme_minimal")
 
-    # Skip
     assert not _should_install_fluent("position_dodge")
     assert not _should_install_fluent("element_text")
     assert not _should_install_fluent("after_stat")
     assert not _should_install_fluent("after_scale")
     assert not _should_install_fluent("aes")
     assert not _should_install_fluent("ggplot")
-    # ``theme`` is intentionally NOT installed via the loop — see
-    # :class:`_PlotThemeHandle` in core.py. The fluent ``.theme(...)``
-    # form is delivered via a property/handle instead.
     assert not _should_install_fluent("theme")
 
 
@@ -184,16 +158,9 @@ def test_plot_theme_attribute_access_still_works():
 
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     p = ggplot_class(df, aes("x", "y")) + geom_point() + theme(aspect_ratio=2)
-    # .get() (delegated from Theme)
     assert p.theme.get("aspect.ratio") == 2
-    # .elements (delegated from Theme)
     assert isinstance(p.theme.elements, dict)
     assert p.theme.elements["aspect.ratio"] == 2
-
-
-# ---------------------------------------------------------------------------
-# Equivalence: method form produces the same plot as `+` form
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -215,7 +182,6 @@ def test_fluent_method_matches_plus_form(df, name, call_args, call_kwargs):
     p_fluent = getattr(df_with_g.ggplot(aes("x", "y")), name)(*call_args, **call_kwargs)
     p_plus = df_with_g.ggplot(aes("x", "y")) + fn(*call_args, **call_kwargs)
 
-    # Both must be hea ggplot instances with the same number of layers.
     assert isinstance(p_fluent, ggplot_class)
     assert isinstance(p_plus, ggplot_class)
     assert len(p_fluent.layers) == len(p_plus.layers)
@@ -255,12 +221,6 @@ def test_fluent_and_plus_interleaved(df):
     assert len(p.layers) == 2
 
 
-# ---------------------------------------------------------------------------
-# Plot-level kwarg mappings — sugar for ``aes(...)`` at the ggplot entry
-# point. Three forms are equivalent; mixing merges with kwargs winning.
-# ---------------------------------------------------------------------------
-
-
 def test_kwargs_form_equals_aes_form(df):
     """``df.ggplot(x="x", y="y")`` ≡ ``df.ggplot(aes(x="x", y="y"))``."""
     p_aes = df.ggplot(aes(x="x", y="y"))
@@ -291,10 +251,9 @@ def test_top_level_ggplot_accepts_kwargs(df):
 
 
 def test_layer_level_x_y_kwargs_work(df):
-    """Regression: ``geom_point(x="x", y="y")`` should NOT silently lose
-    data. The layer factory's narrow aes filter doesn't list ``x``/``y``
-    so they previously landed in ``geom_params`` (= dropped). Layer now
-    sweeps aes-named keys out of geom_params into aes_params.
+    """``geom_point(x="x", y="y")`` must not silently lose data. The layer
+    factory's narrow aes filter does not list ``x``/``y``, so Layer sweeps
+    aes-named keys out of geom_params into aes_params.
     """
     p = df.ggplot().geom_point(x="x", y="y")
     fig = p.draw()
@@ -309,7 +268,6 @@ def test_layer_level_color_constant_still_means_set(df):
     p = df.ggplot(x="x", y="y").geom_point(color="red")
     fig = p.draw()
     try:
-        # Single facecolor matching matplotlib's "red".
         fc = fig.axes[0].collections[0].get_facecolors()
         assert tuple(round(c, 3) for c in fc[0]) == (1.0, 0.0, 0.0, 1.0)
     finally:
@@ -320,8 +278,6 @@ def test_layer_level_color_column_means_map(df):
     """``geom_point(color="g")`` where "g" is a column → MAP via promotion."""
     df_g = df.with_columns(g=hea.tidy.lit("a"))
     p = df_g.ggplot(x="x", y="y").geom_point(color="g")
-    # The promoted mapping should now contain colour: "g".
-    # Inspect via build (no need to draw).
     from hea.ggplot.build import build
 
     bo = build(p)
@@ -356,7 +312,6 @@ def test_layer_level_callable_kwarg_promotes_to_mapping():
     )
     bo_kw = build(p_kw)
     bo_aes = build(p_aes)
-    # Same number of boxes (one per bin) and matching Enum levels.
     assert len(bo_kw.data[0]) == len(bo_aes.data[0])
     assert len(bo_kw.data[0]) > 1, "callable kwarg collapsed to a single row"
     assert bo_kw.data[0]["group"].dtype == bo_aes.data[0]["group"].dtype

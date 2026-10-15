@@ -13,46 +13,30 @@ from __future__ import annotations
 
 import math
 
-# ---------------------------------------------------------------------------
-# HCL → sRGB hex (port of grDevices::hcl)
-# ---------------------------------------------------------------------------
-
-# CIE D65 white point. Values are derived from Xn=95.047, Yn=100, Zn=108.883
-# via u_n = 4*Xn / (Xn + 15*Yn + 3*Zn), v_n = 9*Yn / (...). Same constants
-# `colorspace`/`grDevices` use, hard-coded for speed.
 _U_N = 0.1978300664283
 _V_N = 0.4683199493879
 
 
 def _hcl_to_rgb(h: float, c: float, lightness: float) -> tuple[float, float, float]:
-    """HCL polar in CIE LUV → linear sRGB triple in [0, 1].
-
-    Reference: ``grDevices/src/colors.c::hcl_to_rgb`` (R sources). The path
-    is HCL → Luv → XYZ (D65) → linear RGB → sRGB-gamma.
-    """
+    """HCL polar in CIE LUV → linear sRGB triple in [0, 1]."""
     if lightness <= 0:
         return (0.0, 0.0, 0.0)
 
-    # HCL → Luv (Cartesian)
     h_rad = math.radians(h)
     u = c * math.cos(h_rad)
     v = c * math.sin(h_rad)
 
-    # Luv → XYZ. CIE 1976 inverse lightness function.
     if lightness > 8:
         y = ((lightness + 16) / 116) ** 3
     else:
-        # CIE 1976: y = L / kappa where kappa = 903.3 = 24389/27.
         y = lightness * 27 / 24389
 
-    # When L is non-positive the polar formulae blow up; we already returned.
     u_prime = u / (13 * lightness) + _U_N
     v_prime = v / (13 * lightness) + _V_N
 
     x = (9 * y * u_prime) / (4 * v_prime)
     z = (12 - 3 * u_prime - 20 * v_prime) * y / (4 * v_prime)
 
-    # XYZ → linear sRGB (D65 primaries; standard matrix).
     r_lin = 3.2404542 * x - 1.5371385 * y - 0.4985314 * z
     g_lin = -0.9692660 * x + 1.8760108 * y + 0.0415560 * z
     b_lin = 0.0556434 * x - 0.2040259 * y + 1.0572252 * z
@@ -82,11 +66,6 @@ def hcl_to_hex(h: float, c: float, lightness: float) -> str:
     return f"#{round(r * 255):02X}{round(g * 255):02X}{round(b * 255):02X}"
 
 
-# ---------------------------------------------------------------------------
-# Discrete palettes
-# ---------------------------------------------------------------------------
-
-
 def hue_pal(
     *,
     h: tuple = (15, 375),
@@ -107,8 +86,6 @@ def hue_pal(
     def palette(n: int) -> list[str]:
         if n <= 0:
             return []
-        # Drop one slot when the range is a full circle, otherwise the
-        # first and last hues coincide (R's `hue_pal` does the same).
         end = h_hi
         if (h_hi - h_lo) % 360 < 1 and n > 1:
             end = h_hi - 360 / n
@@ -117,7 +94,6 @@ def hue_pal(
         else:
             step = (end - h_lo) / (n - 1)
             hues = [h_lo + i * step for i in range(n)]
-        # `h_start` rotates the whole palette; `direction=-1` reverses.
         rotated = [(hh + h_start) % 360 for hh in hues]
         if direction == -1:
             rotated = rotated[::-1]
@@ -160,9 +136,6 @@ def manual_pal(values):
     """Palette from an explicit list (or dict mapping levels → colours)."""
 
     if isinstance(values, dict):
-        # dict palette — used when user passes scale_color_manual(values={...}).
-        # The dict-based map happens in ScaleDiscreteColor.map directly; the
-        # callable form here just returns the values in order.
         ordered = list(values.values())
     else:
         ordered = list(values)
@@ -175,12 +148,6 @@ def manual_pal(values):
         return ordered[:n]
 
     return palette
-
-
-# ---------------------------------------------------------------------------
-# Continuous palettes — return a function that takes values in [0, 1] and
-# yields a list of hex codes.
-# ---------------------------------------------------------------------------
 
 
 def gradient_pal(low: str = "#132B43", high: str = "#56B1F7"):
@@ -217,7 +184,6 @@ def gradient2_pal(
         v = np.asarray(values, dtype=float)
         out = np.empty((len(v), 3))
         below = v <= midpoint
-        # piecewise lerp: [0, midpoint] mixes lo↔mid, [midpoint, 1] mixes mid↔hi
         denom_lo = midpoint if midpoint > 0 else 1.0
         denom_hi = (1 - midpoint) if midpoint < 1 else 1.0
         t_lo = np.clip(v / denom_lo, 0, 1)
@@ -342,11 +308,6 @@ def brewer_pal_continuous(*, palette: str = "Blues", direction: int = 1):
     return pal
 
 
-# ---------------------------------------------------------------------------
-# Non-colour palettes — size, alpha, shape, linetype
-# ---------------------------------------------------------------------------
-
-
 def rescale_pal(range_: tuple = (1.0, 6.0)):
     """Linear rescale: ``[0, 1] -> [range_[0], range_[1]]``. Default matches
     ggplot2's ``scale_size_continuous`` (1 mm to 6 mm)."""
@@ -423,9 +384,6 @@ def alpha_pal(range_: tuple = (0.1, 1.0)):
     return rescale_pal(range_)
 
 
-# ggplot2's default shape sequence — `scales::shape_pal`. R uses pch codes
-# 16, 17, 15, 3, 7, 8, … which we map to the closest matplotlib markers.
-# ``"o"`` (filled circle), ``"^"`` (triangle up), ``"s"`` (square), etc.
 _DEFAULT_SHAPES = ["o", "^", "s", "+", "x", "*", "D", "v", "<", ">"]
 
 
@@ -436,7 +394,6 @@ def shape_pal():
         if n <= 0:
             return []
         if n > len(_DEFAULT_SHAPES):
-            # ggplot2 errors at n>6; we cycle to keep things usable.
             import warnings
 
             warnings.warn(
@@ -450,9 +407,6 @@ def shape_pal():
     return palette
 
 
-# ggplot2's default linetype sequence: solid, dashed, dotted, dotdash,
-# longdash, twodash. Matplotlib has built-in names for the first four;
-# longdash/twodash become explicit dash tuples.
 _DEFAULT_LINETYPES = [
     "solid",
     "dashed",

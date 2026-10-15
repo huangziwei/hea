@@ -33,37 +33,21 @@ def _label_callable(fn: Callable, label: str) -> Callable:
 
 
 def _chain_label(col: ColInput) -> str:
-    """Resolve the source-column label for a string OR a chained fct_* callable.
-
-    Used so ``fct_rev(fct_infreq("marital"))`` still labels its axis
-    ``"marital"`` — the outer tag propagates from the inner.
-    """
+    """Resolve the source-column label for a string OR a chained fct_* callable."""
     if callable(col):
         return getattr(col, "__hea_label__", "_chain")
     return col
 
 
 def _resolve_col_input(col: ColInput, data: pl.DataFrame) -> pl.Series:
-    """Get the input Series for a string col-name OR a chained callable.
-
-    Lets ``fct_rev`` / ``fct_relevel`` accept either a column name
-    (the existing contract) or the output of another ``fct_*`` call
-    (so R's ``marital |> fct_infreq() |> fct_rev()`` translates to
-    ``fct_rev(fct_infreq("marital"))``).
-    """
+    """Get the input Series for a string col-name OR a chained callable."""
     if callable(col):
         return col(data)
     return data[col]
 
 
 def _append_unseen_enum_levels(s: pl.Series, levels: list[str]) -> list[str]:
-    """Append Enum categories absent from the data so reordering keeps R parity.
-
-    ``fct_reorder`` / ``fct_infreq`` derive their level order from a
-    group_by, which only iterates values actually present in ``s``. R's
-    ``fct_reorder`` keeps unobserved factor levels — their NA aggregate
-    sorts to the end — so we append them in original Enum order to match.
-    """
+    """Append Enum categories absent from the data so reordering keeps R parity."""
     if not isinstance(s.dtype, pl.Enum):
         return levels
     seen = set(levels)
@@ -92,10 +76,6 @@ def fct_reorder(col: str, by: str, fn="median", *, desc: bool = False) -> Callab
             )
             levels = [str(v) for v in ordered[col].to_list() if v is not None]
         else:
-            # Python callable: aggregate per-group in Python so users can
-            # pass arbitrary scalar reducers (e.g. ``lambda s: s.quantile(0.9)``).
-            # ``.lazy()`` routes through polars' native group_by — hea's
-            # subclassed DataFrame exposes a different group_by API.
             grouped = (
                 data.lazy()
                 .group_by(col, maintain_order=False)
@@ -201,8 +181,6 @@ def fct_infreq(col: str) -> Callable:
     """
 
     def infreq(data: pl.DataFrame) -> pl.Series:
-        # ``.lazy()`` routes through polars' native group_by API; hea's
-        # subclassed DataFrame has its own group_by signature.
         counts = (
             data.lazy()
             .group_by(col, maintain_order=True)
@@ -248,7 +226,6 @@ def fct_recode(col: str, **renames) -> Callable:
     """
     if not renames:
         raise ValueError("fct_recode(): pass at least one new=old rename.")
-    # Build a flat {old: new} mapping; list/tuple values map every entry.
     old_to_new: dict[str, str] = {}
     for new, old in renames.items():
         if isinstance(old, str):
@@ -269,8 +246,6 @@ def fct_recode(col: str, **renames) -> Callable:
     def recode(data: pl.DataFrame) -> pl.Series:
         s = data[col]
         old_levels = _input_levels(s)
-        # Preserve original order, replace renamed in place, dedupe
-        # so multi-old → one-new doesn't create duplicate level entries.
         new_levels: list[str] = []
         seen: set[str] = set()
         for lvl in old_levels:
@@ -305,18 +280,15 @@ def fct_collapse(
                 f"old level names; got {type(olds).__name__}. For 1:1 "
                 "rename use fct_recode."
             )
-    # Flat {old: new} for the polars replace step.
     old_to_new = {str(old): new for new, olds in groups.items() for old in olds}
 
     def collapse(data: pl.DataFrame) -> pl.Series:
         s = data[col]
         old_levels = _input_levels(s)
-        # Sweep originals into other_level (if set).
         if other_level is not None:
             for lvl in old_levels:
                 if lvl not in old_to_new:
                     old_to_new[lvl] = other_level
-        # Build the new level list.
         new_levels: list[str] = list(groups.keys())
         if other_level is not None:
             if other_level not in new_levels:
@@ -334,13 +306,7 @@ def fct_collapse(
 def _lump_apply(
     s: pl.Series, lumped: set, kept_in_order: list[str], other_level: str
 ) -> pl.Series:
-    """Shared cast: remap ``lumped`` levels to ``other_level``, return Enum.
-
-    Level order = ``kept_in_order`` (original-factor-order of the kept set)
-    with ``other_level`` appended unless it's already a kept name (in
-    which case the lumped levels merge into the existing one and the
-    Enum doesn't grow).
-    """
+    """Shared cast: remap ``lumped`` levels to ``other_level``, return Enum."""
     if not lumped:
         return s.cast(pl.Utf8).cast(pl.Enum(kept_in_order))
     new_levels = list(kept_in_order)
@@ -365,8 +331,6 @@ def fct_lump_n(col: str, n: int, *, other_level: str = "Other") -> Callable:
     def lump(data: pl.DataFrame) -> pl.Series:
         s = data[col]
         old_levels = _input_levels(s)
-        # Per-level counts. value_counts() honors null; we drop nulls so
-        # null doesn't compete for a top-n slot.
         vc = s.cast(pl.Utf8).drop_nulls().value_counts().sort("count", descending=True)
         present = vc.height
         if present <= n:
@@ -399,8 +363,6 @@ def fct_lump_lowfreq(col: str, *, other_level: str = "Other") -> Callable:
         vc = s.cast(pl.Utf8).drop_nulls().value_counts().sort("count", descending=True)
         names = [str(v) for v in vc[s.name].to_list()]
         counts = vc["count"].to_list()
-        # forcats::lump_cutoff — index where lumping starts (Python 0-based).
-        # Levels at indices >= cutoff_idx get lumped.
         left = sum(counts)
         cutoff_idx = len(counts)
         for i, c in enumerate(counts):

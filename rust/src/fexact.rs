@@ -1,18 +1,3 @@
-//! Fisher's exact test for r×c contingency tables — the Mehta-Patel FEXACT
-//! network algorithm (ACM TOMS 643).
-//!
-//! A line-by-line mirror of the pure-Python `hea/R/_fexact.py`, which is itself
-//! a faithful port of R's `src/library/stats/src/fexact.c`. The Python module
-//! is the spec and the test oracle; `tests/test_rs_parity.py` pins this Rust
-//! kernel `== python` (transitively `== R`, since Python is pinned bit-exact to
-//! R). The algorithm is deterministic double arithmetic — the log-factorial
-//! table, the shortest/longest path bounds (f3xact/f4xact), and the `pre`
-//! accumulation reproduce R's operation order, so the p-value is bit-exact.
-//!
-//! The hash-table sizes `ldkey`/`ldstp` are derived from `workspace`/`mult`
-//! exactly as R's `iwork()` does, because the `pre`-accumulation order (hence
-//! the last ulps) depends on them.
-
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
@@ -23,8 +8,6 @@ const TOL: f64 = 3.45254e-7;
 const AMISS: f64 = -12345.0;
 const LOG_2PI: f64 = 1.83787706640934548356065947281;
 
-/// 1-based (index 0 unused) vector with `i64` indexing so the port reads like
-/// its Python spec.
 struct IV(Vec<i64>);
 struct FV(Vec<f64>);
 
@@ -72,8 +55,6 @@ fn imin(a: i64, b: i64) -> i64 {
     }
 }
 
-/// f11act — revise row totals: copy `src` column to `dst` dropping the entry at
-/// 1-based position `i1` (`arr` flat, columns pre-offset).
 fn f11act(arr: &mut [i64], src: i64, dst: i64, i1: i64, i2: i64) {
     let mut m = 0;
     while m < i1 - 1 {
@@ -87,8 +68,6 @@ fn f11act(arr: &mut [i64], src: i64, dst: i64, i1: i64, i2: i64) {
     }
 }
 
-/// f8xact — reduce a vector with a zero element: copy `src` to `dst` inserting
-/// `is_` at its sorted position (both columns pre-offset, 1-based).
 fn f8act(arr: &mut [i64], src: i64, dst: i64, is_: i64, i1: i64, izero: i64) {
     let mut i = 1;
     while i < i1 {
@@ -112,7 +91,6 @@ fn f8act(arr: &mut [i64], src: i64, dst: i64, is_: i64, i1: i64, izero: i64) {
     }
 }
 
-/// f9xact — log of a multinomial coefficient `log(ntot!) - sum log(ir!)`.
 fn f9xact(n: i64, ntot: i64, ir: &[i64], fact: &FV) -> f64 {
     let mut d = fact[ntot];
     for k in 0..n {
@@ -121,8 +99,6 @@ fn f9xact(n: i64, ntot: i64, ir: &[i64], fact: &FV) -> f64 {
     d
 }
 
-/// f10act — shortest path length for special tables (`irow`/`icol` 0-based).
-/// Returns `(xmin, val)`.
 fn f10act(
     nrow: i64,
     irow: &[i64],
@@ -185,11 +161,9 @@ struct Fexact {
     emin: f64,
     workspace: i64,
     mult: i64,
-    // sized in run()
     ldkey: i64,
     ldstp: i64,
     n2_stack: i64,
-    // work arrays (1-based; index 0 sentinel)
     iro: IV,
     ico: IV,
     kyy: IV,
@@ -204,7 +178,6 @@ struct Fexact {
     stp: FV,
     ifrq: IV,
     fact: FV,
-    // C statics
     f3_nst: i64,
     f3_nitc: i64,
     f5_itp: i64,
@@ -238,8 +211,6 @@ impl Fexact {
         let iwkmax = 2 * (self.workspace / 2);
         let n2_stack = imax(200, iwkmax / 1000);
 
-        // Reproduce iwork()'s accounting up to the hash tables so ldkey/ldstp
-        // match R exactly (the pre-accumulation order depends on them).
         let mut iwkpt = 0i64;
         iwkpt += (ntot + 1) << 1; // i1  fact (double)
         iwkpt += nco; // i2  ico
@@ -295,7 +266,6 @@ impl Fexact {
         let nr_gt_nc = nrow > ncol;
         let nco = if nr_gt_nc { nrow } else { ncol };
 
-        // Row marginals + total
         let mut ntot = 0i64;
         for i in 1..=nrow {
             self.iro[i] = 0;
@@ -304,7 +274,6 @@ impl Fexact {
             }
             ntot += self.iro[i];
         }
-        // Column marginals
         for i in 1..=ncol {
             self.ico[i] = 0;
             for j in 1..=nrow {
@@ -328,7 +297,6 @@ impl Fexact {
             nro = nrow;
         }
 
-        // Hash-table multipliers
         self.kyy[1] = 1;
         for i in 1..nro {
             if self.iro[i] + 1 <= INT_MAX / self.kyy[i] {
@@ -349,7 +317,6 @@ impl Fexact {
             );
         }
 
-        // Log factorials (R's exact recurrence, not lgamma)
         self.fact = FV(vec![0.0; (ntot + 1) as usize]);
         if ntot >= 2 {
             self.fact[2] = 2.0f64.ln();
@@ -365,7 +332,6 @@ impl Fexact {
             i += 2;
         }
 
-        // Observed path length
         let mut obs = tol;
         ntot = 0;
         for j in 1..=nco {
@@ -388,7 +354,6 @@ impl Fexact {
         let mut pre = 0.0;
         let mut itop = 0i64;
 
-        // Buffer / stage pointers
         let mut k = nco;
         let mut last = ldkey + 1;
         let mut jkey = ldkey + 1;
@@ -405,7 +370,6 @@ impl Fexact {
         self.ifrq[1] = 1;
         self.ifrq[ikstp2 + 1] = -1;
 
-        // Per-node state
         let mut k1 = 0i64;
         let mut nro2 = 0i64;
         let mut nrb = 0i64;
@@ -708,7 +672,6 @@ impl Fexact {
         ntot: i64,
         ldst: i64,
     ) -> Result<f64, String> {
-        // 1-based views (index 0 dummy)
         let mut irow = IV(Vec::with_capacity(irow_s.len() + 1));
         irow.0.push(0);
         irow.0.extend_from_slice(irow_s);
@@ -1430,7 +1393,6 @@ impl Fexact {
         }
 
         loop {
-            // Loop
             let mut kk = k + 1;
             let mut found_l70 = false;
             while kk <= nrow {
@@ -1443,7 +1405,6 @@ impl Fexact {
             if !found_l70 {
                 return (false, k, ks);
             }
-            // L70
             let mut mm = 1i64;
             for i in 1..=k {
                 mm += self.idif[i];
@@ -1482,9 +1443,6 @@ impl Fexact {
     }
 }
 
-/// R's `fexact()` — Fisher's exact test p-value ("PRE") for the `nrow`×`ncol`
-/// contingency `table` (row-major flat, length `nrow*ncol`). `expect=-1,
-/// percnt=100, emin=0` requests the exact p-value; `expect>0` the hybrid.
 #[pyfunction]
 #[pyo3(signature = (nrow, ncol, table, expect=-1.0, percnt=100.0, emin=0.0, workspace=200000, mult=30))]
 #[allow(clippy::too_many_arguments)]
@@ -1531,7 +1489,6 @@ fn fexact(
     inst.run().map_err(PyRuntimeError::new_err)
 }
 
-/// Register the FEXACT kernel onto the `_rs` module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fexact, m)?)?;
     Ok(())

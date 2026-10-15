@@ -1,30 +1,3 @@
-//! Laying one matrix's values out on a wider, fixed pattern.
-//!
-//! Unlike the rest of this directory this is not a port of anything: it backs
-//! `hea.sparse.PatternPlan`, which is hea's own API. It is here because the
-//! pattern it merges against is a CSC factor input and the callers are the
-//! same ones.
-//!
-//! The operation is a **merge**, not a search. Both patterns are CSC with row
-//! indices ascending within each column, so walking the two in step visits
-//! every entry once. The Python it replaces reduced each pattern to one
-//! `col * nrow + row` key per entry and ran `searchsorted`, which is correct
-//! but costs a `nnz log nnz` and an 8-byte key array held for the plan's whole
-//! lifetime.
-
-/// Scatter `B`'s values onto the pattern `(ap, ai)`, column by column.
-///
-/// `out` is the caller's, of length `ai.len()`, and is written in full — every
-/// slot the merge does not reach is zeroed, so it need not arrive clear.
-///
-/// Returns how many of `B`'s entries are **not** in the pattern. A nonzero
-/// count means the containment the caller assumed does not hold and `out` is
-/// not `B`'s values; the caller decides what to do about it, because the
-/// useful error message names the plan.
-///
-/// A repeated row index within one column of `B` writes its slot twice and the
-/// last value wins, which is what the `searchsorted` form did with the same
-/// input. Canonical CSC has no repeats.
 pub fn scatter(
     ncol: usize,
     ap: &[i64],
@@ -58,7 +31,6 @@ pub fn scatter(
 mod tests {
     use super::*;
 
-    /// `(indptr, indices)` of a dense-ish pattern given as column row-lists.
     fn csc(cols: &[&[i64]]) -> (Vec<i64>, Vec<i64>) {
         let mut p = vec![0i64];
         let mut i = Vec::new();

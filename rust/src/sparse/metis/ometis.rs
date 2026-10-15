@@ -1,10 +1,3 @@
-//! `libmetis/ometis.c` — the nested-dissection driver.
-//!
-//! `MlevelNestedDissectionCC` and `SplitGraphOrderCC` order the connected
-//! components of each side separately; they run only under `ctrl->ccorder`,
-//! which defaults to 0 and which `cholmod_metis` never sets. `PruneGraph` is
-//! likewise gated on `ctrl->pfactor > 0`, which defaults to 0.
-
 use super::super::ws::Ws;
 use super::coarsen::{coarsen_graph, coarsen_graph_nlevels};
 use super::compress::compress_graph;
@@ -33,7 +26,6 @@ pub fn metis_nodend(nvtxs: Idx, xadj: &[Idx], adjncy: &[Idx]) -> Option<(Vec<Idx
     let mut perm = vec![0 as Idx; nvtxs as usize];
     let mut iperm = vec![0 as Idx; nvtxs as usize];
 
-    // `ctrl->pfactor > 0.0` gates the dense-column pruning; it is 0 by default.
     let mut cptr = Vec::new();
     let mut cind = Vec::new();
     let mut graph = None;
@@ -68,7 +60,6 @@ pub fn metis_nodend(nvtxs: Idx, xadj: &[Idx], adjncy: &[Idx]) -> Option<(Vec<Idx
     mlevel_nested_dissection(&mut ctrl, graph, &mut iperm, n);
 
     if ctrl.compress != 0 {
-        // Uncompress the ordering.
         for i in 0..nnvtxs as usize {
             perm[iperm[i] as usize] = i as Idx;
         }
@@ -98,7 +89,6 @@ fn mlevel_nested_dissection(ctrl: &mut Ctrl, graph: Graph, order: &mut [Idx], la
     mlevel_node_bisection_multiple(ctrl, &mut levels);
     let graph = levels.pop().unwrap();
 
-    // Order the nodes in the separator, from `lastvtx` downwards.
     let mut lastvtx = lastvtx;
     for i in 0..graph.nbnd as usize {
         lastvtx -= 1;
@@ -108,8 +98,6 @@ fn mlevel_nested_dissection(ctrl: &mut Ctrl, graph: Graph, order: &mut [Idx], la
     let (lgraph, rgraph) = split_graph_order(&graph);
     drop(graph);
 
-    // lgraph first: its `lastvtx` depends on rgraph->nvtxs, which is undefined
-    // once MlevelNestedDissection has consumed rgraph.
     let rnvtxs = rgraph.nvtxs;
     if lgraph.nvtxs > MMDSWITCH && lgraph.nedges > 0 {
         mlevel_nested_dissection(ctrl, lgraph, order, lastvtx - rnvtxs);
@@ -179,7 +167,6 @@ fn mlevel_node_bisection_l2(ctrl: &mut Ctrl, levels: &mut Vec<Graph>, base: usiz
 
     let mut mincut = levels[base].tvwgt[0];
     for i in 0..nruns {
-        // `0.7*niparts` is a double expression truncated by the `idx_t` parameter
         mlevel_node_bisection_l1(ctrl, levels, c, (0.7 * niparts as f64) as Idx);
 
         if i == 0 || levels[c].mincut < mincut {
@@ -208,7 +195,6 @@ fn mlevel_node_bisection_l2(ctrl: &mut Ctrl, levels: &mut Vec<Graph>, base: usiz
 /// `MlevelNodeBisectionL1` (`ometis.c:394-410`) — one full multilevel
 /// tri-section.
 fn mlevel_node_bisection_l1(ctrl: &mut Ctrl, levels: &mut Vec<Graph>, base: usize, niparts: Idx) {
-    // `if (CoarsenTo > 100) CoarsenTo = 100; else if (CoarsenTo < 40) CoarsenTo = 40;`
     ctrl.coarsen_to = (levels[base].nvtxs / 8).clamp(40, 100);
 
     let c = coarsen_graph(ctrl, levels, base);
@@ -233,7 +219,6 @@ fn mlevel_node_bisection_l1(ctrl: &mut Ctrl, levels: &mut Vec<Graph>, base: usiz
 fn split_graph_order(graph: &Graph) -> (Graph, Graph) {
     let nvtxs = graph.nvtxs as usize;
 
-    // The C's prologue, taken through `Ws`; see `sparse::ws`.
     let xadj = Ws::new_ref(&graph.xadj);
     let adjncy = Ws::new_ref(&graph.adjncy);
     let vwgt = Ws::new_ref(&graph.vwgt);
@@ -258,7 +243,6 @@ fn split_graph_order(graph: &Graph) -> (Graph, Graph) {
         graph.setup_split(snvtxs[1], snedges[1]),
     ];
 
-    // "Go and use bndptr to also mark the boundary nodes in the two partitions"
     let mut bndptr_ = graph.bndptr[..nvtxs].to_vec();
     let bndptr = Ws::new(&mut bndptr_);
     for ii in 0..graph.nbnd as usize {
@@ -282,7 +266,6 @@ fn split_graph_order(graph: &Graph) -> (Graph, Graph) {
         let istart = xadj[i] as usize;
         let iend = xadj[i + 1] as usize;
         if bndptr[i] == -1 {
-            // interior vertex: the whole list survives
             let s = &mut sgraph[mypart];
             s.adjncy[snedges[mypart]..snedges[mypart] + (iend - istart)]
                 .copy_from_slice(&graph.adjncy[istart..iend]);

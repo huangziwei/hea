@@ -32,9 +32,6 @@ def tbl(obj):
     >>> raw = pl.DataFrame({"x": [1, 2, 3]})  # plain polars
     >>> hea.tbl(raw).filter(pl.col("x") > 1)  # hea subclass
     """
-    # Lazy imports — the class hierarchy lives in tidy.dataframe / tidy.series,
-    # both of which import from this module via the package __init__. Resolving
-    # at call time dodges the import cycle.
     from .dataframe import DataFrame
     from .series import LazyFrame, Series
 
@@ -139,19 +136,9 @@ def exclude(*columns: Any) -> pl.Expr:
     return pl.exclude(flat)
 
 
-# dplyr's ``n()`` — row-count expression for ``mutate`` / ``summarize``.
-# Aliased to ``pl.len`` so ``from hea import n`` doesn't shadow the builtin
-# ``len`` (which ``from hea import len`` would, since ``hea.len`` is
-# ``polars.len`` via the star-import in __init__.py).
 n = pl.len
 
-# dplyr's ``n_distinct()`` — polars exposes the same operation as
-# ``n_unique``. Both names route to the same Expr; ``n_unique`` is also
-# reachable as ``hea.n_unique`` via the polars star-import.
 n_distinct = pl.n_unique
-
-
-# ---- conditionals (dplyr) -------------------------------------------
 
 
 def if_else(condition, true_value, false_value, missing=None) -> pl.Expr:
@@ -180,9 +167,6 @@ def if_else(condition, true_value, false_value, missing=None) -> pl.Expr:
         (null), matching dplyr's ``NA`` default.
     """
 
-    # Polars' .then("x") interprets a bare string as a column name; dplyr's
-    # if_else treats strings as literals. Lift any non-Expr non-Series value
-    # to pl.lit so "5" stays "5".
     def _lit(v):
         return v if isinstance(v, (pl.Expr, pl.Series)) else pl.lit(v)
 

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import polars as pl
 
+from ..._polars_compat import cat_pool
+
 
 @dataclass
 class Position:
@@ -37,7 +39,7 @@ def to_numeric_positions(series: pl.Series) -> pl.Series:
     :meth:`Position.compute_layer`.
     """
     if series.dtype in (pl.Categorical, pl.Enum):
-        levels = [str(v) for v in series.cat.get_categories().to_list()]
+        levels = [str(v) for v in cat_pool(series).to_list()]
     elif series.dtype in (pl.Utf8, pl.Boolean):
         levels = sorted(str(v) for v in series.drop_nulls().unique().to_list())
     else:

@@ -39,7 +39,6 @@ def seq(*args, from_=None, to=None, by=None, length_out=None, along_with=None):
     keyword conflict on ``from``).
     """
     if from_ is not None or to is not None:
-        # R's named form: fold into positional slots.
         if args:
             raise TypeError(
                 "seq(): pass both endpoints positionally OR via from_= / to=, not both"

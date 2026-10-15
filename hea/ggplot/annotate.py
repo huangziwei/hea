@@ -123,9 +123,6 @@ def annotate(
     """
     from .aes import _ALL_AES_NAMES
 
-    # ``label`` varies per row when the user supplies a list, so it has
-    # to live in the data alongside x/y. Everything else aesthetic-shaped
-    # is treated as SET.
     POSITIONAL = {"x", "y", "xmin", "xmax", "ymin", "ymax", "xend", "yend", "label"}
 
     mapped_values: dict = {}  # → data + Aes mapping
@@ -182,10 +179,6 @@ def annotate(
     )
 
 
-# ---------------------------------------------------------------------------
-# annotation_custom — drop a matplotlib Artist at given data coordinates
-# ---------------------------------------------------------------------------
-
 from .geoms.geom import Geom
 
 
@@ -211,7 +204,6 @@ class _GeomCustomArtist(Geom):
         import copy as _copy
 
         artist = _copy.copy(self.artist)
-        # If the artist has a settable bbox / extent, reposition it.
         if hasattr(artist, "set_extent"):
             artist.set_extent((self.xmin, self.xmax, self.ymin, self.ymax))
         elif hasattr(artist, "set_bounds"):
@@ -238,9 +230,6 @@ def annotation_custom(grob, *, xmin=None, xmax=None, ymin=None, ymax=None):
             "(panel-spanning '-Inf'/Inf shorthand is not yet supported)"
         )
     geom = _GeomCustomArtist(grob, xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax)
-    # A 1-row layer with a non-null aes mapping keeps `_drop_na` from
-    # blanking the row (the geom doesn't read the data; the artist + bounds
-    # carry all the information).
     return Layer(
         geom=geom,
         stat=StatIdentity(),

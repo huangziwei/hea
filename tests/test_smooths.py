@@ -41,18 +41,7 @@ from hea.formula import (
 
 
 def _fs_null_layout(r_meta, ncol):
-    """Column layout of an fs.interaction block.
-
-    mgcv's fs null-space basis is resolved from an exactly-degenerate
-    eigenspace, so the basis WITHIN the null span is LAPACK-build noise:
-    R itself produces an O(1)-rotated null pair when re-run on a different
-    machine (these fixtures carry the generating machine's draw). hea's
-    nat.param is fp-faithful to mgcv's, making its draw equally legitimate
-    — so tests compare the null SPAN per level tightly instead of raw null
-    columns. Returns ``(p, rank, null_d, nf, null_cols)`` where ``p`` is
-    the per-level block width and ``null_cols`` the global indices of all
-    null columns.
-    """
+    """Column layout of an fs.interaction block."""
     p = r_meta["bs_dim"]
     null_d = r_meta["n_penalties"] - 1
     rank = p - null_d
@@ -88,7 +77,6 @@ def test_mgcv_smooths_match_R(fx_id: str):
     data_cols = list(data.columns) if "." in meta["formula"] else None
     ef = expand(f, data_columns=data_cols)
 
-    # R's gam drops rows with NA in ANY formula variable — match that.
     need = set(meta.get("need_vars", [])) & set(data.columns)
     if need:
         data = data.drop_nulls(subset=list(need))
@@ -113,11 +101,6 @@ def test_mgcv_smooths_match_R(fx_id: str):
                 f"smooth #{i} block {k}: X shape got {blk.X.shape} want {X_ref.shape}"
             )
 
-            # fs.interaction: the null columns carry a machine-noise rotation
-            # (see _fs_null_layout) — compare their span per level instead of
-            # raw values, and compare S up to the common maXX = ||X||_inf^2
-            # factor that scale.penalty derives from rotation-sensitive row
-            # sums. Everything else (and every other class) compares raw.
             is_null = np.zeros(blk.X.shape[1], dtype=bool)
             s_scale_ratio = 1.0
             if r_meta["class"] == "fs.smooth.spec":
@@ -129,9 +112,6 @@ def test_mgcv_smooths_match_R(fx_id: str):
                 maXX_ref = float(np.abs(X_ref).sum(axis=1).max()) ** 2
                 s_scale_ratio = maXX_ours / maXX_ref
 
-            # mgcv's Lanczos uses an arbitrary per-eigenvector sign convention;
-            # hea's np.linalg.eigh uses its own. Match each column up to sign,
-            # then apply the same flip to S.
             signs = np.ones(blk.X.shape[1])
             X_got = blk.X.copy()
             for c in range(blk.X.shape[1]):
@@ -146,7 +126,6 @@ def test_mgcv_smooths_match_R(fx_id: str):
                 X_got[:, ~is_null], X_ref[:, ~is_null], atol=tol_X, rtol=0
             ), f"smooth #{i} block {k} ({r_meta['class']}): X values diverge"
             if is_null.any():
-                # Null block: same span, orthogonal relative rotation.
                 for j in range(nf):
                     cols = np.arange(j * p_lev + fs_rank, (j + 1) * p_lev)
                     A, B = X_got[:, cols], X_ref[:, cols]
@@ -182,17 +161,6 @@ def test_mgcv_smooths_match_R(fx_id: str):
                 )
 
 
-# =============================================================================
-# Predict-time basis (BasisSpec.predict_mat vs mgcv's PredictMat)
-# =============================================================================
-#
-# The R generator dumps PredictMat(s, predict_data) per smooth block
-# (`smooth_<i>_<k>_Xpred.mtx`) and the predict_data subset
-# (`predict_data.csv`). Rebuild the smooth at fit-time on `data`, then ask
-# each block's BasisSpec to produce the design at predict_data and compare
-# against R's output.
-
-
 def _load_predict_data(fx_id: str, pkg: str, name: str) -> pl.DataFrame:
     """Load `predict_data.csv` and re-apply factor schema (CSV round-trip
     erases R factor types — without this, fs/sz/by=factor smooths fail to
@@ -225,8 +193,6 @@ def test_mgcv_predict_mat_matches_R(fx_id: str):
     data_cols = list(data.columns) if "." in meta["formula"] else None
     ef = expand(f, data_columns=data_cols)
 
-    # NA-omit on every formula variable — same rule R's gam applies and
-    # what `make_mgcv_fixture` did when constructing predict_data.
     need = set(meta.get("need_vars", [])) & set(data.columns)
     if need:
         data = data.drop_nulls(subset=list(need))
@@ -242,8 +208,6 @@ def test_mgcv_predict_mat_matches_R(fx_id: str):
         for k, blk in enumerate(ours_blocks, start=1):
             xpred_path = fx / f"smooth_{i}_{k}_Xpred.mtx"
             if not xpred_path.exists():
-                # mgcv's PredictMat refused for this block (rare niche cases) —
-                # nothing to compare against.
                 continue
 
             assert blk.spec is not None, (
@@ -260,17 +224,6 @@ def test_mgcv_predict_mat_matches_R(fx_id: str):
                 f"got {X_pred_ours.shape} want {X_pred_ref.shape}"
             )
 
-            # Match column signs against an in-sample anchor that lives in the
-            # same column space as the predict basis. For most bases this is
-            # `sm$X` (smooth_*_X.mtx) — fit and predict bases coincide. For
-            # `t2` they don't: sm$X is the partial absorb (sm$Cp ignored), but
-            # PredictMat applies the full absorb via sm$qrc, giving a basis
-            # whose per-column signs do not match sm$X's. For those we use
-            # `Xpredfit.mtx` (PredictMat at fit data), which carries the
-            # predict-side sign convention and is paired with our
-            # in-sample `predict_mat(data)` output. We gate on coef_remap —
-            # only t2 needs this; for other bases sm$X already matches the
-            # predict basis (sometimes Xpredfit doesn't, e.g. random.effect).
             xpredfit_path = fx / f"smooth_{i}_{k}_Xpredfit.mtx"
             use_predfit_anchor = (
                 xpredfit_path.exists()
@@ -297,11 +250,6 @@ def test_mgcv_predict_mat_matches_R(fx_id: str):
                     signs[c] = -1.0
             X_pred_aligned = X_pred_ours * signs[None, :]
 
-            # fs.interaction: align the machine-noise null rotation (see
-            # _fs_null_layout) by the per-level 2x2 map estimated from the
-            # FIT anchors; predict columns are the same fixed P applied to
-            # new data, so the fit-time relative rotation carries over
-            # exactly.
             if r_meta["class"] == "fs.smooth.spec":
                 p_lev, fs_rank, _null_d, nf, _ = _fs_null_layout(r_meta, blk.X.shape[1])
                 for j in range(nf):

@@ -1,14 +1,3 @@
-//! Dennis-Schnabel UNCMIN (`R nlm`'s optimizer) — mirrors
-//! `hea/R/uncmin.py` (the spec and test oracle) line by line, which is
-//! itself a port of R 4.6.0 `src/appl/uncmin.c` with the clang
-//! `-ffp-contract` fusions of R-as-built mirrored via `rfma` (see the
-//! Python module docstring for the disassembly receipts and the ctypes
-//! oracle validation against R's compiled `optif9`).
-//!
-//! Matrices are flat column-major `a[i + j*n]` (the f2c layout). The
-//! objective is a `PyResult`-returning trait so Python exceptions from
-//! the callbacks propagate out of the driver exactly like R errors.
-
 use pyo3::prelude::*;
 
 use super::linpack::{ddot, dnrm2, dscal, dtrsl};
@@ -39,7 +28,6 @@ fn fmin2(a: f64, b: f64) -> f64 {
     }
 }
 
-/// uncmin.c `fdhess` (:50) — used by `nlm(hessian=TRUE)`.
 pub fn fdhess(
     n: usize,
     x: &mut [f64],
@@ -82,7 +70,6 @@ pub fn fdhess(
     Ok(())
 }
 
-/// uncmin.c `mvmltl` (:132): y = L x (clang-contracted accumulation).
 fn mvmltl(n: usize, a: &[f64], x: &[f64], y: &mut [f64]) {
     for i in 0..n {
         let mut s = 0.0;
@@ -93,14 +80,12 @@ fn mvmltl(n: usize, a: &[f64], x: &[f64], y: &mut [f64]) {
     }
 }
 
-/// uncmin.c `mvmltu` (:160): y = L' x — F77 ddot down each column.
 fn mvmltu(n: usize, a: &[f64], x: &[f64], y: &mut [f64]) {
     for i in 0..n {
         y[i] = ddot(n - i, a, i + i * n, 1, x, i, 1);
     }
 }
 
-/// uncmin.c `mvmlts` (:184): y = A x, symmetric A in the lower triangle.
 fn mvmlts(n: usize, a: &[f64], x: &[f64], y: &mut [f64]) {
     for i in 0..n {
         let mut s = 0.0;
@@ -114,14 +99,12 @@ fn mvmlts(n: usize, a: &[f64], x: &[f64], y: &mut [f64]) {
     }
 }
 
-/// uncmin.c `lltslv` (:215): solve LL'x = b (dtrsl jobs 0 then 10).
 fn lltslv(n: usize, a: &[f64], x: &mut [f64], b: &[f64]) {
     x[..n].copy_from_slice(&b[..n]);
     dtrsl(a, 0, n, n, x, 0, 1, 0);
     dtrsl(a, 0, n, n, x, 0, 1, 10);
 }
 
-/// uncmin.c `choldc` (:242): perturbed Cholesky of a+D; returns addmax.
 fn choldc(n: usize, a: &mut [f64], diagmx: f64, tol: f64) -> f64 {
     let mut addmax = 0.0;
     let aminl = (diagmx * tol).sqrt();
@@ -162,14 +145,12 @@ fn choldc(n: usize, a: &mut [f64], diagmx: f64, tol: f64) -> f64 {
     addmax
 }
 
-/// uncmin.c `qraux1` (:323): swap rows i, i+1 over columns i..n-1.
 fn qraux1(n: usize, r: &mut [f64], i: usize) {
     for j in i..n {
         r.swap(i + j * n, i + 1 + j * n);
     }
 }
 
-/// uncmin.c `qraux2` (:347): Jacobi rotation, first product fused.
 fn qraux2(n: usize, r: &mut [f64], i: usize, a: f64, b: f64) {
     let den = a.hypot(b);
     let c = a / den;
@@ -182,7 +163,6 @@ fn qraux2(n: usize, r: &mut [f64], i: usize, a: f64, b: f64) {
     }
 }
 
-/// uncmin.c `qrupdt` (:382): rank-1 QR update.
 fn qrupdt(n: usize, a: &mut [f64], u: &mut [f64], v: &[f64]) {
     let mut k = n - 1;
     while k > 0 && u[k] == 0.0 {
@@ -214,9 +194,6 @@ fn qrupdt(n: usize, a: &mut [f64], u: &mut [f64], v: &[f64]) {
     }
 }
 
-/// uncmin.c `tregup` (:444): trust-region accept/update (methods 2-3,
-/// unreachable from R's nlm; kept in plain reference order like the
-/// Python spec). Returns (dlt, iretcd, fplsp, fpls, mxtake).
 #[allow(clippy::too_many_arguments)]
 fn tregup(
     n: usize,
@@ -311,8 +288,6 @@ fn tregup(
     Ok((dlt, iretcd, fplsp, fpls, mxtake))
 }
 
-/// uncmin.c `lnsrch` (:614): backtracking line search (method 1) with
-/// the R-as-built fusions. Returns (fpls, iretcd, mxtake).
 #[allow(clippy::too_many_arguments)]
 fn lnsrch(
     n: usize,
@@ -405,7 +380,6 @@ fn lnsrch(
     }
 }
 
-/// uncmin.c `dog_1step` (:742) — method 2, plain reference order.
 #[allow(clippy::too_many_arguments)]
 fn dog_1step(
     n: usize,
@@ -474,7 +448,6 @@ fn dog_1step(
     (dlt, nwtake, fstdog, cln, eta)
 }
 
-/// uncmin.c `dogdrv` (:840) — method 2 driver.
 #[allow(clippy::too_many_arguments)]
 fn dogdrv(
     n: usize,
@@ -520,7 +493,6 @@ fn dogdrv(
     Ok((fpls, dlt, iretcd, mxtake))
 }
 
-/// uncmin.c `hook_1step` (:908) — method 3, plain reference order.
 #[allow(clippy::too_many_arguments)]
 fn hook_1step(
     n: usize,
@@ -612,7 +584,6 @@ fn hook_1step(
     (dlt, amu, phi, phip0, fstime, nwtake)
 }
 
-/// uncmin.c `hookdrv` (:1047) — method 3 driver.
 #[allow(clippy::too_many_arguments)]
 fn hookdrv(
     n: usize,
@@ -685,7 +656,6 @@ fn hookdrv(
     Ok((fpls, dlt, iretcd, mxtake, amu, dltp, phi, phip0))
 }
 
-/// uncmin.c `secunf` (:1147): unfactored BFGS update (method 3).
 #[allow(clippy::too_many_arguments)]
 fn secunf(
     n: usize,
@@ -756,7 +726,6 @@ fn secunf(
     noupdt
 }
 
-/// uncmin.c `secfac` (:1241): factored BFGS update (methods 1-2).
 #[allow(clippy::too_many_arguments)]
 fn secfac(
     n: usize,
@@ -834,7 +803,6 @@ fn secfac(
     noupdt
 }
 
-/// uncmin.c `chlhsn` (:1361): safely-PD LL' of the model Hessian.
 fn chlhsn(n: usize, a: &mut [f64], epsm: f64, sx: &[f64], udiag: &mut [f64]) {
     for j in 0..n {
         for i in j..n {
@@ -931,7 +899,6 @@ fn chlhsn(n: usize, a: &mut [f64], epsm: f64, sx: &[f64], udiag: &mut [f64]) {
     }
 }
 
-/// uncmin.c `hsnint` (:1539): initial Hessian for secant updates.
 fn hsnint(n: usize, a: &mut [f64], sx: &[f64], method: i32) {
     for i in 0..n {
         a[i + i * n] = if method == 3 { sx[i] * sx[i] } else { sx[i] };
@@ -941,9 +908,6 @@ fn hsnint(n: usize, a: &mut [f64], sx: &[f64], method: i32) {
     }
 }
 
-/// uncmin.c `fstofd` (:1567): forward-difference derivative columns.
-/// `m == 1` estimates a gradient row from `fcn`; `m == n` a Hessian
-/// from `d1fcn`; `xpls` is perturbed and restored in place.
 #[allow(clippy::too_many_arguments)]
 fn fstofd(
     m: usize,
@@ -983,7 +947,6 @@ fn fstofd(
     Ok(())
 }
 
-/// uncmin.c `fstocd` (:1648): central-difference gradient.
 fn fstocd(
     n: usize,
     x: &mut [f64],
@@ -1005,7 +968,6 @@ fn fstocd(
     Ok(())
 }
 
-/// uncmin.c `sndofd` (:1686): second-order FD Hessian (no gradient).
 fn sndofd(
     n: usize,
     xpls: &mut [f64],
@@ -1046,7 +1008,6 @@ fn sndofd(
     Ok(())
 }
 
-/// uncmin.c `grdchk` (:1760): analytic-vs-FD gradient check.
 #[allow(clippy::too_many_arguments)]
 fn grdchk(
     n: usize,
@@ -1073,7 +1034,6 @@ fn grdchk(
     Ok(msg)
 }
 
-/// uncmin.c `heschk` (:1804): analytic-vs-FD Hessian check.
 #[allow(clippy::too_many_arguments)]
 fn heschk(
     n: usize,
@@ -1119,7 +1079,6 @@ fn heschk(
     Ok(msg)
 }
 
-/// uncmin.c `opt_stop` (:1884). Returns (itrmcd, icscmx).
 #[allow(clippy::too_many_arguments)]
 fn opt_stop(
     n: usize,
@@ -1179,8 +1138,6 @@ fn opt_stop(
     (jtrmcd, icscmx)
 }
 
-/// uncmin.c `optchk` (:1973). Mutates typsiz/sx; returns the reset
-/// scalars, msg < 0 on input error.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn optchk(
     n: usize,
@@ -1280,7 +1237,6 @@ fn optchk(
     )
 }
 
-/// uncmin.c `optdrv` (:2166). Returns (fpls, itrmcd, itncnt, msg).
 #[allow(clippy::too_many_arguments)]
 pub fn optdrv(
     n: usize,
@@ -1338,7 +1294,6 @@ pub fn optdrv(
         n, x, f, &g, &wrk1, itncnt, 0, gradtl, steptl, &sx, fscale, itnlim, iretcd, false,
     );
     if itrmcd != 0 {
-        // immediate convergence: optdrv_end's itrmcd-3 reset
         let fpls = f;
         xpls[..n].copy_from_slice(&x[..n]);
         gpls[..n].copy_from_slice(&g[..n]);
@@ -1376,7 +1331,6 @@ pub fn optdrv(
             chlhsn(n, &mut a, epsm, &sx, &mut udiag);
         }
         loop {
-            // L105: solve for newton step ap = -g
             for i in 0..n {
                 wrk1[i] = -g[i];
             }
@@ -1473,7 +1427,6 @@ pub fn optdrv(
         x[..n].copy_from_slice(&xpls[..n]);
         g[..n].copy_from_slice(&gpls[..n]);
     }
-    // optdrv_end
     if itrmcd == 3 {
         fpls = f;
         xpls[..n].copy_from_slice(&x[..n]);

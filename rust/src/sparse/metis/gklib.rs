@@ -1,17 +1,3 @@
-//! The GKlib templates `libmetis/gklib.c` instantiates, and the two macros in
-//! `GKlib/gk_macros.h` that the ported code uses inline.
-//!
-//!   * `GKlib/gk_mksort.h`  → [`gk_mkqsort`], and [`ikvsorti`] on top of it
-//!   * `GKlib/gk_mkblas.h`  → [`isum`]
-//!   * `GKlib/gk_macros.h`  → [`makecsr`], [`shiftcsr`]
-//!
-//! `gk_mkqsort` is not a substitutable sort. It is glibc's quicksort-plus-
-//! insertion-sort, it is unstable, and `Match_SHEM` feeds it vertex degrees —
-//! which tie constantly. Which of two equal-degree vertices comes out first
-//! decides the matching, hence every coarse graph, hence the permutation. Rust's
-//! `sort_unstable_by` would give a different, equally valid answer, and the
-//! whole port would then be a different ordering.
-
 use super::Idx;
 
 /// `ikv_t` — `gklib_defs.h:25`, `GK_MKKEYVALUE_T (ikv_t, idx_t, idx_t)`.
@@ -40,16 +26,12 @@ pub fn gk_mkqsort<T: Copy, F: Fn(&T, &T) -> bool>(base: &mut [T], nelt: usize, l
     }
 
     if elems > MAX_THRESH {
-        // `_stack[_GKQSORT_STACK_SIZE], *_top = _stack + 1` — the top starts one
-        // past the bottom, so the loop runs at least once; the never-written
-        // `_stack[0]` is popped on the way out and its value discarded.
         let mut stack = [(0isize, 0isize); 8 * std::mem::size_of::<usize>()];
         let mut top = 1usize;
         let mut lo = 0isize;
         let mut hi = elems - 1;
 
         while top > 0 {
-            // Median of LO, MID and HI, leaving the three sorted.
             let mut mid = lo + ((hi - lo) >> 1);
 
             if lt(&base[mid as usize], &base[lo as usize]) {
@@ -57,8 +39,6 @@ pub fn gk_mkqsort<T: Copy, F: Fn(&T, &T) -> bool>(base: &mut [T], nelt: usize, l
             }
             if lt(&base[hi as usize], &base[mid as usize]) {
                 base.swap(mid as usize, hi as usize);
-                // Only this branch can have made `_mid` smaller than `_lo`
-                // again; the `else` arm upstream is `goto _jump_over`.
                 if lt(&base[mid as usize], &base[lo as usize]) {
                     base.swap(mid as usize, lo as usize);
                 }
@@ -67,7 +47,6 @@ pub fn gk_mkqsort<T: Copy, F: Fn(&T, &T) -> bool>(base: &mut [T], nelt: usize, l
             let mut left = lo + 1;
             let mut right = hi - 1;
 
-            // "Collapse the walls."
             loop {
                 while lt(&base[left as usize], &base[mid as usize]) {
                     left += 1;
@@ -95,7 +74,6 @@ pub fn gk_mkqsort<T: Copy, F: Fn(&T, &T) -> bool>(base: &mut [T], nelt: usize, l
                 }
             }
 
-            // Recurse on the smaller half, iterate on the larger.
             if right - lo <= MAX_THRESH {
                 if hi - left <= MAX_THRESH {
                     top -= 1;
@@ -117,13 +95,10 @@ pub fn gk_mkqsort<T: Copy, F: Fn(&T, &T) -> bool>(base: &mut [T], nelt: usize, l
         }
     }
 
-    // Insertion sort over the now-nearly-sorted array.
     let end = elems - 1;
     let mut tmp = 0isize;
     let thresh = MAX_THRESH.min(end);
 
-    // The smallest of the first threshold goes to the front, which is what
-    // licenses the unguarded `--_tmp_ptr` walk below.
     let mut run = 1isize;
     while run <= thresh {
         if lt(&base[run as usize], &base[tmp as usize]) {
@@ -144,7 +119,6 @@ pub fn gk_mkqsort<T: Copy, F: Fn(&T, &T) -> bool>(base: &mut [T], nelt: usize, l
         tmp += 1;
 
         if tmp != run {
-            // `_trav` runs exactly once, at `_run_ptr`.
             let hold = base[run as usize];
             let mut h = run;
             let mut l = run;

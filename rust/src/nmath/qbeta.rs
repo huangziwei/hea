@@ -1,7 +1,3 @@
-//! `qbeta` — R's nmath/qbeta.c (AS 109 + dual-scale Newton). Mirror of the
-//! `hea/R/nmath.py` `_qbeta_raw`/`qbeta`. The goto-driven control flow is
-//! replicated with a `maybe_swap` loop (`continue` = jump-to-swap), a
-//! `goto_return` flag, and the L_converged / L_return tails.
 #![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 #![allow(unused_assignments)] // loop-carried locals mirror the C `goto` state vars
@@ -38,7 +34,6 @@ fn r_pow_di3(x: f64) -> f64 {
     x * (x * x)
 }
 
-/// C `log`: log(0) = -inf, log(<0) = NaN (no panic).
 #[inline]
 fn clog(x: f64) -> f64 {
     if x > 0.0 {
@@ -108,7 +103,6 @@ pub(crate) fn qbeta_raw(alpha: f64, p: f64, q: f64, lower_tail: bool, log_p: boo
     let mut xinbta = 0.0;
 
     loop {
-        // maybe_swap
         if swap_tail {
             a = r_dt_civ(alpha, lower_tail, log_p);
             la = r_dt_clog(alpha, lower_tail, log_p);
@@ -267,7 +261,6 @@ pub(crate) fn qbeta_raw(alpha: f64, p: f64, q: f64, lower_tail: bool, log_p: boo
             break;
         }
 
-        // L_Newton
         let r = 1.0 - pp;
         let t = 1.0 - qq;
         let mut wprev: f64 = 0.0;
@@ -378,7 +371,6 @@ pub(crate) fn qbeta_raw(alpha: f64, p: f64, q: f64, lower_tail: bool, log_p: boo
         break;
     }
 
-    // L_converged
     if !goto_return {
         let log_ = log_p || use_log_x;
         if (log_ && y == f64::NEG_INFINITY) || (!log_ && y == 0.0) {
@@ -390,7 +382,6 @@ pub(crate) fn qbeta_raw(alpha: f64, p: f64, q: f64, lower_tail: bool, log_p: boo
             add_n_step = false;
         }
     }
-    // L_return
     let r = 1.0 - pp;
     let t = 1.0 - qq;
     if use_log_x {

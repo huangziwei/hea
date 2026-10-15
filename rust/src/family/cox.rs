@@ -64,9 +64,6 @@ fn cox_l(
     lpl
 }
 
-/// `coxlpl` with `deriv<0` semantics extended to also return `g`,`H` (i.e. the
-/// C `deriv==0` branch): `(lpl, g[p], H[p,p])`. `eta` (n,), `x` (n,p) row-major,
-/// `d` (n,) event indicator, `r` (n,) 0-based group per row, `nt` groups.
 #[pyfunction]
 #[pyo3(name = "cox_lpl0")]
 fn cox_lpl0<'py>(
@@ -195,7 +192,6 @@ fn cox_lpl_d1<'py>(
     let mut a_p = vec![0.0f64; p * p]; // upper tri (k<=l), row-major k*p+l
     let mut g = vec![0.0f64; p];
     let mut h = vec![0.0f64; p * p];
-    // first-derivative running accumulators
     let mut d1gamma_p = vec![0.0f64; mm];
     let mut d1b_p = vec![0.0f64; p * mm]; // [k*M+m]
     let mut d1a_p = vec![0.0f64; mm * p * p]; // [m*p*p + k*p + l], upper tri k<=l
@@ -277,7 +273,6 @@ fn cox_lpl_d1<'py>(
             let base = m * p * p;
             for k in 0..p {
                 for l in k..p {
-                    // d1b[k,m]*b_l + b_k*d1b[l,m]  (fuse left product)
                     let pin = rfma(d1b_p[k * mm + m], b_p[l], b_p[k] * d1b_p[l * mm + m]);
                     let mut v = rfma(xx1, pin, -(xx2 * b_p[k] * b_p[l])); // xx1*pin - xx2*b_k*b_l
                     v = rfma(xx, a_p[k * p + l], v); // + xx*A_kl
@@ -406,15 +401,12 @@ fn cox_d2h<'py>(
                     // tree (same left-fuse/right-round rule as d1H) — verified
                     // bit-for-bit against the compiled emit (6000/6000 inputs).
                     let bl = b_p[l];
-                    // A_p[l,l]*d1gamma[k] + 2*d1b[l,k]*b_l
                     let inner1 = rfma(adiag[l], d1gamma_p[k], (2.0 * d1b_p[l * mm + k]) * bl);
-                    // 5-product group, left-assoc fused
                     let mut big5 =
                         rfma(d1adiag[l * mm + m], d1gamma_p[k], adiag[l] * d2gamma_p[off]);
                     big5 = rfma(d2b_p[l * nhh + off], bl, big5);
                     big5 = rfma(2.0 * d1b_p[l * mm + k], d1b_p[l * mm + m], big5);
                     big5 = rfma(bl, d2b_p[l * nhh + off], big5);
-                    // 2*d1b[l,m]*b_l*d1gamma[k] + b_l*b_l*d2gamma[off]
                     let inner6 = rfma(
                         (2.0 * d1b_p[l * mm + m]) * bl,
                         d1gamma_p[k],

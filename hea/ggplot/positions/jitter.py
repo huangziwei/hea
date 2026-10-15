@@ -28,9 +28,6 @@ class PositionJitter(Position):
         if "x" not in data.columns and "y" not in data.columns:
             return data
 
-        # Map discrete axes to integer positions first — ``geom_jitter``
-        # on ``aes(x=drv)`` (categorical) is a canonical ggplot2 use,
-        # and the random offset only makes sense in numeric space.
         for axis in ("x", "y"):
             if axis in data.columns and not data[axis].dtype.is_numeric():
                 data = data.with_columns(to_numeric_positions(data[axis]))

@@ -109,9 +109,6 @@ def geom_freqpoly(
     else:
         stat_obj = stat
 
-    # ``GeomPath`` has no ``fill`` aes; if a user passes one it lands in
-    # ``aes_params`` as a SET constant and the path geom ignores it
-    # (ggplot2 emits "Ignoring unknown parameters: fill"; we skip silently).
     aes_params, geom_params = split_layer_kwargs(kwargs)
 
     return Layer(

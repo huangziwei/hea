@@ -110,8 +110,6 @@ def anova(
         return _anova_gmm(*models, labels=labels)
     if all(isinstance(m, gam) for m in models):
         return _anova_gam(*models, labels=labels, test=test)
-    # glm before lm: glm is not an lm subclass, but the isinstance order
-    # would still matter if it ever became one. Keep the explicit branch.
     if all(isinstance(m, glm) for m in models):
         return _anova_glm(*models, labels=labels, test=test)
     if all(isinstance(m, lm) for m in models):
@@ -165,8 +163,6 @@ def drop1(model, *, test: str | None = None, k: float = 2.0):
         )
     if isinstance(model, gmm):
         return _drop1_gmm(model, test=test, k=k)
-    # glm before lm: glm is not an lm subclass, but order matters if
-    # that ever changes (mirrors anova()'s dispatch order).
     if isinstance(model, glm):
         return _drop1_glm(model, test=test, k=k)
     if isinstance(model, lm):
@@ -175,17 +171,7 @@ def drop1(model, *, test: str | None = None, k: float = 2.0):
 
 
 def _drop_scope(terms) -> list[int]:
-    """Indices of terms that respect *marginality* — R's ``drop.scope``.
-
-    A term is droppable iff its factor set is not a strict subset of any
-    other term's factor set. So given ``cpergore + usage + cpergore:usage``,
-    neither ``cpergore`` nor ``usage`` is droppable (they're both
-    contained in the interaction); only ``cpergore:usage`` is. Without
-    this filter, ``drop1`` would happily compute Δrss for "drop the
-    main effect while keeping the interaction" — which is what R's
-    ``drop1`` deliberately avoids, and which the Faraway book example
-    on ``gavote`` shows R skipping over.
-    """
+    """Indices of terms that respect *marginality* — R's ``drop.scope``."""
     factor_sets = [frozenset(t.label.split(":")) for t in terms]
     keep: list[int] = []
     for i, fi in enumerate(factor_sets):
@@ -201,21 +187,6 @@ def _drop_scope(terms) -> list[int]:
 def _refit_kwargs(m, target_n: int) -> dict:
     """Constructor kwargs for refitting ``m``'s type on a frame of
     ``target_n`` rows.
-
-    step / drop1 / add1 refit many times; we pin every refit to a
-    common row set so AICs are comparable (matches R's ``na.action``
-    behavior). That row set is ``m._design_data`` for drop1, or the
-    upper model's ``_design_data`` for add1 / step. This helper picks
-    the right ``weights`` to pass:
-
-    * If the original fit didn't supply explicit weights, return
-      ``weights=None`` — the refit gets fresh ``np.ones(target_n)``.
-    * If the original fit had explicit weights *and* ``target_n``
-      matches the original ``_design_data`` row count, pass the same
-      weights through (still aligned).
-    * Otherwise the weights can't be aligned to a different row set
-      without a row index — raise instead of silently producing
-      meaningless numbers.
     """
     if isinstance(m, glm):
         n_orig = len(m._design_data)
@@ -245,12 +216,6 @@ def _refit_kwargs(m, target_n: int) -> dict:
 def _add_scope(current_terms, upper_terms) -> list[int]:
     """Indices into ``upper_terms`` of terms addable to ``current_terms``,
     respecting marginality. R's ``add.scope``.
-
-    A term is addable iff (a) it isn't already in ``current_terms`` and
-    (b) every strict non-empty subset of its factor set is the factor
-    set of some term currently in ``current_terms``. The second clause
-    is what blocks ``add a:b`` while ``a`` or ``b`` is missing — the
-    interaction can only be added once both main effects exist.
     """
     cur_factor_sets = {frozenset(t.label.split(":")) for t in current_terms}
     cur_labels = {t.label for t in current_terms}
@@ -305,9 +270,6 @@ def add1(model, scope, *, test: str | None = None, k: float = 2.0):
     lhs = model.formula.split("~", 1)[0].strip()
     upper_formula = f"{lhs} ~ {scope}"
 
-    # Fit upper without weights to determine its NA-cleaned row set;
-    # the ``weights=None`` here is harmless because we only use
-    # upper_model for its terms list and ``_design_data``.
     if isinstance(model, glm):
         upper_model = glm(
             upper_formula,
@@ -351,10 +313,6 @@ def _add1_lm(m: lm, upper_terms, *, common_data, test: str | None, k: float):
         raise ValueError("add1(): no terms in scope for adding to model")
 
     kw = _refit_kwargs(m, len(common_data))
-    # Re-anchor the <none> baseline to the upper's row set if the row
-    # count differs (e.g. upper introduces NA-bearing predictors that
-    # weren't in the current model). Without this, the <none> AIC and
-    # the candidate AICs would be on different row counts.
     if len(common_data) != m.n:
         m = lm(m.formula, common_data, **kw)
 
@@ -387,8 +345,6 @@ def _add1_lm(m: lm, upper_terms, *, common_data, test: str | None, k: float):
         rss_col.append(round(m_aug.rss, 4))
         aic_col.append(round(_extract_aic_lm(m_aug.rss, m_aug.df_residuals, n, k), 4))
         if use_F and d_df > 0:
-            # F denom is the *augmented* model's MSE — mirror of drop1's
-            # rule (denom is always the bigger model's residual MS).
             mse_aug = m_aug.rss / m_aug.df_residuals
             fstat = (d_rss / d_df) / mse_aug
             p = float(_dist.pf(fstat, d_df, m_aug.df_residuals, lower_tail=False))
@@ -446,7 +402,6 @@ def _add1_glm(m: glm, upper_terms, *, common_data, test: str | None, k: float):
         raise ValueError("add1(): no terms in scope for adding to model")
 
     kw = _refit_kwargs(m, len(common_data))
-    # Anchor <none> baseline to the common row set (see _add1_lm).
     if len(common_data) != m.n:
         m = glm(m.formula, common_data, **kw)
 
@@ -467,14 +422,7 @@ def _add1_glm(m: glm, upper_terms, *, common_data, test: str | None, k: float):
     sig_col: list[str] = [""]
 
     def _delta_loglik(dev_aug: float) -> float:
-        """``loglik_aug - loglik_cur`` in R's drop1/add1 sign convention.
-
-        For Gaussian (σ unknown) this is ``n*log(dev_cur/dev_aug)`` —
-        the proper σ-unknown LRT, positive when the augmented model
-        fits better. For non-Gaussian it's ``Δdev / dispersion_cur``
-        (R uses the *current* model's Pearson dispersion as the
-        normalizing scale, not the augmented model's).
-        """
+        """``loglik_aug - loglik_cur`` in R's drop1/add1 sign convention."""
         if fam.name == "gaussian":
             return n * float(np.log(dev_full / dev_aug))
         return (dev_full - dev_aug) / disp_cur
@@ -492,13 +440,8 @@ def _add1_glm(m: glm, upper_terms, *, common_data, test: str | None, k: float):
 
         df_col.append(d_df)
         dev_col.append(round(m_aug.deviance, 4))
-        # Recalibrated AIC, mirror image of drop1: aic_aug holds
-        # dispersion fixed at the current model's value, so AICs are
-        # comparable across additions. ``aic_cur - Δloglik + k*Δdf``.
         aic_col.append(round(aic_full_table - d_loglik + k * d_df, 4))
         if kind == "F" and d_df > 0:
-            # F denom is the *augmented* model's residual mean deviance,
-            # mirror of drop1's "current model's residual mean deviance".
             rms_aug = m_aug.deviance / m_aug.df_residual
             fstat = (d_dev / d_df) / rms_aug
             p = float(_dist.pf(fstat, d_df, m_aug.df_residual, lower_tail=False))
@@ -540,12 +483,7 @@ def _add1_glm(m: glm, upper_terms, *, common_data, test: str | None, k: float):
 
 
 def _step_aic(model, k: float) -> float:
-    """The AIC R's ``step()`` minimizes — extractAIC formula.
-
-    For lm it's ``n*log(RSS/n) + k*p`` (Mallows-style); for glm it's
-    ``glm.AIC + (k-2)*edf``. Both reduce to standard AIC at ``k=2``;
-    differ at ``k=log(n)`` (BIC) or other custom penalties.
-    """
+    """The AIC R's ``step()`` minimizes — extractAIC formula."""
     if isinstance(model, glm):
         edf = model.n - model.df_residual
         return model.AIC + (k - 2.0) * edf
@@ -629,9 +567,6 @@ def step(
             "or dict {'lower': ..., 'upper': ...}"
         )
 
-    # Fit upper and lower once on the original data, ignoring weights —
-    # we only need their term lists and (for upper) its NA-cleaned row
-    # set. The weights are reapplied via ``_refit_kwargs`` below.
     if is_glm:
         upper_model = glm(
             f"{lhs} ~ {upper_rhs}",
@@ -661,10 +596,6 @@ def step(
     upper_terms = upper_model._expanded.terms
     lower_label_set = {t.label for t in lower_model._expanded.terms}
 
-    # Pin every refit to the upper model's NA-cleaned row set so AICs
-    # are comparable across iterations (matches R's na.action behavior
-    # in stepwise selection). Re-anchor the user-supplied current model
-    # to this row set if it differs.
     common_data = upper_model._design_data
     kw = _refit_kwargs(model, len(common_data))
 
@@ -732,13 +663,7 @@ def step(
 
 
 def _print_step_trace(current, cur_aic: float, candidates, is_glm: bool):
-    """R-style step trace: ``<none>`` + each candidate, sorted by AIC.
-
-    Df is shown as the *absolute* change (the prefix ``-``/``+`` carries
-    the direction). For lm we show ``Sum of Sq`` + ``RSS``; for glm
-    just ``Deviance`` (R's convention). AIC is rounded to 2 decimals,
-    matching R's printed output.
-    """
+    """R-style step trace: ``<none>`` + each candidate, sorted by AIC."""
     rows: list[tuple] = []
     if is_glm:
         rows.append(("<none>", None, current.deviance, cur_aic))
@@ -777,13 +702,7 @@ def _print_step_trace(current, cur_aic: float, candidates, is_glm: bool):
 
 
 def _extract_aic_lm(rss: float, df_residuals: int, n: int, k: float) -> float:
-    """R's ``extractAIC.lm`` — Mallows-style ``n*log(RSS/n) + k*p``.
-
-    Differs from ``AIC.lm`` (the logLik-based formula) by a constant
-    that depends only on ``n``, so the differences across nested fits
-    in a drop1 table are the same either way — we use this form to
-    match R's printed values directly.
-    """
+    """R's ``extractAIC.lm`` — Mallows-style ``n*log(RSS/n) + k*p``."""
     p = n - df_residuals
     if rss <= 0:
         return float("-inf")
@@ -808,10 +727,6 @@ def _drop1_lm(m: lm, *, test: str | None, k: float):
     mse_full = rss_full / df_full
 
     scope = _drop_scope(terms)
-    # Hold the row set constant across all refits (matches R's na.action
-    # behavior). Sub-formulas use a subset of m's columns, so any rows
-    # that survived NA-cleaning for m are valid for the sub-formulas
-    # too — m._design_data is the right anchor.
     common_data = m._design_data
     kw = _refit_kwargs(m, len(common_data))
 
@@ -900,15 +815,10 @@ def _drop1_glm(m: glm, *, test: str | None, k: float):
     df_full = m.df_residual
     disp_full = float(m.dispersion)
     n = m.n
-    # R's ``drop1.glm`` uses ``extractAIC(full)[2]`` for the <none> row
-    # and shifts every other row by the same constant. extractAIC.glm
-    # gives ``$aic + (k-2)*edf``, equivalent to standard glm AIC at k=2.
     edf_full = n - df_full
     aic_full_table = m.AIC + (k - 2.0) * edf_full
 
     scope = _drop_scope(terms)
-    # Same anchoring as the lm path — pin the row set to m._design_data
-    # so every sub-fit has comparable AIC.
     common_data = m._design_data
     kw = _refit_kwargs(m, len(common_data))
 
@@ -920,14 +830,7 @@ def _drop1_glm(m: glm, *, test: str | None, k: float):
     sig_col: list[str] = [""]
 
     def _delta_loglik(dev_drop: float) -> float:
-        """R's drop1.glm "loglik diff" between the dropped and full fit.
-
-        For Gaussian (σ unknown) this is the profile-likelihood form
-        ``n*log(dev_drop/dev_full)``. For other families it's
-        ``Δdev/dispersion_full`` (which equals Δdev when dispersion=1
-        for scale-known Poisson/Binomial). Driving both the Chisq stat
-        column ("scaled dev." / "LRT") and the per-row AIC shift.
-        """
+        """R's drop1.glm "loglik diff" between the dropped and full fit."""
         if fam.name == "gaussian":
             return n * float(np.log(dev_drop / dev_full))
         return (dev_drop - dev_full) / disp_full
@@ -947,22 +850,8 @@ def _drop1_glm(m: glm, *, test: str | None, k: float):
 
         df_col.append(d_df)
         dev_col.append(round(m_sub.deviance, 4))
-        # Recalibrated AIC matches R: aic_full_table + Δloglik - k*Δdf.
-        # Holds dispersion fixed at the full model's value across all
-        # rows, so AICs are directly comparable across drops (which is
-        # the whole point of drop1's table). For Gaussian this happens
-        # to coincide with the standard glm.AIC, but for Gamma/IG the
-        # standard AIC re-estimates dispersion per fit and would shift
-        # the dropped rows non-uniformly.
         aic_col.append(round(aic_full_table + d_loglik - k * d_df, 4))
         if kind == "F" and d_df > 0:
-            # R's ``drop1.glm`` F-denominator is ``dev_full / df_full``
-            # (residual *mean deviance*), not the Pearson dispersion
-            # ``summary(m)$dispersion`` that ``anova.glm`` uses. The two
-            # coincide for Gaussian but differ for Gamma/IG/etc; matches
-            # R's behavior (which warns "F test assumes 'quasi' family"
-            # for Poisson/Binomial since ``dev_full/df_full`` is then a
-            # quasi-likelihood-style scale rather than 1).
             rms_full = dev_full / df_full
             fstat = (d_dev / d_df) / rms_full
             p = float(_dist.pf(fstat, d_df, df_full, lower_tail=False))
@@ -991,7 +880,6 @@ def _drop1_glm(m: glm, *, test: str | None, k: float):
         cols["Pr(>F)"] = p_col
         cols[" "] = sig_col
     elif kind == "Chisq":
-        # R's drop1.glm flips the column name on scale-known-ness.
         stat_lbl = "LRT" if fam.scale_known else "scaled dev."
         cols[stat_lbl] = stat_col
         cols["Pr(>Chi)"] = p_col
@@ -1005,23 +893,12 @@ def _drop1_glm(m: glm, *, test: str | None, k: float):
 
 
 def _drop1_gmm(model, *, test, k):
-    """Single fixed-term deletions for a ``gmm`` fit — lme4's ``drop1.merMod``.
-
-    Refits the model without each *droppable* fixed-effect term (random-effect
-    bars and ``offset()`` terms preserved), comparing each reduced fit to the
-    full one by the Laplace-deviance LRT. Droppability respects marginality
-    (``_drop_scope``): a main effect inside an interaction is not dropped. A
-    REML LMM input is refit by ML first (a valid LRT needs ML), mirroring
-    :func:`_anova_gmm`. Columns match lme4: ``npar`` (the Δnpar removed — 3 for
-    a 4-level factor), ``AIC`` (= ``-2logL + k·npar``, i.e. ``extractAIC``),
-    and with a test ``LRT`` / ``Pr(Chi)``.
-    """
+    """Single fixed-term deletions for a ``gmm`` fit — lme4's ``drop1.merMod``."""
     if test is not None and test.upper() not in ("CHISQ", "LRT"):
         raise ValueError(
             f"drop1(gmm): test must be 'Chisq'/'LRT' or None; got {test!r}"
         )
     do_test = test is not None
-    # Valid LRT needs ML; refit a REML LMM by ML (glmer is already ML).
     if model.REML:
         print("refitting model(s) with ML (instead of REML)")
         m = gmm(model.formula, model.data, REML=False)
@@ -1033,8 +910,6 @@ def _drop1_gmm(model, *, test, k):
         raise TypeError("drop1(gmm): need at least one fixed-effect term to drop")
     lhs = m.formula.split("~", 1)[0].strip()
     intercept_str = "1" if m._expanded.intercept else "0"
-    # Preserve the random-effect bars and any offset() exactly (deparse → the
-    # canonical formula text, re-parsed by every sub-fit).
     keep_tail = [f"({deparse(b)})" for b in m._expanded.bars]
     keep_tail += [f"offset({deparse(o)})" for o in m._expanded.offsets]
 
@@ -1042,7 +917,6 @@ def _drop1_gmm(model, *, test, k):
         return float(getattr(mm, "deviance_laplace", mm.deviance))
 
     def _aic_table(dev, npar):
-        # extractAIC.merMod: -2logL + k·npar (standard AIC at k=2).
         return dev + k * npar
 
     dev_full = _dev(m)
@@ -1093,14 +967,12 @@ def _drop1_gmm(model, *, test, k):
 
 def _anova_lm(*models, labels: list[str]):
     """F-test ANOVA table comparing nested ``lm`` fits."""
-    # Sort ascending by npar (= descending by df_residuals, matching R).
     order = sorted(
         range(len(models)), key=lambda i: models[i].df_residuals, reverse=True
     )
 
     dfs = [models[i].df_residuals for i in order]
     rss = [models[i].rss for i in order]
-    # R uses the largest (least-constrained) model's MSE as the F denom.
     mse_full = rss[-1] / dfs[-1]
 
     df_col: list[int | None] = [None]
@@ -1150,16 +1022,7 @@ def _anova_lm(*models, labels: list[str]):
 
 
 def _anova_lm_single(m: lm):
-    """Sequential (Type I) ANOVA — R's ``anova.lm(m)`` for a single fit.
-
-    Mechanical port of ``stats:::anova.lm`` (``stats/R/lm.R``): the
-    per-term sum of squares is ``split(effects[1:rank]^2, assign[pivot][1:rank])``
-    — read off the fit's QR in **one** decomposition, no refits. R drops
-    aliased columns to the right of the pivot; hea drops them from the design
-    at fit time, so the kept columns *are* ``pivot[1:rank]`` in order and their
-    term assignment is ``m._col_assign``. F = MS_term / MS_residual_full,
-    p = upper-tail F, weighted RSS Σ wᵢrᵢ² (R's ``ssr``).
-    """
+    """Sequential (Type I) ANOVA — R's ``anova.lm(m)`` for a single fit."""
     terms = m._expanded.terms
     if not terms:
         raise TypeError(
@@ -1169,7 +1032,6 @@ def _anova_lm_single(m: lm):
 
     lhs = m.formula.split("~", 1)[0].strip()
 
-    # R: ssr <- sum(w * residuals^2); dfr <- df.residual(object)
     e = np.asarray(m._residuals_arr, dtype=float)
     w = (
         np.asarray(m._w, dtype=float)
@@ -1180,15 +1042,9 @@ def _anova_lm_single(m: lm):
     dfr = m.df_residuals
     mse_full = ssr / dfr
 
-    # comp <- object$effects[1:rank] — read off the fit's stored effects
-    # (Qᵀ√w·(y−offset)); rank == m.rank (aliased columns already dropped from
-    # m.X at fit time, so the kept columns are R's pivot[1:rank] in order).
     comp = np.asarray(m.effects, dtype=float)[: m.rank]
     asgn = np.array([m._col_assign[c] for c in m.column_names])
 
-    # ss <- vapply(split(comp^2, asgn), sum); df <- lengths(split(asgn, asgn)).
-    # Groups in ascending assign order; the intercept group (assign==0) is the
-    # row R drops via ``if(intercept) table[-1,]``.
     uniq = [a for a in sorted(set(asgn.tolist())) if a != 0]
     labels: list[str] = []
     df_col: list[int] = []
@@ -1211,7 +1067,6 @@ def _anova_lm_single(m: lm):
         f_col.append(round(fstat, 4))
         p_col.append(float(f"{p:.4g}"))
         sig_col.append(significance_code([p])[0])
-    # Residuals row
     labels.append("Residuals")
     df_col.append(dfr)
     sos_col.append(round(ssr, 4))
@@ -1246,13 +1101,6 @@ def _anova_gam_single(m: gam, freq: bool = False, dispersion: float | None = Non
     plus the smooth significance table. Mirrors mgcv's ``anova.gam`` for
     a single fit (which omits the lm-coefficient details that
     ``summary.gam`` prints).
-
-    The parametric rows ARE summary.gam's pTerms.table — mgcv's
-    ``anova.gam(single)`` returns the summary object reclassed and
-    ``print.anova.gam`` shows its pTerms.table — so they're shared via
-    ``gam._pterms_rows`` (assign-exact term→column mapping, pinv-rank
-    df, Chi.sq↔F by est.disp). ``freq``/``dispersion`` are anova.gam's
-    passthrough to ``summary.gam(object, dispersion=, freq=)``
     (mgcv.r:4153).
     """
     digits = 4
@@ -1266,7 +1114,6 @@ def _anova_gam_single(m: gam, freq: bool = False, dispersion: float | None = Non
     out.append(f"Formula: {m.formula}")
     out.append("")
 
-    # ---- Parametric Terms (summary.gam's pTerms.table) -------------------
     rows = m._pterms_rows(freq=freq, dispersion=dispersion)
     if rows:
         stat_col = "F" if est_disp else "Chi.sq"
@@ -1291,11 +1138,6 @@ def _anova_gam_single(m: gam, freq: bool = False, dispersion: float | None = Non
         out.append("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1")
         out.append("")
 
-    # ---- Smooth significance table ---------------------------------------
-    # mgcv's single-model ``anova.gam`` returns ``summary.gam(object)``
-    # reclassed, so these rows must be identical to summary()'s — shared
-    # via ``gam._smooth_significance_rows`` (reTest/testStat dispatch,
-    # mixture p-values, Chi.sq↔F by ``family.scale_known``).
     if m._blocks:
         sm_rows = m._smooth_significance_rows(dispersion=dispersion)
         sig_smooth = significance_code([r[4] for r in sm_rows])
@@ -1326,21 +1168,7 @@ def _anova_gam_single(m: gam, freq: bool = False, dispersion: float | None = Non
 
 
 def _anova_gam_rdf(g: gam) -> float:
-    """mgcv-style residual df for a ``gam`` in a multi-model anova table.
-
-    mgcv's ``anova.gam`` *overrides* each fit's ``df.residual`` before
-    handing the list to ``stats::anova.glmlist``: it uses ``edf1`` (not
-    ``edf``) — the "1-step" effective df designed for hypothesis testing
-    — minus a smoothing-parameter-uncertainty correction ``dfc`` when
-    the fit carries a separate ``edf2`` (REML with unconditional
-    correction). For default GCV fits, ``edf2`` is ``NULL`` and
-    ``dfc = 0``, so the formula reduces to ``n - sum(edf1)``.
-
-    hea's gam always exposes ``edf2``, but sets it equal to ``edf1`` as
-    the no-op sentinel when the unconditional correction wasn't
-    computed — we detect that with ``allclose`` and zero out ``dfc``,
-    matching mgcv's NULL branch numerically.
-    """
+    """mgcv-style residual df for a ``gam`` in a multi-model anova table."""
     n = g.n
     edf1_sum = float(np.sum(g.edf1))
     edf2 = getattr(g, "edf2", None)
@@ -1354,15 +1182,7 @@ def _anova_gam_rdf(g: gam) -> float:
 
 
 def _anova_gam(*models: gam, labels: list[str], test: str | None = None):
-    """Approximate F / Chisq deviance table for nested ``gam`` fits.
-
-    Mirrors mgcv's ``anova.gam`` for multiple gam objects: the residual
-    df uses ``edf1`` (see ``_anova_gam_rdf``), the F denominator is the
-    largest model's ``scale`` (mgcv's ``sig2``), and the test selection
-    follows the same auto-pick rule as ``anova.glm`` — ``Chisq`` for
-    scale-known families (Poisson/Binomial), ``F`` for unknown-scale
-    (Gaussian/Gamma/IG).
-    """
+    """Approximate F / Chisq deviance table for nested ``gam`` fits."""
     df_, docstring = _anova_gam_table(*models, labels=labels, test=test)
     print(docstring)
     print(format_df(df_))
@@ -1371,10 +1191,7 @@ def _anova_gam(*models: gam, labels: list[str], test: str | None = None):
 
 
 def _anova_gam_table(*models: gam, labels: list[str], test: str | None = None):
-    """Pure builder for the multi-model ``anova(gam, ...)`` table.
-
-    Returns ``(df, docstring)``. See ``_anova_gam`` for semantics.
-    """
+    """Pure builder for the multi-model ``anova(gam, ...)`` table."""
     fam0 = models[0].family
     if not all(
         type(m.family) is type(fam0) and m.family.link.name == fam0.link.name
@@ -1405,8 +1222,6 @@ def _anova_gam_table(*models: gam, labels: list[str], test: str | None = None):
     rdfs = [_anova_gam_rdf(m) for m in models]
     devs = [float(m.deviance) for m in models]
 
-    # Sort ascending by npar (= descending by edf1-residual df), matching
-    # mgcv. Smallest model first; full model last.
     order = sorted(range(len(models)), key=lambda i: rdfs[i], reverse=True)
     rdfs_sorted = [rdfs[i] for i in order]
     devs_sorted = [devs[i] for i in order]
@@ -1463,25 +1278,7 @@ def _anova_gam_table(*models: gam, labels: list[str], test: str | None = None):
 
 
 def _anova_glm(*models, labels: list[str], test: str | None = None):
-    """``anova.glm``-style deviance table for nested ``glm`` fits.
-
-    With ``test=None`` we auto-pick (matches R's recommendation):
-    - scale-known families (Poisson, Binomial) → ``Chisq`` LRT on Δdev.
-    - unknown-scale families (Gaussian, Gamma, IG) → ``F``.
-
-    Override via ``test=``:
-    - ``"Chisq"`` / ``"LRT"`` (alias) → ``Δdev / dispersion_full ~ χ²(Δdf)``.
-      For scale-known families ``dispersion_full = 1`` so this is just Δdev,
-      matching the auto-pick. For unknown-scale, the division is the
-      asymptotic chi-square test (R's ``anova.glm`` does the same).
-    - ``"F"`` → ``F = (Δdev / Δdf) / dispersion_full`` against ``F(Δdf,
-      df_residual_full)``. Allowed for scale-known families too (R does)
-      though the chi-square version is preferred.
-    - ``"Rao"`` → score test, not implemented yet.
-
-    Three-or-more models are walked incrementally (row k vs row k-1 after
-    sorting by ``df_residuals`` descending, matching ``_anova_lm``).
-    """
+    """``anova.glm``-style deviance table for nested ``glm`` fits."""
     df_, docstring = _anova_glm_table(*models, labels=labels, test=test)
     print(docstring)
     print(format_df(df_))
@@ -1490,12 +1287,7 @@ def _anova_glm(*models, labels: list[str], test: str | None = None):
 
 
 def _anova_glm_table(*models, labels: list[str], test: str | None = None):
-    """Pure builder for the ``anova(glm,...)`` table.
-
-    Returns ``(df, docstring)``. Used by ``_anova_glm`` (which prints) and
-    by tests that need to inspect column values directly. See ``_anova_glm``
-    for the semantics of ``test=``.
-    """
+    """Pure builder for the ``anova(glm,...)`` table."""
     fam0 = models[0].family
     if not all(
         type(m.family) is type(fam0) and m.family.link.name == fam0.link.name
@@ -1523,7 +1315,6 @@ def _anova_glm_table(*models, labels: list[str], test: str | None = None):
                 f"got {test!r}"
             )
 
-    # Sort ascending by npar (= descending by df_residuals), matching R.
     order = sorted(
         range(len(models)), key=lambda i: models[i].df_residuals, reverse=True
     )
@@ -1549,11 +1340,6 @@ def _anova_glm_table(*models, labels: list[str], test: str | None = None):
             sig_col.append("")
             continue
         if test == "Chisq":
-            # disp_full == 1 for scale-known families (Poisson/Binomial),
-            # so this matches the canonical LRT there. For unknown-scale
-            # it's the asymptotic χ² test on the rescaled deviance — same
-            # formula R uses when `test="Chisq"` is passed for Gaussian/
-            # Gamma/IG fits.
             stat = d_dev / disp_full
             p = float(_dist.pchisq(stat, d_df, lower_tail=False))
         else:
@@ -1590,11 +1376,6 @@ def _anova_glm_table(*models, labels: list[str], test: str | None = None):
 def _anova_gmm_single(model):
     """Single-model Type-I (sequential) fixed-effect F-table — lme4's
     ``anova.merMod``.
-
-    The rotated coefficients ``effects = RX · β̂`` (``RX`` = the fixed-effect
-    Cholesky) are squared and summed within each term to give the sequential
-    sums of squares; ``F = MeanSq / σ̂²``. There is no p-value (a mixed model
-    has no exact denominator df), matching ``anova(fm)`` with a single model.
     """
     from ..formula import materialize
 
@@ -1627,14 +1408,12 @@ def _anova_gmm_single(model):
 
 def _anova_gmm(*models, labels: list[str]):
     """Likelihood-ratio test for nested ``gmm`` fits (lme4-style)."""
-    # LRT requires ML; silently refit any REML inputs.
     refit = any(m.REML for m in models)
     models = tuple(
         (gmm(m.formula, m.data, REML=False) if m.REML else m) for m in models
     )
     if refit:
         print("refitting model(s) with ML (instead of REML)")
-    # Sort ascending by npar, preserving original indices for row labels.
     order = sorted(range(len(models)), key=lambda i: models[i].npar)
 
     npar_col: list[int] = []
@@ -1649,15 +1428,9 @@ def _anova_gmm(*models, labels: list[str]):
     for k, idx in enumerate(order):
         m = models[idx]
         npar_col.append(m.npar)
-        # lme4's print.anova.merMod shows the criteria at 1 decimal.
         aic_col.append(round(m.AIC, 1))
         bic_col.append(round(m.BIC, 1))
         ll_col.append(round(m.loglike, 1))
-        # ``-2*log(L)`` for the anova column — what R's ``anova.merMod``
-        # prints. For LMM ``m.deviance`` already equals -2·log L; for GLMM
-        # ``m.deviance`` is the residual deviance and the optimised
-        # criterion lives on ``deviance_laplace``. Pick the latter when
-        # available.
         dev_val = float(getattr(m, "deviance_laplace", m.deviance))
         dev_col.append(round(dev_val, 1))
         if k == 0:
@@ -1668,9 +1441,6 @@ def _anova_gmm(*models, labels: list[str]):
             continue
         prev = models[order[k - 1]]
         prev_dev = float(getattr(prev, "deviance_laplace", prev.deviance))
-        # lme4 clamps the LRT statistic at 0 (pmax) — a higher-npar model can
-        # land at a *worse* deviance (non-nested, or optimiser noise), giving a
-        # spurious negative χ². Clamping makes p=1 for those rows.
         chisq = max(0.0, prev_dev - dev_val)
         d_df = m.npar - prev.npar
         p = (

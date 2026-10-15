@@ -1,7 +1,3 @@
-//! `dhyper` / `phyper` — hypergeometric density/CDF (nmath/dhyper.c, phyper.c).
-//! Mirror of the `hea/R/nmath.py` hypergeometric cluster. dhyper is exact-double
-//! (routes through dbinom_raw). phyper's `pdhyper` ratio sums a short converging
-//! `LDOUBLE` series in R; f64 here (residual confined to that tail sum).
 #![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
@@ -15,7 +11,6 @@ use super::toms708::lbeta_scalar;
 
 #[inline]
 fn r_nonint(x: f64) -> bool {
-    // R_nonint: |x - nearbyint(x)| > 1e-9 * max(1, |x|); nearbyint = round-half-even
     (x - x.round_ties_even()).abs() > 1e-9 * 1.0f64.max(x.abs())
 }
 #[inline]
@@ -133,7 +128,6 @@ pub(crate) fn phyper_scalar(
 
 #[inline]
 fn lfastchoose(n: f64, k: f64) -> f64 {
-    // choose.c: lfastchoose(n, k) = -log(n+1) - lbeta(n-k+1, k+1)
     -(n + 1.0).ln() - lbeta_scalar(n - k + 1.0, k + 1.0)
 }
 
@@ -158,10 +152,8 @@ pub(crate) fn qhyper_scalar(
     if nr < 0.0 || nb < 0.0 || n < 0.0 || n > nn {
         return f64::NAN;
     }
-    // Find xr (= #red in sample) with phyper(xr) >= p > phyper(xr-1).
     let xstart = 0.0f64.max(n - nb);
     let xend = n.min(nr);
-    // R_Q_P01_boundaries(p, xstart, xend)
     if log_p {
         if p > 0.0 {
             return f64::NAN;
@@ -212,7 +204,6 @@ pub(crate) fn qhyper_scalar(
     xr
 }
 
-// === PyO3 wrappers ===========================================================
 #[pyfunction]
 #[pyo3(name = "dhyper", signature = (x, r, b, n, give_log=false))]
 pub fn dhyper<'py>(

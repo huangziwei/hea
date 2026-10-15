@@ -35,8 +35,6 @@ from hea.ggplot._block import (
 )
 from hea.ggplot.build import build
 
-# ----- Measurement --------------------------------------------------------
-
 
 def _simple_plot(**labs_kw) -> ggplot:
     df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
@@ -78,10 +76,6 @@ def test_measure_caption_grows_bottom_margin():
 
 
 def test_measure_ylab_grows_left_margin():
-    # Rotated 90°, ANY single-line ylabel has the same width (= font
-    # height); only its presence vs absence changes the left margin.
-    # Compare a plot with the default ylabel against one whose ylabel is
-    # blanked out — the labelpad gap is dropped along with the text.
     p_blank = _simple_plot(y="")
     p_default = _simple_plot()
     a = measure_block(p_blank, build(p_blank))
@@ -95,7 +89,6 @@ def test_measure_blank_xlab_shrinks_bottom_margin():
     p_blank = _simple_plot(x="")
     a = measure_block(p_default, build(p_default))
     b = measure_block(p_blank, build(p_blank))
-    # Default plot's xlabel "x" has nonzero height; blank string drops it.
     assert a.margin_bottom_in > b.margin_bottom_in
 
 
@@ -106,7 +99,6 @@ def test_measure_facet_wrap_panel_grid_dims():
     )
     p = ggplot(df, aes("x", "y")) + geom_point() + facet_wrap("g")
     block = measure_block(p, build(p))
-    # facet_wrap on 3 unique groups → wrap_dims gives (1, 3).
     assert (block.panel_grid_rows, block.panel_grid_cols) == (1, 3)
 
 
@@ -114,9 +106,6 @@ def test_measure_no_facet_panel_grid_is_one_one():
     p = _simple_plot()
     block = measure_block(p, build(p))
     assert (block.panel_grid_rows, block.panel_grid_cols) == (1, 1)
-
-
-# ----- Layout / render ----------------------------------------------------
 
 
 def test_render_block_panel_bbox_matches_margins():
@@ -129,8 +118,6 @@ def test_render_block_panel_bbox_matches_margins():
     try:
         render_block(p, bo, block, fig=fig)
         ax = block.panel_axes[0]
-        # Force a draw so set_position is final (matplotlib's auto-layout
-        # may adjust before then).
         fig.canvas.draw()
         bbox = ax.get_position()  # in figure-relative coords
 
@@ -159,8 +146,6 @@ def test_render_block_facet_creates_n_panel_axes():
     try:
         render_block(p, bo, block, fig=fig)
         assert len(block.panel_axes) == 3
-        # All panel axes should sit inside the panel cell (between left
-        # and right margins).
         fig.canvas.draw()
         for ax in block.panel_axes:
             bbox = ax.get_position()
@@ -177,9 +162,6 @@ def test_draw_uses_block_engine_no_extra_axes():
     p = _simple_plot(title="title", caption="caption")
     fig = p.draw()
     try:
-        # Title/caption are rendered as fig.text / ax.set_title — they
-        # don't add to fig.axes. So a single-panel plot with title+caption
-        # has exactly 1 axes.
         assert len(fig.axes) == 1
     finally:
         plt.close(fig)
@@ -199,7 +181,6 @@ def test_draw_respects_user_width_height_in_cm():
     p = _simple_plot()
     fig = p.draw(width=20, height=15, units="cm")
     try:
-        # 20 cm = 7.874 in, 15 cm = 5.906 in
         assert fig.get_figwidth() == pytest.approx(20 / 2.54, abs=1e-3)
         assert fig.get_figheight() == pytest.approx(15 / 2.54, abs=1e-3)
     finally:

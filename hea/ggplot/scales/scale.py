@@ -11,12 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-# Sentinel for "user did not pass an explicit name=" to a scale factory.
-# Lets us distinguish that case from ``name=None`` (which mirrors R's
-# ``name = NULL`` and means *suppress the axis title*). Factories opt in
-# by defaulting their ``name`` kwarg to this sentinel; the consumer in
-# ``render._default_labels`` then knows whether to override the
-# auto-derived label.
 _NAME_MISSING: Any = object()
 
 
@@ -24,9 +18,7 @@ _NAME_MISSING: Any = object()
 class Scale:
     aesthetics: tuple[str, ...] = ()
     name: Any = _NAME_MISSING
-    # ``breaks``: "default" | None (no ticks) | array-like | callable
     breaks: Any = "default"
-    # ``labels``: "default" | array-like | callable(breaks) -> list[str]
     labels: Any = "default"
     limits: tuple | None = None
     expand: tuple = (0.05, 0.0)
@@ -112,11 +104,7 @@ def format_breaks(breaks) -> list[str]:
 
 
 def _fmt_fixed_vector(values) -> list[str]:
-    """All values formatted with a common decimal count.
-
-    Mirrors R's vector ``format(scientific=FALSE)`` behaviour: pad each
-    entry so the column lines up on the decimal point.
-    """
+    """All values formatted with a common decimal count."""
     decimals = max((_decimals_needed(v) for v in values), default=0)
     if decimals == 0:
         out = []
@@ -147,7 +135,6 @@ def _fmt_sci_vector(values) -> list[str]:
 def _fmt_sci_one(v: float) -> str:
     if v == 0:
         return "0e+00"
-    # Find the smallest mantissa precision that round-trips to v exactly.
     for prec in range(1, 16):
         s = f"{v:.{prec - 1}e}"
         if float(s) == v:
@@ -158,11 +145,7 @@ def _fmt_sci_one(v: float) -> str:
 
 
 def _normalise_exponent(s: str) -> str:
-    """Trim mantissa trailing zeros and pad the exponent to two digits.
-
-    ``2.5000e-04`` → ``2.5e-04``; ``3e-4`` → ``3e-04``. Matches R's
-    default scientific output width.
-    """
+    """Trim mantissa trailing zeros and pad the exponent to two digits."""
     mant, _, exp = s.partition("e")
     if "." in mant:
         mant = mant.rstrip("0").rstrip(".")

@@ -1,4 +1,3 @@
-//! AUTO-GENERATED coefficient tables (bit-exact to hea.R.nmath).
 #![allow(dead_code)]
 
 #[rustfmt::skip]

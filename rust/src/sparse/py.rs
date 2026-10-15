@@ -28,10 +28,6 @@ use super::super_symbolic;
 use super::symbolic::{self, Method, Ordering, Sparse};
 use super::ws::{self, Work};
 
-/// `sys` as `cholmod_solve` names it. The two permutation-only systems have no
-/// `scikit-sparse` equivalent — 0.5.0's `solve()` rejects `system="P"` — and
-/// they are exactly what a caller doing its own triangular solve against `L`
-/// needs, since `L L' = P A P'`.
 fn parse_sys(s: &str) -> PyResult<Sys> {
     Ok(match s {
         "A" => Sys::A,
@@ -73,8 +69,6 @@ pub(super) fn parse_method(s: &str) -> PyResult<Method> {
     })
 }
 
-/// `L->ordering` on the way out, as [`parse_method`] would spell it. Never
-/// `"best"`: the trial loop reports what it *selected*.
 pub(super) fn ordering_name(o: Ordering) -> &'static str {
     match o {
         Ordering::Amd => "amd",
@@ -98,7 +92,6 @@ pub(super) fn parse_supernodal(s: &str) -> PyResult<SuperMode> {
     })
 }
 
-/// `CHOLMOD_SIMPLICIAL` / `CHOLMOD_AUTO` / `CHOLMOD_SUPERNODAL`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SuperMode {
     Simplicial,
@@ -111,43 +104,23 @@ pub(super) enum SuperMode {
 /// (`cholmod_analyze.c:887-891`).
 const SUPERNODAL_SWITCH: f64 = 40.0;
 
-/// Which factorization `L` holds, with the workspace that path needs.
-///
-/// Upstream carries both in one `cholmod_factor` behind `L->is_super` and
-/// switches on it in `cholmod_factorize_p` (`:172`). The two have disjoint
-/// fields and disjoint workspaces, so they are an enum here rather than a
-/// struct with half its members unused.
 enum Kind {
     Simplicial(Box<Simp>),
     Supernodal(Box<Super>),
 }
 
-/// The simplicial factor and the two things only it needs.
 struct Simp {
     l: Factor,
     params: Params,
     ywork: SolveWork,
 }
 
-/// The supernodal factor and the two things only it needs.
 struct Super {
     l: SuperFactor,
     cwork: SuperWork,
     ywork: SuperSolveWork,
 }
 
-/// Whether the pattern `(bp, bi)` is inside `(ap, ai)` — the new `A` inside the
-/// one `L`'s supernodes were built on.
-///
-/// Both patterns have their row indices ascending, so this is a merge, not a
-/// search.
-///
-/// Only the **supernodal** path asks. There the symbolic analysis fixes where
-/// every entry of `L` lives, so an entry of `A` outside that pattern has nowhere
-/// to be assembled; the answer decides whether the analysis can be reused or has
-/// to be redone. The simplicial path never asks: `rowfac` derives each row's
-/// pattern from `A` and the etree as it goes and grows `L` when it has to, so a
-/// wider `A` is simply factorized.
 fn pattern_is_contained(n: usize, ap: &[i64], ai: &[i64], bp: &[i64], bi: &[i64]) -> bool {
     for j in 0..n {
         let (mut q, qend) = (ap[j] as usize, ap[j + 1] as usize);
@@ -164,8 +137,6 @@ fn pattern_is_contained(n: usize, ap: &[i64], ai: &[i64], bp: &[i64], bi: &[i64]
     true
 }
 
-/// `cholmod_analyze` followed by `cholmod_factorize_p` — the body both the
-/// constructor and a re-analyzing [`CholFactor::refactorize`] run.
 fn analyze_and_factorize(
     a: &Sparse,
     beta: f64,
@@ -253,59 +224,22 @@ fn analyze_and_factorize(
     ))
 }
 
-/// A numeric Cholesky factorization, reusable for both new values and repeated
-/// solves.
 #[pyclass(module = "hea._rs")]
 pub struct CholFactor {
-    /// `A->p` and `A->i` of the last matrix factorized — the **pattern**, and
-    /// not the values.
-    ///
-    /// `cholmod_factorize (A, L, Common)` is handed the whole matrix on every
-    /// call and keeps none of it, so [`CholFactor::refactorize`] takes the
-    /// caller's arrays as they arrive and builds a borrowing [`Sparse`] over
-    /// them. Two things still need the pattern after the call returns, and
-    /// nothing needs the values:
-    ///
-    /// * [`pattern_is_contained`], to decide whether the analysis still holds;
-    /// * [`CholFactor::factor_csc`], whose `resymbol_noperm` re-derives `L`'s
-    ///   simplicial pattern from `A`'s and reads no `A->x` at all.
-    ///
-    /// So `A->x` is not stored, which is 367 MiB of the 760 that the whole
-    /// matrix was on a 3.4M-row system. The remaining 393 is the price of
-    /// pruning `factor_csc`'s output, and it is a price rather than an
-    /// oversight: `scikit-sparse` skips `resymbol` — `L()` is
-    /// `cholmod_factor_to_sparse` alone — and so returns the entries relaxed
-    /// amalgamation added.
     ap: Vec<i64>,
     ai: Vec<i64>,
-    /// `A->stype`, kept with the pattern for the same reason: it is what says
-    /// which triangle those indices are.
     stype: i32,
-    /// `A->nrow`. Equal to the column count for a symmetric `A`, and the
-    /// dimension of `L` in both cases: `stype == 0` factorizes `A A'`.
     nrow: usize,
-    /// `A->sorted` for that pattern, so a `refactorize` whose pattern is
-    /// unchanged does not sweep `A->i` again to rediscover it.
     sorted: bool,
     kind: Kind,
     work: Work,
-    /// `Common->rowfacfl` from the last factorization. Simplicial only —
-    /// `cholmod_super_numeric` does not keep a flop count.
     fl: f64,
-    /// What `cholmod_analyze` was told, kept so the analysis can be *redone*
-    /// when a later `A` outgrows it — see [`CholFactor::refactorize`].
     method: Method,
     mode: SuperMode,
     params: Params,
 }
 
 impl CholFactor {
-    /// The supernodal factor converted to a simplicial one, or `None` when it
-    /// is simplicial already and the caller should read `Kind::Simplicial`.
-    ///
-    /// `from_supernodal` followed by `resymbol_noperm`, which is the one
-    /// conversion in this file: `.L` and the selected inverse both come through
-    /// here so they cannot drift apart.
     fn build_simplicial(&mut self) -> PyResult<Option<Factor>> {
         let CholFactor {
             ap,
@@ -354,17 +288,11 @@ impl CholFactor {
         Ok(Some(f))
     }
 
-    /// The selected inverse of `P A P'`, with the permutation to undo it.
-    ///
-    /// Upstream's recursion is stated for `LDL'`, so an `LL'` factor is
-    /// converted through [`Factor::change_factor`] first — on a copy, since a
-    /// caller's factor must still be the one they factorized.
     fn selected(&mut self, py: Python<'_>) -> PyResult<(spinv::Selected, Vec<i64>)> {
         let (z, perm, _) = self.selected_with_phases(py)?;
         Ok((z, perm))
     }
 
-    /// [`CholFactor::selected`], also returning the sweep's phase breakdown.
     fn selected_with_phases(
         &mut self,
         _py: Python<'_>,
@@ -480,24 +408,6 @@ impl CholFactor {
         .map_err(PyValueError::new_err)
     }
 
-    /// Refactorize new values against the same symbolic analysis —
-    /// `cholmod_factorize (A, L, Common)` on a numeric `L`.
-    ///
-    /// **The pattern comes from `A`, and is not assumed to match.** It usually
-    /// does, and then this is the value copy it looks like. But a caller that
-    /// builds `A` as a product recomputes its pattern every time, and an entry
-    /// that comes out numerically zero is one the product simply does not
-    /// emit — so the pattern moves with the values. `gmm`'s
-    /// `M = Λ Zᵀ Z Λᵀ + I` does it in both directions: it drops to
-    /// block-diagonal when the optimizer tries a zero variance component, and
-    /// on `nlme::Machines` with `(Machine|Worker)` it *gains* the `(2,1)` entry
-    /// of each block the moment a correlation goes nonzero, because no
-    /// observation is on two machines at once and `Zᵀ Z` has a structural zero
-    /// there. `cholmod_factorize` is handed the whole `A` for exactly this
-    /// reason, so this is too.
-    ///
-    /// Whether a *wider* `A` is allowed is a property of the path, not a policy
-    /// choice: [`pattern_is_contained`] says which and why.
     #[pyo3(signature = (indptr, indices, data, beta=0.0))]
     fn refactorize(
         &mut self,
@@ -595,9 +505,6 @@ impl CholFactor {
         .map_err(PyValueError::new_err)
     }
 
-    /// `cholmod_solve`. `b` is `n`-by-`nrhs` flattened in **column-major**
-    /// order, which is what `cholmod_dense` is; the returned array has the same
-    /// layout.
     #[pyo3(signature = (b, nrhs=1, system="A"))]
     fn solve(
         &mut self,
@@ -678,14 +585,6 @@ impl CholFactor {
         ))
     }
 
-    /// `diag(A⁻¹)`, in `A`'s own ordering.
-    ///
-    /// Takahashi's recursion over the factor, so `A⁻¹` is never formed. The
-    /// *work* is `Σ_j |L_j|²`, a factorization's flop count rather than its
-    /// nonzero count, and the sweep is scalar where the numeric factorization
-    /// is blocked and threaded — so budget orders of magnitude more than a
-    /// refactorize of the same matrix, not one. It holds roughly two `L`s
-    /// while it runs.
     fn inv_diagonal(&mut self, py: Python<'_>) -> PyResult<Py<PyArray1<f64>>> {
         let (z, perm) = self.selected(py)?;
         let d = z.diagonal();
@@ -697,20 +596,11 @@ impl CholFactor {
         Ok(out.into_pyarray(py).unbind())
     }
 
-    /// Nanoseconds in each of the sweep's three phases: scatter, the fused
-    /// recurrence, gather.
-    ///
-    /// All zero unless the extension was built with the `profiling` feature.
-    /// The unpermute is not timed and not included — this is the sweep alone.
     fn selected_inverse_phases(&mut self, py: Python<'_>) -> PyResult<(u64, u64, u64)> {
         let (_, _, ph) = self.selected_with_phases(py)?;
         Ok((ph.scatter, ph.recurrence, ph.gather))
     }
 
-    /// The selected inverse as CSC `(indptr, indices, data)`, in `A`'s ordering.
-    ///
-    /// The pattern is `L + L'` pulled back through the permutation, so the
-    /// columns are re-sorted on the way out.
     fn selected_inverse(
         &mut self,
         py: Python<'_>,
@@ -763,13 +653,6 @@ impl CholFactor {
         ))
     }
 
-    /// `½ log|det A|`.
-    ///
-    /// The diagonal of an `LDL'` factor holds `D`, not `L`, so this is
-    /// `½ Σ log D_kk` there and `Σ log L_kk` for `LL'` — the same number either
-    /// way. Raises rather than returning `-inf`/`nan` if the factorization
-    /// stopped early, because a caller reading a log-determinant off a factor
-    /// that does not exist is a bug, not a limit case.
     fn half_log_det(&self) -> PyResult<f64> {
         let n = self.n();
         if self.minor() < n {
@@ -803,7 +686,6 @@ impl CholFactor {
         Ok(if self.is_ll() { s } else { 0.5 * s })
     }
 
-    /// `L->Perm`: `L L' = P A P'`, i.e. `A[p][:, p]` is what was factorized.
     #[getter]
     fn perm(&self, py: Python<'_>) -> Py<PyArray1<i64>> {
         match &self.kind {
@@ -822,9 +704,6 @@ impl CholFactor {
         }
     }
 
-    /// `L->ordering` — which method the trial loop actually selected, never
-    /// `"best"`. Worth reading: it is the difference between a factor that
-    /// fills in and one that does not.
     #[getter]
     fn ordering(&self) -> &'static str {
         ordering_name(match &self.kind {
@@ -833,8 +712,6 @@ impl CholFactor {
         })
     }
 
-    /// `L->minor`: `n` if `A` is positive definite, else the first column at
-    /// which it was found not to be.
     #[getter]
     fn minor(&self) -> usize {
         match &self.kind {
@@ -852,26 +729,16 @@ impl CholFactor {
         }
     }
 
-    /// `L->is_super`.
     #[getter]
     fn is_super(&self) -> bool {
         matches!(self.kind, Kind::Supernodal(_))
     }
 
-    /// `Common->rowfacfl` from the last factorization. Zero on the supernodal
-    /// path, which does not keep a flop count.
     #[getter]
     fn rowfacfl(&self) -> f64 {
         self.fl
     }
 
-    /// Entries in `L` — the same number either path took, and the same as
-    /// `len(factor_csc()[2])`.
-    ///
-    /// For the supernodal factor that is `Σ ColCount [j]` from the analysis,
-    /// **not** `L->xsize`: the dense blocks also hold the entries relaxed
-    /// amalgamation added, which are not in `L` and which `factor_csc` prunes.
-    /// See `xsize` for what is actually allocated.
     #[getter]
     fn nnz(&self) -> i64 {
         match &self.kind {
@@ -880,10 +747,6 @@ impl CholFactor {
         }
     }
 
-    /// Doubles held by `L`: `L->xsize` for a supernodal factor, `L->nzmax` for
-    /// a simplicial one. Larger than [`Self::nnz`] on the supernodal path —
-    /// that gap is the price of the dense blocks, and it is reported rather
-    /// than smoothed over.
     #[getter]
     fn xsize(&self) -> i64 {
         match &self.kind {

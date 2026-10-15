@@ -1,5 +1,3 @@
-// AUTO-GENERATED from hea.R.nmath._BD0_SCALE (R bd0.c table). Do not edit by hand.
-// Bit-exact via from_bits; regenerate with the snippet in rust/src/nmath/mod.rs docs.
 #[rustfmt::skip]
 pub const BD0_SCALE: [[f64; 4]; 129] = [
     [f64::from_bits(0x3fe62e4300000000), f64::from_bits(0xbe205c6100000000), f64::from_bits(0xbc9950d880000000), f64::from_bits(0x3b0d9cc020000000)],

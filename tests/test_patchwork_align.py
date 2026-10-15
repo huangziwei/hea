@@ -53,11 +53,7 @@ def _patchwork_doc_plots():
 
 
 def _panel_bboxes(fig) -> list:
-    """Return panel-axes bboxes (figure-relative).
-
-    Filters out colorbar caxes, which the block engine adds in the
-    right-margin column. Heuristic: a colorbar cax is much narrower than
-    a panel (≤ 0.05 of figure width is a reliable threshold)."""
+    """Return panel-axes bboxes (figure-relative)."""
     fig.canvas.draw()
     return [ax.get_position() for ax in fig.axes if ax.get_position().width > 0.05]
 
@@ -69,7 +65,6 @@ def test_horizontal_compose_panels_share_top_and_bottom():
     fig = (p1 | p2).draw(figsize=(8, 3))
     try:
         boxes = _panel_bboxes(fig)
-        # Expect 2 panel axes.
         assert len(boxes) == 2
         b1, b2 = boxes
         assert b1.y0 == pytest.approx(b2.y0, abs=1e-3)
@@ -99,20 +94,10 @@ def test_grid_2x2_panels_align_per_row_and_col():
     fig = (p1 + p2 + p3 + p4).draw(figsize=(8, 6))
     try:
         boxes = _panel_bboxes(fig)
-        # p4 is faceted (3 panels). Total panel axes: p1 + p2 + p3 + 3 facets = 6.
-        # Block engine adds them in row-major order: row 0 = (p1, p2),
-        # row 1 = (p3, p4_panels). So:
-        #   boxes[0] = p1 panel
-        #   boxes[1] = p2 panel
-        #   boxes[2] = p3 panel
-        #   boxes[3..5] = p4 facet panels (3 of them)
         assert len(boxes) == 6
         p1_b, p2_b, p3_b = boxes[0], boxes[1], boxes[2]
-        # Row-shares: p1 and p2 share y; p3 and p4-panel-row share y.
         assert p1_b.y0 == pytest.approx(p2_b.y0, abs=1e-3)
         assert p1_b.y1 == pytest.approx(p2_b.y1, abs=1e-3)
-        # Col-shares: p1 and p3 share x — KEY: this is what the gtable
-        # engine fixes (p3's colorbar would otherwise squeeze p3's panel).
         assert p1_b.x0 == pytest.approx(p3_b.x0, abs=1e-3)
         assert p1_b.x1 == pytest.approx(p3_b.x1, abs=1e-3)
     finally:
@@ -134,10 +119,8 @@ def test_subtitle_on_one_sibling_does_not_squeeze_the_other():
     try:
         boxes = _panel_bboxes(fig)
         b_no, b_yes = boxes
-        # Both panels in same row → matching y-extents.
         assert b_no.y0 == pytest.approx(b_yes.y0, abs=1e-3)
         assert b_no.y1 == pytest.approx(b_yes.y1, abs=1e-3)
-        # And matching heights.
         assert b_no.height == pytest.approx(b_yes.height, abs=1e-3)
     finally:
         plt.close(fig)
@@ -150,7 +133,6 @@ def test_nested_compose_renders_without_subfigures():
     fig = (p1 | (p2 / p3)).draw(figsize=(8, 5))
     try:
         assert len(fig.subfigs) == 0
-        # 3 leaf panels in total.
         boxes = _panel_bboxes(fig)
         assert len(boxes) == 3
     finally:
@@ -163,7 +145,6 @@ def test_nested_compose_p2_p3_share_panel_x_extents():
     fig = (p1 | (p2 / p3)).draw(figsize=(8, 5))
     try:
         boxes = _panel_bboxes(fig)
-        # boxes[0] = p1 (left), boxes[1] = p2 (top right), boxes[2] = p3 (bottom right).
         _, b2, b3 = boxes
         assert b2.x0 == pytest.approx(b3.x0, abs=1e-3)
         assert b2.x1 == pytest.approx(b3.x1, abs=1e-3)
@@ -189,12 +170,6 @@ def test_inter_plot_gap_consistent_across_ytick_widths():
     """The visible whitespace between sibling plots in ``p1 | p2`` must
     not change just because one plot's y-tick labels happen to be wider
     or narrower than another's.
-
-    Regression for the case where the left-margin budget used a fixed
-    ``"00000"`` reserve. A plot with narrow ticks (e.g. ``"0.06"``)
-    over-reserved against ``"00000"``, leaving the slack as visible
-    whitespace at the panel edge — making ``p1 | p2_density`` look more
-    spaced than ``p1 | p2_count`` even though both should align flush.
     """
     import numpy as np
 
@@ -233,8 +208,6 @@ def test_inter_plot_gap_consistent_across_ytick_widths():
         ggplot(df_narrow, aes("x", "y")) + geom_point()
         | ggplot(df_narrow, aes("x", "y")) + geom_point()
     )
-    # 0.10" tolerance — within rendering noise once the budget tracks
-    # the actual tick text. Pre-fix this difference was ~0.12".
     assert abs(g_wide - g_narrow) < 0.10, (
         f'inter-plot gap drifts with y-tick width: wide={g_wide:.3f}", '
         f'narrow={g_narrow:.3f}"'
@@ -244,11 +217,6 @@ def test_inter_plot_gap_consistent_across_ytick_widths():
 def test_colorbar_tick_labels_do_not_overlap_next_plot():
     """Side-by-side compose: a wide-tick colorbar (e.g. ``"10000"`` for a
     count scale) on the LEFT plot must clear the RIGHT plot's ylabel.
-
-    Regression for ``p1 | p2`` where ``p1`` has a count colorbar — the
-    right-margin column was budgeted for ``"0.0"/"0.5"/"1.0"`` (~0.13"
-    label width), so a 5-char ``"10000"`` tick spilled ~0.27" past the
-    column boundary and overlapped p2's ``ylabel``.
     """
     import numpy as np
 
@@ -273,7 +241,6 @@ def test_colorbar_tick_labels_do_not_overlap_next_plot():
             fb = bb.transformed(fig.transFigure.inverted())
             role = "cb" if ax.get_label() == "<colorbar>" else "main"
             bbs.append((role, fb.xmin, fb.xmax))
-        # Render order is p1.main, p1.cb, p2.main, p2.cb.
         p1_right = max(bbs[0][2], bbs[1][2])
         p2_left = min(bbs[2][1], bbs[3][1])
         assert p2_left > p1_right, (
@@ -289,19 +256,12 @@ def test_colorbar_sibling_does_not_squeeze_other_panels():
     """Plot with a colorbar in same row as a plot without — panels still
     have the same width (super_right takes max so the no-colorbar plot
     gets reserved space too).
-
-    Note: matplotlib's fig.colorbar may currently shrink the host axes
-    when called via the legacy apply_legends path; this test pins the
-    CURRENT block-engine behaviour. Phase F replaces apply_legends with
-    block.right and tightens this further.
     """
     df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3], "z": [10.0, 20.0, 30.0]})
     p_plain = ggplot(df, aes("x", "y")) + geom_point()
     p_cbar = ggplot(df, aes("x", "y", colour="z")) + geom_point()
     fig = (p_plain | p_cbar).draw(figsize=(8, 3))
     try:
-        # The plain plot's panel and the colorbar plot's panel should
-        # have the same y-extents (shared row).
         plain = fig.axes[0]
         cbar_panel = fig.axes[1]
         fig.canvas.draw()

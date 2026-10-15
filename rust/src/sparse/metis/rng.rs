@@ -20,15 +20,9 @@ use super::Idx;
 const NN: usize = 312;
 const MM: usize = 156;
 const MATRIX_A: u64 = 0xB502_6F5A_A966_19E9;
-/// Most significant 33 bits.
 const UM: u64 = 0xFFFF_FFFF_8000_0000;
-/// Least significant 31 bits.
 const LM: u64 = 0x7FFF_FFFF;
 
-/// The generator state. In the C this is a pair of file statics in `random.c`
-/// (`mt`, `mti`), reachable from every `irand*` call; here it is owned by
-/// [`super::ctrl::Ctrl`], which every call site already has in scope. What has
-/// to match is the *order* of the draws, and that follows the call order.
 pub struct Rng {
     mt: [u64; NN],
     /// `mti == NN + 1` means `mt` has never been seeded (`random.c:88`).
@@ -74,9 +68,6 @@ impl Rng {
         const MAG01: [u64; 2] = [0, MATRIX_A];
 
         if self.mti >= NN {
-            // "if init_genrand64() has not been called, a default initial seed
-            // is used" — unreachable through `METIS_NodeND`, which seeds in
-            // `SetupCtrl`, but it is what the C does.
             if self.mti == NN + 1 {
                 self.init(5489);
             }

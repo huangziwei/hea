@@ -19,19 +19,6 @@ _PANEL_X_RANGE_KEY = "_stat_density_panel_x_range"
 
 @dataclass
 class StatDensity(Stat):
-    # Mirrors ggplot2's ``stat_density()`` parameter defaults
-    # (R/stat-density.R). ``adjust`` multiplies ``bw`` and is the most
-    # common knob users reach for. ``kernel`` is hardcoded to gaussian
-    # (scipy's ``gaussian_kde``); ``bounds`` is not yet honoured.
-    #
-    # ``trim`` matches R: ``False`` (default) evaluates each group's
-    # density on the panel-wide x range (so all curves share the same
-    # grid and per-group tails extend across the panel); ``True`` clips
-    # each group to its own ``[min(x), max(x)]``. ggplot2 reads this
-    # range from ``scales$x$dimension()``; hea reads it from the panel
-    # data (``compute_panel``) since stats run before scales are trained.
-    # Identical to R when this is the sole layer driving the x scale and
-    # no manual ``xlim()`` is set.
     bw: object = "nrd0"
     adjust: float = 1.0
     n: int = 512
@@ -40,11 +27,6 @@ class StatDensity(Stat):
     default_y_label: str = "density"
 
     def compute_panel(self, data, params):
-        # Capture the panel-wide x range before the base class splits
-        # ``data`` per group. With ``trim = False`` every group's KDE
-        # is evaluated on this shared grid, so a low-mass group's curve
-        # extends across the panel — matching ggplot2's behaviour where
-        # ``scales$x$dimension()`` is the panel x range.
         if "x" in data.columns and len(data):
             xs = data["x"].to_numpy().astype(float)
             xs = xs[~np.isnan(xs)]
@@ -72,8 +54,6 @@ class StatDensity(Stat):
                 x_min, x_max = panel_range
         grid = np.linspace(x_min, x_max, self.n)
 
-        # scipy gaussian_kde takes bw_method as a multiplier on x.std() — pass our
-        # absolute bandwidth as bw / x.std to recover the bandwidth we computed.
         sigma_x = x.std(ddof=1)
         kde = gaussian_kde(x, bw_method=(bw / sigma_x) if sigma_x > 0 else bw)
         density = kde(grid)

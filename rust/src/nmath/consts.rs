@@ -1,4 +1,3 @@
-//! AUTO-GENERATED shared constants (decimal repr = bit-exact to hea.R.nmath).
 #![allow(dead_code)]
 #![allow(non_upper_case_globals)] // M_LN_SQRT_PId2 mirrors the R/nmath.py name
 

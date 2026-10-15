@@ -27,17 +27,12 @@
 use super::super::ws::Ws;
 use super::{Idx, Real};
 
-/// One `(key, val)` heap entry — `rkv_t`/`ikv_t` depending on the
-/// instantiation.
 #[derive(Clone, Copy, Debug)]
 struct Kv<K> {
     key: K,
     val: Idx,
 }
 
-/// `GK_MKPQUEUE_T (PQT, KVT)` (`gk_struct.h`) plus its methods.
-///
-/// `LT` is the template's `KEY_LT` parameter.
 pub struct PQueue<K: Copy, LT: Fn(K, K) -> bool> {
     nnodes: usize,
     heap: Vec<Kv<K>>,
@@ -196,7 +191,6 @@ impl<K: Copy + Default, LT: Fn(K, K) -> bool> PQueue<K, LT> {
         }
     }
 
-    /// The `while (i > 0)` half shared by `Insert`, `Delete` and `Update`.
     fn filter_up(&mut self, mut i: usize, newkey: K) -> usize {
         let PQueue {
             nnodes,
@@ -220,8 +214,6 @@ impl<K: Copy + Default, LT: Fn(K, K) -> bool> PQueue<K, LT> {
         i
     }
 
-    /// The `while ((j = (i << 1) + 1) < nnodes)` half shared by `Delete`,
-    /// `Update` and `GetTop`.
     fn filter_down(&mut self, mut i: usize, newkey: K, nnodes: usize) -> usize {
         let PQueue {
             heap, locator, lt, ..
@@ -253,7 +245,6 @@ impl<K: Copy + Default, LT: Fn(K, K) -> bool> PQueue<K, LT> {
     }
 }
 
-/// The `real_t`-keyed instantiation, the only one `METIS_NodeND` reaches.
 pub type RPQueue = PQueue<Real, fn(Real, Real) -> bool>;
 
 /// `rpqCreate (maxnodes)` with `gklib.c:33`'s `key_gt`.

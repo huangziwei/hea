@@ -26,12 +26,6 @@ from .stat import _GROUPING_AES, Stat
 
 @dataclass
 class StatDensityRidges(Stat):
-    # ggridges' parameters (R/stats.R::stat_density_ridges):
-    # ``bandwidth = NULL`` → joint nrd0 across groups; ``from``/``to``
-    # default to ``[min(x) - 3·bw, max(x) + 3·bw]``; ``n = 512``.
-    # ``calc_ecdf``/``quantile_lines``/``quantiles``/``jittered_points``
-    # are not yet honoured — would require additional output rows tagged
-    # by ``datatype`` and a richer geom.
     bandwidth: object | None = None
     n: int = 512
     from_: float | None = None
@@ -41,18 +35,8 @@ class StatDensityRidges(Stat):
         if "x" not in data.columns or len(data) == 0:
             return pl.DataFrame()
 
-        # ggplot2's ``add_group`` groups by every *discrete* aesthetic
-        # — including the y aes — so ``aes(x=value, y=Species)``
-        # automatically produces one group per Species. hea's
-        # ``_add_group`` only considers colour/fill/shape/linetype, so
-        # for ridges we have to fall back to grouping by y when the
-        # built-in group column doesn't separate the data.
         group_keys = self._group_keys(data)
 
-        # Joint bandwidth: mean of per-group nrd0. Matches ggridges'
-        # ``calc_panel_params``: ``bws <- vapply(xs[xs_mask], bw.nrd0, ...);
-        # bw <- mean(bws, na.rm = TRUE)``. Single bandwidth keeps every
-        # ridge on a comparable smoothness footing.
         if self.bandwidth is None:
             bws = []
             if group_keys:
@@ -79,10 +63,6 @@ class StatDensityRidges(Stat):
         to_x = float(self.to) if self.to is not None else float(xs_all.max()) + 3 * bw
         grid = np.linspace(from_x, to_x, self.n)
 
-        # Carry per-group identifier columns through to the geom: y is
-        # the ridge baseline (not in ``_GROUPING_AES``), plus the usual
-        # group/colour/fill/linetype that ``Stat.compute_panel`` would
-        # normally re-attach.
         preserve = []
         if "y" in data.columns:
             preserve.append("y")
@@ -105,14 +85,7 @@ class StatDensityRidges(Stat):
         return pl.concat(chunks, how="diagonal_relaxed")
 
     def _group_keys(self, data: pl.DataFrame) -> list[str]:
-        """Decide which columns to group by inside :meth:`compute_panel`.
-
-        Prefer ``group`` when it actually splits the data; otherwise
-        fall back to ``y`` so each ridgeline baseline gets its own KDE
-        (mirrors ggplot2's ``add_group`` which treats discrete y as a
-        grouping aesthetic). Some plots set both — in that case use
-        both so e.g. ``aes(y=species, fill=year)`` produces one ridge
-        per (species, year) pair."""
+        """Decide which columns to group by inside :meth:`compute_panel`."""
         keys: list[str] = []
         if "group" in data.columns and data["group"].n_unique() > 1:
             keys.append("group")
@@ -126,8 +99,6 @@ class StatDensityRidges(Stat):
 
     def _compute_one(self, sub, grid, bw, preserve):
         x = _to_clean_floats(sub["x"])
-        # ggridges drops groups with <3 rows
-        # (R/stats.R: ``if(nrow(data) < 3) return(data.frame())``).
         if len(x) < 3:
             return None
         sigma = x.std(ddof=1)

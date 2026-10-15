@@ -95,9 +95,6 @@ class ggplot:
 
     @theme.setter
     def theme(self, value):
-        # Unwrap if someone hands us a handle back (e.g. ``out.theme =
-        # out.theme + thing`` — the RHS delegates to ``Theme.__add__``
-        # so it's already a plain Theme, but guard anyway).
         if isinstance(value, _PlotThemeHandle):
             value = value._theme
         self._theme = value
@@ -121,14 +118,6 @@ class ggplot:
             ggplot(df, aes(x="a", y="b"), color="c")  # x="a", y="b", color="c"
             ggplot(df, aes(x="a"), x="z")              # x="z"
         """
-        # Captures globals + locals of the constructing frame so aes expressions
-        # can resolve names the user had in scope (e.g. helper functions). Same
-        # trick `hea.plot.dispatch.plot` uses; see `_frame_env` there.
-        #
-        # ``_env`` lets the caller pass a pre-captured env, used when ``ggplot``
-        # is invoked through a wrapper (e.g. ``hea.DataFrame.ggplot``) — the
-        # wrapper captures *its* caller's frame and passes it through, otherwise
-        # ``f_back`` here would point at the wrapper, not the user.
         if _env is not None:
             env = _env
         else:
@@ -154,9 +143,6 @@ class ggplot:
         self.plot_env = env
 
     def __add__(self, other):
-        # Patchwork: `ggplot + ggplot` and `ggplot + PlotGrid` compose into
-        # an auto-layout grid (R `library(patchwork)` semantics). Layer/Theme/
-        # Scale/etc. on the rhs falls through to the singledispatch table.
         from .patchwork import GuideArea, PlotGrid, _grid_combine
 
         if isinstance(other, (ggplot, PlotGrid, GuideArea)):
@@ -164,7 +150,6 @@ class ggplot:
         return ggplot_add(other, self)
 
     def __radd__(self, other):
-        # Supports rare `theme(...) + ggplot(...)` form.
         return ggplot_add(other, self)
 
     def __and__(self, other):
@@ -203,8 +188,6 @@ class ggplot:
             return _v_combine(other, self)
         return NotImplemented
 
-    # ---- output ------------------------------------------------------
-
     def draw(
         self,
         ax=None,
@@ -240,9 +223,6 @@ class ggplot:
         from .render import render
 
         if ax is None and subplotspec is None:
-            # Standalone — block engine. Compute figsize up-front so the
-            # gridspec margins (in inches) come out right; matplotlib
-            # normalizes ratios against the actual figure size.
             import matplotlib.pyplot as plt
 
             from ._block import (
@@ -261,8 +241,6 @@ class ggplot:
             render_block(self, bo, block, fig=fig)
             return fig
 
-        # ``ax=`` / ``subplotspec=`` integrate with a user-managed
-        # matplotlib layout — the user owns figure sizing in that case.
         fig = render(self, build(self), ax=ax, subplotspec=subplotspec)
         return fig
 
@@ -294,8 +272,6 @@ class ggplot:
         fig = self.draw()
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
-        # Close so Jupyter doesn't also auto-display the live figure
-        # alongside the _repr_png_ bytes.
         plt.close(fig)
         buf.seek(0)
         return buf.read()
@@ -305,12 +281,7 @@ _UNIT_TO_INCHES = {"in": 1.0, "cm": 1 / 2.54, "mm": 1 / 25.4}
 
 
 def _resolve_figsize(*, width, height, units, figsize) -> tuple[float, float] | None:
-    """Resolve user-supplied size kwargs to ``(w_in, h_in)`` or ``None``.
-
-    Mirrors ``_resize_figure``'s validation but returns inches without
-    touching a figure — the block engine calls this BEFORE creating the
-    figure so the gridspec sees the final size.
-    """
+    """Resolve user-supplied size kwargs to ``(w_in, h_in)`` or ``None``."""
     if figsize is not None:
         if width is not None or height is not None:
             raise TypeError(
@@ -357,9 +328,6 @@ def _resize_figure(fig, *, width, height, units, figsize) -> None:
         units_in_inches = _UNIT_TO_INCHES[units]
 
     fig.set_size_inches(float(width) * units_in_inches, float(height) * units_in_inches)
-    # Some figure layouts (e.g. with a colorbar) emit a UserWarning and may not
-    # converge — accept the new size without re-laying out rather than failing
-    # the whole draw.
     with contextlib.suppress(Exception):
         fig.tight_layout()
 
@@ -413,9 +381,6 @@ def _(thing: Facet, plot):
 @ggplot_add.register
 def _(thing: Theme, plot):
     out = _copy_plot(plot)
-    # Theme merge semantics: complete themes (presets) replace, partial
-    # ``theme(...)`` calls override field-by-field. Implementation in
-    # ``Theme.__add__``.
     out.theme = out.theme + thing
     return out
 
@@ -427,9 +392,6 @@ def _(thing: Labels, plot):
     return out
 
 
-# ``guides(...)`` overrides per-aesthetic guide settings; rendering reads
-# them via ``plot.guide_overrides``. Auto-build still covers the common
-# case so this is currently a forward-compatible passthrough.
 from .guides import Guides as _Guides
 
 
@@ -439,8 +401,6 @@ def _(thing: _Guides, plot):
 
     out = _copy_plot(plot)
     existing = getattr(out, "guide_overrides", {}) or {}
-    # Canonicalize aes spellings so ``guides(color=...)`` (American)
-    # matches groups built off canonical ``"colour"`` aes names.
     new_overrides = {_canon(k): v for k, v in thing.overrides.items()}
     out.guide_overrides = {**existing, **new_overrides}
     return out
@@ -455,12 +415,6 @@ def _(thing: list, plot):
     return plot
 
 
-# ---------------------------------------------------------------------------
-# Fluent API auto-install
-# ---------------------------------------------------------------------------
-
-# Names whose `name(...)` produces a value that's `+`-able into a ggplot.
-# Match by prefix:
 _FLUENT_INSTALL_PREFIXES = (
     "geom_",
     "stat_",
@@ -469,11 +423,6 @@ _FLUENT_INSTALL_PREFIXES = (
     "coord_",
     "theme_",
 )
-# Match by exact name (top-level callables that aren't prefix-matched).
-# Note: ``theme`` is intentionally excluded — it collides with the
-# stored ``_theme`` field on ``ggplot``; the ``theme`` property +
-# :class:`_PlotThemeHandle` covers the fluent ``.theme(...)`` form
-# without needing a class-level method that the dataclass would shadow.
 _FLUENT_INSTALL_EXACT = frozenset(
     {
         "labs",
@@ -488,13 +437,11 @@ _FLUENT_INSTALL_EXACT = frozenset(
     }
 )
 
-# Names that prefix-match but should NOT be installed:
 _FLUENT_SKIP_PREFIXES = (
     "position_",  # kwargs to geoms, not addable on their own
     "element_",  # theme components, used inside theme(...) not added
     "after_",  # aes-modifiers (after_stat, after_scale)
 )
-# Exact names to skip even if they'd otherwise pattern-match:
 _FLUENT_SKIP_EXACT = frozenset(
     {
         "aes",  # mapping arg, not addable
@@ -514,18 +461,7 @@ def _should_install_fluent(name: str) -> bool:
 
 
 def _install_fluent_methods(namespace: dict) -> None:
-    """Install fluent methods on ``ggplot`` for every layer-addable name.
-
-    Each matched name ``foo`` becomes a method ``ggplot.foo`` such that
-    ``plot.foo(*a, **kw)`` is equivalent to ``plot + foo(*a, **kw)``.
-
-    Called at the end of ``hea/ggplot/__init__.py`` once the package's
-    namespace is fully populated. New geoms/scales/themes/etc. added to
-    ``hea.ggplot.__all__`` automatically get fluent methods on the next
-    package import — no per-name maintenance needed.
-
-    Mirrors ``hea/dataframe.py:_install_series_subclass_overrides``.
-    """
+    """Install fluent methods on ``ggplot`` for every layer-addable name."""
     names = namespace.get("__all__") or [n for n in namespace if not n.startswith("_")]
     for name in names:
         if not _should_install_fluent(name):
@@ -534,8 +470,6 @@ def _install_fluent_methods(namespace: dict) -> None:
         if not callable(fn):
             continue
 
-        # Bind ``fn`` as default arg so each closure captures by value
-        # (avoids the late-binding pitfall in for-loop closures).
         def method(self, *args, _fn=fn, **kwargs):
             return self + _fn(*args, **kwargs)
 

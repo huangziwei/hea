@@ -1,12 +1,3 @@
-//! `libmetis/initpart.c` — the initial bisection of the coarsest graph.
-//!
-//! With the default `iptype` (`METIS_IPTYPE_EDGE`) the separator is reached
-//! indirectly: bisect by edge cut, then promote the boundary
-//! (`separator.c`'s `ConstructSeparator`). `METIS_IPTYPE_NODE` goes straight
-//! there through `GrowBisectionNode`. `Init2WayPartition`, the multi-constraint
-//! bisections and `GrowBisectionNode2` belong to the k-way and recursive entry
-//! points.
-
 use super::super::ws::Ws;
 use super::balance::balance_2way;
 use super::ctrl::{Ctrl, METIS_IPTYPE_EDGE, METIS_IPTYPE_NODE};
@@ -19,11 +10,9 @@ use super::srefine::compute_2way_node_partition_params;
 use super::wspace::iwspacemalloc;
 use super::{Idx, Real};
 
-/// `InitSeparator` (`initpart.c:...`).
 pub fn init_separator(ctrl: &mut Ctrl, graph: &mut Graph, niparts: Idx) {
     let ntpwgts: [Real; 2] = [0.5, 0.5];
 
-    // "this is required for the cut-based part of the refinement"
     let (invtvwgt, ncon) = (graph.invtvwgt.clone(), graph.ncon);
     ctrl.setup_2way_bal_multipliers(&invtvwgt, ncon, &ntpwgts);
 
@@ -42,7 +31,6 @@ pub fn init_separator(ctrl: &mut Ctrl, graph: &mut Graph, niparts: Idx) {
     }
 }
 
-/// `RandomBisection` (`initpart.c:...`) — for graphs with no edges at all.
 pub fn random_bisection(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2], niparts: Idx) {
     let nvtxs = graph.nvtxs;
 
@@ -95,8 +83,6 @@ pub fn random_bisection(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2],
     graph.r#where[..nvtxs as usize].copy_from_slice(&bestwhere[..nvtxs as usize]);
 }
 
-/// `GrowBisection` (`initpart.c:...`) — BFS from a random seed until one side
-/// is heavy enough, then balance and FM-refine. Repeated `niparts` times.
 pub fn grow_bisection(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2], niparts: Idx) {
     let nvtxs = graph.nvtxs;
 
@@ -106,8 +92,6 @@ pub fn grow_bisection(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2], n
     let mut queue = iwspacemalloc(nvtxs);
     let mut touched = iwspacemalloc(nvtxs);
 
-    // Note the two are computed in different precisions upstream: `onemaxpwgt`
-    // is an all-`real_t` chain, `oneminpwgt` starts from the double `1.0`.
     let onemaxpwgt = (ctrl.ubfactors[0] * graph.tvwgt[0] as Real * ntpwgts[1]) as Idx;
     let oneminpwgt =
         ((1.0f64 / ctrl.ubfactors[0] as f64) * graph.tvwgt[0] as f64 * ntpwgts[1] as f64) as Idx;
@@ -132,7 +116,6 @@ pub fn grow_bisection(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2], n
 
         loop {
             if first == last {
-                // Empty queue: the graph is disconnected.
                 if nleft == 0 || drain {
                     break;
                 }
@@ -185,7 +168,6 @@ pub fn grow_bisection(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2], n
             }
         }
 
-        // Bad limiting cases.
         if pwgts[1] == 0 {
             let r = ctrl.rng.irand_in_range(nvtxs) as usize;
             graph.r#where[r] = 1;
@@ -212,9 +194,6 @@ pub fn grow_bisection(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2], n
     graph.r#where[..nvtxs as usize].copy_from_slice(&bestwhere[..nvtxs as usize]);
 }
 
-/// `GrowBisectionNode` (`initpart.c:...`) — the `METIS_IPTYPE_NODE` variant,
-/// which builds the separator itself instead of going through
-/// `ConstructSeparator`.
 pub fn grow_bisection_node(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 2], niparts: Idx) {
     let nvtxs = graph.nvtxs;
 
@@ -225,7 +204,6 @@ pub fn grow_bisection_node(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 
     let onemaxpwgt = (ctrl.ubfactors[0] * graph.tvwgt[0] as Real * 0.5) as Idx;
     let oneminpwgt = ((1.0f64 / ctrl.ubfactors[0] as f64) * graph.tvwgt[0] as f64 * 0.5) as Idx;
 
-    // "Allocate sufficient memory for both edge and node"
     graph.pwgts = vec![0; 3];
     graph.r#where = vec![0; nvtxs as usize];
     graph.bndptr = vec![0; nvtxs as usize];
@@ -310,7 +288,6 @@ pub fn grow_bisection_node(ctrl: &mut Ctrl, graph: &mut Graph, ntpwgts: &[Real; 
         balance_2way(ctrl, graph, ntpwgts);
         fm_2way_refine(ctrl, graph, ntpwgts, 4);
 
-        // Construct and refine the vertex separator.
         {
             let (xadj, bndind) = (Ws::new_ref(&graph.xadj), Ws::new_ref(&graph.bndind));
             let w = Ws::new(&mut graph.r#where);

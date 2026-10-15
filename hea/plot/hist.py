@@ -9,17 +9,10 @@ from ._util import resolve_ax, to_value_series
 
 
 def _resolve_breaks(vals: np.ndarray, breaks) -> np.ndarray:
-    """Return bin edges from R-style ``breaks`` argument.
-
-    Accepts an integer (#bins), an explicit sequence of edges, or a
-    method name: ``"sturges"`` (R default), ``"scott"``, or ``"fd"``
-    (Freedman-Diaconis). Unknown strings fall back to numpy's named
-    methods so ``"auto"``, ``"sqrt"``, ``"rice"`` etc. also work.
-    """
+    """Return bin edges from R-style ``breaks`` argument."""
     if isinstance(breaks, str):
         method = breaks.lower()
         if method == "sturges":
-            # R's classical default: ceiling(log2(n) + 1)
             n = max(len(vals), 1)
             nb = int(np.ceil(np.log2(n) + 1))
             return np.histogram_bin_edges(vals, bins=nb)
@@ -88,7 +81,6 @@ def hist(
     widths = np.diff(edges)
 
     if freq is None:
-        # R rule: counts when bin widths are equal, density otherwise.
         freq = bool(widths.size and np.allclose(widths, widths[0]))
 
     if freq:

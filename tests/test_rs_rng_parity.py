@@ -28,13 +28,6 @@ from hea.R.rng import RGenerator, RMersenneTwister
 if not have_rscript():
     pytest.skip("Rscript not on PATH (install R)", allow_module_level=True)
 
-# Strict 0-ulp on macOS (shared Apple libm). The diagnostic CI run showed this 3-way
-# gate is ALSO bit-exact on Linux/glibc for the committed seeds — no continuous drift
-# AND no rejection-sampler desync (the feared 1-ulp accept/reject flip, which would
-# change a draw AND its uniform consumption and cascade, never triggered). So it runs
-# off-macOS too, with a small tolerance purely as insurance against numpy/glibc-build
-# variation; a real desync would blow past any tolerance and fail loudly — the correct
-# signal, not something to mask.
 _STRICT = sys.platform == "darwin"
 _LINUX_RTOL = 1e-14
 
@@ -51,7 +44,6 @@ def _assert_bit_exact(got, exp, label):
     exp = np.atleast_1d(np.asarray(exp, dtype=float))
     assert got.shape == exp.shape, f"{label}: shape {got.shape} != {exp.shape}"
     if not _STRICT:
-        # tolerance/diagnostic off-macOS; reports "Mismatched elements: N/M" per kernel.
         np.testing.assert_allclose(
             got, exp, rtol=_LINUX_RTOL, atol=1e-300, equal_nan=True, err_msg=label
         )
@@ -76,7 +68,6 @@ def _build_cases():
     def add(name, rcall, params, py):
         C.append((name, rcall, [np.asarray(p, float) for p in params], py))
 
-    # --- uniforms / normals / exponential -----------------------------------
     add("runif", "runif(4000)", [], lambda mt: mt.unif_rand(4000))
     add("rnorm", "rnorm(4000)", [], lambda mt: mt.rnorm(4000))
     add(
@@ -89,7 +80,6 @@ def _build_cases():
         lambda mt: np.array([mt.exp_rand() for _ in range(4000)]),
     )
 
-    # --- rpois: runs of equal mu (exercises R's static cache) + pure-vary ----
     mu_inv = np.repeat([0.5, 2.0, 5.0, 9.0, 9.9], 300)  # <10 inversion
     mu_rej = np.repeat([10.0, 15.0, 40.0, 200.0, 1000.0], 300)  # >=10 rejection
     mu_mix = np.concatenate([mu_inv, mu_rej])
@@ -107,7 +97,6 @@ def _build_cases():
         lambda mt, m=mu_vary: np.array([mt.rpois(x) for x in m]),
     )
 
-    # --- rbinom: BINV (small n*p) + BTPE (large n*p) -------------------------
     sizes = [2, 5, 20, 40, 100, 500, 1000]
     probs = [0.05, 0.1, 0.3, 0.5, 0.7, 0.9, 0.95]
     bsz = np.array([s for s in sizes for _ in probs] * 25, float)
@@ -118,7 +107,6 @@ def _build_cases():
         [bsz, bpr],
         lambda mt, s=bsz, p=bpr: np.array([mt.rbinom(a, b) for a, b in zip(s, p)]),
     )
-    # all-BINV stress (the q**n vs R_pow_di path): many small binomials.
     isz = np.array([3, 5, 7, 9, 11, 13, 17, 21, 25, 29] * 300, float)
     ipr = np.array([0.5] * isz.size, float)
     add(
@@ -128,7 +116,6 @@ def _build_cases():
         lambda mt, s=isz, p=ipr: np.array([mt.rbinom(a, b) for a, b in zip(s, p)]),
     )
 
-    # --- rgamma: GS (a<1) + GD (a>=1) across the b/si/c regime splits --------
     gsh_l = [
         0.1,
         0.3,
@@ -156,7 +143,6 @@ def _build_cases():
         lambda mt, s=gsh, c=gsc: np.array([mt.rgamma(a, b) for a, b in zip(s, c)]),
     )
 
-    # --- rnbinom (Poisson-Gamma) --------------------------------------------
     nbz = np.array(
         [s for s in [0.5, 1.0, 2.0, 5.0, 10.0, 50.0] for _ in [0.5, 2.0, 10.0, 50.0]]
         * 30,
@@ -174,7 +160,6 @@ def _build_cases():
         lambda mt, s=nbz, m=nbm: np.array([mt.rnbinom(a, b) for a, b in zip(s, m)]),
     )
 
-    # --- rchisq central + noncentral ----------------------------------------
     cdf = np.array([0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 100.0] * 100, float)
     add(
         "rchisq",
@@ -195,7 +180,6 @@ def _build_cases():
         lambda mt, d=ncdf, c=ncp: np.array([mt.rchisq(a, b) for a, b in zip(d, c)]),
     )
 
-    # --- rt / rf -------------------------------------------------------------
     tdf = np.array([1.0, 2.0, 5.0, 10.0, 30.0, 100.0, 0.5] * 120, float)
     add(
         "rt",
@@ -216,7 +200,6 @@ def _build_cases():
         lambda mt, a=f1, b=f2: np.array([mt.rf(x, y) for x, y in zip(a, b)]),
     )
 
-    # --- rbeta: BC (min<=1) + BB (min>1) ------------------------------------
     ba = np.array(
         [a for a in [0.3, 0.5, 1.0, 2.0, 5.0] for _ in [0.5, 1.0, 3.0]] * 60, float
     )
@@ -230,7 +213,6 @@ def _build_cases():
         lambda mt, a=ba, b=bb: np.array([mt.rbeta(x, y) for x, y in zip(a, b)]),
     )
 
-    # --- sample.int (unweighted): shrinking-pool / replace / permutation -----
     add(
         "sample_norep",
         "sample.int(2000, 800)",
@@ -250,7 +232,6 @@ def _build_cases():
         lambda mt: mt.sample_int(1500, 1500, False) + 1,
     )
 
-    # --- weighted sample (ProbSample{No,}Replace + Walker alias) -------------
     w = _g.uniform(0.0, 1.0, 500)
     w[::7] = 0.0  # some zero weights
     add(
@@ -274,7 +255,6 @@ def _build_cases():
         lambda mt, p=w2: mt.sample_prob(p, 800, True) + 1,
     )
 
-    # --- RGenerator facade (the family `$rd` batch path) vs R -----------------
     rg_mu = np.repeat([0.5, 3.0, 12.0, 80.0], 400).astype(float)
     add(
         "rgen_poisson",
@@ -306,7 +286,6 @@ def _build_cases():
         lambda mt, d=rg_df: RGenerator(mt).standard_t(df=d),
     )
 
-    # --- remaining batch methods (rf_n/rchisq_n/rbeta_n/rnbinom_n/exp_rand_n) -
     bf1 = np.repeat([1.0, 5.0, 30.0], 300).astype(float)
     bf2 = np.tile([2.0, 10.0, 50.0], 300).astype(float)
     add(

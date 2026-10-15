@@ -69,8 +69,6 @@ class GeomRect(Geom):
             alpha=alpha,
         )
         ax.add_collection(coll)
-        # PatchCollection doesn't auto-update the axes data limits; do it
-        # explicitly so autoscale picks up rect bounds.
         ax.update_datalim(
             [
                 (float(xmin.min()), float(ymin.min())),
@@ -82,9 +80,6 @@ class GeomRect(Geom):
 
 @dataclass
 class GeomTile(Geom):
-    # Mirrors ggplot2's ``GeomTile$default_aes`` (R/geom-tile.R):
-    # ``linewidth = 0.4 * borderwidth = 0.4 * 0.5 = 0.2`` mm — slightly
-    # thinner than the 0.5 used by ``GeomRect`` parent.
     default_aes: dict = field(
         default_factory=lambda: {
             "colour": None,
@@ -135,8 +130,6 @@ class GeomRaster(Geom):
         xs = np.unique(x)
         ys = np.unique(y)
 
-        # Regular-grid check: uniform spacing on both axes and exactly one
-        # row per (x, y) cell. If it fails, defer to GeomTile.
         if (
             len(x) != len(xs) * len(ys)
             or (len(xs) > 1 and not np.allclose(np.diff(xs), np.diff(xs)[0]))
@@ -145,11 +138,8 @@ class GeomRaster(Geom):
             GeomTile().draw_panel(data, ax)
             return
 
-        # Build a 2D fill grid indexed (y, x) — matplotlib's imshow expects
-        # row-major (y first, x second). Convert hex strings to RGBA.
         fills = data["fill"].to_list()
         rgba = np.array([_color_to_rgba(c, "grey20") for c in fills])
-        # Map each row's (x_i, y_i) to its position in the regular grid.
         x_idx = np.searchsorted(xs, x)
         y_idx = np.searchsorted(ys, y)
         grid = np.zeros((len(ys), len(xs), 4))
@@ -157,8 +147,6 @@ class GeomRaster(Geom):
 
         dx = xs[1] - xs[0] if len(xs) > 1 else 1.0
         dy = ys[1] - ys[0] if len(ys) > 1 else 1.0
-        # imshow's `extent` is (left, right, bottom, top). origin="lower"
-        # aligns the (0, 0) cell with the bottom-left corner.
         extent = (xs[0] - dx / 2, xs[-1] + dx / 2, ys[0] - dy / 2, ys[-1] + dy / 2)
         alpha = float(_scalar(data, "alpha", default=1.0))
         ax.imshow(
@@ -177,12 +165,6 @@ def _tile_to_rect(data):
 
     from ..positions.position import to_numeric_positions
 
-    # Discrete x / y (Enum / Categorical / Utf8) → 0-based integer positions
-    # so the ``x ± w/2`` arithmetic works. Same conversion the position
-    # adjustments use for dodge / jitter on a categorical axis. matplotlib's
-    # category converter still owns the visible tick labels via the scale's
-    # ``setup_axis`` step — we just need a numeric here so the
-    # rectangle math doesn't trip over a Utf8 / Enum subtraction.
     x = to_numeric_positions(data["x"])
     y = to_numeric_positions(data["y"])
     if "width" in data.columns:
@@ -204,7 +186,6 @@ def _tile_to_rect(data):
         "ymin": ymin.alias("ymin"),
         "ymax": ymax.alias("ymax"),
     }
-    # Carry over fill/colour/alpha/size/linetype if present.
     for aes in ("fill", "colour", "alpha", "size", "linetype"):
         if aes in data.columns:
             out_cols[aes] = data[aes].alias(aes)
@@ -219,10 +200,7 @@ def _scalar(df, col, *, default):
 
 
 def _per_row_color(df, col, default, *, missing_value=None):
-    """Return per-row colour values as a list (or scalar if uniform).
-
-    ``missing_value`` lets callers pass through e.g. ``"none"`` when the
-    aesthetic column has nulls (used for missing edge colour)."""
+    """Return per-row colour values as a list (or scalar if uniform)."""
     from .._util import r_color
 
     if col not in df.columns or len(df) == 0:

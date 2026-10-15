@@ -1,6 +1,3 @@
-//! `pt` / `pf` / `dt` / `qt` / `qf` — R's nmath pt.c / pf.c / dt.c / qt.c / qf.c.
-//! Mirror of the `hea/R/nmath.py` t/F cluster. These route through pbeta /
-//! pgamma / qbeta / qgamma / qnorm / dnorm / bd0 / stirlerr.
 #![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
@@ -164,8 +161,6 @@ pub(crate) fn dt_scalar(x: f64, n: f64, give_log: bool) -> f64 {
     (t - u).exp() * M_1_SQRT_2PI * i_sqrt
 }
 
-/// R's `tanpi(x) = tan(pi*x)` (cospi.c): libm `__tanpi` on darwin (R's
-/// HAVE___TANPI branch), the `Rtanpi` fallback elsewhere.
 #[cfg(target_os = "macos")]
 pub(crate) fn tanpi(x: f64) -> f64 {
     extern "C" {
@@ -478,7 +473,6 @@ pub(crate) fn qf_scalar(p: f64, df1: f64, df2: f64, lower_tail: bool, log_p: boo
     }
 }
 
-// === PyO3 wrappers ===========================================================
 #[pyfunction]
 #[pyo3(name = "pt", signature = (x, n, lower_tail=true, log_p=false))]
 pub fn pt<'py>(

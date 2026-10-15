@@ -72,19 +72,8 @@ This package is the result of splitting the legacy ``hea/R.py`` (one
 
 from __future__ import annotations
 
-#: Every name this namespace re-exports, mapped to the sub-module that defines
-#: it, so nothing is imported until it is touched. Eager re-export makes a
-#: *cycle*: `hea.family` needs `hea.R.nmath`, importing it runs this file, and
-#: this file would pull `htest` and `model_selection`, which import
-#: `hea.models` -- whose `bam` imports `hea.family` straight back. That survives
-#: only while `hea/__init__.py` happens to load `hea.R` before `hea.family`.
-#: It is also weight: nothing in the base-R namespace needs `bam`/`gam`/`glm`
-#: at import time, and `hea.R.nmath` is a numeric leaf that should not cost
-#: them.
 _EXPORTS = {
-    # _shared
     "NamedVector": ("_shared", "NamedVector"),
-    # factor
     "_LazyFactor": ("factor", "_LazyFactor"),
     "factor": ("factor", "factor"),
     "fct": ("factor", "fct"),
@@ -93,7 +82,6 @@ _EXPORTS = {
     "levels": ("factor", "levels"),
     "nlevels": ("factor", "nlevels"),
     "ordered": ("factor", "ordered"),
-    # shape
     "colnames": ("shape", "colnames"),
     "complete_cases": ("shape", "complete_cases"),
     "dim": ("shape", "dim"),
@@ -105,10 +93,8 @@ _EXPORTS = {
     "nrow": ("shape", "nrow"),
     "summary": ("shape", "summary"),
     "tail": ("shape", "tail"),
-    # plotmath
     "cat": ("plotmath", "cat"),
     "quote": ("plotmath", "quote"),
-    # vector
     "cummax": ("vector", "cummax"),
     "cummin": ("vector", "cummin"),
     "cumprod": ("vector", "cumprod"),
@@ -128,7 +114,6 @@ _EXPORTS = {
     "which": ("vector", "which"),
     "which_max": ("vector", "which_max"),
     "which_min": ("vector", "which_min"),
-    # stats_summary
     "IQR": ("stats_summary", "IQR"),
     "cor": ("stats_summary", "cor"),
     "cov": ("stats_summary", "cov"),
@@ -137,7 +122,6 @@ _EXPORTS = {
     "quantile": ("stats_summary", "quantile"),
     "sd": ("stats_summary", "sd"),
     "var": ("stats_summary", "var"),
-    # math
     "LETTERS": ("math", "LETTERS"),
     "abs": ("math", "abs"),
     "acos": ("math", "acos"),
@@ -161,7 +145,6 @@ _EXPORTS = {
     "sqrt": ("math", "sqrt"),
     "tan": ("math", "tan"),
     "trunc": ("math", "trunc"),
-    # matrix
     "R_range": ("matrix", "R_range"),
     "R_round": ("matrix", "R_round"),
     "apply": ("matrix", "apply"),
@@ -175,19 +158,16 @@ _EXPORTS = {
     "rowMeans": ("matrix", "rowMeans"),
     "rowSums": ("matrix", "rowSums"),
     "sweep": ("matrix", "sweep"),
-    # coerce
     "as_Date": ("coerce", "as_Date"),
     "as_character": ("coerce", "as_character"),
     "as_date": ("coerce", "as_date"),
     "as_integer": ("coerce", "as_integer"),
     "as_logical": ("coerce", "as_logical"),
     "as_numeric": ("coerce", "as_numeric"),
-    # predicates
     "is_finite": ("predicates", "is_finite"),
     "is_na": ("predicates", "is_na"),
     "is_null": ("predicates", "is_null"),
     "is_numeric": ("predicates", "is_numeric"),
-    # distance
     "Dist": ("distance", "Dist"),
     "as_dist": ("distance", "as_dist"),
     "as_matrix_dist": ("distance", "as_matrix_dist"),
@@ -197,7 +177,6 @@ _EXPORTS = {
     "labels_dist": ("distance", "labels_dist"),
     "mahalanobis": ("distance", "mahalanobis"),
     "print_dist": ("distance", "print_dist"),
-    # clustering
     "Dendrogram": ("clustering", "Dendrogram"),
     "Hclust": ("clustering", "Hclust"),
     "Kmeans": ("clustering", "Kmeans"),
@@ -225,7 +204,6 @@ _EXPORTS = {
     "reorder_dendrogram": ("clustering", "reorder_dendrogram"),
     "rev_dendrogram": ("clustering", "rev_dendrogram"),
     "str_dendrogram": ("clustering", "str_dendrogram"),
-    # distributions
     "dbeta": ("distributions", "dbeta"),
     "dbinom": ("distributions", "dbinom"),
     "dcauchy": ("distributions", "dcauchy"),
@@ -311,19 +289,15 @@ _EXPORTS = {
     "rwilcox": ("distributions", "rwilcox"),
     "sample": ("distributions", "sample"),
     "set_seed": ("distributions", "set_seed"),
-    # functional
     "sapply": ("functional", "sapply"),
     "tapply": ("functional", "tapply"),
-    # emmeans
     "EmmGrid": ("emmeans", "EmmGrid"),
     "emmeans": ("emmeans", "emmeans"),
     "summary_emmgrid_contrasts": ("emmeans", "summary_emmgrid_contrasts"),
-    # tables
     "addmargins": ("tables", "addmargins"),
     "prop_table": ("tables", "prop_table"),
     "table": ("tables", "table"),
     "xtabs": ("tables", "xtabs"),
-    # htest
     "AnovaTable": ("htest", "AnovaTable"),
     "HTest": ("htest", "HTest"),
     "PairwiseHTest": ("htest", "PairwiseHTest"),
@@ -364,7 +338,6 @@ _EXPORTS = {
     "t_test": ("htest", "t_test"),
     "var_test": ("htest", "var_test"),
     "wilcox_test": ("htest", "wilcox_test"),
-    # model_generics
     "AIC": ("model_generics", "AIC"),
     "BIC": ("model_generics", "BIC"),
     "Terms": ("model_generics", "Terms"),
@@ -408,7 +381,6 @@ _EXPORTS = {
     "isSingular": ("model_generics", "isSingular"),
     "extractAIC": ("model_generics", "extractAIC"),
     "rePCA": ("model_generics", "rePCA"),
-    # formula_helpers
     "DF2formula": ("formula_helpers", "DF2formula"),
     "MFclass": ("formula_helpers", "MFclass"),
     "NAAction": ("formula_helpers", "NAAction"),
@@ -429,7 +401,6 @@ _EXPORTS = {
     "predict_poly": ("formula_helpers", "predict_poly"),
     "reformulate": ("formula_helpers", "reformulate"),
     "update_formula": ("formula_helpers", "update_formula"),
-    # diagnostics
     "cooks_distance": ("diagnostics", "cooks_distance"),
     "dfbeta": ("diagnostics", "dfbeta"),
     "dfbetas": ("diagnostics", "dfbetas"),
@@ -438,7 +409,6 @@ _EXPORTS = {
     "influence": ("diagnostics", "influence"),
     "rstandard": ("diagnostics", "rstandard"),
     "rstudent": ("diagnostics", "rstudent"),
-    # lm_aov_extras
     "Infl": ("lm_aov_extras", "Infl"),
     "cov2cor": ("lm_aov_extras", "cov2cor"),
     "covratio": ("lm_aov_extras", "covratio"),
@@ -449,9 +419,7 @@ _EXPORTS = {
     "replications": ("lm_aov_extras", "replications"),
     "sigma": ("lm_aov_extras", "sigma"),
     "weighted_residuals": ("lm_aov_extras", "weighted_residuals"),
-    # rng
     "RMersenneTwister": ("rng", "RMersenneTwister"),
-    # model_selection
     "add1": ("model_selection", "add1"),
     "anova": ("model_selection", "anova"),
     "drop1": ("model_selection", "drop1"),
@@ -464,15 +432,6 @@ _EXPORTS = {
 }
 
 
-#: Names that are both a sub-module here *and* a function this namespace
-#: re-exports -- ``hea.R.factor``, ``hea.R.matrix``, ``hea.R.emmeans``. Importing
-#: a sub-module binds it into the parent namespace, so it shadows the function.
-#: Eagerly that never showed, because the ``from .factor import (...)`` line ran
-#: after the sub-module import and the function won; lazily, whoever touches the
-#: module first wins, and resolving *any* export from ``.factor`` (``fct``, say)
-#: was enough to leave ``hea.R.factor`` pointing at the module. Binding all three
-#: eagerly would cost 177 ms against this file's 16, so the shadow is undone at
-#: the point it is cast instead.
 _SHADOWED = frozenset({"emmeans", "factor", "matrix"})
 
 
@@ -516,22 +475,15 @@ __all__ = [
     "AIC",
     "BIC",
     "IQR",
-    # base-R constants
     "LETTERS",
     "AnovaTable",
     "DF2formula",
-    # dendrogram subsystem (base-R stats: dendrogram.R, non-graphics)
     "Dendrogram",
-    # distance layer (base-R stats: dist / as.dist / as.matrix.dist + accessors)
     "Dist",
-    # emmeans (CRAN port, parked here until the surface grows)
     "EmmGrid",
-    # hypothesis tests (return HTest, R's ``htest`` print-shape)
     "HTest",
-    # clustering (base-R stats: hclust + tree objects)
     "Hclust",
     "Infl",
-    # k-means (base-R stats: Hartigan-Wong / Lloyd / Forgy / MacQueen)
     "Kmeans",
     "MFclass",
     "NAAction",
@@ -541,7 +493,6 @@ __all__ = [
     "R_range",
     "R_round",
     "Terms",
-    # lme4 merMod accessors (VarCorr / getME / predicates / getData / rePCA)
     "VarCorr",
     "acos",
     "add1",
@@ -560,7 +511,6 @@ __all__ = [
     "as_integer",
     "as_logical",
     "as_matrix_dist",
-    # coercion / predicates
     "as_numeric",
     "asin",
     "atan",
@@ -569,13 +519,11 @@ __all__ = [
     "binom_test",
     "bootMer",
     "case_names",
-    # base I/O
     "cat",
     "cbind",
     "ceiling",
     "chisq_test",
     "cmdscale",
-    # model generics (lm / glm / gam / bam / gmm)
     "coef",
     "coefficients",
     "colMeans",
@@ -619,10 +567,8 @@ __all__ = [
     "dist",
     "dlnorm",
     "dlogis",
-    # combinatorial / multivariate + Smirnov distribution surface
     "dmultinom",
     "dnbinom",
-    # distributions: d/p/q/r families
     "dnorm",
     "dpois",
     "drop1",
@@ -655,10 +601,8 @@ __all__ = [
     "getData",
     "getME",
     "get_all_vars",
-    # regression diagnostics
     "hatvalues",
     "hclust",
-    # shape / preview
     "head",
     "influence",
     "influence_measures",
@@ -695,7 +639,6 @@ __all__ = [
     "mantelhaen_test",
     "matrix",
     "mcnemar_test",
-    # reductions (R defaults: sd/var use N-1)
     "mean",
     "median",
     "merge_dendrogram",
@@ -737,11 +680,6 @@ __all__ = [
     "pgamma",
     "pgeom",
     "phyper",
-    # elementwise math (R: vectorized scalar functions)
-    # Note: ``abs`` and ``round`` exist as module attributes but are NOT
-    # exported — they collide with Python builtins and the translator
-    # treats the R names as builtins (the builtin handles scalars / Series
-    # / ndarrays via __abs__ / __round__).
     "pi",
     "plnorm",
     "plogis",
@@ -793,14 +731,12 @@ __all__ = [
     "quade_test",
     "quantile",
     "qunif",
-    # plotmath
     "quote",
     "qweibull",
     "qwilcox",
     "r2dtable",
     "rWishart",
     "ranef",
-    # rank helpers (Lindeløv-style "tests as lm" notebook)
     "rank",
     "rbeta",
     "rbind",
@@ -810,12 +746,9 @@ __all__ = [
     "rePCA",
     "refit",
     "refitML",
-    # formula / model-frame helpers (models.R, nafns.R, contr.poly.R)
     "reformulate",
     "reorder",
     "reorder_dendrogram",
-    # vector primitives — R's rep() flattens nested list-of-vector inputs
-    # (the translator emits ``c(scalar, vec)`` as a Python list literal).
     "rep",
     "replications",
     "resid",
@@ -833,7 +766,6 @@ __all__ = [
     "rnbinom",
     "rnorm",
     "rowMeans",
-    # matrix / frame utilities (R: base matrix ops)
     "rowSums",
     "rpois",
     "rsignrank",
@@ -847,13 +779,11 @@ __all__ = [
     "sample",
     "sapply",
     "sd",
-    # vector helpers
     "seq",
     "seq_along",
     "seq_len",
     "set_seed",
     "shapiro_test",
-    # lm / aov extras
     "sigma",
     "sign",
     "signed_rank",
@@ -867,7 +797,6 @@ __all__ = [
     "summary_emmgrid_contrasts",
     "sweep",
     "t_test",
-    # contingency tables
     "table",
     "tabulate",
     "tail",
@@ -875,7 +804,6 @@ __all__ = [
     "tapply",
     "terms",
     "trunc",
-    # time series construction (R's ts())
     "ts",
     "unique",
     "update",

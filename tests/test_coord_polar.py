@@ -28,10 +28,6 @@ from hea.ggplot import (
 )
 from hea.ggplot.coords import CoordPolar
 
-# ---------------------------------------------------------------------------
-# Construction & dispatch
-# ---------------------------------------------------------------------------
-
 
 def test_coord_polar_defaults():
     c = coord_polar()
@@ -64,11 +60,6 @@ def test_coord_polar_fluent_form_works():
     p = df.ggplot(aes("x", "y")).geom_point().coord_polar(start=math.pi / 2)
     assert isinstance(p.coordinates, CoordPolar)
     assert p.coordinates.start == math.pi / 2
-
-
-# ---------------------------------------------------------------------------
-# Axes creation + orientation
-# ---------------------------------------------------------------------------
 
 
 def test_coord_polar_creates_polar_axes_standalone():
@@ -127,11 +118,6 @@ def test_coord_polar_direction_negates_for_matplotlib():
         plt.close(fig_ccw)
 
 
-# ---------------------------------------------------------------------------
-# Multi-path render entry points
-# ---------------------------------------------------------------------------
-
-
 def test_coord_polar_via_subplotspec():
     """``plot.draw(subplotspec=spec)`` — patchwork / mosaic integration path.
     Hits ``render._render_single``'s ``subplotspec`` branch (not the block
@@ -170,16 +156,10 @@ def test_coord_polar_accepts_polar_ax():
     fig, ax = plt.subplots(subplot_kw={"projection": "polar"})
     try:
         out = p.draw(ax=ax)
-        # Same figure returned, polar preserved.
         assert out is fig
         assert ax.name == "polar"
     finally:
         plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# Theme regression — _apply_spines guard
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("theme_factory", [theme_minimal, theme_bw])
@@ -191,11 +171,6 @@ def test_coord_polar_does_not_crash_under_themes(theme_factory):
     p = ggplot(df, aes("x", "y")) + geom_point() + coord_polar() + theme_factory()
     fig = p.draw()
     plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# Theta rescale — the 1D linear remap to [0, 2π]
-# ---------------------------------------------------------------------------
 
 
 def test_rescale_theta_continuous_two_pi_is_noop():
@@ -220,7 +195,6 @@ def test_rescale_theta_rescales_width():
     c = coord_polar()
     df = pl.DataFrame({"x": [0.0, 7.0], "width": [1.0, 1.0]})
     out = c.rescale_theta(df, (0.0, 7.0))
-    # factor = 2π/7, width stays proportional.
     np.testing.assert_allclose(out["width"].to_numpy(), [2 * math.pi / 7] * 2)
 
 
@@ -245,11 +219,6 @@ def test_rescale_theta_zero_span_returns_df():
     assert c.rescale_theta(df, (1.0, 1.0)) is df
 
 
-# ---------------------------------------------------------------------------
-# End-to-end: ordinal bar chart on polar (the snippet's scenario)
-# ---------------------------------------------------------------------------
-
-
 def test_coord_polar_bar_chart_renders_wedges_for_each_ordinal_level():
     """Eight ordinal levels → eight wedges spanning the circle evenly.
     Equivalent to ggplot2's ``ggplot(diamonds) + geom_bar(aes(clarity)) +
@@ -261,15 +230,8 @@ def test_coord_polar_bar_chart_renders_wedges_for_each_ordinal_level():
     try:
         ax = fig.axes[0]
         assert ax.name == "polar"
-        # 4 categories → 4 wedges (matplotlib Rectangle patches for ax.bar
-        # on polar axes are stored under ax.patches).
         assert len(ax.patches) == 4
-        # Each wedge sits at a multiple of 2π/N (modulo the rescale's
-        # +0.6/-0.6 expansion). Confirm they're spread around the circle
-        # rather than overlapping at theta=0..3.
         thetas = sorted(p.get_x() + p.get_width() / 2 for p in ax.patches)
-        # Span of bar centres exceeds π (i.e., the bars wrap the circle,
-        # not all bunched in one quadrant).
         assert thetas[-1] - thetas[0] > math.pi
     finally:
         plt.close(fig)
@@ -289,16 +251,10 @@ def test_coord_polar_continuous_x_keeps_radians_data():
     try:
         ax = fig.axes[0]
         assert ax.name == "polar"
-        # PathCollection from ax.scatter — verify 8 points present.
         coll = ax.collections[0]
         assert len(coll.get_offsets()) == 8
     finally:
         plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
-# Patchwork composition — the full snippet shape
-# ---------------------------------------------------------------------------
 
 
 def test_coord_polar_suppresses_axis_titles_by_default():
@@ -350,9 +306,6 @@ def test_coord_polar_ordinal_bars_tile_full_circle_without_seam_gap():
     fig = p.draw()
     try:
         ax = fig.axes[0]
-        # Sort bar centers; check spacing between adjacent bars equals
-        # the seam spacing (bar n-1 right edge ↔ bar 0 left edge, modulo
-        # 2π). If the seam has a unique gap, this fails.
         centers = sorted(p.get_x() + p.get_width() / 2 for p in ax.patches)
         spacings = [centers[i + 1] - centers[i] for i in range(n - 1)]
         seam_spacing = (2 * math.pi - centers[-1]) + centers[0]

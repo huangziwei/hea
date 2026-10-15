@@ -1,6 +1,3 @@
-//! `pgamma` / `dgamma` / `qgamma` — R's pgamma.c (Welinder) / dgamma.c /
-//! qgamma.c (AS 91 + Newton). Mirror of the `hea/R/nmath.py` gamma cluster.
-//! Scalar kernels + numpy-vectorized PyO3 wrappers.
 #![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
@@ -16,7 +13,6 @@ use super::util::rfma;
 
 const EPS: f64 = f64::EPSILON;
 
-// --- dpq.h helpers -----------------------------------------------------------
 #[inline]
 pub(crate) fn r_log1_exp(x: f64) -> f64 {
     if x > -M_LN2 {
@@ -72,13 +68,11 @@ pub(crate) fn r_dt_qiv(p: f64, lower_tail: bool, log_p: bool) -> f64 {
     }
 }
 
-// --- continued fraction / series helpers (pgamma.c) --------------------------
 fn logcf(x: f64, i: f64, d: f64, eps: f64) -> f64 {
     let mut c1 = 2.0 * d;
     let mut c2 = i + d;
     let mut c4 = c2 + d;
     let mut a1 = c2;
-    // C: `a*b - c*d` fuses the first product (clang fmadd/fnmul), `a - c` → fmsub.
     let mut b1 = i * rfma(-i, x, c2); // i*(c2 - i*x)
     let mut b2 = d * d * x;
     let mut a2 = rfma(c4, c2, -b2); // c4*c2 - b2
@@ -297,7 +291,6 @@ fn pd_lower_series(lambda: f64, mut y: f64) -> f64 {
     }
     if y != y.floor() {
         let f = pd_lower_cf(y, lambda + 1.0 - y);
-        // C `sum += term * f` — compound add with RHS mul; clang fuses.
         sum = rfma(term, f, sum);
     }
     sum
@@ -621,7 +614,6 @@ pub fn qgamma_scalar(mut p: f64, alpha: f64, scale: f64, lower_tail: bool, mut l
             let t = p2 * rfma(-c, ch.ln(), rfma(alpha, M_LN2, g) + p1).exp();
             let b = t / ch;
             let a = rfma(0.5, t, -(b * c));
-            // Nested Horners; clang fuses every `acc*a + C` within the expression.
             let s1 = rfma(
                 a,
                 rfma(a, rfma(a, rfma(a, rfma(60.0, a, 70.0), 84.0), 105.0), 140.0),
@@ -654,7 +646,6 @@ pub fn qgamma_scalar(mut p: f64, alpha: f64, scale: f64, lower_tail: bool, mut l
             let _ = i;
         }
     }
-    // END
     let mut x = 0.5 * scale * ch;
     if max_it_newton != 0 {
         if !log_p {
@@ -697,8 +688,6 @@ pub fn qgamma_scalar(mut p: f64, alpha: f64, scale: f64, lower_tail: bool, mut l
     }
     x
 }
-
-// === PyO3 wrappers (numpy-vectorized; Python pre-broadcasts equal-length) =====
 
 #[pyfunction]
 #[pyo3(name = "pgamma", signature = (x, alph, scale, lower_tail=true, log_p=false))]

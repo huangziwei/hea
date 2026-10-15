@@ -35,11 +35,6 @@ def diastolic():
     return pl.Series("diastolic", rng.normal(72, 12, 200))
 
 
-# ---------------------------------------------------------------------------
-# hist
-# ---------------------------------------------------------------------------
-
-
 def test_hist_returns_axes_with_explicit_labels(diastolic):
     """The chapter form: ``hist(pima$diastolic, xlab='Diastolic', main='')``."""
     ax = hist(diastolic, xlab="Diastolic", main="")
@@ -68,7 +63,6 @@ def test_hist_probability_switches_to_density(diastolic):
     """``probability=True`` is the negation of ``freq=True``."""
     ax = hist(diastolic, probability=True)
     bars = ax.patches
-    # density-mode bar heights integrate to 1.0 (up to numerical error).
     area = sum(b.get_height() * b.get_width() for b in bars)
     assert abs(area - 1.0) < 1e-9
     assert ax.get_ylabel() == "Density"
@@ -88,11 +82,6 @@ def test_hist_breaks_explicit_edges(diastolic):
 def test_hist_rejects_both_freq_and_probability(diastolic):
     with pytest.raises(ValueError, match="freq= or probability="):
         hist(diastolic, freq=True, probability=False)
-
-
-# ---------------------------------------------------------------------------
-# boxplot — standalone, single + multi vector.
-# ---------------------------------------------------------------------------
 
 
 def test_boxplot_single_vector():
@@ -116,7 +105,6 @@ def test_boxplot_list_of_vectors():
 
 def test_boxplot_horizontal_flag():
     ax = boxplot([1.0, 2.0, 3.0], horizontal=True)
-    # In horizontal mode matplotlib uses y-tick labels for groups.
     labels = [t.get_text() for t in ax.get_yticklabels()]
     assert labels == ["1"]
 
@@ -124,11 +112,6 @@ def test_boxplot_horizontal_flag():
 def test_boxplot_requires_at_least_one_arg():
     with pytest.raises(TypeError, match="at least one"):
         boxplot()
-
-
-# ---------------------------------------------------------------------------
-# barplot — vector heights & table() input.
-# ---------------------------------------------------------------------------
 
 
 def test_barplot_vector_heights():
@@ -158,11 +141,6 @@ def test_barplot_horiz_uses_y_axis():
 def test_barplot_rejects_length_mismatch():
     with pytest.raises(ValueError, match="names has"):
         barplot([1, 2, 3], names=["only", "two"])
-
-
-# ---------------------------------------------------------------------------
-# density — KDE object + .plot()
-# ---------------------------------------------------------------------------
 
 
 def test_density_returns_density_object(diastolic):
@@ -200,13 +178,7 @@ def test_plot_dispatches_density_object(diastolic):
     ax = plot(density(diastolic), main="")
     assert isinstance(ax, matplotlib.axes.Axes)
     assert ax.get_title() == ""
-    # The dispatch should have drawn a density curve, not scatter points.
     assert len(ax.lines) == 1
-
-
-# ---------------------------------------------------------------------------
-# rug — overlay on existing axes.
-# ---------------------------------------------------------------------------
 
 
 def test_rug_overlays_ticks(diastolic):
@@ -214,7 +186,6 @@ def test_rug_overlays_ticks(diastolic):
     hist(diastolic, ax=ax)
     n_lines_before = len(ax.lines)
     rug(diastolic, ax=ax)
-    # One tick per data point added.
     assert len(ax.lines) - n_lines_before == diastolic.len()
 
 
@@ -249,11 +220,6 @@ def test_rug_rejects_bad_side(diastolic):
     _fig, ax = plt.subplots()
     with pytest.raises(ValueError, match="side="):
         rug(diastolic, side="nowhere", ax=ax)
-
-
-# ---------------------------------------------------------------------------
-# curve — function evaluation + overlay.
-# ---------------------------------------------------------------------------
 
 
 def test_curve_plots_function():
