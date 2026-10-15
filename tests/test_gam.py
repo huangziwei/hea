@@ -4763,10 +4763,8 @@ def test_fit5_fully_penalized_summary_matches_mgcv():
     # On this R-native seed-31 data s(v) fully SATURATES (sp→∞, edf→1):
     # its λ rides a flat ridge where hea (3.69e10) and mgcv (3.43e10) stop
     # at different huge values, yet the s.table row (edf 1, Chi.sq 10.54)
-    # is identical — so s(v)'s λ is only asserted >1e9 while s(x,cc)/s(g,re)
-    # λ and the whole s.table pin tight. One uniform 5e-5 class — the circlss
-    # test-pnlss-parity.R convention, widened from its 2e-6 because this
-    # basin is far flatter than any there.
+    # is identical. s(v)'s λ is asserted >1e9; s(x,cc)/s(g,re) λ and the whole
+    # s.table pin at one uniform 5e-5 tolerance.
     # R: gam(list(y ~ ..., ~ 1), family=gaulss(), method="REML",
     # knots=list(x=c(0, 2*pi)), control=gam.control(epsilon=1e-10,
     # newton=list(conv.tol=1e-11))) on the same %.17g CSV; pins from

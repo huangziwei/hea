@@ -3398,12 +3398,9 @@ def test_bam_general_discrete_ok_gate():
 
 
 def test_bam_cc_discrete_matches_mgcv():
-    """Cyclic (bs='cc') smooths on the discrete rail — the basis every
-    pycircstat2 circ_bam fit hits first (binned marginals + explicit
-    full-circle knots) had no hea coverage. Live mgcv 1.9-4 pins,
-    set.seed(66); x0 <- runif(n)*2*pi; x1 <- runif(n); e <- rnorm(n);
-    y <- sin(x0) + .5*cos(2*x0) + 1.2*x1 + .3*e; n=300:
-    """
+    """``bs='cc'`` smooths on the discrete rail, with and without full-circle
+    ``knots``, against mgcv 1.9-4 on set.seed(66); x0 <- runif(n)*2*pi;
+    x1 <- runif(n); e <- rnorm(n); y <- sin(x0) + .5*cos(2*x0) + 1.2*x1 + .3*e."""
     from hea.family import gaulss
     from hea.R.rng import RGenerator
 

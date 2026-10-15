@@ -21,7 +21,7 @@ module-name = "hea._rs"              # compiled module installs as hea/_rs
 
 [project]
 name = "hea"
-version = "0.1.10"
+version = "0.2.0"
 description = "R-style Linear Models with Python"
 authors = []
 requires-python = ">=3.10.0"
@@ -35,7 +35,7 @@ dependencies = [
     # API and either can move in any release, so the version is pinned and
     # tests/test_dataframe_subclass.py is the tripwire. Nothing below polars
     # 1.44 works: `_collect_eager` and `Categories.to_series()` are absent.
-    "polars==2.0.0rc1",
+    "polars==2.0.0",
     "scipy>=1.15.1",
 ]
 
@@ -63,13 +63,6 @@ data = [
 # `hea.sparse`, a Rust port of CHOLMOD shipped in the wheel, so there is
 # nothing optional left to install for it.
 fast = []
-
-[tool.uv]
-# The polars pin is a release candidate (see [project].dependencies) and uv
-# will not resolve a pre-release without this. It has to be "allow": the
-# narrower "explicit" covers only packages this file names, and polars pulls
-# its own `polars-runtime-*` rc transitively. Remove once the pin is final.
-prerelease = "allow"
 
 [dependency-groups]
 dev = [

@@ -28,7 +28,7 @@ dump_model <- function(tag, f, dat) {
               paste(sprintf("%.5g", bF$sp), collapse = ", ")))
   cat(sprintf("%-4s bamT: edf=%.6f sp=(%s)\n", tag, sum(bT$edf),
               paste(sprintf("%.5g", bT$sp), collapse = ", ")))
-  d <- file.path("/Users/ziweih/Works/hea/tests/fixtures/bam_rf_by", tag)
+  d <- file.path("tests/fixtures/bam_rf_by", tag)
   dir.create(d, showWarnings = FALSE, recursive = TRUE)
   write.table(fitted(bF), file.path(d, "bamF_fitted.csv"),
               row.names = FALSE, col.names = FALSE)
@@ -39,7 +39,7 @@ dump_model <- function(tag, f, dat) {
   write.table(sum(bT$edf), file.path(d, "bamT_edfsum.csv"), row.names = FALSE, col.names = FALSE)
 }
 
-out_dir <- "/Users/ziweih/Works/hea/tests/fixtures/bam_rf_by"
+out_dir <- "tests/fixtures/bam_rf_by"
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
 ## --- 2-D spatiotemporal RF: te(Lag, Xc, by=Stim) ------------------------

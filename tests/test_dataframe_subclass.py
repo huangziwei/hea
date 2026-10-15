@@ -57,6 +57,7 @@ def s() -> Series:
 DF_ALLOWLIST: set[str] = set()
 
 LF_ALLOWLIST: set[str] = {
+    "from_lazyframe_resolver",
     "pivot",
 }
 
@@ -462,6 +463,7 @@ SERIES_NON_S: set[str] = {
     "all",
     "any",
     "approx_n_unique",
+    "approx_quantile",
     "arg_max",
     "arg_min",
     "bitwise_and",
