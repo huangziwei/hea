@@ -1,7 +1,5 @@
 # hea: R-style Linear Models without *R* (but with Python)
 
-
-
 ## Install
 
 ```bash
@@ -63,4 +61,4 @@ ct1.summary()
 ct1.plot_smooth(partial_residuals=True)
 ```
 
-See more examples in [examples/books/lmwr](./example/books/lmwr), [examples/books/gam](./example/books/gam.ipynb) and more.
+See more examples in [examples/books/lmwr](./examples/books/lmwr), [examples/books/gam](./examples/books/gam.ipynb) and more.
