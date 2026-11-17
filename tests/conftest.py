@@ -33,6 +33,33 @@ DATA_ROOT = Path(__file__).parent.parent / "datasets"
 MANIFEST_PATH = FIXTURE_ROOT / "manifest.json"
 
 
+def _pinned_arithmetic() -> bool:
+    import platform
+    import sys
+
+    import scipy
+
+    from hea.sparse import build_info
+
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        return False
+    deps = scipy.show_config(mode="dicts")["Build Dependencies"]
+    return (
+        deps["blas"]["name"].lower() == "accelerate"
+        and build_info().get("backend") == "accelerate"
+    )
+
+
+# The R fixtures and exact-bit pins were written by R on darwin/arm64 with
+# libRblas linked to Accelerate. Here hea issues the same BLAS calls to the
+# same library and contracts a*b + c as that build does, so a result decided
+# by last-bit rounding can equal R's only under this configuration: thin-plate
+# Lanczos signs (which the null-space QR turns into a rotation of the whole
+# wiggly basis) and the basis eigen() returns for a numerically zero
+# eigenspace. Under other arithmetic those values move for R itself.
+PINNED_ARITHMETIC = _pinned_arithmetic()
+
+
 def load_manifest():
     with open(MANIFEST_PATH) as f:
         return json.load(f)

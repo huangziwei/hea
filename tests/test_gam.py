@@ -44,8 +44,8 @@ import matplotlib
 import numpy as np
 import polars as pl
 import pytest
+from conftest import PINNED_ARITHMETIC, load_dataset
 from conftest import assert_fp_equiv as _assert_fp_equiv
-from conftest import load_dataset
 
 from hea.family import Gamma, Poisson, Tweedie, tw
 from hea.models import gam, glm
@@ -4330,7 +4330,9 @@ def test_vcomp_rescale_fs_consistency_and_mgcv():
     # The fs pins come from R reading the fixture's bits through
     # writeBin/readBin: the fit hangs on the basis of a near-zero eigenspace
     # in nat.param, which moves with one-ulp input changes, and R's CSV
-    # parser rounds 31 of these 240 x0 values differently.
+    # parser rounds 31 of these 240 x0 values differently. That basis also
+    # carries the BLAS's last bits, so R's own values hold only under
+    # PINNED_ARITHMETIC; the rescale identities hold everywhere.
     m = gam("y ~ s(x0, g, bs='fs')", _vcomp_fixture(), method="REML")
     vc = m.vcomp
     vc0 = m._compute_vcomp(rescale=False)
@@ -4345,6 +4347,8 @@ def test_vcomp_rescale_fs_consistency_and_mgcv():
         vc0["lower"].to_numpy()[:3] * np.sqrt(ss),
         rtol=1e-12,
     )
+    if not PINNED_ARITHMETIC:
+        return
     np.testing.assert_allclose(
         vc0["std_dev"].to_numpy(),
         [4.413976398, 3.953204127, 4.196293391, 0.7425853829],
@@ -4362,9 +4366,14 @@ def test_vcomp_rescale_fs_consistency_and_mgcv():
     )
 
 
+@pytest.mark.skipif(
+    not PINNED_ARITHMETIC,
+    reason="mgcv's fs null-space basis follows the BLAS's last bits",
+)
 def test_fs_smooth_fit_matches_mgcv():
     # mgcv 1.9-4 on the fixture's exact bits (writeBin/readBin; see
-    # test_vcomp_rescale_fs_consistency_and_mgcv for why not a CSV).
+    # test_vcomp_rescale_fs_consistency_and_mgcv for why not a CSV, and why
+    # only under PINNED_ARITHMETIC).
     df = _vcomp_fixture()
     m = gam("y ~ s(x0, g, bs='fs')", df, method="REML")
     np.testing.assert_allclose(
@@ -4940,19 +4949,21 @@ def test_gaulss_efs_optimizer_matches_mgcv():
     m = gam(["y ~ s(x) + w", "~ s(z)"], df, family=_gaulss_efs(), method="REML")
     assert m.outer_info["iter"] == 5
     # EFS stops on a loose band from inner fits at epsilon = 1e-7, so its
-    # sp carries the inner fit's rounding: ~5e-5 here with bit-identical X.
+    # sp carries the inner fit's rounding: ~5e-5 here with bit-identical X
+    # under PINNED_ARITHMETIC, ~8e-4 under another BLAS.
+    tol = 1e-4 if PINNED_ARITHMETIC else 1e-3
     np.testing.assert_allclose(
-        m.sp, [0.13952991661542161, 0.1791785588752533], rtol=1e-4
+        m.sp, [0.13952991661542161, 0.1791785588752533], rtol=tol
     )
     np.testing.assert_allclose(
-        m.REML_criterion / 2, 216.91862441143917, rtol=0, atol=1e-4
+        m.REML_criterion / 2, 216.91862441143917, rtol=0, atol=tol
     )
-    np.testing.assert_allclose(m.edf_total, 14.275620761125078, rtol=0, atol=1e-4)
+    np.testing.assert_allclose(m.edf_total, 14.275620761125078, rtol=0, atol=tol)
     np.testing.assert_allclose(
         np.asarray(m.fitted_values)[:2],
         [[1.462325738, 2.146764825], [-0.1597381979, 1.618533839]],
         rtol=0,
-        atol=1e-4,
+        atol=tol,
     )
     assert m.sp_vcov() is None
     np.testing.assert_array_equal(m.Vc, m.Vp)

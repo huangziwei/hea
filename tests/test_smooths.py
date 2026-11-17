@@ -26,6 +26,7 @@ import polars as pl
 import pytest
 from conftest import (
     FIXTURE_ROOT,
+    PINNED_ARITHMETIC,
     _apply_schema,
     fixture_meta,
     fixtures_by_kind,
@@ -56,6 +57,31 @@ def _fs_null_layout(r_meta, ncol):
 MGCV_FIXTURES = fixtures_by_kind("mgcv")
 
 
+def _reparameterization(X_got, X_ref, tol):
+    """The change of basis ``T`` with ``X_ref @ T == X_got`` to ``tol``.
+
+    Off PINNED_ARITHMETIC a basis built from Lanczos or eigen() vectors can be
+    mgcv's smooth in another parameterization: one sign of a Ritz vector,
+    passed through the QR against the null space, rotates every wiggly
+    column. What stays fixed is the function space, so ``X_got`` must be an
+    exact linear image of ``X_ref``.
+    """
+    T, *_ = np.linalg.lstsq(X_ref, X_got, rcond=None)
+    resid = float(np.max(np.abs(X_ref @ T - X_got)))
+    assert resid < tol, f"column space differs (residual {resid:.2e})"
+    return T
+
+
+def _assert_congruent(S_got, S_ref, T, tol, what):
+    """``S_got`` is ``T' S_ref T`` up to a positive scale, which mgcv's
+    penalty normalization (by ``norm(X, "I")^2 / norm(S)``) sets per basis."""
+    C = T.T @ S_ref @ T
+    scale = float(np.vdot(C, S_got) / np.vdot(C, C)) if np.any(C) else 1.0
+    assert scale > 0 and np.allclose(S_got, scale * C, atol=tol, rtol=0), (
+        f"{what}: penalty is not congruent under the change of basis"
+    )
+
+
 def _has_error(fx_id: str) -> bool:
     sm_meta = json.loads((FIXTURE_ROOT / fx_id / "smooth_meta.json").read_text())
     return any("error" in s for s in sm_meta.get("smooths", []))
@@ -76,15 +102,20 @@ def _tp_smooth_fixtures() -> list[str]:
     return out
 
 
+@pytest.mark.skipif(
+    not PINNED_ARITHMETIC,
+    reason="Lanczos signs follow the BLAS's rounding; fixtures are R on Accelerate",
+)
 @pytest.mark.parametrize("fx_id", _tp_smooth_fixtures())
 def test_tp_basis_column_signs_match_mgcv(fx_id: str):
     # Thin-plate basis columns are Lanczos Ritz vectors; their signs follow the
     # exact arithmetic of mgcv's Rlanczos and of the tridiagonal eigensolver
     # (LAPACK dstedc, via mgcv_trisymeig). Here every tp/ts column must match
     # mgcv's values *with* its sign; the sign-agnostic comparison in
-    # test_mgcv_smooths_match_R would accept any solver. The tolerance leaves
-    # room for fixtures written under another BLAS (~2e-8 on mgcv_0018's
-    # k = 40, m = 3 basis); a flipped column is off by O(1).
+    # test_mgcv_smooths_match_R would accept any solver. The signs hang on the
+    # last bit of dsymv/ddot, so this holds only under PINNED_ARITHMETIC. The
+    # tolerance leaves room for fixtures written under another BLAS (~2e-8 on
+    # mgcv_0018's k = 40, m = 3 basis); a flipped column is off by O(1).
     meta, _ = fixture_meta(fx_id)
     fx = FIXTURE_ROOT / fx_id
     sm_meta = json.loads((fx / "smooth_meta.json").read_text())
@@ -168,9 +199,27 @@ def test_mgcv_smooths_match_R(fx_id: str):
                     X_got[:, c] = -blk.X[:, c]
 
             tol_X = max(1e-6, 1e-5 * float(np.max(np.abs(X_ref))))
-            assert np.allclose(
+            same_cols = np.allclose(
                 X_got[:, ~is_null], X_ref[:, ~is_null], atol=tol_X, rtol=0
-            ), f"smooth #{i} block {k} ({r_meta['class']}): X values diverge"
+            )
+            if not same_cols and not PINNED_ARITHMETIC:
+                T = _reparameterization(blk.X, X_ref, tol_X)
+                assert len(blk.S) == r_meta["n_penalties"]
+                for j, S_got in enumerate(blk.S, start=1):
+                    S_ref = np.asarray(
+                        mmread(
+                            fx / f"smooth_{i}_{k}_S_{j}.mtx", spmatrix=False
+                        ).toarray(),
+                        dtype=float,
+                    )
+                    tol_S = max(1e-6, 1e-5 * float(np.max(np.abs(S_got))))
+                    _assert_congruent(
+                        S_got, S_ref, T, tol_S, f"smooth #{i} block {k} S_{j}"
+                    )
+                continue
+            assert same_cols, (
+                f"smooth #{i} block {k} ({r_meta['class']}): X values diverge"
+            )
             if is_null.any():
                 for j in range(nf):
                     cols = np.arange(j * p_lev + fs_rank, (j + 1) * p_lev)
@@ -294,6 +343,18 @@ def test_mgcv_predict_mat_matches_R(fx_id: str):
                 minus = float(np.max(np.abs(anchor_ours[:, c] + anchor_ref[:, c])))
                 if minus < plus:
                     signs[c] = -1.0
+            tol = max(1e-6, 1e-5 * float(np.max(np.abs(X_pred_ref))))
+            aligned = anchor_ours * signs[None, :]
+            tol_anchor = max(1e-6, 1e-5 * float(np.max(np.abs(anchor_ref))))
+            if not PINNED_ARITHMETIC and not np.allclose(
+                aligned, anchor_ref, atol=tol_anchor, rtol=0
+            ):
+                T = _reparameterization(anchor_ours, anchor_ref, tol_anchor)
+                assert np.allclose(X_pred_ref @ T, X_pred_ours, atol=tol, rtol=0), (
+                    f"smooth #{i} block {k} ({r_meta['class']}): predict_mat "
+                    "diverges under the fit's change of basis"
+                )
+                continue
             X_pred_aligned = X_pred_ours * signs[None, :]
 
             if r_meta["class"] == "fs.smooth.spec":
@@ -305,7 +366,6 @@ def test_mgcv_predict_mat_matches_R(fx_id: str):
                     )
                     X_pred_aligned[:, cols] = X_pred_ours[:, cols] @ G
 
-            tol = max(1e-6, 1e-5 * float(np.max(np.abs(X_pred_ref))))
             assert np.allclose(X_pred_aligned, X_pred_ref, atol=tol, rtol=0), (
                 f"smooth #{i} block {k} ({r_meta['class']}): predict_mat diverges "
                 f"(max abs diff = {float(np.max(np.abs(X_pred_aligned - X_pred_ref))):.2e}, "

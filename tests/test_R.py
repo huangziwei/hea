@@ -15,7 +15,7 @@ import sys
 import numpy as np
 import polars as pl
 import pytest
-from conftest import have_rscript, r_scalar_values
+from conftest import PINNED_ARITHMETIC, have_rscript, r_scalar_values
 
 import hea
 from hea import R as R_mod
@@ -4196,11 +4196,15 @@ def test_kappa_matches_r():
     # base R's kappa(z) at its defaults: qr() (dqrdc2) then LINPACK dtrco on
     # the triangular factor. Pins are R 4.6.0's printed values at %.17g for a
     # symmetric, a wide, a triangular and an ill-conditioned matrix (entries
-    # 1/(i+j), kappa ~ 6e7). For the last, hea's dqrdc2 factor differs from
-    # R's only in the last bits of the smallest pivot (~1e-7); the condition
-    # estimate amplifies that to ~2.5e-10 relative, hence its own tolerance.
+    # 1/(i+j), kappa ~ 6e7). dqrdc2 and dtrco call the BLAS, so the pins are
+    # exact under PINNED_ARITHMETIC; elsewhere the ill-conditioned case's
+    # smallest pivot (~1e-7) carries the BLAS's last bits, which the estimate
+    # amplifies to ~2.5e-10 relative.
     from hea.R._linpack import _dtrco
     from hea.R.linalg import kappa
+
+    def pin(ref, rel):
+        return ref if PINNED_ARITHMETIC else pytest.approx(ref, rel=rel)
 
     cases = [
         (np.array([[4.0, 2, 1], [2, 5, 3], [1, 3, 6]]), 6.3967740047466632),
@@ -4213,14 +4217,13 @@ def test_kappa_matches_r():
         (np.array([[2.0, 1, -1], [0, 3, 0.5], [0, 0, 1e-3]]), 6996.0034266133625),
     ]
     for z, ref in cases:
-        assert kappa(z) == pytest.approx(ref, rel=1e-13)
+        assert kappa(z) == pin(ref, 1e-13)
     k = np.arange(1, 7)
-    assert kappa(1.0 / np.add.outer(k, k)) == pytest.approx(
-        61143998.238278121, rel=1e-9
-    )
+    assert kappa(1.0 / np.add.outer(k, k)) == pin(61143998.238278121, 1e-9)
     assert kappa(np.zeros((0, 0))) == 0.0
 
-    # dtrco alone, on R's own qr() factor of that matrix: bit-for-bit.
+    # dtrco alone, on R's own qr() factor of that matrix: bit-for-bit under
+    # PINNED_ARITHMETIC (its dasum/ddot run in the BLAS's order).
     r_factor = np.array(
         [
             [
@@ -4259,4 +4262,4 @@ def test_kappa_matches_r():
             [0.0, 0.0, 0.0, 0.0, 0.0, -9.360444389376745e-08],
         ]
     )
-    assert 1.0 / _dtrco(r_factor, 6, 1) == 61143998.238278121
+    assert 1.0 / _dtrco(r_factor, 6, 1) == pin(61143998.238278121, 1e-13)
