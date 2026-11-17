@@ -10,6 +10,7 @@ import itertools
 import numpy as np
 import polars as pl
 
+from .._rsum import r_colsums, r_rowsums
 from ._shared import NamedVector
 
 
@@ -24,35 +25,28 @@ def _to_2d(x) -> np.ndarray:
 
 
 def rowSums(x, na_rm=False):
-    """R: per-row sum. Returns a 1-D numpy array."""
-    arr = _to_2d(x)
-    if na_rm:
-        return np.nansum(arr, axis=1)
-    return arr.sum(axis=1)
+    """R: per-row sum, accumulated over the columns in order in ``LDOUBLE``
+    (``do_colsum``). Returns a 1-D numpy array."""
+    return r_rowsums(_to_2d(x).astype(float), na_rm=na_rm)
 
 
 def colSums(x, na_rm=False):
-    """R: per-column sum. Returns a 1-D numpy array."""
-    arr = _to_2d(x)
-    if na_rm:
-        return np.nansum(arr, axis=0)
-    return arr.sum(axis=0)
+    """R: per-column sum, accumulated over the rows in order in ``LDOUBLE``
+    (``do_colsum``). Returns a 1-D numpy array."""
+    return r_colsums(_to_2d(x).astype(float), na_rm=na_rm)
 
 
 def rowMeans(x, na_rm=False):
-    """R: per-row mean. Returns a 1-D numpy array."""
-    arr = _to_2d(x)
-    if na_rm:
-        return np.nanmean(arr, axis=1)
-    return arr.mean(axis=1)
+    """R: per-row mean, ``rowSums`` divided by the number of columns (or of
+    non-missing entries when ``na_rm``). Returns a 1-D numpy array."""
+    return r_rowsums(_to_2d(x).astype(float), na_rm=na_rm, mean=True)
 
 
 def colMeans(x, na_rm=False):
-    """R: per-column mean. Returns a 1-D numpy array."""
-    arr = _to_2d(x)
-    if na_rm:
-        return np.nanmean(arr, axis=0)
-    return arr.mean(axis=0)
+    """R: per-column mean, ``colSums`` divided by the number of rows (or of
+    non-missing entries when ``na_rm``); no second correction pass, unlike
+    ``mean``. Returns a 1-D numpy array."""
+    return r_colsums(_to_2d(x).astype(float), na_rm=na_rm, mean=True)
 
 
 def apply(X, MARGIN, FUN, *args, **kwargs):

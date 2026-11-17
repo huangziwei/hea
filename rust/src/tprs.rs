@@ -22,7 +22,7 @@
 //! `_rfma_vec`-fold build on every platform.
 
 use numpy::ndarray::Array2;
-use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray2};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
@@ -164,7 +164,102 @@ fn tp_eval_e<'py>(
         .into_pyarray(py)
 }
 
+/// Column sums of squares of `X` (n, k) as `tprs_setup` forms them before
+/// rescaling each column to unit rms (tprs.c:494): `w=0; for (j<n) w +=
+/// X[j][i]*X[j][i];` -- row order, fused to `fmadd` on arm64 like the
+/// distance accumulate above.
+#[pyfunction]
+fn tp_col_sumsq<'py>(py: Python<'py>, x: PyReadonlyArray2<'py, f64>) -> Bound<'py, PyArray1<f64>> {
+    let a = x.as_array();
+    let (n, k) = (a.shape()[0], a.shape()[1]);
+    let mut out = vec![0.0f64; k];
+    for (i, o) in out.iter_mut().enumerate() {
+        let mut w = 0.0;
+        for j in 0..n {
+            let v = a[[j, i]];
+            w = rfma(v, v, w);
+        }
+        *o = w;
+    }
+    out.into_pyarray(py)
+}
+
+/// `(UZ)'b` for every row `b` of `B` (n, kk): one BLAS `dgemv('T', kk, k,
+/// 1.0, UZ, kk, b, 1, 0.0, a, 1)` per row, the call tprs.c makes in
+/// `tprs_setup` (:466) and `predict_tprs` (:603). A single `B UZ` `dgemm`
+/// rounds differently from those row calls, so the rows are issued one by
+/// one, in parallel since each is independent.
+#[cfg(vendor_blas)]
+#[pyfunction]
+fn tp_uz_rows<'py>(
+    py: Python<'py>,
+    b: PyReadonlyArray2<'py, f64>,
+    uz: PyReadonlyArray2<'py, f64>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let (bv, uv) = (b.as_array(), uz.as_array());
+    let (n, kk) = (bv.shape()[0], bv.shape()[1]);
+    if uv.shape()[0] != kk {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "tp_uz_rows: B and UZ disagree on the inner dimension",
+        ));
+    }
+    let k = uv.shape()[1];
+    let mut uzc = vec![0.0f64; kk * k];
+    for j in 0..k {
+        for i in 0..kk {
+            uzc[i + j * kk] = uv[[i, j]];
+        }
+    }
+    let brows: Vec<f64> = bv.iter().copied().collect();
+    let mut out = vec![0.0f64; n * k];
+    if k > 0 {
+        py.allow_threads(|| {
+            out.par_chunks_mut(k).enumerate().for_each(|(i, row)| {
+                crate::sparse::blas::gemv_t_set(kk, k, &uzc, kk, &brows[i * kk..(i + 1) * kk], row);
+            });
+        });
+    }
+    Ok(Array2::from_shape_vec((n, k), out)
+        .unwrap()
+        .into_pyarray(py))
+}
+
+/// Apply one ``dqrsl`` Householder step to every row of ``Y`` (m, n):
+/// ``y += t*u`` with ``t = -ddot(u, y)/u[0]``, BLAS ``ddot``/``daxpy`` per row
+/// as R's ``qr.qty(qrc, t(X))`` issues them. Rows are independent.
+#[cfg(vendor_blas)]
+#[pyfunction]
+fn householder_rows<'py>(
+    py: Python<'py>,
+    y: PyReadonlyArray2<'py, f64>,
+    u: numpy::PyReadonlyArray1<'py, f64>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let (yv, uv) = (y.as_array(), u.as_array());
+    let (m, n) = (yv.shape()[0], yv.shape()[1]);
+    if uv.len() != n {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "householder_rows: u must match the row length",
+        ));
+    }
+    let uvec: Vec<f64> = uv.iter().copied().collect();
+    let mut out: Vec<f64> = yv.iter().copied().collect();
+    if n > 0 {
+        py.allow_threads(|| {
+            out.par_chunks_mut(n)
+                .for_each(|row| crate::sparse::blas::dqrsl_reflect(&uvec, row));
+        });
+    }
+    Ok(Array2::from_shape_vec((m, n), out)
+        .unwrap()
+        .into_pyarray(py))
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    #[cfg(vendor_blas)]
+    m.add_function(wrap_pyfunction!(householder_rows, m)?)?;
+    #[cfg(vendor_blas)]
+    m.add_function(wrap_pyfunction!(tp_uz_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(tp_col_sumsq, m)?)?;
     m.add_function(wrap_pyfunction!(tp_eval_b, m)?)?;
     m.add_function(wrap_pyfunction!(tp_eval_e, m)?)?;
     Ok(())

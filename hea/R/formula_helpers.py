@@ -36,6 +36,7 @@ from dataclasses import dataclass
 import numpy as np
 import polars as pl
 
+from .._rsum import r_colsums, r_mean
 from ..formula import (
     BinOp,
     Call,
@@ -496,12 +497,8 @@ class Poly(np.ndarray):
 
 
 def _r_mean(x: np.ndarray) -> float:
-    """R's ``mean.default`` — two-pass long-double mean, cast to double."""
-    xl = np.asarray(x, dtype=np.longdouble)
-    n = xl.size
-    tmp = xl.sum() / n
-    tmp = tmp + (xl - tmp).sum() / n
-    return float(tmp)
+    """R's ``mean.default`` on a double vector (``real_mean``)."""
+    return r_mean(x)
 
 
 def _poly_fit(x: np.ndarray, degree: int):
@@ -529,14 +526,10 @@ def _poly_fit(x: np.ndarray, degree: int):
         col[j] = qr[j, j]
         qy, *_ = dqrsl(qr, n, rank, qraux, col, 10000)  # qr.qy(QR, z)
         Z[:, j] = qy
-    Zl = Z.astype(np.longdouble)
-    norm2 = np.asarray((Zl**2).sum(axis=0), dtype=np.longdouble)  # colSums LD
-    alpha = np.asarray(
-        (xc.astype(np.longdouble)[:, None] * Zl**2).sum(axis=0) / norm2
-        + np.longdouble(xbar),
-        dtype=float,
-    )[:degree]
-    norm2 = np.concatenate([[1.0], np.asarray(norm2, dtype=float)])
+    Z2 = Z * Z
+    norm2 = r_colsums(Z2)  # colSums(Z^2)
+    alpha = (r_colsums(xc[:, None] * Z2) / norm2 + xbar)[:degree]
+    norm2 = np.concatenate([[1.0], norm2])
     Zn = Z / np.sqrt(norm2[1:])
     return Zn[:, 1:], alpha, norm2
 

@@ -1771,6 +1771,9 @@ _LD_J_MAX = 100000
 def _tweedie_log_a_one(y_i: float, phi_i: float, p: float):
     """Series approximation log a(y, φ, p) = log Σ_{j≥1} W_j for one y > 0.
     (tweedious, misc.c:346-503). The first two feed the φ-derivatives of
+    log a, E[jψ] the p-derivative (Tweedie.dls_dp) and the last three the
+    p-second-derivatives (Tweedie._d2ls_dp). Special functions are nmath's
+    (R's Rmath), and ``wp1² + wp2`` is combined per term.
     """
     om1 = 1.0 - p  # negative
     onep2 = om1 * om1

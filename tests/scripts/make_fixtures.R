@@ -405,7 +405,9 @@ make_mgcv_fixture <- function(case, data, out_dir) {
       # the predict comparison. For most bases sm$X already serves; but t2's
       # sm$X is a partial absorb whose per-column sign convention differs from
       # PredictMat's full absorb, so we dump the full-absorb in-sample basis.
-      Xpredfit <- tryCatch(mgcv::PredictMat(s, data = data),
+      # "Fit data" is full_data, the complete cases smoothCon saw above; the
+      # Python side evaluates its anchor on the same rows.
+      Xpredfit <- tryCatch(mgcv::PredictMat(s, data = full_data),
                            error = function(e) NULL)
       if (!is.null(Xpredfit)) {
         write_mm(Matrix::Matrix(Xpredfit, sparse = TRUE),

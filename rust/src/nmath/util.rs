@@ -93,3 +93,44 @@ pub fn r_pow_di(mut x: f64, mut n: i64) -> f64 {
     }
     pow
 }
+
+/// Elementwise `rfma(a, b, c)` over three equal-length arrays: the
+/// vector form of a C loop `y[i] = a[i]*b[i] + c[i]` as R's arm64 build
+/// contracts it (one rounding), or the two-rounding form elsewhere.
+#[pyo3::pyfunction]
+pub fn rfma_vec<'py>(
+    py: pyo3::Python<'py>,
+    a: numpy::PyReadonlyArray1<'py, f64>,
+    b: numpy::PyReadonlyArray1<'py, f64>,
+    c: numpy::PyReadonlyArray1<'py, f64>,
+) -> pyo3::PyResult<pyo3::Bound<'py, numpy::PyArray1<f64>>> {
+    use numpy::IntoPyArray;
+    let (a, b, c) = (a.as_array(), b.as_array(), c.as_array());
+    if a.len() != b.len() || a.len() != c.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "rfma_vec: length mismatch",
+        ));
+    }
+    let out: Vec<f64> = (0..a.len()).map(|i| rfma(a[i], b[i], c[i])).collect();
+    Ok(out.into_pyarray(py))
+}
+
+/// `s = 0; for (i) s += x[i]*y[i];` -- the in-order dot product of a plain
+/// C loop, each step contracted like R's build (`rfma`).
+#[pyo3::pyfunction]
+pub fn rfma_dot(
+    x: numpy::PyReadonlyArray1<'_, f64>,
+    y: numpy::PyReadonlyArray1<'_, f64>,
+) -> pyo3::PyResult<f64> {
+    let (x, y) = (x.as_array(), y.as_array());
+    if x.len() != y.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "rfma_dot: length mismatch",
+        ));
+    }
+    let mut s = 0.0;
+    for i in 0..x.len() {
+        s = rfma(x[i], y[i], s);
+    }
+    Ok(s)
+}

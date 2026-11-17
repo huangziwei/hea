@@ -336,7 +336,8 @@ def test_curated_lf_methods_preserve_subclass(lf: LazyFrame):
 
 def test_lf_materializing_methods_return_hea_dataframe(lf: LazyFrame):
     """LazyFrame methods that materialize must return ``hea.tidy.DataFrame``.
-    (`polars/lazyframe/frame.py:2510`). ``describe`` materializes too —
+    (`polars/lazyframe/frame.py:2510`). ``describe`` materializes too:
+    despite living on LazyFrame it returns a DataFrame.
     """
     out = lf.collect()
     assert isinstance(out, DataFrame), (

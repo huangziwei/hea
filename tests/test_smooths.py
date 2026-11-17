@@ -64,6 +64,52 @@ def _has_error(fx_id: str) -> bool:
 MGCV_OK = [e["id"] for e in MGCV_FIXTURES if not _has_error(e["id"])]
 
 
+def _tp_smooth_fixtures() -> list[str]:
+    out = []
+    for fx_id in MGCV_OK:
+        sm_meta = json.loads((FIXTURE_ROOT / fx_id / "smooth_meta.json").read_text())
+        if any(
+            s["class"] in ("tp.smooth.spec", "ts.smooth.spec")
+            for s in sm_meta["smooths"]
+        ):
+            out.append(fx_id)
+    return out
+
+
+@pytest.mark.parametrize("fx_id", _tp_smooth_fixtures())
+def test_tp_basis_column_signs_match_mgcv(fx_id: str):
+    # Thin-plate basis columns are Lanczos Ritz vectors; their signs follow the
+    # exact arithmetic of mgcv's Rlanczos and of the tridiagonal eigensolver
+    # (LAPACK dstedc, via mgcv_trisymeig). Here every tp/ts column must match
+    # mgcv's values *with* its sign; the sign-agnostic comparison in
+    # test_mgcv_smooths_match_R would accept any solver. The tolerance leaves
+    # room for fixtures written under another BLAS (~2e-8 on mgcv_0018's
+    # k = 40, m = 3 basis); a flipped column is off by O(1).
+    meta, _ = fixture_meta(fx_id)
+    fx = FIXTURE_ROOT / fx_id
+    sm_meta = json.loads((fx / "smooth_meta.json").read_text())
+    data = load_dataset(meta["dataset"]["pkg"], meta["dataset"]["name"])
+    need = set(meta.get("need_vars", [])) & set(data.columns)
+    if need:
+        data = data.drop_nulls(subset=list(need))
+    data_cols = list(data.columns) if "." in meta["formula"] else None
+    ours = materialize_smooths(
+        expand(parse(meta["formula"]), data_columns=data_cols), data
+    )
+    for i, r_meta in enumerate(sm_meta["smooths"], start=1):
+        if r_meta["class"] not in ("tp.smooth.spec", "ts.smooth.spec"):
+            continue
+        for k, blk in enumerate(ours[i - 1], start=1):
+            X_ref = np.asarray(
+                mmread(fx / f"smooth_{i}_{k}_X.mtx", spmatrix=False).toarray(),
+                dtype=float,
+            )
+            tol = 1e-7 * max(1.0, float(np.abs(X_ref).max()))
+            np.testing.assert_allclose(
+                blk.X, X_ref, rtol=0, atol=tol, err_msg=f"smooth {i} block {k}"
+            )
+
+
 @pytest.mark.parametrize("fx_id", MGCV_OK)
 def test_mgcv_smooths_match_R(fx_id: str):
     meta, _ = fixture_meta(fx_id)

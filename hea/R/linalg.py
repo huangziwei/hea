@@ -10,6 +10,8 @@ calls from ``lm.fit`` / ``lm.wfit`` via ``Cdqrls`` (``stats/src/lm.c``):
   * ``dqrls``  — the ``dqrdc2`` + ``dqrsl`` wrapper (``dqrls.f``).
   * ``Cdqrls`` — the ``lm.c`` entry returning R's ``$qr/$coefficients/$residuals/
     $effects/$rank/$pivot/$qraux/$tol/$pivoted``.
+  * ``kappa``  — base R's ``kappa.default`` at its defaults: ``dqrdc2`` then
+    LINPACK ``dtrco`` on the triangular factor.
 
 This is the **pure-Python spec + oracle** for the Rust port (``hea/_rs`` →
 ``dqrls``); it mirrors the Fortran line-for-line (pivot order, rank rule, the
@@ -25,8 +27,9 @@ import math
 import numpy as np
 
 from .._dispatch import rs_fn
+from .._rfma import _rfma
 
-__all__ = ["Cdqrls", "dqrdc2", "dqrls", "dqrls_rank", "dqrsl"]
+__all__ = ["Cdqrls", "dqrdc2", "dqrls", "dqrls_rank", "dqrsl", "kappa"]
 
 _rs_dqrls = rs_fn("dqrls")
 _rs_dqrls_rank = rs_fn("dqrls_rank")
@@ -46,12 +49,22 @@ def dqrls_rank(x: np.ndarray, tol: float = 1e-7):
 
 
 def dqrdc2(x: np.ndarray, tol: float = 1e-7):
-    """Mechanical port of ``dqrdc2.f``. ``x`` is ``(n, p)`` (overwritten on a
-    copy here). Returns ``(qr, qraux, jpvt, rank)``: ``qr`` holds R in its upper
-    triangle and the Householder vectors below; ``qraux`` the reflector scalars;
-    ``jpvt`` the 1-based pivot (column j of the output is column ``jpvt[j]`` of
-    the input); ``rank`` the number of independent columns."""
-    qr = np.array(x, dtype=float, copy=True)
+    """Mechanical port of R's ``dqrdc2.f`` (LINPACK ``dqrdc`` with R's
+    limited column pivoting). ``x`` is ``(n, p)`` (a copy is overwritten).
+    Returns ``(qr, qraux, jpvt, rank)``: ``qr`` holds R in its upper triangle
+    and the Householder vectors below; ``qraux`` the reflector scalars;
+    ``jpvt`` the 1-based pivot (column j of the output is column ``jpvt[j]``
+    of the input); ``rank`` the number of independent columns.
+
+    The column norms, dot products and updates are the BLAS calls the
+    Fortran makes (``dnrm2``, ``ddot``, ``daxpy``) through scipy's BLAS, the
+    library R links on this platform; ``dscal`` by ``1/nrmxl`` is the
+    elementwise product it computes; the norm downdate ``1 - (|x_lj|/
+    qraux_j)**2`` is a single fused ``fmsub`` in R's arm64 build. Columns are
+    kept contiguous, as in R's column-major storage."""
+    from scipy.linalg.blas import daxpy, ddot, dnrm2
+
+    qr = np.array(x, dtype=float, order="F", copy=True)
     n, p = qr.shape
     qraux = np.zeros(p)
     work = np.zeros((p, 2))
@@ -59,7 +72,7 @@ def dqrdc2(x: np.ndarray, tol: float = 1e-7):
 
     if n > 0:
         for j in range(p):
-            qraux[j] = np.linalg.norm(qr[:, j])  # dnrm2(n, x(1,j))
+            qraux[j] = dnrm2(qr[:, j])
             work[j, 0] = qraux[j]
             work[j, 1] = qraux[j] if qraux[j] != 0.0 else 1.0
 
@@ -81,27 +94,52 @@ def dqrdc2(x: np.ndarray, tol: float = 1e-7):
             work[p - 1, 0], work[p - 1, 1] = tt_sv, ttt_sv
             k -= 1
         if l != n:
-            nrmxl = np.linalg.norm(qr[l0:n, l0])  # dnrm2(n-l+1, x(l,l))
+            nrmxl = dnrm2(qr[l0:n, l0])
             if nrmxl != 0.0:
                 if qr[l0, l0] != 0.0:
                     nrmxl = math.copysign(nrmxl, qr[l0, l0])
-                qr[l0:n, l0] /= nrmxl  # dscal(1/nrmxl)
-                qr[l0, l0] += 1.0
+                qr[l0:n, l0] = qr[l0:n, l0] * (1.0 / nrmxl)
+                qr[l0, l0] = 1.0 + qr[l0, l0]
+                xl = qr[l0:n, l0]
                 for j in range(l, p):  # Fortran j = l+1..p
-                    t = -np.dot(qr[l0:n, l0], qr[l0:n, j]) / qr[l0, l0]
-                    qr[l0:n, j] += t * qr[l0:n, l0]  # daxpy
+                    t = -ddot(xl, qr[l0:n, j]) / qr[l0, l0]
+                    qr[l0:n, j] = daxpy(xl, qr[l0:n, j].copy(), a=t)
                     if qraux[j] != 0.0:
-                        tt = 1.0 - (abs(qr[l0, j]) / qraux[j]) ** 2
+                        q = abs(qr[l0, j]) / qraux[j]
+                        tt = _rfma(-q, q, 1.0)  # 1 - q**2, one fmsub in R's arm64 build
                         tt = max(tt, 0.0)
                         if abs(tt) >= 1e-6:
                             qraux[j] = qraux[j] * math.sqrt(tt)
                         else:
-                            qraux[j] = np.linalg.norm(qr[l0 + 1 : n, j])  # dnrm2(n-l)
+                            qraux[j] = dnrm2(qr[l0 + 1 : n, j])
                             work[j, 0] = qraux[j]
                 qraux[l0] = qr[l0, l0]
                 qr[l0, l0] = -nrmxl
     k = min(k - 1, n)
-    return qr, qraux, jpvt, k
+    return np.ascontiguousarray(qr), qraux, jpvt, k
+
+
+def kappa(z: np.ndarray) -> float:
+    """R ``kappa(z)`` with ``kappa.default``'s defaults (``exact = FALSE``,
+    ``method = "qr"``, ``norm = NULL``): ``kappa.qr(qr(z))``. That is R's
+    LINPACK ``qr`` (``dqrdc2``, ``tol = 1e-7``) of ``z``, or of ``t(z)`` when
+    ``z`` is wide, then ``.kappa_tri`` on the leading square block of the
+    triangular factor with its ``LINPACK = TRUE`` default:
+    ``1/dtrco(R, job = 1)``, the reciprocal of LINPACK's 1-norm
+    reciprocal-condition estimate. An exactly singular factor gives
+    ``rcond = 0`` and so ``Inf``, as in R."""
+    from ._linpack import _dtrco
+
+    z = np.asarray(z, dtype=float)
+    if z.ndim != 2 or 0 in z.shape:
+        return 0.0
+    if z.shape[0] < z.shape[1]:
+        z = z.T
+    qr, _qraux, _jpvt, _rank = dqrdc2(z, tol=1e-7)
+    p = qr.shape[1]
+    R = np.triu(qr[:p, :p])
+    rcond = _dtrco(R, p, 1)
+    return math.inf if rcond == 0.0 else 1.0 / rcond
 
 
 def _job_flags(job: int):
@@ -117,7 +155,12 @@ def _job_flags(job: int):
 def dqrsl(qr: np.ndarray, n: int, k: int, qraux: np.ndarray, y: np.ndarray, job: int):
     """Mechanical port of ``dqrsl.f`` — apply the ``dqrdc2`` factorization.
     Returns ``(qy, qty, b, rsd, xb, info)``; only the parts selected by ``job``
-    (decimal ``abcde``: a=qy, b/c/d/e⇒qty, c=b, d=rsd, e=xb) are meaningful."""
+    (decimal ``abcde``: a=qy, b/c/d/e⇒qty, c=b, d=rsd, e=xb) are meaningful.
+    Each reflector is applied with the Fortran's BLAS ``ddot`` and ``daxpy``
+    through scipy's BLAS, on a column-major copy of ``qr``."""
+    from scipy.linalg.blas import daxpy, ddot
+
+    qr = np.array(qr, dtype=float, order="F", copy=True)
     cqy, cqty, cb, cr, cxb = _job_flags(job)
     info = 0
     y = np.asarray(y, dtype=float).reshape(-1)
@@ -154,8 +197,8 @@ def dqrsl(qr: np.ndarray, n: int, k: int, qraux: np.ndarray, y: np.ndarray, job:
             if qraux[j0] != 0.0:
                 temp = qr[j0, j0]
                 qr[j0, j0] = qraux[j0]
-                t = -np.dot(qr[j0:n, j0], qy[j0:n]) / qr[j0, j0]
-                qy[j0:n] += t * qr[j0:n, j0]
+                t = -ddot(qr[j0:n, j0], qy[j0:n]) / qr[j0, j0]
+                qy[j0:n] = daxpy(qr[j0:n, j0], qy[j0:n].copy(), a=t)
                 qr[j0, j0] = temp
     if cqty:  # compute Qᵀ·y (ascending j)
         for j in range(1, ju + 1):
@@ -163,8 +206,8 @@ def dqrsl(qr: np.ndarray, n: int, k: int, qraux: np.ndarray, y: np.ndarray, job:
             if qraux[j0] != 0.0:
                 temp = qr[j0, j0]
                 qr[j0, j0] = qraux[j0]
-                t = -np.dot(qr[j0:n, j0], qty[j0:n]) / qr[j0, j0]
-                qty[j0:n] += t * qr[j0:n, j0]
+                t = -ddot(qr[j0:n, j0], qty[j0:n]) / qr[j0, j0]
+                qty[j0:n] = daxpy(qr[j0:n, j0], qty[j0:n].copy(), a=t)
                 qr[j0, j0] = temp
 
     if cb:
@@ -188,7 +231,7 @@ def dqrsl(qr: np.ndarray, n: int, k: int, qraux: np.ndarray, y: np.ndarray, job:
             b[j0] = b[j0] / qr[j0, j0]
             if j != 1:
                 t = -b[j0]
-                b[:j0] += t * qr[:j0, j0]  # daxpy(j-1, t, x(1,j), b)
+                b[:j0] = daxpy(qr[:j0, j0], b[:j0].copy(), a=t)
 
     if cr or cxb:  # compute rsd / xb (descending)
         for jj in range(1, ju + 1):
@@ -197,11 +240,11 @@ def dqrsl(qr: np.ndarray, n: int, k: int, qraux: np.ndarray, y: np.ndarray, job:
                 temp = qr[j0, j0]
                 qr[j0, j0] = qraux[j0]
                 if cr:
-                    t = -np.dot(qr[j0:n, j0], rsd[j0:n]) / qr[j0, j0]
-                    rsd[j0:n] += t * qr[j0:n, j0]
+                    t = -ddot(qr[j0:n, j0], rsd[j0:n]) / qr[j0, j0]
+                    rsd[j0:n] = daxpy(qr[j0:n, j0], rsd[j0:n].copy(), a=t)
                 if cxb:
-                    t = -np.dot(qr[j0:n, j0], xb[j0:n]) / qr[j0, j0]
-                    xb[j0:n] += t * qr[j0:n, j0]
+                    t = -ddot(qr[j0:n, j0], xb[j0:n]) / qr[j0, j0]
+                    xb[j0:n] = daxpy(qr[j0:n, j0], xb[j0:n].copy(), a=t)
                 qr[j0, j0] = temp
     return qy, qty, b, rsd, xb, info
 

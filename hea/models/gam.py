@@ -95,6 +95,7 @@ from ..formula import (
 )
 from ..R import distributions as _dist
 from ..R import nmath as _nmath
+from ..R.linalg import kappa as _r_kappa
 from ..utils import (
     _dig_tst,
     format_df,
@@ -748,8 +749,31 @@ def _pls_qr(
     """Penalized least-squares solve via QR of the augmented matrix —
     mgcv's ``pls_fit1`` (gdi.c): never forms X'WX, so the working
     condition number is κ([√W·X; E]) rather than its square.
+
+        min ‖√W(z − Xβ)‖² + β'Sλβ,   E'E = Sλ
+
+    Returns ``(beta, R_upper, log_det, ok)`` with ``R_upper`` a p×p
+    triangular factor satisfying ``R'R = X'WX + Sλ`` (a drop-in
+    Cholesky-factor replacement, ``lower=False``) and
+    ``log_det = log|X'WX + Sλ|``.
+
     ``Xtwz``: pls_fit1's ``use.wy`` mode (gam.fit4.r:378-390) — the
+    rhs formed directly from the finite vector ``wz = W·z`` as
+    ``X'wz``, for extended-family rows where ``w ≈ 0`` makes ``z``
+    itself non-finite. Algebraically ``Q₁'(√w·z) = R⁻ᵀ·X'Wz``, so it
+    substitutes one triangular solve for the orthogonal projection;
+    everything downstream (factor, determinant, SVD correction) is
+    unchanged.
+
+    Negative Newton weights are handled by gdiPK's SVD correction
     (gdi.c:1816-1901): with ``Q₁`` the data-rows orthogonal factor of
+    ``[√|W|·X; E]`` and ``Ĩ Q₁ = U D V'`` its negative-w rows,
+
+        X'WX + Sλ = R'V(I − 2D²)V'R,
+
+    solved through ``(I − 2D²)⁻¹`` and refactored triangular via a
+    small QR of ``(I − 2D²)^{1/2}V'R``. Any ``1 − 2d² ≤ 0`` means the
+    penalized Hessian is indefinite — return ``ok=False``, mirroring
     pls_fit1's ``n<0`` signal (gam.fit3.r:341 retries the step with
     Fisher weights; gam.fit4.r:392 retries with positive weights).
     """
@@ -1280,7 +1304,10 @@ def _gam_fit3(
 
 def _S_pinv(S_full, penalty_rank):
     """Pseudo-inverse of Sλ on its fixed range space.
-    returned by ``gam.reparam`` (gam.fit3.r:9) as ``det``/``det1``/``det2``;
+
+    mgcv's ``gam.reparam`` (gam.fit3.r:9) returns the penalty
+    log-determinant and its ρ-derivatives as ``det``/``det1``/``det2``;
+    this computes them from the eigen-reduced Sλ.
     """
     r = penalty_rank
     if r <= 0:
@@ -1309,7 +1336,11 @@ def _make_K(A_chol, A_chol_lower, X):
 
 def _dbeta_drho(fit, rho, slots, p):
     """Implicit-function-theorem derivative ∂β̂/∂ρ_k at PIRLS-converged β̂.
-    dispatched from ``gam.fit3`` at gam.fit3.r:550 (deriv=2 adds the
+
+    Differentiating the penalized score ``∂ℓ/∂β − Sλ β̂ = 0`` in ρ_k gives
+    ``∂β̂/∂ρ_k = −λ_k H⁻¹ S_k β̂`` with ``H = X'WX + Sλ`` (Newton weights).
+    Returns a (p, n_sp) array. mgcv computes this inside the single
+    ``gdi1`` C call (gdi.c) that ``gam.fit3`` makes at gam.fit3.r:550.
     """
     n_sp = len(slots)
     if n_sp == 0:
@@ -1355,6 +1386,9 @@ def _fit_link_derivs(fit, family):
 def _ml_logdet_adj(fit, Mp):
     """Adjustment to convert log|H+S| (REML) → log|H_pp+S_pp| (ML).
     Direct port of mgcv ``MLpenalty1`` (gdi.c:1532-1680): for ML the
+    Laplace approximation marginalises only over the range of Sλ,
+    dropping the Mp null-space columns of the QR factor R before the
+    log-determinant; REML uses the full Hessian.
     """
     Mp = int(Mp)  # null-space dim (a count); callers may pass float
     if Mp == 0:
@@ -1376,7 +1410,11 @@ def _profile_log_phi_fixed_sp(fit, log_phi0, Mp, gamma, wt, y, family, reml_ind)
     analogue of mgcv's newton() run when every sp is user-fixed and
     the scale is free (the lsp vector is then just [log φ],
     gam.fit3.r:121-123).
-    ≡ gam.fit3.r:629-631's dlr.dlphi/d2lr.d2lphi rows after the
+    Its gradient and curvature are gam.fit3.r:629-631's
+    dlr.dlphi/d2lr.d2lphi rows after the φ ↔ log φ chain rule. Newton
+    steps are clamped to mgcv's maxNstep = 5 and halved while the
+    criterion rises, with a gradient step where the φ-curvature is not
+    convex (Tweedie series tails).
     """
     Dp = float(fit.dev + fit.pen)
     Mp = float(Mp)
@@ -1419,7 +1457,10 @@ def _profile_log_phi_fixed_sp(fit, log_phi0, Mp, gamma, wt, y, family, reml_ind)
 
 def _dDp_drho(fit, rho, slots):
     """∂Dp/∂ρ_k at PIRLS-converged β̂. Length-n_sp.
-    dispatched from ``gam.fit3`` at gam.fit3.r:550 (deriv=2 adds the
+
+    mgcv computes this inside the single ``gdi1`` C call (gdi.c) that
+    ``gam.fit3`` makes at gam.fit3.r:550; ``deriv = 2`` adds the
+    second-derivative block.
     """
     n_sp = len(slots)
     if n_sp == 0:
@@ -1435,7 +1476,10 @@ def _dDp_drho(fit, rho, slots):
 
 def _db_drho(rho, beta, A_chol, A_chol_lower, slots, p):
     """Analytical ∂β/∂ρ_k = -exp(ρ_k)·A⁻¹ S_k β, returned as (p, n_sp).
-    dispatched from ``gam.fit3`` at gam.fit3.r:550 (deriv=2 adds the
+
+    mgcv computes this inside the single ``gdi1`` C call (gdi.c) that
+    ``gam.fit3`` makes at gam.fit3.r:550; ``deriv = 2`` adds the
+    second-derivative block.
     """
     n_sp = len(slots)
     db = np.zeros((p, n_sp))
@@ -1450,7 +1494,10 @@ def _db_drho(rho, beta, A_chol, A_chol_lower, slots, p):
 
 def _dlog_det_S_drho(rho, S_pinv=None, S_full=None, *, slots, p, penalty_rank):
     """∂log|Sλ|+/∂ρ_k = λ_k · tr(S⁺ S_k). Length-n_sp.
-    returned by ``gam.reparam`` (gam.fit3.r:9) as ``det``/``det1``/``det2``;
+
+    mgcv's ``gam.reparam`` (gam.fit3.r:9) returns the penalty
+    log-determinant and its ρ-derivatives as ``det``/``det1``/``det2``;
+    this computes them from the eigen-reduced Sλ.
     """
     n_sp = len(slots)
     if n_sp == 0:
@@ -1470,7 +1517,10 @@ def _dlog_det_S_drho(rho, S_pinv=None, S_full=None, *, slots, p, penalty_rank):
 
 def _d2log_det_S_drho_drho(rho, S_pinv=None, S_full=None, *, slots, p, penalty_rank):
     """∂²log|Sλ|+/∂ρ_i∂ρ_j Hessian. Shape ``(n_sp, n_sp)``.
-    returned by ``gam.reparam`` (gam.fit3.r:9) as ``det``/``det1``/``det2``;
+
+    mgcv's ``gam.reparam`` (gam.fit3.r:9) returns the penalty
+    log-determinant and its ρ-derivatives as ``det``/``det1``/``det2``;
+    this computes them from the eigen-reduced Sλ.
     """
     n_sp = len(slots)
     if n_sp == 0:
@@ -1508,7 +1558,9 @@ def _pearson_and_deriv(rho, fit, deriv=True, *, family, wt, y, slots, X, p):
     ``deriv``) its ρ-gradient ``∂P/∂ρ`` (length n_sp), at PIRLS-
     converged β̂.
     mgcv's ``oo$P``/``oo$P1`` from ``pearson2`` (gdi.c:1207-1255). For
-    statistic; the P-REML/P-ML scale is ``P/(n−Mp)`` (gdi.c:2696-2703,
+    the GCV/GACV path this is the raw statistic; the P-REML/P-ML scale is
+    ``P/(n−Mp)`` (gdi.c:2696-2703, unpenalized ``i=0``), see
+    ``_phi_pearson``.
     """
     n_sp = len(slots)
     if fit.is_working_gaussian:
@@ -1655,7 +1707,10 @@ def _dDeta(fit, level, *, family, y, wt):
 
 def _dw_deta(fit, *, y, family_mgcv_extended, family, wt):
     """∂w_i/∂η_i at PIRLS-converged β̂. Length-n.
-    dispatched from ``gam.fit3`` at gam.fit3.r:550 (deriv=2 adds the
+
+    mgcv computes this inside the single ``gdi1`` C call (gdi.c) that
+    ``gam.fit3`` makes at gam.fit3.r:550; ``deriv = 2`` adds the
+    second-derivative block.
     """
     if fit._dwdeta is not None:
         return fit._dwdeta
@@ -1710,7 +1765,10 @@ def _d2beta_drho_drho(
     wt,
 ):
     """∂²β̂/∂ρ_l∂ρ_k at PIRLS-converged β̂. Returns a (p, n_sp, n_sp) array.
-    dispatched from ``gam.fit3`` at gam.fit3.r:550 (deriv=2 adds the
+
+    mgcv computes this inside the single ``gdi1`` C call (gdi.c) that
+    ``gam.fit3`` makes at gam.fit3.r:550; ``deriv = 2`` adds the
+    second-derivative block.
     """
     n_sp = len(slots)
     if n_sp == 0:
@@ -1747,7 +1805,10 @@ def _d2beta_drho_drho(
 
 def _d2w_deta2(fit, *, y, family_mgcv_extended, family, wt):
     """∂²w_i/∂η_i² at PIRLS-converged β̂. Length-n.
-    dispatched from ``gam.fit3`` at gam.fit3.r:550 (deriv=2 adds the
+
+    mgcv computes this inside the single ``gdi1`` C call (gdi.c) that
+    ``gam.fit3`` makes at gam.fit3.r:550; ``deriv = 2`` adds the
+    second-derivative block.
     """
     if fit._d2wdeta2 is not None:
         return fit._d2wdeta2
@@ -1807,7 +1868,10 @@ def _d2w_deta2(fit, *, y, family_mgcv_extended, family, wt):
 
 def _log_det_S_pos(rho, *, penalty_rank, slots, p):
     """log|Sλ|_+ — log-determinant of Sλ on its fixed range space.
-    returned by ``gam.reparam`` (gam.fit3.r:9) as ``det``/``det1``/``det2``;
+
+    mgcv's ``gam.reparam`` (gam.fit3.r:9) returns the penalty
+    log-determinant and its ρ-derivatives as ``det``/``det1``/``det2``;
+    this computes them from the eigen-reduced Sλ.
     """
     r = penalty_rank
     if r <= 0:
@@ -1825,7 +1889,10 @@ def _dlog_det_H_drho(
     fit, rho, db_drho=None, *, X, slots, p, y, family_mgcv_extended, family, wt
 ):
     """∂log|H|/∂ρ_k where H = X'WX + Sλ at converged β̂. Length-n_sp.
-    dispatched from ``gam.fit3`` at gam.fit3.r:550 (deriv=2 adds the
+
+    mgcv computes this inside the single ``gdi1`` C call (gdi.c) that
+    ``gam.fit3`` makes at gam.fit3.r:550; ``deriv = 2`` adds the
+    second-derivative block.
     """
     n_sp = len(slots)
     if n_sp == 0:
@@ -2220,6 +2287,12 @@ def _pearson_hess(
     `_pearson_and_deriv` per-obs term) and ``Pe2 = ∂²P_i/∂η²``:
     ``g2/g1 = g''/g'²`` (= ``link.g2g``) before pearson2 (gam.fit3.r:534-
     535); pearson2's Pe2 (gdi.c:1232-1233) becomes, in those units with
+    ``me = μ_η = 1/g'``::
+
+        Pe2 = −Pe1·g2g + me²·(2w/V + 2·xx·V1) − me·Pe1·V1 − me²·xx·r·(V2 − V1²)
+
+    with ``xx = r·w/V``, ``r = y − μ̂``. β̂'s ρ-derivatives use the Newton
+    IFT (`_dbeta_drho` / `_d2beta_drho_drho`), as `_pearson_and_deriv` does.
     """
     n_sp = len(slots)
     if n_sp == 0:
@@ -2308,7 +2381,13 @@ def _gacv_grad(
     wt,
     pls_lwork,
 ):
-    """Analytical gradient of `_gacv` (mgcv gam.fit3.r:769):"""
+    """Analytical gradient of `_gacv` (mgcv gam.fit3.r:769)::
+
+        GACV1_k = D1_k/n + 2P/δ²·trA1_k + 2γ·trA·P1_k/(δ·n)
+
+    reusing `_gcv_grad_pieces` for D1 = ∂dev/∂ρ and trA1 = ∂τ/∂ρ, plus the
+    Pearson statistic P and its derivative P1.
+    """
     n_sp = len(slots)
     if n_sp == 0:
         return np.zeros(0)
@@ -2410,7 +2489,12 @@ def _gcv_hessian(
 ):
     """Analytical Hessian of `_gcv`. Shape (n_sp, n_sp). Wood 2008 §4.
     ``oo$trA2``, gam.fit3.r:773-775). The default path is unchanged.
-      W-derivatives dW_F/dη, d²W_F/dη² (mgcv gam.fit3.r:644). The
+      W-derivatives dW_F/dη, d²W_F/dη² (mgcv gam.fit3.r:644). The term
+    d²w_lk = d²W_F/dη² · v_l v_k + dW_F/dη · X·∂²β̂/(∂ρ_l ∂ρ_k) combines
+    the Fisher weight derivatives with the Newton ∂²β̂/∂ρ², each in its own
+    role. For Gaussian-identity hv ≡ 0 and d²w ≡ 0, so Q_k ≡ 0 and the
+    W-derivative terms reduce to
+    ``2 λ_l λ_k tr[A⁻¹ S_l A⁻¹ S_k F] − δ_lk·λ_k·tr[A⁻¹ S_k F]``.
     """
     fit_F = _fisher_view(
         fit,
@@ -2653,8 +2737,16 @@ def _gacv_hessian(
     wt,
     pls_lwork,
 ):
-    """Analytic GACV Hessian ``GACV2`` (n_sp × n_sp) — mechanical port of
-    mgcv gam.fit3.r:786-790:
+    """Analytic GACV Hessian ``GACV2`` (n_sp × n_sp), a mechanical port of
+    mgcv gam.fit3.r:786-790::
+
+        GACV2 = D2/n + outer(trA1,trA1)·4P/δ³ + 2P·trA2/δ²
+              + 2·outer(trA1,P1)/δ² + 2·outer(P1,trA1)·(1/(δn)+trA/(nδ²))
+              + 2·trA·P2/(δn);   GACV2 = (GACV2+GACV2ᵀ)/2
+
+    with δ = n − γ·trA. D2 (deviance Hessian) and trA2 (edf Hessian) come
+    from the shared `_gcv_hessian` pieces; P/P1/P2 are the raw Pearson
+    statistic and its ρ-derivatives.
     """
     n_sp = len(slots)
     if n_sp == 0:
@@ -2757,9 +2849,16 @@ def _dbeta_dp_tw(fit, *, X, wt, y, family):
 
 
 def _db_dtheta_fam(fit, *, X, family, y, wt):
-    """∂β̂/∂θ_fam — the family-θ columns of mgcv's ``db.drho``
-    (gdi computes them through the same Dd chain). Implicit
-    differentiation of the penalized score at fixed ρ:
+    """∂β̂/∂θ_fam, the family-θ columns of mgcv's ``db.drho`` (gdi computes
+    them through the same Dd chain). Implicit differentiation of the
+    penalized score at fixed ρ::
+
+        0 = X'(Dmu·μ'(η))/2 + Sλβ̂   ⇒
+        ∂β̂/∂θ_j = −A⁻¹ · X'(Dmuth_j·μ'(η))/2
+
+    with ``A = X'WX + Sλ`` the converged penalized Newton Hessian from
+    PIRLS (``fit.A_chol``) and ``Dmuth = ∂²D/∂μ∂θ`` from
+    ``family.Dd(level=1)`` (shared via the per-fit ``_Dd`` cache).
     """
     dd = _Dd(fit, 1, family=family, y=y, wt=wt)
     mu_eta = family.link.mu_eta(fit.eta)
@@ -2777,6 +2876,9 @@ def _compute_Vc2(rho, fit, Vr, sigma_squared, *, L_pen, slots, p):
     where M_k = ∂L^{-T}/∂ρ_k and A = L L^T is hea's lower-Cholesky of
     ``X'X + Sλ``.
     Fisher-type working weights there (gam.fit4.r:798 "note that
+    these are Fisher type weights"; wf = pmax(0, ½·EDeta2) for extended
+    families). Callers therefore pass the ``_fisher_view`` fit (or fit5's
+    own lbb-root), not the PIRLS Newton factor.
     """
     n_sp = len(slots)
     if n_sp == 0 or sigma_squared <= 0 or not np.isfinite(sigma_squared):
@@ -2812,10 +2914,14 @@ def _compute_Vc2(rho, fit, Vr, sigma_squared, *, L_pen, slots, p):
 
 
 def _dW_dtheta_total(fit, dd1=None, *, X, family, y, wt, family_mgcv_extended):
-    """Total ∂W/∂θ for an extended family at the converged fit,
-    shape (n, n_theta): the direct fixed-β̂ piece ½·Deta2th plus the
-    β̂(θ)-coupled piece (∂w/∂η)·(X·∂β̂/∂θ). The Dd-table form, general
-    over families (identical values for tw by
+    """Total ∂W/∂θ for an extended family at the converged fit, shape
+    (n, n_theta): the direct fixed-β̂ piece ½·Deta2th plus the β̂(θ)-coupled
+    piece (∂w/∂η)·(X·∂β̂/∂θ). For Tweedie the Dd tables give the same values
+    as the exponential-family formula.
+
+    mgcv computes the family-parameter (θ for nb/scat, p for tw)
+    derivatives of W and log|H+S| in ``gam.fit4``'s gdi block (gam.fit4.r)
+    from the family's ``Dd`` θ-derivatives (Dth/Deta2th).
     """
     if dd1 is None:
         dd1 = _dDeta(fit, 1, family=family, y=y, wt=wt)
@@ -2924,7 +3030,23 @@ def _dlog_det_H_dtheta(fit, dd1=None, *, X, family, y, wt, family_mgcv_extended)
 
 
 def _dlog_det_H_dp_tw(fit, db_dp=None, *, X, wt, y, family, family_mgcv_extended):
-    """``∂log|H+S|/∂p`` for Tweedie. Two pieces:"""
+    """``∂log|H+S|/∂p`` for Tweedie, from two pieces::
+
+        direct, at fixed β̂:
+            ∂W_i/∂p|_{β̂} = (μ_η_i²/V_i) · [(y_i - μ_i)/μ_i - α_i·log(μ_i)]
+        indirect, via β̂(p):
+            ∂W_i/∂p|_{β̂(p)} = (∂W/∂η)_i · (X · dβ̂/dp)_i
+
+    Then tr(H⁻¹ · X'·diag(total)·X) = Σ d_i · total_i with
+    ``d_i = (X · A⁻¹ · X')_{ii}`` (the diagonal used for the ρ derivative).
+    For Fisher-fallback fits (α ≡ 1, no Newton corrections) the direct piece
+    is ``-log(μ)·μ_η²/V``, since ∂α/∂p = (y-μ)/μ is zeroed with the rest of
+    the Newton α terms.
+
+    mgcv computes the family-parameter (θ for nb/scat, p for tw)
+    derivatives of W and log|H+S| in ``gam.fit4``'s gdi block (gam.fit4.r)
+    from the family's ``Dd`` θ-derivatives (Dth/Deta2th).
+    """
     dW_dp_total = _dW_dp_tw_total(
         fit,
         db_dp=db_dp,
@@ -3106,12 +3228,43 @@ def _reml_hessian(
     d2w_deta2,
 ):
     """Analytical Hessian of `_reml` (2·V_R units).
-    (``gam.fit4.r:748``: ``REML2 = ((D2+bSb2)/(2φ) − ls2)/γ + ldet2/2``
-    ``gam.fit4.r:756-762``). ``D2`` (the deviance Hessian, ``gdi.c``
-    gdi.c:159-188) and ``ldet2`` (the ``log|H|`` Hessian, ``get_ddetXWXpS``
-    gdi.c:911-940) are assembled from the per-obs ``family.dDeta(level=2)``
-    Wood 2011 §4 for non-Gaussian, with Newton-form W:
-    For Gaussian-identity (h' ≡ h'' ≡ 0) only the SS Wood block and the
+
+    Returns ((n_sp+1) × (n_sp+1)) when ``include_log_phi=True``, else
+    (n_sp × n_sp). With ``include_family_theta``, the Hessian is further
+    augmented by ``family.n_theta`` rows/columns computed analytically: the
+    family-θ rows of mgcv's REML2 (``gam.fit4.r:748``:
+    ``REML2 = ((D2+bSb2)/(2φ) − ls2)/γ + ldet2/2``) over the joint (θ,ρ)
+    space, with the log φ row from ``gam.fit4.r:756-762``. ``D2`` (the
+    deviance Hessian, ``gdi.c`` ``gdi2``:2145-2166), ``bSb2``/``P2`` (the
+    penalty Hessian, ``get_bSb`` gdi.c:159-188) and ``ldet2`` (the
+    ``log|H|`` Hessian, ``get_ddetXWXpS`` gdi.c:911-940) are assembled from
+    the per-obs ``family.dDeta(level=2)`` tables and the IFT β-derivatives
+    (:meth:`_d2beta_theta`). In 2·V_R units
+    ``H = (D2+bSb2)/(φγ) − 2·ls2/γ + ldet2``.
+
+    Wood 2011 §4 for non-Gaussian, with Newton-form W::
+
+      ∂²(2·V_R)/∂ρ_l∂ρ_k = (1/φ)·∂²Dp/∂ρ_l∂ρ_k
+                          + ∂²log|H|/∂ρ_l∂ρ_k
+                          − ∂²log|S|+/∂ρ_l∂ρ_k
+
+      ∂²Dp/∂ρ_l∂ρ_k      = δ_lk·g_k − 2·λ_l·λ_k·β̂' S_l A⁻¹ S_k β̂
+      ∂²log|S|+/∂ρ_l∂ρ_k = δ_lk·λ_k·tr(S⁺ S_k) − λ_l·λ_k·tr(S⁺ S_l S⁺ S_k)
+      ∂²log|H|/∂ρ_l∂ρ_k  = −tr(H⁻¹·∂H/∂ρ_l·H⁻¹·∂H/∂ρ_k) + tr(H⁻¹·∂²H/∂ρ_l∂ρ_k)
+
+    with ``∂H/∂ρ_l = X' diag(h'·v_l) X + λ_l S_l`` (``v_l := X·dβ_l``) and
+    ``∂²H/∂ρ_l∂ρ_k = X' diag(h''·v_l·v_k + h'·X·d²β_lk) X + δ_lk·λ_l·S_l``.
+    Cross-derivatives with log φ: ``∂²(2·V_R)/∂ρ_k∂log φ = −g_k/φ`` and
+    ``∂²(2·V_R)/∂log φ² = Dp/φ − 2·ls'_2``, ``ls'_2 = family.ls(y, wt, φ)[2]``
+    chain-ruled to log φ.
+
+    Under ``method="ML"`` the log-determinant is the projected
+    ``log|U_rᵀ(H+S)U_r|``; the extra ∂²log|M_proj| term (``M_proj =
+    U_nᵀA⁻¹U_n``) is added in the loop, matching the gradient correction
+    in ``_reml_grad`` and mgcv's ``MLpenalty1`` → ``get_ddetXWXpS`` (gdi.c),
+    which fills ``det2`` on the post-drop K, P. For Gaussian-identity
+    (h' ≡ h'' ≡ 0) only the SS Wood block and the Gaussian Dp/log|S|+
+    pieces survive.
     """
     n_sp = len(slots)
     phi = float(np.exp(log_phi))
@@ -4503,7 +4656,8 @@ def newton(
         # `_grad`/`_hess` reuse the fit's REML1/REML2 when present and only
         # refit when the accepted point came from a deriv=0 trial. Inner
         # epsilon: newton caps control$epsilon at conv.tol/100
-        # (gam.fit3.r:1308) → 1e-8 at gam defaults.
+        # (gam.fit3.r:1308).
+        eps5 = min(float(g5["epsilon"]), conv_tol / 100.0)
 
         def _fit5_at(rho_t, d):
             fit_t = _gam_fit5(
@@ -4519,7 +4673,8 @@ def newton(
                 deriv=d,
                 start=g5["start"],
                 gamma=g5["gamma"],
-                epsilon=1e-8,
+                epsilon=eps5,
+                maxit=g5["maxit"],
             )
             g5["start"] = fit_t["coefficients"]
             return fit_t
@@ -4675,97 +4830,108 @@ def newton(
                 return 0.0
             pred = float(grad @ step + 0.5 * step @ (H @ step))
             denom = max(abs(pred), abs(score_change)) + score_scale * conv_tol
-            return abs(pred - score_change) / denom if denom > 0 else 0.0
+            # an infinite trial score gives NaN here, as in R; every test that
+            # reads qerror checks the score's finiteness first
+            with np.errstate(invalid="ignore", over="ignore"):
+                return float(abs(pred - score_change) / denom) if denom > 0 else 0.0
 
-        # ----- step acceptance (gam.fit3.r:1492-1573) -----
+        # ----- step acceptance (gam.fit3.r:1486-1641) -----
+        # mgcv evaluates the first trial at deriv = pdef·2 (gam.fit3.r:1486)
+        # and keeps it as ``b``; ``lsp1``/``score1`` track the latest trial.
         accepted_step = None
         accepted_f = float("inf")
         accepted_fit = None
         sd_unused = True
-
-        # mgcv evaluates the first trial at deriv = pdef·2 (gam.fit3.r:1486):
-        # +def ⇒ get grad/hess in this fit so an immediate accept needs no
-        # second fit (REML5); indefinite ⇒ deriv=0, defer to the SD trial.
         f_try, fit_try = _eval(theta + Nstep, deriv=2 if pdef else 0)
+        first_fit = fit_try
+        cand_step, cand_f, cand_fit = Nstep.copy(), f_try, fit_try
         score_change = f_try - f_prev
         qerror = _qerror(Nstep, score_change)
+        ii = 0
+        sd_cand = None
         if np.isfinite(f_try) and score_change < 0 and pdef and qerror < qerror_thresh:
             accepted_step, accepted_f, accepted_fit = Nstep.copy(), f_try, fit_try
-        else:
+        elif (not np.isfinite(f_try)) or f_try >= f_prev or qerror >= qerror_thresh:
             step = Nstep.copy()
-            for ii in range(max_half):
+            score1 = f_try
+            while (
+                (not np.isfinite(score1)) or score1 >= f_prev or qerror >= qerror_thresh
+            ) and ii < max_half:
                 if ii == 3 and it < 9:
-                    # Newton failing — switch to SD direction at the
-                    # current step length (gam.fit3.r:1521; mgcv's
-                    # i<10 with 1-based iterations = it<9 here).
+                    # Newton failing: switch to the SD direction at the
+                    # current step length (gam.fit3.r:1521; mgcv's i<10
+                    # with 1-based iterations is it<9 here).
                     s_length = min(float(np.linalg.norm(step)), max_sd_step)
                     sd_norm = float(np.linalg.norm(Sstep))
                     if sd_norm > 0:
                         step = Sstep * (s_length / sd_norm)
-                        sd_unused = False
+                    sd_unused = False
                 else:
                     step = step / 2
-                f_try, fit_try = _eval(theta + step, deriv=0)
-                score_change = f_try - f_prev
+                f1, fit1 = _eval(theta + step, deriv=0)
+                cand_step, cand_f, cand_fit = step.copy(), f1, fit1
+                score1 = f1
+                score_change = f1 - f_prev
                 if ii > min(4, max_half // 2):
-                    qerror = qerror_thresh / 2  # drop qerror requirement
+                    qerror = qerror_thresh / 2  # drop the qerror requirement
                 else:
                     qerror = _qerror(step, score_change)
-                if np.isfinite(f_try) and score_change < 0 and qerror < qerror_thresh:
-                    accepted_step = step.copy()
-                    accepted_f, accepted_fit = f_try, fit_try
-                    break
+                if np.isfinite(f1) and score_change < 0 and qerror < qerror_thresh:
+                    if pdef or not sd_unused:
+                        accepted_step, accepted_f, accepted_fit = step.copy(), f1, fit1
+                    else:
+                        # still to be compared with the steepest-descent trial
+                        sd_cand = (step.copy(), f1, fit1)
+                    score1 = f_prev - abs(f_prev) - 1.0  # leave the loop
+                if (
+                    (not np.isfinite(score1))
+                    or score1 >= f_prev
+                    or qerror >= qerror_thresh
+                ):
+                    ii += 1
+            if (not pdef) and sd_unused and ii < max_half and sd_cand is not None:
+                cand_step, cand_f, cand_fit = sd_cand
 
-        # ----- indefinite SD fallback (gam.fit3.r:1580-1641) -----
-        # If the Hessian wasn't PD and we haven't already used the SD
-        # direction in step-halving, run an independent SD line
-        # search and pick whichever direction scored lower. This is
-        # what keeps Newton out of UBRE/GCV saturation tails when
-        # the seed lies near a local maximum (all-negative eig).
+        # ----- indefinite SD trial (gam.fit3.r:1580-1641) -----
+        # With an indefinite Hessian and no SD step tried yet, mgcv line-searches
+        # the steepest-descent direction and moves to the better of that and
+        # the Newton-side candidate (lsp1, score1) — unconditionally, even when
+        # neither improves on the current score.
         if (not pdef) and sd_unused and Sstep.size > 0:
             sd_best_step = None
-            sd_best_f = float("inf")
+            sd_best_f = float("nan")
             sd_best_fit = None
-            # mgcv starts at 2·Sstep so the first halving gives
-            # Sstep itself (max-norm 1) — gam.fit3.r:1581.
-            sd_step = Sstep * 2
-            for kk in range(40):
+            sd_step = Sstep * 2  # the first halving gives Sstep itself
+            for kk in range(1, 41):
                 sd_step = sd_step / 2
                 f_sd, fit_sd = _eval(theta + sd_step, deriv=0)
                 score_change_sd = f_sd - f_prev
                 qerror_sd = _qerror(sd_step, score_change_sd)
-                accept_sd = np.isfinite(f_sd) and (
-                    sd_best_step is None
-                    or (f_sd <= sd_best_f and qerror_sd < qerror_thresh)
-                )
-                if accept_sd:
+                if (not np.isfinite(sd_best_f)) or (
+                    np.isfinite(f_sd)
+                    and f_sd <= sd_best_f
+                    and qerror_sd < qerror_thresh
+                ):
                     sd_best_step = sd_step.copy()
                     sd_best_f, sd_best_fit = f_sd, fit_sd
                 if (
-                    sd_best_step is not None
-                    and sd_best_f < f_prev
+                    np.isfinite(sd_best_f)
                     and np.isfinite(f_sd)
+                    and sd_best_f < f_prev
                     and f_sd > sd_best_f
                 ):
                     break
-            if sd_best_step is not None and sd_best_f < accepted_f:
-                accepted_step = sd_best_step
-                accepted_f = sd_best_f
-                accepted_fit = sd_best_fit
+            if np.isfinite(sd_best_f) and sd_best_f < cand_f:
+                cand_step, cand_f, cand_fit = sd_best_step, sd_best_f, sd_best_fit
+            accepted_step, accepted_f, accepted_fit = cand_step, cand_f, cand_fit
 
+        step_failed = ii == max_half
         if accepted_step is None:
-            # No improving step. mgcv checks the gradient convergence test
-            # BEFORE declaring step failure (gam.fit3.r:1646-1657): if the
-            # current point already satisfies max|grad| ≤ score_scale·conv_tol·5
-            # this is convergence AT the optimum (the Newton step just can't
-            # improve on it), reported "full convergence" — NOT a step failure.
-            # Only a still-large residual gradient is a genuine step failure
-            # (the ill-posed corner where mgcv warns "check results carefully").
-            _ss = _score_scale(fit, f_prev)
-            gmax = float(np.abs(grad).max()) if grad.size > 0 else 0.0
-            conv_text = (
-                "full convergence" if gmax <= _ss * conv_tol * 5.0 else "step failed"
-            )
+            # Every trial failed (ii == maxHalf, gam.fit3.r:1657): mgcv stops
+            # with "step failed" at the current ρ and returns ``b``, the fit of
+            # the rejected first trial (gam.fit3.r:1486).
+            fit = first_fit
+            conv_text = "step failed"
             it_done = it + 1
             break
         theta = theta + accepted_step
@@ -4805,6 +4971,11 @@ def newton(
                 # Otherwise can't progress (gam.fit3.r:1654).
                 uconv_ind = np.ones_like(uconv_ind, dtype=bool)
             converged = False
+        if step_failed:
+            # The indefinite SD move above was taken after the halving loop
+            # ran out; mgcv then stops on step failure (gam.fit3.r:1657).
+            conv_text = "step failed"
+            break
         if converged:
             conv_text = "full convergence"
             break
@@ -4920,8 +5091,9 @@ def bfgs(
     n_sp = int(np.asarray(theta0).size)
     eps_mach = float(np.finfo(float).eps)
 
-    # mgcv caps the inner PIRLS tol at conv.tol/100 (gam.fit3.r:1797).
-    inner_eps = min(1e-7, conv_tol / 100.0)
+    # mgcv caps the inner tolerance control$epsilon at conv.tol/100
+    # (gam.fit3.r:1797).
+    inner_eps = min(float(g5["epsilon"]), conv_tol / 100.0)
 
     def _to_working(g):
         return g if L is None else L.T @ g
@@ -4942,6 +5114,7 @@ def bfgs(
             start=g5["start"],
             gamma=g5["gamma"],
             epsilon=inner_eps,
+            maxit=g5["maxit"],
         )
         g5["start"] = fit["coefficients"]
         return fit
@@ -6402,9 +6575,11 @@ def estimate_gam(
 
         rho_hat = rho_full(theta_hat)
         sp_out = np.exp(theta_hat)
-        # The converged deriv-2 fit: newton's/efs's last accepted iterate
-        # (cached in g5 — mgcv's b; estimate.gam never refits). Fixed-sp/no-sp
-        # paths fit directly, deriv 0 for derivs-0 families (mgcv.r:1479+).
+        # The fitted model is the outer optimizer's last accepted iterate
+        # (cached in g5 — mgcv's b; estimate.gam never refits). With fixed or
+        # no smoothing parameters gam.outer takes its "no.sps" route:
+        # gam2objective calls gam.fit5 at deriv = 0 with gam.control's
+        # epsilon, which no Newton loop has capped (gam.fit3.r:2176-2179).
         fit = gg.g5.get("fit")
         if fit is None:
             fit = _gam_fit5(
@@ -6417,10 +6592,11 @@ def estimate_gam(
                 weights=gg.wt,
                 offset=gg.offsets,
                 Mp=gg.Mp,
-                deriv=2 if avail_derivs >= 2 else 0,
+                deriv=0,
                 start=gg.g5["start"],
                 gamma=gg.gamma,
-                epsilon=1e-8,
+                epsilon=gg.g5["epsilon"],
+                maxit=gg.g5["maxit"],
             )
         if fit["warn"]:
             import warnings as _warnings
@@ -9028,9 +9204,15 @@ class gam:
         gam.fit5 REML closure → final deriv-2 fit. The post-fit
         surface (gam.fit5.post.proc: Vp/edf/summary/predict/plot) is not
         built here — only fitting attributes are populated.
+
         ``method`` is coerced to REML like mgcv (mgcv.r:1894-1898,
+        silently); ``sp=`` takes the working-length vector and fixes
+        every sp (all-or-nothing — the single-formula mixed-sp fold
+        hasn't been extended here); ``control=`` supplies the efs and
+        newton knobs. ``edge_correct`` runs mgcv's newton walk
         (gam.fit3.r:1669) plus gam.fit5.post.proc's k=2 Vc pass
         (gam.fit4.r:1650-1663) — newton-optimizer fits only, exactly
+        like mgcv (bfgs/efs never receive edge.correct).
         """
         self._control = gam_control(**(control or {}))
         if offset is not None:
@@ -9206,6 +9388,10 @@ class gam:
                 )
             start_irp = _sl_initial_repara(sl, start_arr, both_sides=False)
 
+        # epsilon/maxit are gam.control's own values. Each caller applies
+        # the cap its mgcv counterpart applies: newton/bfgs (and the edge
+        # refit) use min(epsilon, conv.tol/100), gam.fit3.r:1308/1797,
+        # while efsud and the fixed-sp fit use epsilon as given.
         self._g5 = {
             "X": X_irp,
             "y": y,
@@ -9216,6 +9402,8 @@ class gam:
             "weights": self._wt,
             "start": start_irp,
             "gamma": self._gamma,
+            "epsilon": float(self._control["epsilon"]),
+            "maxit": int(self._control["maxit"]),
         }
 
         # mgcv's estimate.gam general-family branch (mgcv.r:1984+): bundle
@@ -9478,7 +9666,11 @@ class gam:
                         deriv=2,
                         start=g5["start"],
                         gamma=g5["gamma"],
-                        epsilon=1e-8,
+                        epsilon=min(
+                            g5["epsilon"],
+                            self._control["newton"]["conv_tol"] / 100.0,
+                        ),
+                        maxit=g5["maxit"],
                     )
                     hess_k = np.asarray(fit1["REML2"], dtype=float)
                     if self._L is not None:
@@ -10567,6 +10759,8 @@ class gam:
         """Port of ``mgcv:::reTest`` (mgcv.r:3716-3755). Returns ``(stat,
         pval, rank)``. Uses ``psum_chisq`` (Davies 1980) for the p-value.
         - Wood (2013) "On p-values for smooth components of an extended GAM",
+          Biometrika 100(1), 221–228.
+        - mgcv source: ``R/mgcv.r``.
         """
         sig2 = (
             float(self.sigma_squared)
@@ -10612,10 +10806,26 @@ class gam:
         shared by :meth:`summary` and ``anova(m)`` (mgcv's single-model
         ``anova.gam`` *is* ``summary.gam`` reclassed, so the tables must
         come from one place).
+
         Dispatch per smooth: ``reTest`` (Wood 2013) whenever the combined
+        penalty is full-rank on the block (``null.space.dim == 0`` — re/fs/
+        sz, cyclic bases, and every smooth under ``select=TRUE``);
+        ``testStat`` (inverted-Nychka, fractional rank, ``_test_stat``)
+        otherwise. ``stat_col`` is the printed statistic: ``Chi.sq`` (the
+        raw stat) when ``est.disp`` is FALSE (known-scale family, or any
+        family under a ``dispersion=`` override), ``F = stat / Ref.df``
+        when the scale is estimated — same for both branches (mgcv prints
+        ``chi.sq/df`` under ``est.disp``).
+
         ``dispersion`` is summary.gam's override (mgcv.r:3895-3899): the
+        smooth tests always use ``Vp`` (freq= never reaches them), but a
+        supplied dispersion rescales it by ``dispersion/sig2`` and forces
+        ``est.disp = FALSE`` (χ² references; testStat ``res.df = -1``).
+
         ``re_test=False`` (summary.gam's ``re.test`` formal, mgcv.r:3858)
+        drops the reTest-path smooths from the table entirely — mgcv sets
         ``res <- NULL`` and skips the row (mgcv.r:4024-4030); it does NOT
+        reroute them to testStat.
         """
         scale_known = bool(self._scale_known_fit)
         est_disp = (not scale_known) and dispersion is None
@@ -10810,6 +11020,10 @@ class gam:
         identifiability check from ``gdiPK`` (gdi.c:1740-1758) on the
         augmented penalized problem.
         root Eb (``totalPenaltySpace``, gam.fit3.r:2661:
+        ``St = Σ_k S_k/‖S_k‖_F``, which does not depend on the smoothing
+        parameters), each part divided by its own Frobenius norm; then a
+        pivoted QR of the stack and Cline-condition rank reduction at mgcv's
+        ``rank.tol = √eps`` via :func:`_R_rank`.
         """
         X = self._X_full
         if self._fisher_w is not None:
@@ -10824,6 +11038,8 @@ class gam:
     ) -> pl.DataFrame:
         """Build the variance-component table mgcv calls ``gam.vcomp``.
         (mgcv.r:4242-4290). Rescaling multiplies σ_k by a constant, so
+        the delta-method SEs of log σ_k (hence the CI ratios) are unchanged.
+        ``rescale=False`` reports σ_k at the fitted scaling.
         """
         if conf_lev <= 0.0 or conf_lev >= 1.0:  # mgcv's guard
             conf_lev = 0.95
@@ -12639,10 +12855,28 @@ class gam:
         """mgcv summary.gam's pTerms block (mgcv.r:3928-3977): one joint
         Wald test per whole parametric term — a factor's columns are
         tested together, which the per-coefficient p.table can't do.
+
+        Returns ``(label, df, stat, p)`` rows. ``stat`` is Chi.sq with a
+        pchisq p-value when ``est.disp`` is FALSE (known scale, or any
+        ``dispersion=`` override), else F = Chi.sq/df with
+        pf(·, df, residual.df) (mgcv's est.disp dispatch; residual.df =
+        n − Σedf). The covariance is ``Vp`` (summary.gam's default
         ``freq=FALSE``) or ``Ve`` under ``freq=True`` (mgcv.r:3890),
+        rescaled by ``dispersion/sig2`` when a dispersion is supplied
         (mgcv.r:3895-3899); each term block is pseudo-inverted at
+        rank.tol = √eps with the resulting rank as the df
+        (:func:`_wald_pinv`), so dropped (rank-deficient) coefficients —
+        zero rows in report space — reduce the df exactly like mgcv.
+
+        Written list-generic over linear predictors like mgcv
+        (``pterms <- if (is.list(object$pterms)) ... else list(...)``,
         mgcv.r:3930): one entry for a single linear predictor. With
+        several, formula j ≥ 2 terms get mgcv's ``.{j-1}`` label suffix
         (mgcv.r:3939) and per-LP (assign, pstart) blocks feed the same
+        loop. The intercept (assign 0) is never a term — mgcv's
+        convention. mgcv's printed surface for this table is
+        ``anova.gam``, not ``print.summary.gam`` — hea's ``anova()``
+        consumes these rows; ``summary()``'s print output is unchanged.
         """
         md = getattr(self, "_md", None)
         if md is not None:
@@ -14516,6 +14750,8 @@ def _augment_smX(
     parameter rows of the shared (nobs+np+nc)-row frame, so
     ``fixDependence`` mostly only sees NULL-space dependencies.
     (mgcv.r:1266 runs after smoothCon absorb.cons=TRUE), so there are
+    no ``C`` blocks and ``nc = 0``: the ``C/norm(C)`` rows never
+    materialize.
     """
     X = np.asarray(b.X, dtype=float)
     ns = len(b.S)
@@ -14797,11 +15033,12 @@ def _r_cond(R: np.ndarray) -> float:
     return R_inf * y_inf
 
 
-def _R_rank(R: np.ndarray, tol: float = float(np.finfo(float).eps) ** 0.5) -> int:
+def _R_rank(R: np.ndarray, tol: float = float(np.finfo(float).eps) ** 0.9) -> int:
     """mgcv ``Rrank`` (mgcv.r:4-17): rank of a *pivoted* upper-triangular
     ``R`` by reducing rank until the Cline condition estimate of the
-    leading block satisfies ``κ · tol < 1``.
-    (gam.fit3.r:133) before calling pls_fit1/gdi1 — callers on that path
+    leading block satisfies ``κ · tol < 1``. The default ``tol`` is
+    mgcv's ``eps^0.9``; callers that mirror an mgcv call with a different
+    tolerance pass it explicitly.
     """
     rank = min(R.shape[0], R.shape[1])
     while rank > 0:
@@ -14872,6 +15109,18 @@ def _pls_rank_drop(
     rank = _R_rank(R_piv, tol=float(np.finfo(float).eps) * 100.0)
     drop = np.sort(piv[rank:]) if rank < p else np.zeros(0, dtype=int)
     return rank, drop, R1
+
+
+def _r_eigen_sym(A: np.ndarray, only_values: bool = False):
+    """R ``eigen(A, symmetric=TRUE)`` (``hea._rlinalg.r_eigen_sym``).
+
+    The routine decides each eigenvector's sign. Fitted quantities do not
+    depend on it, but mgcv's ``initial.spg`` combines the reparameterized
+    model matrix with penalties in the original basis, so the starting
+    smoothing parameters, and with them the outer iteration's path, do."""
+    from .._rlinalg import r_eigen_sym
+
+    return r_eigen_sym(A, only_values=only_values)
 
 
 def _mroot(A: np.ndarray, rank: int | None = None, method: str = "chol") -> np.ndarray:
@@ -14977,7 +15226,7 @@ def _get_stable_S(
             for i in range(Mf):
                 if alpha[i]:
                     Sb += Si[i] / frob[i]
-            ev_asc = np.linalg.eigvalsh(Sb)  # ascending
+            ev_asc = _r_eigen_sym(Sb, only_values=True)[::-1]  # ascending
             r = 1
             while r < Q and ev_asc[Q - r - 1] > ev_asc[Q - 1] * r_tol:
                 r += 1
@@ -14993,9 +15242,7 @@ def _get_stable_S(
         for i in range(Mf):
             if alpha[i]:
                 Sb += spf[i] * Si[i]
-        ev, U = np.linalg.eigh(Sb)
-        ev = ev[::-1].copy()
-        U = np.ascontiguousarray(U[:, ::-1])
+        ev, U = _r_eigen_sym(Sb)  # mgcv_symeig, descending
         if it == 1:
             Qf = U.copy()  # Q == q here
         else:
@@ -15180,8 +15427,15 @@ class _Sl:
 
 def _sl_setup(slots: list[_PenaltySlot], p: int) -> _Sl:
     """mgcv ``Sl.setup`` (fast-REML.r:68-429), default dense
-    non-Cholesky path.
-    (fast-REML.r:175-225), then each block is reparameterized: singletons
+    non-Cholesky path. Penalties sharing a column range form one block,
+    split into singletons when their footprints do not overlap
+    (fast-REML.r:175-225). Then each block is reparameterized: a diagonal
+    singleton is rescaled to unit penalized diagonal, a dense singleton is
+    rotated by its eigenvectors and rescaled to a partial identity, and a
+    multi-penalty block is rotated into the eigenbasis of its unscaled
+    total penalty, whose range-space projections become its ``S`` and
+    ``rS``. Also builds the balanced total penalty ``S`` and its root
+    ``E`` used for rank tests.
     """
     eps = float(np.finfo(float).eps)
     groups: list[tuple[int, int, list[np.ndarray]]] = []
@@ -15265,9 +15519,7 @@ def _sl_setup(slots: list[_PenaltySlot], p: int) -> _Sl:
                 )
             else:
                 # Eigen reparameterization (fast-REML.r:288-302).
-                w, U = np.linalg.eigh(0.5 * (S1 + S1.T))
-                w = w[::-1].copy()
-                U = U[:, ::-1].copy()
+                w, U = _r_eigen_sym(0.5 * (S1 + S1.T))
                 rank = int(np.sum(w > eps**0.8 * float(w.max())))
                 Dv = w.copy()
                 ind = np.zeros(k, dtype=bool)
@@ -15301,9 +15553,7 @@ def _sl_setup(slots: list[_PenaltySlot], p: int) -> _Sl:
             St = S_list[0].copy()
             for Sj in S_list[1:]:
                 St = St + Sj
-            w, U = np.linalg.eigh(0.5 * (St + St.T))
-            w = w[::-1].copy()
-            U = U[:, ::-1].copy()
+            w, U = _r_eigen_sym(0.5 * (St + St.T))
             rank = int(np.sum(w > eps**0.8 * float(w.max())))
             Ur = U[:, :rank]
             S_proj = []
@@ -15479,9 +15729,12 @@ def _ldet_s(
     """mgcv ``ldetS`` (fast-REML.r:762-1013), default dense non-Cholesky
     path: log|Sλ|₊ with first/second ρ-derivatives, the per-block multi-S
     reparameterization list ``rp``, the total-penalty root ``E`` (zero
-    rows dropped) and total ``S``.
-    :func:`_ldet_s_block` when ``repara=False`` (fast-REML.r:909-910),
-    ``grp$St <- grp$E``, fast-REML.r:911).
+    rows dropped) and total ``S``. Multi-penalty blocks go through
+    :func:`_gam_reparam` (the similarity transform of Wood 2011,
+    Appendix B) when ``repara=True`` and through :func:`_ldet_s_block`
+    when ``repara=False`` (fast-REML.r:909-910), in which case the block's
+    ``St`` is that function's summed penalty (``grp$St <- grp$E``,
+    fast-REML.r:911).
     """
     if root and not repara:
         # fast-REML.r:911/961 would store the ldetSblock ROOT in St for this
@@ -16375,9 +16628,18 @@ def _gam_fit5(
     epsilon: float = 1e-7,
     maxit: int = 200,
 ) -> dict:
-    """mgcv ``gam.fit5`` (gam.fit4.r:941) — general penalized-likelihood
-    fitter for extended families with a formula list (gaulss, mvn, …).
-    mgcv.r:1899-1903); the ldetS (``rp``) reparameterization is applied
+    """mgcv ``gam.fit5`` (gam.fit4.r:941-1477): penalized-likelihood fit of
+    a general family (gaulss, mvn, cox.ph, …) at fixed log smoothing
+    parameters ``lsp``, with the Laplace-approximate REML score and, for
+    ``deriv`` 1 or 2, its gradient and Hessian with respect to ``lsp``.
+
+    ``x`` arrives with estimate.gam's initial reparameterization already
+    applied (mgcv.r:1899-1903); this function applies the ldetS (``rp``)
+    reparameterization on top, fits by the stabilized Newton iteration
+    described in the section header above, and returns coefficients and
+    ``db_drho`` with ``rp`` undone. ``epsilon`` and ``maxit`` are
+    gam.control's ``epsilon`` and ``maxit`` after whatever cap the caller
+    applies; the main loop runs to ``2·maxit`` iterations.
     """
     if scoreType != "REML":
         raise NotImplementedError(
@@ -16542,7 +16804,10 @@ def _gam_fit5(
     iter_ = 0
 
     for iter_ in range(1, 2 * maxit + 1):  # main iteration
-        kappaH = float(np.linalg.cond(Hp, 1))
+        # mgcv takes kappa(Hp) of the penalized Hessian each iteration starts
+        # from (gam.fit4.r:1028). Its only reader is the step-failure accuracy
+        # estimate, which ends the loop, so it is evaluated there from Hp_top.
+        Hp_top = Hp
         D = np.diag(Hp).copy()
         if np.sum(~np.isfinite(D)) > 0:
             raise FloatingPointError("non finite values in Hessian")
@@ -16713,6 +16978,7 @@ def _gam_fit5(
                 coefp = coef * (1.0 + np.resize([-1.0, 1.0], coef.size) * eps_mach**0.9)
                 llp = llf(coef, 1)
                 gradp = llp["lb"] - St @ coefp
+                kappaH = _r_kappa(Hp_top)
                 err = min(
                     1e-3,
                     kappaH
@@ -16951,10 +17217,15 @@ def _efsud(
     or more flat shape directions (which can need >200 EFS steps to
     satisfy ``efs_tol``) can converge — keep it at 200 for mgcv
     cross-engine parity.
-    efsud, gam.fit4.r:1480); the loop reads ``epsilon`` (inner PIRLS tol +
+
+    ``control`` is gam.control as the user gave it (efsud receives it
+    from gam.outer, gam.fit4.r:1480, with no Newton cap): ``epsilon`` is
+    both gam.fit5's inner tolerance and the log-likelihood stop rule's
+    ε, and ``maxit`` bounds gam.fit5's inner loop.
     """
     ctrl = control or _GAM_CONTROL_DEFAULTS
     epsilon = ctrl["epsilon"]
+    maxit = int(ctrl["maxit"])
     efs_lspmax = ctrl["efs_lspmax"]
     efs_tol = ctrl["efs_tol"]
     efs_maxit = ctrl["efs_maxit"]
@@ -16977,6 +17248,7 @@ def _efsud(
             start=st,
             gamma=1.0,
             epsilon=epsilon,
+            maxit=maxit,
         )
 
     fit = fit_at(lsp, start)
@@ -17051,8 +17323,8 @@ def _single_sp(X, S, target: float = 0.5, tol: float | None = None) -> float:
     """mgcv ``single.sp`` (mgcv.r:4504): the smoothing parameter giving a
     target average e.d.f. per penalized term for a SINGLE-penalty problem —
     ``X`` the model matrix, ``S`` the penalty. Returns ``exp(λ̂)``, or ``-1.0``
-    on a backsolve failure (rank-deficient ``X``).
-    (mgcv.r:4663), which the gam/bam fit path never sets; it is otherwise an
+    on a backsolve failure (rank-deficient ``X``). mgcv calls it only from
+    ``initial.sp``'s ``expensive = TRUE`` branch (mgcv.r:4663).
     """
     from scipy.optimize import brentq
 
@@ -17103,7 +17375,15 @@ def _initial_sp_general(
     λᵢ = 0.3·‖Z'H₀Z‖_M / ‖Z'SᵢZ‖_M with H₀ = −lbb at the family's
     ``initialize_coef`` start and Z a pivoted-Cholesky basis of Sᵢ's
     range when Sᵢ is rank-deficient (norm "M" = max |entry|).
-    (gam.fit3.r:2661-2684), eigen-rooted at eps^0.66. Returns the
+
+    The start is the family initializer regularized by
+    ``totalPenaltySpace``'s root ``E`` (gam.fit3.r:2661-2684:
+    E'E = Σᵢ Sᵢ/‖Sᵢ‖_F, eigenvalues kept above max·eps^0.66). ``X`` is the
+    initially reparameterized model matrix while the ``Sᵢ`` and ``E`` stay
+    in the original basis, as in mgcv: estimate.gam reparameterizes
+    ``G$X`` before calling ``initial.spg`` but passes the untransformed
+    ``G$S``. Returns the log smoothing parameters, regressed onto the
+    working parameters through ``L`` when it is supplied.
     """
     if isinstance(X, _DiscreteX):
         p = X.design.p
@@ -17122,7 +17402,7 @@ def _initial_sp_general(
         if nrm > 0:
             St[a:b, a:b] += s.S / nrm
     if np.any(St):
-        ev, Y = np.linalg.eigh(0.5 * (St + St.T))
+        ev, Y = _r_eigen_sym(0.5 * (St + St.T))
         kept = ev > ev.max() * eps**0.66
         Eb = (np.sqrt(ev[kept]) * Y[:, kept]).T
     else:

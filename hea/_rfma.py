@@ -1,16 +1,15 @@
-"""The per-arch R-parity fused multiply-add, and nothing else.
+"""The per-arch R-parity fused multiply-add.
 
-A leaf on purpose. This lived in :mod:`hea.R._shared`, which put every
-consumer behind ``hea/R/__init__.py`` -- and two of them, :mod:`hea.formula`
-and :mod:`hea.models.bam`, are not in ``hea.R`` at all. That was a real import
-cycle (``hea.formula`` -> ``hea.R`` -> ``hea.R.factor`` -> ``hea.formula``),
-survivable only while ``hea/__init__.py`` happened to import the two in a
-working order; a lazy top level does not, and it surfaced immediately. It was
-also import weight: a three-line numeric primitive was dragging in the whole
-base-R namespace.
+R's C sources are compiled with clang on arm64, which contracts a
+single-expression ``a*b + c`` into one fused ``fmadd`` (one rounding); on
+x86-64 the default build has no FMA and rounds twice. ``_rfma`` reproduces
+that per architecture for scalars, ``_rfma_vec`` elementwise for arrays, and
+``_rfma_dot`` for the in-order dot product of a plain C loop
+``s = 0; for (i) s += x[i]*y[i];``.
 
-:mod:`hea.R._shared` re-exports both names, so every ``from ._shared import
-_rfma`` inside ``hea.R`` is unchanged.
+A leaf module, so :mod:`hea.formula` and :mod:`hea.models.bam` can use it
+without importing :mod:`hea.R` (which imports both of them).
+:mod:`hea.R._shared` re-exports the names for the ``hea.R`` modules.
 """
 
 from __future__ import annotations
@@ -20,7 +19,12 @@ import platform
 
 import numpy as np
 
+from ._dispatch import rs_fn
+
 _R_FMA = platform.machine().lower() in ("arm64", "aarch64") and hasattr(math, "fma")
+_rfma_vec_rs = rs_fn("rfma_vec")
+_rfma_dot_rs = rs_fn("rfma_dot")
+
 if _R_FMA:
 
     def _rfma(a, b, c):
@@ -32,7 +36,21 @@ if _R_FMA:
     _rfma_ufunc = np.frompyfunc(_rfma, 3, 1)
 
     def _rfma_vec(a, b, c):
+        if _rfma_vec_rs is not None:
+            a, b, c = np.broadcast_arrays(
+                np.asarray(a, dtype=np.float64),
+                np.asarray(b, dtype=np.float64),
+                np.asarray(c, dtype=np.float64),
+            )
+            shape = a.shape
+            out = _rfma_vec_rs(
+                np.ascontiguousarray(a).ravel(),
+                np.ascontiguousarray(b).ravel(),
+                np.ascontiguousarray(c).ravel(),
+            )
+            return np.asarray(out).reshape(shape)
         return _rfma_ufunc(a, b, c).astype(np.float64)
+
 else:
 
     def _rfma(a, b, c):
@@ -40,3 +58,14 @@ else:
 
     def _rfma_vec(a, b, c):
         return a * b + c
+
+
+def _rfma_dot(x, y) -> float:
+    x = np.ascontiguousarray(x, dtype=np.float64).ravel()
+    y = np.ascontiguousarray(y, dtype=np.float64).ravel()
+    if _rfma_dot_rs is not None:
+        return float(_rfma_dot_rs(x, y))
+    s = 0.0
+    for xi, yi in zip(x.tolist(), y.tolist()):
+        s = _rfma(xi, yi, s)
+    return s

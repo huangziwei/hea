@@ -173,3 +173,93 @@ def _dpofa(a, n):
             return j
         a[j - 1, j - 1] = math.sqrt(s)
     return 0
+
+
+def _dasum(n, dx, ox=0):
+    """``dasum``: the sum of ``|dx[ox:ox+n]|`` accumulated left to right,
+    which is the reference BLAS order (its unrolled loop adds in sequence).
+    Accelerate's reduction order for this kernel has not been probed, so on
+    darwin/arm64 the result can differ from R's in the last bit."""
+    s = 0.0
+    for i in range(n):
+        s += abs(float(dx[ox + i]))
+    return s
+
+
+def _dtrco(t, n, job):
+    """LINPACK ``dtrco`` (src/appl/dtrco.f): an estimate of the reciprocal
+    1-norm condition number of the triangular ``t`` (``job = 0`` lower,
+    otherwise upper), returned as ``rcond``. It solves ``t'y = e`` with the
+    signs of ``e`` chosen for local growth, then ``t z = y``, rescaling to
+    avoid overflow, and reports ``‖z‖₁ / (‖t‖₁ ‖y‖₁)``. The products folded
+    into a sum are fused through ``_rfma``, as gfortran contracts them."""
+    lower = job == 0
+    tnorm = 0.0
+    for j in range(1, n + 1):
+        ln = n + 1 - j if lower else j
+        i1 = j if lower else 1
+        tnorm = max(tnorm, _dasum(ln, t[:, j - 1], ox=i1 - 1))
+
+    # solve trans(t)*y = e
+    ek = 1.0
+    z = [0.0] * n
+    for kk in range(1, n + 1):
+        k = n + 1 - kk if lower else kk
+        km = k - 1
+        tkk = float(t[km, km])
+        if z[km] != 0.0:
+            ek = math.copysign(ek, -z[km])
+        if abs(ek - z[km]) > abs(tkk):
+            s = abs(tkk) / abs(ek - z[km])
+            _dscal(n, s, z)
+            ek = s * ek
+        wk = ek - z[km]
+        wkm = -ek - z[km]
+        s = abs(wk)
+        sm = abs(wkm)
+        if tkk != 0.0:
+            wk = wk / tkk
+            wkm = wkm / tkk
+        else:
+            wk = 1.0
+            wkm = 1.0
+        if kk != n:
+            j1 = 1 if lower else k + 1
+            j2 = k - 1 if lower else n
+            for j in range(j1, j2 + 1):
+                tkj = float(t[km, j - 1])
+                sm = sm + abs(_rfma(wkm, tkj, z[j - 1]))
+                z[j - 1] = _rfma(wk, tkj, z[j - 1])
+                s = s + abs(z[j - 1])
+            if s < sm:
+                w = wkm - wk
+                wk = wkm
+                for j in range(j1, j2 + 1):
+                    z[j - 1] = _rfma(w, float(t[km, j - 1]), z[j - 1])
+        z[km] = wk
+    s = 1.0 / _dasum(n, z)
+    _dscal(n, s, z)
+
+    ynorm = 1.0
+    # solve t*z = y
+    for kk in range(1, n + 1):
+        k = kk if lower else n + 1 - kk
+        km = k - 1
+        tkk = float(t[km, km])
+        if abs(z[km]) > abs(tkk):
+            s = abs(tkk) / abs(z[km])
+            _dscal(n, s, z)
+            ynorm = s * ynorm
+        if tkk != 0.0:
+            z[km] = z[km] / tkk
+        if tkk == 0.0:
+            z[km] = 1.0
+        i1 = k + 1 if lower else 1
+        if kk < n:
+            w = -z[km]
+            _daxpy(n - kk, w, t[:, km], z, ox=i1 - 1, oy=i1 - 1)
+    s = 1.0 / _dasum(n, z)
+    _dscal(n, s, z)
+    ynorm = s * ynorm
+
+    return ynorm / tnorm if tnorm != 0.0 else 0.0

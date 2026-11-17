@@ -229,6 +229,23 @@ extern "C" {
         x: *mut c_double,
         incx: *const c_int,
     );
+    #[cfg_attr(not(accelerate), link_name = "scipy_ddot_")]
+    fn ddot_(
+        n: *const c_int,
+        x: *const c_double,
+        incx: *const c_int,
+        y: *const c_double,
+        incy: *const c_int,
+    ) -> c_double;
+    #[cfg_attr(not(accelerate), link_name = "scipy_daxpy_")]
+    fn daxpy_(
+        n: *const c_int,
+        a: *const c_double,
+        x: *const c_double,
+        incx: *const c_int,
+        y: *mut c_double,
+        incy: *const c_int,
+    );
     #[cfg_attr(not(accelerate), link_name = "scipy_dgemv_")]
     fn dgemv_(
         trans: *const c_char,
@@ -506,6 +523,49 @@ pub fn gemv_t(m: usize, n: usize, a: &[f64], lda: usize, x: &[f64], y: &mut [f64
             &inc,
         );
     }
+}
+
+/// `y = A'x` as `dgemv('T', m, n, 1.0, a, lda, x, 1, 0.0, y, 1)`, the call
+/// mgcv's tprs.c makes per row to map a radial/polynomial row through `UZ`.
+pub fn gemv_t_set(m: usize, n: usize, a: &[f64], lda: usize, x: &[f64], y: &mut [f64]) {
+    if n == 0 {
+        return;
+    }
+    let (mi, ni, ldai, inc) = (m as c_int, n as c_int, lda.max(1) as c_int, 1 as c_int);
+    let (one, zero) = (1.0f64, 0.0f64);
+    /* SAFETY: `a` is `m`-by-`n` column-major at `lda`, `x` is `m` long and `y`
+     * is `n` long, checked by the caller; `y` is the only `&mut`. */
+    unsafe {
+        dgemv_(
+            &ch(b'T'),
+            &mi,
+            &ni,
+            &one,
+            a.as_ptr(),
+            &ldai,
+            x.as_ptr(),
+            &inc,
+            &zero,
+            y.as_mut_ptr(),
+            &inc,
+        );
+    }
+}
+
+/// One LINPACK ``dqrsl`` reflector step on ``y``: ``t = -ddot(u, y)/u[0]``,
+/// ``y += t*u`` (``daxpy``) — the calls R's ``qr.qty``/``qr.qy`` make per
+/// Householder vector, with ``u[0]`` already set to ``qraux``.
+pub fn dqrsl_reflect(u: &[f64], y: &mut [f64]) {
+    let n = u.len();
+    if n == 0 {
+        return;
+    }
+    let (ni, inc) = (n as c_int, 1 as c_int);
+    /* SAFETY: `u` and `y` are both `n` long (checked by the caller) and
+     * distinct; `y` is the only `&mut`. */
+    let d = unsafe { ddot_(&ni, u.as_ptr(), &inc, y.as_ptr(), &inc) };
+    let t = -d / u[0];
+    unsafe { daxpy_(&ni, &t, u.as_ptr(), &inc, y.as_mut_ptr(), &inc) };
 }
 
 pub fn trsm_lln(m: usize, n: usize, a: &[f64], lda: usize, b: &mut [f64], ldb: usize) {

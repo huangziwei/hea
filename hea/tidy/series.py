@@ -79,6 +79,13 @@ class Series(pl.Series):
     def _is_ordered_factor(self) -> bool:
         """True when this Series should print levels with ``<`` separators
         (R's ordered-factor display). Two sources, in order:
+
+        1. The local marker set by ``factor(..., ordered=True)`` /
+           ``ordered()``, which covers unnamed Series (bare-list inputs). It is
+           not carried through derived operations; this is display only.
+        2. The ``_ORDERED_COLS_CV`` contextvar, which covers named columns
+           registered for poly contrasts in model fitting, so the same
+           ordered-ness reaches ``df["col"]`` views.
         """
         if getattr(self, "_hea_ordered", False):
             return True

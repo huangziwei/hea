@@ -755,7 +755,15 @@ class Translator:
         return self._visit_Call(synth)
 
     def _visit_Call(self, n: R.Call) -> P.AST:
-        """Three dispatch layers, tried in order:"""
+        """Three dispatch layers, tried in order:
+
+        1. If ``func`` is a known **verb**: rewrite to ``first_arg.verb(rest)``
+           with the verb's NSE slot active for the rest.
+        2. If ``func`` is a known **function/helper** in
+           :data:`FUNCTION_TABLE`: dispatch on its form.
+        3. Otherwise emit a regular function call, walking the args with the
+           current slot.
+        """
         func = n.func
         if isinstance(func, R.BinOp) and func.op in ("::", ":::"):
             func = func.right  # type: ignore[assignment]
@@ -1214,8 +1222,17 @@ class Translator:
     _JOIN_BY_BINOPS: frozenset[str] = frozenset({"==", "<", "<=", ">", ">=", "!="})
 
     def _emit_join_by_call(self, args: tuple[R.Node, ...]) -> P.AST:
-        """``join_by(x, dest == faa, closest(t >= u))`` — dplyr's NSE
-        join spec. Each arg gets its own treatment:
+        """``join_by(x, dest == faa, closest(t >= u))``, dplyr's NSE join spec.
+        Each argument is translated by its shape:
+
+        - ``Identifier`` (bare name) → ``'name'`` (a string: the same key on
+          both sides, a shape hea's ``join_by`` recognises).
+        - ``BinOp`` with a comparison operator → ``col('lhs') op col('rhs')``,
+          so polars' ``Expr.__eq__`` / ``__lt__`` / … builds a join-binary
+          expression.
+        - ``Call`` to ``closest`` / ``between`` / ``overlaps`` / ``within`` (or
+          anything else) → translated normally with ``Slot.EXPR`` active, so its
+          arguments (column names) become ``col()``s.
         """
         py_args: list[P.AST] = []
         for a in args:
@@ -1637,7 +1654,15 @@ def _is_numeric_literal(node: R.Node) -> bool:
 
 
 def _to_py_identifier(name: str) -> str:
-    """Normalize an R identifier into a valid Python identifier:"""
+    """Normalize an R identifier into a valid Python identifier:
+
+    1. ``.`` → ``_`` (``data.frame`` → ``data_frame``).
+    2. A trailing ``_`` if the result is a hard Python keyword (``lambda``
+       → ``lambda_``, ``class`` → ``class_``).
+
+    Soft keywords (``match``, ``case``, ``type``, ``_``) are left alone;
+    they are valid identifiers outside their reserved-statement contexts.
+    """
     import keyword
 
     py = name.replace(".", "_")

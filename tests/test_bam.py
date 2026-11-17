@@ -372,6 +372,9 @@ def _load_rf_matrix(name: str, cols: list[str]) -> dict:
 def test_bam_discrete_matrix_by_2d_matches_mgcv():
     """2-D ``te(Lag, Xc, by=Stim)`` signal regression under discrete=True.
     rank-1 marginal (bam.r:2470-2482) and the fit applies the **binned** by
+    ``by.var[k[:, ks_by+q]]`` per summation column (discrete.c:tensorXb). hea
+    weights the smooth by that same binned by, so discrete=True must match
+    **bamT**, not bamF (exact-by, which lives at discrete=False).
     """
     sub = "te"
     d = _load_rf_matrix(sub, ["y"])
@@ -1922,7 +1925,7 @@ def test_bam_estscale_phi_matches_mgcv_bam(case, fam_factory):
     fit_ref = np.array(
         [float(x) for x in (_BAM_ES / case / "fitted.csv").read_text().split()]
     )
-    m = hea.models.bam("y ~ z + s(x, k=12)", df, family=fam_factory(), method="REML")
+    m = hea.models.bam("y ~ z + s(x, k=12)", df, family=fam_factory(), method="fREML")
     np.testing.assert_allclose(m.sp[0], meta["sp"], rtol=1e-8)
     np.testing.assert_allclose(m.sigma_squared, meta["scale"], rtol=1e-10)
     np.testing.assert_allclose(m.edf_total, meta["edf_total"], rtol=1e-10)
@@ -2118,6 +2121,13 @@ def test_matrix_arg_te_predict_accepts_vector_newdata():
 def _method_probe_frame(n: int = 300) -> pl.DataFrame:
     """RGenerator(66) data — bit-matches the R recipe below (R-native
     runif/rnorm/rpois via hea.R.rng), so mgcv pins can be regenerated with::
+
+        set.seed(66); n <- 300
+        x0 <- runif(n); x1 <- runif(n); x2 <- runif(n); e <- rnorm(n, 0, 0.2)
+        f <- sin(2*pi*x0)*0.7 + (x1-0.5)^2*2 + 0.3*sin(pi*x2)
+        mu <- 2 + 6*(x0-0.5)^2 + 4*(x1-0.25)^2; yp <- rpois(n, mu)
+        d <- data.frame(x0, x1, x2, yg = f + e,
+                        ygam = exp(f*0.5 + e*0.5) + 0.2, yp = yp)
     """
     from hea.R.rng import RGenerator
 
@@ -2263,7 +2273,7 @@ def test_bam_method_poisson_collapse_and_ml():
     assert float(m_ml.sp[1]) == pytest.approx(8.65489401, rel=1e-6)
     assert float(np.sum(m_ml.edf)) == pytest.approx(6.275150642, rel=1e-6)
     assert _bam_score(m_ml) == pytest.approx(595.7609693, rel=1e-9)
-    assert float(m_r.sp[0]) == pytest.approx(2.1935047, rel=1e-6)
+    assert float(m_r.sp[0]) == pytest.approx(2.19351456531, rel=1e-9)
     assert _bam_score(m_r) == pytest.approx(600.1910440649, rel=1e-9)
 
 
@@ -2305,6 +2315,29 @@ def test_bam_method_gacv_scale_unknown_degenerate_matches_mgcv():
     assert float(np.sum(m2.edf)) == pytest.approx(19.0, abs=1e-3)
     assert np.all(m2.sp < 1e-6)
     assert 0.0 <= float(m2.GCV_score) < 1e-4
+
+
+def test_bam_gacv_fixed_sp_score_matches_mgcv():
+    """bam(Gamma, GACV.Cp) at fixed sp: the reported score is gam.fit3's GACV
+    on the compressed gaussian refit (bam.r:1263-1273), i.e. computed from
+    the coefficients that solve the final (R, f) at that sp. Toward
+    interpolation the reduced residual is ~1e-7, so the score is set by that
+    solve alone; references are mgcv 1.9-4 on the fixture's exact bits."""
+    df = _method_probe_frame()
+    for sp, ref in [
+        (1e-3, 8.5949222784e-04),
+        (1e-5, 9.4773200784e-06),
+        (1e-7, 9.4871950707e-08),
+        (7e-9, 6.6411014828e-09),
+    ]:
+        m = hea.models.bam(
+            "ygam ~ s(x0) + s(x1)",
+            df,
+            family=Gamma(link=hea.family.LogLink()),
+            method="GACV.Cp",
+            sp=[sp, sp],
+        )
+        assert float(m.GCV_score) == pytest.approx(ref, rel=1e-4)
 
 
 def test_bam_gcv_nongaussian_regression():
@@ -2423,9 +2456,17 @@ def test_bam_negbin_matches_mgcv():
 def test_bam_report_layer_flavors_match_mgcv():
     """The bam report-layer flavor fixes (found via the negbin port, but
     poisson/gaussian were equally affected):
+
     * fREML edf2/Vc = Sl.postproc's Vc1-only recipe (fast-REML.r:2007-2018)
+      — NOT gam.fit3.post.proc's Vc1+Vc2 (that belongs to the explicit
+      REML/ML/P-* gam(G=G) route);
+    * GCV.Cp AIC df uses edf (mgcv's magic rail sets edf2 NULL);
     * the DISCRETE rail reports bgam.fitd's own criterion (bam.r:792):
+      penalised deviance + family saturated log-lik with prop's
+      ldetS/ldetXXS — the `crit <-` statement ends at `)/2`; the trailing
       log(2πφ) line (bam.r:794) is a discarded bare expression.
+
+    All values pinned from mgcv 1.9-4 on the probe frame.
     """
     df = _method_probe_frame()
     p1 = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson())
@@ -2788,7 +2829,9 @@ def test_bam_binomial_cbind_matches_mgcv():
 def test_bam_censored_chunked_subsety():
     """chunk_size < n exercises the per-chunk family-state window
     (family.set_ind — mgcv's subsety, bam.r:1068). Receipts:
-      calls (bam.r:1166/1186/1204, reset only at :1307) — live receipt:
+      calls (bam.r:1166/1186/1204, reset only at :1307), which collapses θ on
+    a chunked fit; hea restores the subset per build, so its chunked θ̂
+    stays next to the unchunked one.
     """
     from hea.family import Gaussian, Poisson, cnorm, gfam
 
@@ -3034,12 +3077,27 @@ def test_bam_general_discrete_fit5_matches_dense_rail():
             assert np.allclose(fit_c["REML1"], fit_d["REML1"], rtol=1e-7, atol=1e-8)
 
 
+# The bfgs outer loop's last gam.fit5 call can stop at a relative gradient
+# of ~2.6e-8, against a 2e-8 step-failure gate: gam.fit5's rounding floor,
+# where no step changes the log-likelihood by more than an ulp.
+@pytest.mark.filterwarnings("ignore:gam.fit5 step failed:UserWarning")
 def test_bam_gaulss_discrete_matches_mgcv():
-    """bam(list, gaulss, discrete=True) end to end — the fit mgcv REFUSES
-    — against dense mgcv::gam(gaulss) oracles on the same frame (live
-    mgcv 1.9-4, the _gaulss_frame recipe):
-    trace (the mgcv.r:1907 coercion — full Newton is structurally off,
-    gamlss.r:777), and lands on the newton-quality optimum: the
+    """bam(list, gaulss, discrete=True) end to end — a fit mgcv refuses —
+    against dense mgcv::gam(gaulss) oracles on the same frame (mgcv 1.9-4,
+    the _gaulss_frame recipe):
+
+      b  <- gam(list(y~s(x0)+x1, ~s(x2)), family=gaulss(), data=d,
+                method="REML")   # REML 191.7194511707, sp .04369801 .67410720
+      be <- gam(..., optimizer="efs")
+                                 # REML 191.7194536659, sp .04370736 .67283664
+      fitted[1:3,1]  0.63365452 -1.66060571 -0.46139888
+      fitted[1:3,2]  1.44075881  2.68427594  1.61579331
+
+    hea's default discrete optimizer is BFGS over the deriv-1 REML trace
+    (the mgcv.r:1907 coercion; full Newton is structurally off,
+    gamlss.r:777), and it lands on the newton-quality optimum. The bit-scale
+    checks are the two rail-parity tests above; the EFS opt-in has its own
+    pins in the efs/fixed-sp test.
     """
     from hea.family import gaulss
 
@@ -3353,9 +3411,20 @@ def test_bam_general_discrete_family_initialize_receipts():
 
 
 def test_bam_general_discrete_families_match_mgcv():
-    """e2e (default BFGS over the deriv-1 trace) vs live mgcv dense
-    gam(newton) oracles (mgcv 1.9-4, set.seed(66) recipes ≡ _dgf_frame
-    — bam itself refuses general families):
+    """e2e (default BFGS over the deriv-1 trace) vs mgcv dense gam(newton)
+    oracles (mgcv 1.9-4, set.seed(66) recipes ≡ _dgf_frame; bam itself
+    refuses general families):
+
+        gammals  newton REML 95.3448372027  sp[0] .12729133
+        gumbls   newton REML 833.67503919   sp[0] .026283832
+        gevlss   newton REML 581.861114818  sp[0] .03789596
+        multinom newton REML 206.411146655  sp[0] .019576962
+        (efs endpoints: 95.3449555896 / 833.677220498 / 581.863951549 /
+         206.413561991)
+
+    sp[1] sits on the flat penalize-to-linear plateau where mgcv's own
+    newton and efs endpoints disagree by 2-16x, so it is not gated. The
+    bit-scale checks are the rail-parity tests above.
     """
     pins = {
         "gammals": (95.3448372027, 0.12729133, 1e-3, 5e-3),
@@ -3499,6 +3568,9 @@ def test_bam_general_discrete_efs_and_fixed_sp():
         hea.models.bam("y ~ s(x0)", d, discrete=True, optimizer=("efs",))
 
 
+# Same fit as test_bam_gaulss_discrete_matches_mgcv: its last inner step
+# can fail at gam.fit5's rounding floor and warn.
+@pytest.mark.filterwarnings("ignore:gam.fit5 step failed:UserWarning")
 def test_bam_general_discrete_predict():
     """predict on the discrete GENERAL fit (v0.1.7 gate slice) —
     predict.bamd's binned protocol (bam.r:1843-1921) applied per LP with

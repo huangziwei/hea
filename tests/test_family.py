@@ -3139,6 +3139,8 @@ def test_tweedious_work_census_matches_mgcv():
     C_tweedious). Block B: per-row θ/ρ (vector C_tweedious2 with the lgamma(j+1)
     recursion). ``y[0]=0`` exercises the closed-form point mass.
     ``w2i/wi − (w1i/wi)²`` cancellation (mgcv misc.c:499-500) amplifies the
+    last-ulp floor of exp and of the accumulation by about 150x, so the
+    pins allow for it; references are 17-digit values from mgcv 1.9-4.
     """
     from hea.family import _ld_tweedie_work
 

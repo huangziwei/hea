@@ -589,6 +589,10 @@ def test_analyze_reports_when_cholmod_would_try_metis(name, M):
     """The one place this port's *candidate set* can diverge from a CHOLMOD
     built with the Partition module, reported rather than hidden.
     (``cholmod_analyze.c:767-781``). When it breaks, both stop at AMD and the
+    answers agree by construction. When it does not, upstream's third method
+    is METIS and this port's is natural, so the two can pick different
+    orderings: ``laplacian3d-24`` is that case, while ``laplacian3d-23``,
+    one grid step smaller, still breaks out.
     """
     ref = REF_ANALYZE[name]
     got = analyze(M, ordering="best")
@@ -602,6 +606,10 @@ def test_analyze_reports_when_cholmod_would_try_metis(name, M):
 def test_analyze_best_selects_but_does_not_invent(name, M):
     """``ordering="best"`` returns one of the orderings it tried, unchanged.
     The trial loop is CHOLMOD's (``cholmod_analyze.c:554-782``): run each
+    method and keep the smallest ``lnz``. Two properties follow: it never
+    returns an analysis worse than pinning AMD, and when AMD's break check
+    fires it never looks past AMD, which keeps the default as cheap as the
+    pinned path where AMD already wins.
     """
     best = analyze(M, ordering="best")
     amd = analyze(M, ordering="amd")
@@ -1387,7 +1395,18 @@ def test_solve_matches_cholmod(name, M, stype, use_ll):
 @pytest.mark.parametrize("stype", [1, -1])
 def test_supernodal_and_simplicial_agree(name, M, stype):
     """The two factorizations are the same factorization.
-    (``cholmod_analyze.c:887-891``) — and it is worth 4x on the matrices that
+
+    ``hea.sparse`` picks between them the way CHOLMOD does — supernodal when
+    the analysis reports at least 40 flops per nonzero of ``L``
+    (``cholmod_analyze.c:887-891``). Which one ran must not be observable in
+    the answer: same ``L`` (same pattern, and the supernodal one is pruned of
+    the entries relaxed amalgamation added), same permutation, same
+    log-determinant, same solves.
+
+    ``L`` is compared exactly on *pattern* and to a tolerance on *values*:
+    a different arithmetic order gives different last bits, which is why the
+    bit-exactness pins above run simplicial. Agreement with CHOLMOD's own
+    supernodal, bit for bit, is checked outside this suite.
     """
     n = M.shape[0]
     if n == 0:

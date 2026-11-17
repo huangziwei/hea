@@ -56,6 +56,8 @@ from scipy.linalg.lapack import dgeqp3, dormqr, dpstrf
 
 from .._dispatch import rs_fn
 from .._rfma import _rfma_vec
+from .._rlinalg import r_matprod
+from .._rsum import r_colsums, r_mean
 from ..family import (
     DiscreteX,
     Family,
@@ -116,7 +118,9 @@ from .gam import (
     _na_pass_expand,
     _parametric_penalty,
     _ParaPenBlock,
+    _penalty_root_of,
     _PenaltySlot,
+    _pls_qr,
     _preml_hessian,
     _R_rank,
     _row_frame,
@@ -189,9 +193,23 @@ def _rw_matrix(
     trans: bool = False,
 ) -> np.ndarray:
     """Recombine rows of ``X`` per ``stop``/``row``/``weight``.
+
     Direct port of mgcv ``rwMatrix`` (C kernel src/misc.c:710-748; R wrapper
     bam.r:18-29). Forward (``trans=False``): the ith output row is
+    ``Σ_{k ∈ ind_i} weight[k] · X[row[k], :]`` where ``ind_i = 1:stop[1]`` if
+    ``i==1`` else ``(stop[i-1]+1):stop[i]``. Transposed (``trans=True``):
+    ``out[row[k], :] += weight[k] · X[i, :]`` over the same (i, k) pairs — the
+    scatter adjoint. BOTH are exercised by the AR1 X'Wy / y-norm² path
     (:func:`XWyd`, discrete.c:1152-1156 calls rwMatrix forward then transpose).
+
+    FMA: mgcv's C accumulates ``*X1p += weight * *Xp`` in one expression, which
+    fuses to ``fma`` on arm64. The rust kernel (:data:`_rs_rw_matrix`, the
+    primary path) mirrors that with ``rfma``. The numpy fallback below (used
+    only when the extension is unavailable) rounds the ``weight·X`` products
+    before summing (reduceat / scatter-add), so its last bits can differ.
+
+    R indices ``stop`` and ``row`` are passed in 1-based form, matching the
+    mgcv source. They are converted to 0-based here.
     """
     stop = np.asarray(stop, dtype=int) - 1
     row = np.asarray(row, dtype=int) - 1
@@ -1131,6 +1149,10 @@ def _qr_update(
 ) -> dict:
     """Update QR factor ``R`` and projected response ``f`` with new rows.
     Direct port of mgcv ``qr_update`` (bam.r:46-75). Given ``X = QR`` and
+    ``f = Q'y``, append rows ``Xn``/``yn`` and refresh ``(R, f, ‖y‖²)``. The
+    ``use_chol=True`` path accumulates ``X'X`` and ``X'y`` directly (faster,
+    less stable for ill-conditioned designs) and :func:`_chol2qr` converts
+    to ``(R, f)``. Returns a dict ``{R, f, y_norm2}`` matching mgcv's list.
     """
     Xn = np.asarray(Xn, dtype=float)
     yn = np.asarray(yn, dtype=float).ravel()
@@ -1355,6 +1377,12 @@ def _chunk_indices(
     """Yield ``(start, end)`` pairs covering ``range(n)`` in chunks of
     ``chunk_size``.
     Mirrors mgcv ``bam.fit`` (bam.r:1566-1574, single-thread). For
+    ``ar1=False`` (rho == 0) the chunks tile ``range(n)`` exactly. For
+    ``ar1=True`` chunks i >= 1 start one row earlier: that row is the
+    previous observation the AR1 transform's sub-diagonal needs, and each
+    overlapping chunk's transformed first row is dropped after the transform
+    (see :func:`_build_qr_chunked_gaussian`). The indices are pre-drop, so
+    consumers pass the full ``[start:end)`` slice.
     """
     if n <= 0:
         return []
@@ -1486,9 +1514,26 @@ def _build_qr_chunked_gaussian(
     prior_w: np.ndarray | None = None,
 ) -> _BamQR:
     """Chunked QR build for the Gaussian-identity (am=TRUE) path.
+
+    Walks ``data`` in chunks of ``chunk_size``, materialises each chunk's
+    full design via :func:`_materialize_chunk`, and accumulates ``(R, f,
+    ‖z‖²)`` with :func:`_qr_update`. ``z = y − offset``. ``prior_w`` (mgcv
+    ``G$w``) scales each row by ``√w`` BEFORE the AR1 transform — mgcv weights
     then ``rwMatrix``-decorrelates (bam.r:654: ``rwMatrix(..., sqrt(w)*z)``);
+    ``None`` ≡ all-ones. The resulting ``R'R = X'WX`` and ``y_norm2 =
+    Σ wᵢ(yᵢ−offᵢ)²`` are the prior-weighted Gram / working-RSS.
+
+    For ``rho == 0`` this mirrors mgcv ``bam.fit`` single-thread loop
     (bam.r:1576-1613). For ``rho ≠ 0`` (AR1 error model) each chunk is
+    transformed via :func:`_rw_matrix` using ``(stop, row, weight)``
+    arrays from :func:`_ar1_rwmatrix_indices`; chunks 2+ overlap the
+    previous chunk by one row (the row needed by the AR1 sub-diagonal),
+    and the first transformed row of those chunks is dropped after the
     rwMatrix transform — see bam.r:1576-1611.
+
+    ``ar_start`` (full-length-n boolean array, optional) re-anchors the
+    AR chain at ``True`` positions; ``True`` at position i means row i
+    starts a fresh AR sequence (sub-diagonal=0, leading-diag=1).
     """
     n = data.height
     if n == 0:
@@ -1590,11 +1635,32 @@ def _build_qr_chunked_pirls(
     prior_w: np.ndarray | None = None,
 ) -> _PirlsQR:
     """One PIRLS-step chunked QR build for non-Gaussian families.
+
     Mirrors mgcv ``bgam.fit`` inner accumulation (bam.r:1059-1099). For each
+    chunk:
+
+    * Materialise ``X_chunk`` (parametric + smooth columns).
+    * Compute the chunk's η. If ``coef is not None`` use ``η = X·β + offset``
       (mgcv bam.r:1066); otherwise fall back to the supplied ``eta_init``
+      (the family-initialised η used on iter 1).
     * Form Fisher working response and weights (mgcv bam.r:1078-1083):
+
+          z = (η − offset) + (y − μ) / μ_η
+          w = w_prior · μ_η² / V(μ)
+
+    * Drop rows where ``w_prior > 0 & μ_η != 0`` is false (mgcv's ``good``
       mask, bam.r:1080).
+    * Accumulate ``√w · X_good`` and ``√w · z_good`` into ``(R, f, ‖z‖²)``
+      via :func:`_qr_update`.
+    * Sum chunkwise deviance via ``family.dev_resids(y, μ, w_prior)``.
+
+    Returns a :class:`_PirlsQR` carrying both the reduced sufficient
+    statistics and the full-length (η, μ, w, z, dev) needed by the outer
+    PIRLS step-halving and convergence checks.
+
+    The Newton-form α is **not** applied here — mgcv uses Fisher weights
     inside the PIRLS loop (gam.fit3.r:270). Newton α enters only at the
+    post-fit score-derivative stage to make the converged Hessian match
     the observed-info form (Wood 2011 §3.3).
     """
     n = data.height
@@ -3049,14 +3115,9 @@ class bam(gam):
                     theta0 = np.concatenate([cur_rho, [cur_logphi]])
                 else:
                     theta0 = cur_rho
-                if method == "REML":
-                    # Non-discrete Gaussian (f)REML → ``fast.REML.fit``
+                if method == "REML" and self._method_in == "fREML":
+                    # Non-discrete Gaussian fREML → ``fast.REML.fit``
                     # (bam.r:1240), converge-fully on the fixed (R, f).
-                    # fast.REML.fit implements ONLY the REML criterion —
-                    # mgcv's explicit method="REML" runs gam(G=G) instead
-                    # (bam.r:1722-1733), but on the Gaussian working data
-                    # the two objectives coincide, so hea unifies them on
-                    # the fast rail.
                     theta_hat = self._fast_reml_fit(
                         theta0,
                         include_log_phi=include_log_phi,
@@ -3078,7 +3139,15 @@ class bam(gam):
                     # produce Sl.fitChol β/PP — null the F9 slots so the fit
                     # re-solves.
                     self._reml_beta = self._reml_A_inv = None
-                    crit = "REML" if method == "ML" else self._bam_outer_criterion()
+                    crit = (
+                        "REML"
+                        if method in ("ML", "REML")
+                        else self._bam_outer_criterion()
+                    )
+                    if include_log_phi:
+                        theta0 = np.concatenate(
+                            [theta0[:-1], [self._gam_g_log_scale0()]]
+                        )
                     theta_hat = self._outer_newton(
                         theta0,
                         criterion=crit,
@@ -3193,10 +3262,26 @@ class bam(gam):
         penalties/Sl/REML machinery runs in p-space, and every
         n-dependent assembly flows through the XWXd/XWyd/Xbd kernels via
         the family's DiscreteX dispatch inside gam.fit5.
+
+        Smoothness selection defaults to BFGS over the deriv-1 REML
+        trace: the discrete ``gamlss.gH`` tops out at that trace
         (gamlss.r:777), so full-Newton REML (needing REML2/trHid2H) is
+        structurally unavailable and estimate_gam caps the effective
         ll order at 1 — mgcv.r:1907's coercion to the bfgs outer
         optimizer (gam.fit3.r:1722). ``optimizer=("efs",)`` selects
+        extended Fellner-Schall (deriv-0 fits) instead, mgcv's other
+        short-derivative route. AR1 (``rho``) and NCV stay off the
+        discrete general path, mirroring mgcv's discrete limits.
+
+        ``start=`` seeds the coefficient vector exactly like
+        ``gam(start=)`` on the dense general path: gam.fit5 maps it into
+        the fitting basis and PROTECTS it from the family initializer
         (gam.fit4.r:995-998 — ``start0 <- start; eval(family$initialize);
+        start <- start0``), so a user start replaces the pilot solve
+        entirely. That makes it both the warm-start lever (each outer
+        BFGS/EFS trial already re-seeds from the previous inner fit) and
+        the basin selector for multimodal likelihoods — e.g. seeding a
+        discrete fit from a dense pilot fit's coefficients.
         """
         family = Gaussian() if family is None else family
         if not isinstance(family, GeneralFamily):
@@ -4116,6 +4201,18 @@ class bam(gam):
         and ``_reml_hessian``'s ``needs_w`` gate stays correct."""
         return np.zeros(self.p)
 
+    def _gam_g_log_scale0(self) -> float:
+        """The initial log φ of mgcv's compressed ``gam(G=G)`` refit
+        (estimate.gam, mgcv.r:2027-2033): ``log(in.out$scale)`` when in.out
+        is given, else ``log(null.scale/10)`` from ``get.null.coef`` on the
+        gaussian working problem, ``null.scale = Σ(f − mean(f))²/nrow(R)``."""
+        if getattr(self, "_in_out", None) is not None:
+            return self._in_out_log_scale()
+        f_red = np.asarray(self._bam_qr.f, dtype=float)
+        dev0 = f_red - r_mean(f_red)
+        null_scale = float(r_colsums(dev0 * dev0)[0]) / f_red.size
+        return float(np.log(null_scale / 10.0))
+
     def _bam_outer_criterion(self) -> str:
         """Outer-Newton criterion for the non-(f)REML/ML methods — the same
         scoreType mapping mgcv's compressed ``gam(G=G, method=method)``
@@ -4148,8 +4245,16 @@ class bam(gam):
         gaussian ``ls``/variance/link quantities and unit prior weights —
         the response family lives only in the outer PIRLS loop that
         rebuilds (R, f). Bind the same view here.
-        ``nobs`` (gam.fit3.r:744-752) — the ``dev.extra``/``n.true``
-        Pearson-φ (gam.fit3.r:641/648), which the full-data statistics
+
+        For GACV.Cp's GACV/GCV tail the refit is gam.fit3 on ``(R, f)``
+        with ``nobs = ncol(R)`` (gam.fit3.r:744-752): its deviance is the
+        reduced rows' residual sum ``‖f − Rβ‖²``, summed from residuals as
+        gaussian ``dev.resids`` are, while ``dev.extra``/``n.true`` reach
+        only the scale and Pearson-φ estimates (gam.fit3.r:641/648).
+        Forming that sum from the residuals, rather than as the full-data
+        RSS minus ``rss.extra``, keeps it accurate where the fit nearly
+        interpolates the reduced rows and the score divides it by
+        ``nobs − tr(A)``.
         """
         need_w = scoreType in ("REML", "PREML")
         dw_deta = self._dw_deta(fit) if (need_w and deriv >= 1) else None
@@ -4159,9 +4264,26 @@ class bam(gam):
         if self.method == "GACV.Cp" and scoreType in ("GACV", "GCV"):
             qrx = getattr(self, "_bam_qr", None)
             if qrx is not None:
-                rss_extra = float(qrx.y_norm2 - qrx.f @ qrx.f)
+                R_red = np.asarray(qrx.R, dtype=float)
+                f_red = np.asarray(qrx.f, dtype=float)
+                E_aug = _penalty_root_of(
+                    self._slots,
+                    self.p,
+                    self._UrS,
+                    self._reparam_Y,
+                    self._keep_cols,
+                    self._reparam_cache,
+                    np.asarray(rho, dtype=float),
+                    H_fixed=self._h_fixed_fit(),
+                )
+                b_red, _r, _ld, ok = _pls_qr(
+                    R_red, self._pls_lwork, np.ones(R_red.shape[0]), f_red, E_aug
+                )
+                if not ok:
+                    b_red = np.asarray(fit.beta, dtype=float)
+                r_red = f_red - r_matprod(R_red, b_red[:, None])[:, 0]
                 fit_view = _copy.copy(fit)
-                fit_view.dev = max(float(fit.dev) - rss_extra, 0.0)
+                fit_view.dev = float(r_colsums(r_red * r_red)[0])
                 fit_view.rss = fit_view.dev
                 n_score = self.p
         return _gam_fit3_score(
@@ -4201,6 +4323,10 @@ class bam(gam):
     def _ml_flavor_swap(self, family_aic: float, log_phi_hat: float) -> float:
         """The log-lik flavor difference in mgcv's final bam ML report.
         (bam.r:2784-2787) — while hea's ``self._reml`` carries the
+        ``dev/φ̂ − 2·ls(φ̂)`` form. The two coincide for poisson/binomial/Tweedie
+        (deviance–saturated-loglik identity) but differ for gaussian (``$aic`` at
+        the MLE scale, ``+2``, ``−Σlog w``) and Gamma (``+2``, dispersion
+        plug-in). Returns the additive correction in hea's 2V units.
         """
         phi = float(np.exp(log_phi_hat))
         if self._family_mgcv_extended:
@@ -4218,10 +4344,31 @@ class bam(gam):
     def _compute_edf12(self, rho, fit, sigma_squared, A_inv, A_inv_XtWX, edf, H_aug):
         """mgcv-bam's fREML edf1/edf2/Vc — ``Sl.postproc`` (fast-REML.r:
         1997-2018) and ``bgam.fitd`` (bam.r:824-881) share the recipe::
+
+            edf1 = 2·edf − rowSums(Fᵀ∘F)               (F = A⁻¹·X'WX)
+            rV   = (Λ₊^{-1/2}·Vᵀ)[, 1:M]   from eigen(outer hess)
+            Vc   = Vp + d1b·(rVᵀ·rV)·d1bᵀ
+            edf2 = rowSums(Vc ∘ X'WX)/φ,  Σedf2 capped at Σedf1
                                                         (bam.r:2789)
+
+        The column truncation keeps the ρ coordinates of every
+        eigenvector — the ρρ block of the positive-eigenspace
+        pseudo-inverse with the log-φ coupling marginalised. There is NO
+        Vc2 Cholesky-derivative term and NO 0.1-prior regularisation —
+        those belong to gam.fit3.post.proc, which mgcv-bam reaches only
+        through the explicit REML/ML/P-REML/P-ML ``gam(G=G)`` route
         (bam.r:1263-1273): those methods dispatch to the inherited gam
+        machinery. GCV.Cp/GACV.Cp also use super(): mgcv leaves edf2 NULL
+        there and the AIC df below never reads it.
+
+        The outer Hessian: the discrete POI's last accepted
         ``Sl.fitChol`` proposal (mgcv ``prop$hess``, bam.r:869) or
+        ``fast.REML.fit``'s final Newton Hessian (mgcv
         ``fit$outer.info$hess``, fast-REML.r:2010) — both stashed by the
+        fit loops; the ``_reml_hessian``-based ``H_aug`` argument is the
+        fallback. d1b: ``_db_drho`` at the converged fit ≡ mgcv's
+        unwound ``fit$d1b``/``prop$db`` (same ∂β̂/∂ρ in original
+        coordinates).
         """
         if self._method_in != "fREML":
             return super()._compute_edf12(
@@ -4497,7 +4644,10 @@ class bam(gam):
     ) -> None:
         """Populate the user-facing attributes after outer-Newton has
         converged on the (R, f) reduced problem.
-        Mirrors the post-fit block in ``gam.__init__`` (gam.py:476-783) for
+        Mirrors the post-fit block in ``gam.__init__`` for
+        the Gaussian-identity case: the X-using pieces (full η, leverage,
+        residuals) are filled by one chunked pass, and the β/Vp/Ve/edf algebra
+        is the same (XtWX = X'X = R'R when W = I).
         """
         n, p = self.n, self.p
         method = self.method
@@ -4984,9 +5134,40 @@ class bam(gam):
     def _bgam_fit_loop(
         self, *, sp_user, coef_start=None, eps: float = 1e-7
     ) -> tuple[_FitState, np.ndarray]:
-        """Outer PIRLS loop with chunked QR rebuild per iter.
-        the samfrac pre-fit loosens it to 1e-2 (bam.r:2685).
+        """Outer PIRLS loop with a chunked QR rebuild per iteration.
+
+        ``coef_start`` is mgcv's ``coef=`` warm start (bgam.fitd:548-560 /
+        bgam.fit:1066): iteration 0 builds the working model at
+        η = X·coef + offset instead of the family-initialize η, with dev seeded
+        at 2·dev(coef) and the step-halving reference snapshots armed from the
+        start. ``eps`` is control$epsilon; the samfrac pre-fit loosens it to
+        1e-2 (bam.r:2685).
+
         Direct port of mgcv ``bgam.fit`` (bam.r:909-1353). Each iteration:
+
+        1. Build (R, f, ‖z̃‖², rss_extra) over chunks of √W·X / √W·z, where
+           (W, z) are the Fisher PIRLS weights/working response from the
+           chunk's η = X·β + offset (the family-initialised η on iteration 1).
+        2. Update the reduced sufficient statistics ``self._XtX = R'R``,
+           ``self._Xty = R'f``, ``self._yty = ‖z̃‖²``, ``self._X_full = R``.
+        3. Update (ρ, log φ) on the reduced (R, f), then recover β̂ at the new
+           ρ̂ via ``_fit_given_rho``. The smoothing-parameter update follows
+           mgcv's split on ``discrete``:
+
+           * discrete=TRUE  → one ``_pi_fit_chol`` (Sl.fitChol) step,
+             gradient-halving, warm-started (mgcv ``bgam.fitd``);
+           * discrete=FALSE → ``_fast_reml_fit`` (mgcv ``fast.REML.fit``) run to
+             convergence, reml-value halving, re-seeded from ``initial.sp`` each
+             iteration (mgcv ``bgam.fit``);
+           * GCV.Cp → ``_outer_newton`` on V_g/V_u.
+        4. Step-halving (mgcv's "kk" inner loop): if ``it > 1`` and the new
+           penalised deviance increases, halve β toward ``β₀`` and rebuild.
+
+        Convergence (mgcv:1154): ``|dev - devold| / (0.1+|dev|) < ε`` after
+        ``it > 1`` (mgcv's ``iter > 2``: the ``dev*2`` seed in step 0 makes the
+        first iteration's check meaningless). At the converged β̂ the reduced
+        (R, f) problem is Gaussian, so the inner Newton sees ``W = I``; the
+        non-Gaussian weights live only in the outer loop's ``W``.
         """
         family = self.family
         link = family.link
@@ -5578,8 +5759,8 @@ class bam(gam):
                             both_sides=True,
                             cov=True,
                         )
-                elif method == "REML":
-                    # Non-discrete (f)REML → mgcv ``bgam.fit`` (bam.r:1226-1261):
+                elif method == "REML" and self._method_in == "fREML":
+                    # Non-discrete fREML → mgcv ``bgam.fit`` (bam.r:1226-1261):
                     # ``fast.REML.fit`` to FULL convergence on the current
                     # reduced (R, f). fast.REML.fit implements ONLY the REML
                     # criterion (mgcv's explicit method="REML" runs the
@@ -5672,17 +5853,15 @@ class bam(gam):
                         rho0 = rho0_full
                     else:
                         rho0, *_ = np.linalg.lstsq(self._L, rho0_full, rcond=None)
-                    if include_log_phi:  # ML with estimated scale
-                        if log_phi_hat is None:
-                            log_phi0 = float(
-                                np.log(max(float(np.var(y, ddof=1)) * 0.05, 1e-300))
-                            )
-                        else:  # iter > 1 — carry forward
-                            log_phi0 = log_phi_hat
-                        theta0 = np.concatenate([rho0, [log_phi0]])
+                    if include_log_phi:  # REML/ML with estimated scale
+                        theta0 = np.concatenate([rho0, [self._gam_g_log_scale0()]])
                     else:
                         theta0 = rho0
-                    crit = "REML" if method == "ML" else self._bam_outer_criterion()
+                    crit = (
+                        "REML"
+                        if method in ("ML", "REML")
+                        else self._bam_outer_criterion()
+                    )
                     theta_hat = self._outer_newton(
                         theta0,
                         criterion=crit,
@@ -6342,6 +6521,7 @@ def _distinct_exceeds_1d(a: np.ndarray, threshold: int) -> bool:
     """Exact predicate: does ``a`` have **more than** ``threshold`` distinct
     values? Early-exits as soon as ``threshold + 1`` distinct are seen.
     uses to decide whether to round (bam.r:152), so the round/keep decision is
+    identical to mgcv's; only the way the boolean is computed differs.
     """
     n = a.size
     if n <= threshold:
@@ -7226,6 +7406,11 @@ def _term_Xb_raw(
 ) -> np.ndarray:
     """Compute ``X_term_raw @ b_raw`` (length ``n``).
     Direct port of mgcv ``singleXb`` / ``tensorXb`` (discrete.c:375-444),
+    with the inner C loops as numpy gathers and einsum. Tensor terms keep the
+    C kernel's structure: the final marginal is contracted against ``b``
+    first to form ``C`` (the m_d-rowed working matrix), then the earlier
+    marginals are gathered at their row indices per q and contracted with
+    ``C`` row-wise.
     """
     if term.kind == "param":
         return term.Xd_list[0] @ b_raw
@@ -7460,6 +7645,10 @@ def _param_smooth_block(
 ) -> np.ndarray:
     """Raw block ``X_param' W X_smooth`` (shape ``p_par × pt_smooth``).
     accumulation when one term has ``m==n`` (discrete.c:1965-2006; the
+    ``mim==n ⇒ rfac=0`` guard at 1811 guarantees no ``n×p`` product). Each
+    parametric column ``a`` is fed as the "y" of ``X_smooth'(W·X_param[:,a])``,
+    the same scatter as ``XWyd``; for the AR1 ``tri`` weight (``w_off`` given)
+    ``W·X_param[:,a]`` is the tridiagonal matvec :func:`_tri_matvec`.
     """
     Xp = pterm.Xd_list[0]
     p_par = Xp.shape[1]
@@ -7477,8 +7666,25 @@ def _smooth_smooth_block(
     w_off: np.ndarray | None = None,
 ) -> np.ndarray:
     """Raw block ``X_i' W X_j`` for two smooth terms (shape ``pt_i × pt_j``).
+
     Faithful port of mgcv ``XWXijs`` general case (discrete.c:1793-2027):
+    decompose each tensor term into (non-final row-tensor) ⊗ (final marginal);
+    for each sub-block ``(r,c)`` accumulate the final-marginal weight table
+    ``W̄[a,b] = Σ_{s,t,rows} w·dXi_r·dXj_c·[K_i=a][K_j=b]`` then contract
+    ``Xd_im' W̄ Xd_jm``. The ``n×pt`` term design is never materialised.
+
+    For the AR1 ``tri`` weight (``w_off`` given, length ``n-1``) each ``(s,t)``
+    contributes THREE scatters into ``W̄`` (mgcv XWXijs ``tri`` branches,
     discrete.c:1843-1881) — the diagonal plus the super/sub couplings::
+
+        diag : (K_i[l],   K_j[l])   += w[l]·dXi[l]·dXj[l]          l=0..n-1
+        super: (K_i[l],   K_j[l+1]) += w_off[l]·dXi[l]·dXj[l+1]    l=0..n-2
+        sub  : (K_i[l+1], K_j[l])   += w_off[l]·dXi[l+1]·dXj[l]    l=0..n-2
+
+    :func:`_wbar_contract` already contracts an arbitrary list of scatter
+    triples, so the only ``tri`` change here is emitting the extra two per
+    ``(s,t)`` (and routing every block through it — the ``si==1`` diagonal
+    shortcut and the rust kernel assume a diagonal ``W̄`` and so are skipped).
     """
     Xim = ti.Xd_list[-1]
     Xjm = tj.Xd_list[-1]
