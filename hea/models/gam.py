@@ -42,10 +42,29 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from matplotlib.transforms import blended_transform_factory
-from scipy.linalg import cho_factor, cho_solve, qr, solve_triangular
+from scipy.linalg import cho_factor, cho_solve, solve_triangular
 from scipy.linalg.lapack import dgeqrf, dormqr
 
 from .._dispatch import rs_fn
+from .._rfma import _rfma, _rfma_dot, _rfma_vec
+from .._rlinalg import (
+    r_backsolve,
+    r_chol,
+    r_crossprod,
+    r_matprod,
+    r_norm,
+    r_qr,
+    r_qr_coef,
+    r_qr_fitted,
+    r_qr_lapack,
+    r_qr_qy,
+    r_qr_qy_lapack,
+    r_qr_R,
+    r_svd,
+    r_tcrossprod,
+)
+from .._rpow import _rpow
+from .._rsum import r_all_equal, r_colsums, r_mean, r_rowsums, r_sum, r_var
 from ..family import (
     Binomial,
     Family,
@@ -87,7 +106,7 @@ from ..formula import (
     Call,
     SmoothBlock,
     _eval_atom,
-    _eval_lhs_expr,
+    _eval_lhs_series,
     materialize_smooths,
     normalize_data,
     parse,
@@ -123,6 +142,8 @@ def gam_control(
     epsilon: float = 1e-7,
     maxit: int = 200,
     irls_reg: float = 0.0,
+    mgcv_tol: float = 1e-7,
+    mgcv_half: int = 15,
     rank_tol: float | None = None,
     newton: dict | None = None,
     nlm: dict | None = None,
@@ -157,13 +178,13 @@ def gam_control(
     directions) that genuinely need more iterations to satisfy
     ``efs_tol`` — raising it makes hea diverge from mgcv, which still
     stops at 200, so leave it at 200 for cross-engine work.
-    ``rank_tol`` is accepted but the fit path overrides it
-    to eps·100 exactly like mgcv (gam.fit3.r:133 — the knob only feeds
-    the unported magic path); ``nthreads``/``keepData``/``trace`` are
-    accepted no-ops. Unported knobs raise (never silent): non-zero
-    ``irls_reg`` (performance-iteration only), ``idLinksBases=False``,
-    ``scalePenalty=False``; mgcv's ``mgcv.tol``/``mgcv.half`` govern the
-    performance-iteration path and are not accepted here.
+    ``irls_reg``, ``mgcv_tol``, ``mgcv_half`` and ``rank_tol`` are
+    ``magic``'s ridge parameter, convergence tolerance, step-halving limit
+    and rank tolerance on the Gaussian additive GCV/UBRE path (``am.fit``,
+    mgcv.r:2620); gam.fit3 takes its rank tolerance as eps·100 whatever
+    ``rank_tol`` says (gam.fit3.r:133). ``nthreads``/``keepData``/``trace``
+    are accepted no-ops. Unported knobs raise (never silent):
+    ``idLinksBases=False``, ``scalePenalty=False``.
     """
     if scale_est not in ("fletcher", "pearson", "deviance"):
         raise ValueError(
@@ -180,12 +201,6 @@ def gam_control(
         raise ValueError("maximum number of iterations must be > 0")
     if not (np.isscalar(irls_reg) and irls_reg >= 0):
         raise ValueError("IRLS regularizing parameter must be a non-negative number.")
-    if irls_reg != 0.0:
-        raise NotImplementedError(
-            "irls_reg is consumed only by mgcv's performance-iteration/"
-            "magic path (mgcv.r:2622), which is not ported; the outer-"
-            "Newton path ignores it in mgcv too."
-        )
     if rank_tol is None:
         rank_tol = float(np.finfo(float).eps ** 0.5)
     elif rank_tol < 0 or rank_tol > 1:
@@ -262,6 +277,8 @@ def gam_control(
         "epsilon": float(epsilon),
         "maxit": int(maxit),
         "irls_reg": float(irls_reg),
+        "mgcv_tol": float(mgcv_tol),
+        "mgcv_half": int(mgcv_half),
         "rank_tol": float(rank_tol),
         "newton": newton_full,
         "nlm": nlm_full,
@@ -3162,8 +3179,7 @@ def _reml_grad(
         # (∂(D+β'Sβ)/∂β = 0 kills the β-coupled chain); lsth1 comes
         # from the family's extended ls; the log|H+S| piece is the
         # Dd-based dW/dθ trace (direct ½·Deta2th + indirect via
-        # ∂β̂/∂θ). For tw this equals the dD_dp/dls_dp/dp_dtheta chain
-        # exactly (tw.Dd's D*th already carry dp/dθ).
+        # ∂β̂/∂θ); tw's Dd already carries dp/dθ.
         nt = family.n_theta
         theta = family.get_theta()
         dd1 = _dDeta(fit, 1, family=family, y=y, wt=wt)
@@ -4676,7 +4692,6 @@ def newton(
                 epsilon=eps5,
                 maxit=g5["maxit"],
             )
-            g5["start"] = fit_t["coefficients"]
             return fit_t
 
         def _eval(t, deriv=2):
@@ -4688,9 +4703,14 @@ def newton(
             return float(fit_t["REML"]), fit_t
 
         def _grad(rho, log_phi, fit):
+            # newton calls this on the fit it accepts: refit at deriv=2 from
+            # the current start when needed, then carry its coefficients as
+            # the next start (gam.fit3.r:1368/1503/1551/1627) - rejected
+            # trials leave the start alone.
             if fit.get("REML2") is None:
                 fit.update(_fit5_at(rho, 2))
             g5["fit"] = fit
+            g5["start"] = fit["coefficients"]
             return _to_working(np.asarray(fit["REML1"], dtype=float))
 
         def _hess(rho, log_phi, fit):
@@ -4796,21 +4816,23 @@ def newton(
         # triggers the SD-fallback; ``pdef`` False blocks
         # immediate-step acceptance.
         if H1.size > 0:
-            w_eig, V_eig = np.linalg.eigh(H1)
+            d, U = _r_eigen_sym(H1)
             sqrt_eps = float(np.finfo(float).eps ** 0.5)
-            d_top = float(w_eig[-1])
-            indef = bool(np.any(-w_eig > abs(d_top) * sqrt_eps))
-            if indef and w_eig.size == 1:
-                indef = bool(w_eig[0] < -score_scale * sqrt_eps)
-            d = np.abs(w_eig)
-            pdef = bool(np.all(w_eig > 0))
-            low_d = d.max() * (np.finfo(float).eps ** 0.7) if d.size else 0.0
+            indef = bool(np.any(-d > abs(float(d[0])) * sqrt_eps))
+            if indef and d.size == 1:
+                indef = bool(d[0] < -score_scale * sqrt_eps)
+            neg = d < 0
+            pdef = not bool(np.any(neg))
+            d = np.where(neg, -d, d)
+            low_d = float(d.max()) * float(np.finfo(float).eps ** 0.7)
             clamp_mask = d < low_d
             if np.any(clamp_mask):
                 pdef = False
-                d = np.where(clamp_mask, low_d, d)
-            d_inv = np.where(d > 0, 1.0 / d, 0.0)
-            Nstep_active = -V_eig @ (d_inv * (V_eig.T @ grad1))
+            d = np.where(clamp_mask, low_d, d)
+            nz = d != 0
+            d = np.where(nz, 1.0 / np.where(nz, d, 1.0), d)
+            Ut_g = r_matprod(np.ascontiguousarray(U.T), grad1.reshape(-1, 1))[:, 0]
+            Nstep_active = -r_matprod(U, (d * Ut_g).reshape(-1, 1))[:, 0]
             Nstep = np.zeros_like(grad)
             Nstep[uconv_ind] = Nstep_active
         else:
@@ -4820,7 +4842,7 @@ def newton(
 
         ms = float(np.abs(Nstep).max()) if Nstep.size else 0.0
         if ms > max_step:
-            Nstep = Nstep * (max_step / ms)
+            Nstep = max_step * Nstep / ms  # mns * Nstep/ms
 
         gmax = float(np.abs(grad).max()) if grad.size else 0.0
         Sstep = (-grad / gmax) if gmax > 0 else np.zeros_like(grad)
@@ -4828,7 +4850,8 @@ def newton(
         def _qerror(step, score_change, *, grad=grad, H=H, score_scale=score_scale):
             if step.size == 0:
                 return 0.0
-            pred = float(grad @ step + 0.5 * step @ (H @ step))
+            # sum(grad*step) + 0.5*t(step) %*% hess %*% step
+            pred = r_sum(grad * step) + 0.5 * _r_quad(step, H)
             denom = max(abs(pred), abs(score_change)) + score_scale * conv_tol
             # an infinite trial score gives NaN here, as in R; every test that
             # reads qerror checks the score's finiteness first
@@ -4861,10 +4884,12 @@ def newton(
                     # Newton failing: switch to the SD direction at the
                     # current step length (gam.fit3.r:1521; mgcv's i<10
                     # with 1-based iterations is it<9 here).
-                    s_length = min(float(np.linalg.norm(step)), max_sd_step)
-                    sd_norm = float(np.linalg.norm(Sstep))
+                    # s.length <- min(sum(step^2)^.5, maxSstep);
+                    # step <- Sstep*s.length/sum(Sstep^2)^.5
+                    s_length = min(float(_rpow(r_sum(step * step), 0.5)), max_sd_step)
+                    sd_norm = float(_rpow(r_sum(Sstep * Sstep), 0.5))
                     if sd_norm > 0:
-                        step = Sstep * (s_length / sd_norm)
+                        step = Sstep * s_length / sd_norm
                     sd_unused = False
                 else:
                     step = step / 2
@@ -5153,11 +5178,11 @@ def bfgs(
         grad1 = _grad(bk)
         Bmat[k, :] = (grad1 - grad) / feps
     Bmat = (Bmat + Bmat.T) / 2.0
-    evals, evecs = np.linalg.eigh(Bmat)
+    evals, evecs = _r_eigen_sym(Bmat)
     evals = np.abs(evals)
     thresh = float(np.max(evals)) * 1e-4 if evals.size else 0.0
     evals[evals < thresh] = thresh
-    Bmat = evecs @ ((evecs / evals).T)
+    Bmat = r_matprod(evecs, np.ascontiguousarray(evecs.T) / evals[:, None])
     g5["start"] = start0.copy()
 
     c1, c2 = 1e-4, 0.9  # Wolfe constants
@@ -5345,10 +5370,10 @@ def bfgs(
     bfin = _fit5(lsp, 1)
     g5["fit"] = bfin
     gfin = _grad(bfin)
-    evals, evecs = np.linalg.eigh((Bmat + Bmat.T) / 2.0)
+    evals, evecs = _r_eigen_sym(Bmat)
     keep = evals > float(np.max(evals)) * eps_mach**0.9
     inv = np.where(keep, 1.0 / np.where(keep, evals, 1.0), 0.0)
-    hess = evecs @ (inv[:, None] * evecs.T)
+    hess = r_matprod(evecs, inv[:, None] * np.ascontiguousarray(evecs.T))
     outer_info = {
         "conv": ct,
         "iter": iters,
@@ -5369,7 +5394,6 @@ def gam_outer(
     include_family_theta=False,
     newton_fn=None,
     bfgs_fn=None,
-    magic_fn=None,
 ):
     """mgcv ``gam.outer`` (mgcv.r:1634): dispatch the smoothing-parameter
     optimization to the chosen outer optimizer and return the converged
@@ -5380,13 +5404,11 @@ def gam_outer(
     handled there too, as in mgcv. The optimizer machinery is threaded as
     callables — `newton`/`bfgs` are the free module fns (via the class's
     thin `_outer_*` shims, which source their many data/poly args from
-    ``self``); ``magic`` is the Gaussian-additive fast path — so the
-    standard, extended (bam) and general-family constructors all reuse this
-    one dispatch. Control knobs come from ``control["newton"]`` (mgcv's
-    ``G$control``): conv.tol, maxNstep, maxSstep, maxHalf."""
+    ``self``) — so the standard, extended (bam) and general-family
+    constructors all reuse this one dispatch. Control knobs come from
+    ``control["newton"]`` (mgcv's ``G$control``): conv.tol, maxNstep,
+    maxSstep, maxHalf."""
     _nt = control["newton"]
-    if optimizer == "magic":
-        return magic_fn(theta0)
     if optimizer == "bfgs":
         return bfgs_fn(theta0, conv_tol=_nt["conv_tol"], max_Nstep=_nt["maxNstep"])
     return newton_fn(
@@ -5758,478 +5780,250 @@ def efsudr(
     }
 
 
-# ---------------------------------------------------------------------------
-# magic — GCV/UBRE fast path for the Gaussian-additive model. Ports mgcv's C
-# engine (src/magic.c) + the R wrapper (mgcv.r:4678): QR the √w·X design once,
-# then Newton over log-sp on the reduced (q+rank_S)×q system. Free fns 1:1 with
-# magic.c's fit_magic (c:62) / magic_gH (c:193) / magic driver (c:286). The
-# dispatch predicate `_use_magic` stays a `gam` method (it is estimate.gam-level,
-# not part of magic itself — mgcv.r:2001 chooses am.fit → magic there).
-# ---------------------------------------------------------------------------
-
-
-def _magic_setup(*, wt, y, offset, struct_R, keep_cols, X):
-    """magic's ``getRpqr`` (magic.c:451): QR the n×q √w-weighted design
-    ONCE → R (q×q), y0 = Q₁'(√w·y), yy = ‖√w·y‖². Reused for every
-    reduced score-eval — this is the work the Newton path repeats n times."""
-    sqw = np.sqrt(wt)
-    yv = y - offset
-    b = sqw * yv
-    if struct_R is not None and keep_cols is None:
-        R = struct_R
-        y0 = solve_triangular(R, X.T @ (wt * yv), lower=False, trans="T")
-    else:
-        Q, R = np.linalg.qr(sqw[:, None] * X)
-        y0 = Q.T @ b
-    yy = float(b @ b)
-    return R, y0, yy
-
-
-def _magic_penalty_roots(*, p, slots) -> list[np.ndarray]:
-    """Per-penalty full p×cS_i roots rS_i (rS_i rS_iᵀ = S_i), one per
-    ``slots`` entry (== the ρ order). cS_i = rank(S_i)."""
-    roots = []
-    for slot in slots:
-        a, b = slot.col_start, slot.col_end
-        ev, V = np.linalg.eigh(0.5 * (slot.S + slot.S.T))
-        pos = ev > ev.max() * 1e-12 if ev.max() > 0 else np.zeros_like(ev, bool)
-        rb = V[:, pos] * np.sqrt(ev[pos])  # k × cS_i
-        full = np.zeros((p, rb.shape[1]))
-        full[a:b, :] = rb
-        roots.append(full)
-    return roots
-
-
-def _magic_fit_reduced(
-    rho,
-    R,
-    y0,
-    yy,
+def _am_fit(
     *,
-    wt,
-    gamma,
-    slots,
-    p,
-    norm_const=0.0,
-    n_score=None,
-    scale=None,
-    gcv=True,
-    H_fixed=None,
-):
-    """Port of magic.c ``fit_magic``: GCV/UBRE score from the SVD of the
-    reduced ``[R; St^½]`` ((q+rank_S)×q). St = Σ exp(ρ_k) S_k (+ the fixed
-    penalty ``H_fixed`` — mgcv passes ``G$H`` to magic, mgcv.r:2620; it
-    enters St but, being sp-free, not the ``magic_gH`` gradient).
-    Returns score, scale, rss, trA, rank, β, plus the SVD pieces
-    (U1, V, d, y1, delta) the derivative routine reuses.
-    part of ‖y‖² orthogonal to the reduced design, bam.r:1675/1146);
-    ``n_score`` overrides the score-n (magic.c:148 ``n = *n_score``);
-    (magic.c:151).
-    """
-    q = R.shape[1]
-    if n_score is None:
-        n_score = float(np.sum(wt != 0.0))
-    else:
-        n_score = float(n_score)
-    rank_tol = np.sqrt(np.finfo(float).eps)
-    St = _s_lambda(slots, p, rho, H_fixed=H_fixed)
-    St = 0.5 * (St + St.T)
-    ev, Vev = np.linalg.eigh(St)
-    pos = ev > ev.max() * 1e-14 if ev.max() > 0 else np.zeros_like(ev, bool)
-    root = (Vev[:, pos] * np.sqrt(ev[pos])).T  # rank_S × q, rootᵀroot = St
-    R_aug = np.vstack([R, root])
-    U, d, Vt = np.linalg.svd(R_aug, full_matrices=False)
-    rank = q
-    thresh = d[0] * rank_tol
-    while d[rank - 1] < thresh:
-        rank -= 1
-    Vr = Vt[:rank].T  # q × rank
-    U1 = U[:q, :rank]  # q × rank (top q rows)
-    y1 = U1.T @ y0
-    yAy = float(y1 @ y1)
-    b_proj = U1 @ y1
-    yAAy = float(b_proj @ b_proj)
-    norm = yy - 2 * yAy + yAAy
-    norm = max(norm, 0.0)
-    trA = float(np.sum(U1 * U1))
-    delta = n_score - gamma * trA
-    if gcv:
-        # magic.c:150 — scale estimated alongside the GCV score.
-        score = n_score * (norm + norm_const) / (delta * delta)
-        scale_out = (norm + norm_const) / (n_score - trA)
-    else:
-        # magic.c:151 — UBRE/approximate AIC at the known scale.
-        score = (norm + norm_const) / n_score - 2.0 * scale / n_score * delta + scale
-        scale_out = scale
-    beta = Vr @ (y1 / d[:rank])
-    return {
-        "score": score,
-        "scale": scale_out,
-        "norm": norm,
-        "trA": trA,
-        "rank": rank,
-        "beta": beta,
-        "U1": U1,
-        "V": Vr,
-        "d": d[:rank],
-        "y1": y1,
-        "delta": delta,
-        "n_score": n_score,
-        "gamma": gamma,
-        "gcv": gcv,
-        "norm_const": norm_const,
-        "ubre_scale": scale,
-    }
-
-
-def _magic_gH(mg, rho, roots):
-    """Port of magic.c ``magic_gH``: gradient (exact) and Hessian of the
-    GCV score wrt ρ, from the reduced SVD in ``mg`` — O(m·rank²), no
-    re-fit. The Hessian is magic's frozen-basis *search-direction* approx
-    (it differentiates the explicit sp-dependence, not the SVD basis); the
-    driver converges on the exact gradient with an SD fallback."""
-    U1, V, d, y1 = mg["U1"], mg["V"], mg["d"], mg["y1"]
-    gamma, n = mg["gamma"], mg["n_score"]
-    norm, delta = mg["norm"], mg["delta"]
-    m = len(roots)
-    Dinv = 1.0 / d
-    U1U1 = U1.T @ U1
-    esp = np.exp(np.asarray(rho, float))
-    M = [None] * m
-    K = [None] * m
-    My = [None] * m
-    yK = [None] * m
-    Ky = [None] * m
-    for i in range(m):
-        VSi = (V.T @ roots[i]) * Dinv[:, None]  # D⁻¹V'rS_i (rank×cS_i)
-        Mi = VSi @ VSi.T  # D⁻¹V'S_iVD⁻¹
-        Ki = Mi @ U1U1
-        M[i], K[i] = Mi, Ki
-        My[i] = Mi @ y1
-        yK[i] = Ki.T @ y1
-        Ky[i] = Ki @ y1
-    ddelta = np.zeros(m)
-    dnorm = np.zeros(m)
-    d2delta = np.zeros((m, m))
-    d2norm = np.zeros((m, m))
-    for i in range(m):
-        ddelta[i] = gamma * np.trace(K[i]) * esp[i]
-        for j in range(i + 1):
-            v = float(np.sum(M[j] * K[i]))
-            d2delta[i, j] = d2delta[j, i] = -gamma * 2 * esp[i] * esp[j] * v
-        d2delta[i, i] += ddelta[i]
-        dnorm[i] = 2 * esp[i] * float(y1 @ (My[i] - Ky[i]))
-        for j in range(i + 1):
-            v = float(
-                np.sum(
-                    My[i] * Ky[j] + My[j] * Ky[i] - 2 * My[i] * My[j] + yK[i] * My[j]
-                )
-            )
-            d2norm[i, j] = d2norm[j, i] = v * 2 * esp[i] * esp[j]
-        d2norm[i, i] += dnorm[i]
-    grad = np.zeros(m)
-    hess = np.zeros((m, m))
-    if mg.get("gcv", True):
-        # GCV (control[0]==1) — magic.c:263-273; the RSS is inflated by
-        # norm_const (``norm += *norm_const``) before the score algebra.
-        norm = norm + mg.get("norm_const", 0.0)
-        xx = n / (delta * delta)
-        xx1 = xx * 2 * norm / delta
-        x1 = -2 * xx / delta
-        x2 = 3 * xx1 / delta
-        for i in range(m):
-            grad[i] = xx * dnorm[i] - xx1 * ddelta[i]
-            for j in range(i + 1):
-                hess[i, j] = hess[j, i] = (
-                    x1 * (ddelta[j] * dnorm[i] + ddelta[i] * dnorm[j])
-                    + xx * d2norm[i, j]
-                    + x2 * ddelta[i] * ddelta[j]
-                    - xx1 * d2delta[i, j]
-                )
-    else:
-        # UBRE — magic.c:275-279 (norm_const drops out of derivatives).
-        scale = mg["ubre_scale"]
-        for i in range(m):
-            grad[i] = (dnorm[i] - 2.0 * scale * ddelta[i]) / n
-            for j in range(i + 1):
-                hess[i, j] = hess[j, i] = (
-                    d2norm[i, j] - 2.0 * scale * d2delta[i, j]
-                ) / n
-    return grad, hess
-
-
-def _magic_optimize(
-    rho0,
-    *,
-    tol=1e-7,
-    max_half=15,
-    wt,
-    y,
-    offset,
-    struct_R,
-    keep_cols,
     X,
-    gamma,
+    y,
+    weights,
+    offset,
     slots,
-    p,
-    norm_const=0.0,
-    n_score=None,
-    scale=None,
-    gcv=True,
-    L=None,
-    lsp0=None,
-    H_fixed=None,
-):
-    """Port of magic.c ``magic`` (the driver, magic.c:286-707): Newton
-    over log-sp backed by steepest descent with step halving, plus the
-    infinite-sp check, on the reduced GCV/UBRE system. Returns ρ̂, the
-    once-computed QR (``magic_R``/``magic_y0``) the final fit reuses, and
-    the outer_info. (Flat-deriv reset deferred — bam's call is always
-    autoinit, magic.c:510, where the reset block is skipped.)
-    transform as ``L'g`` / ``L'HL`` (magic.c:606-621); ``None`` ≡
-    """
-    R, y0, yy = _magic_setup(
-        wt=wt, y=y, offset=offset, struct_R=struct_R, keep_cols=keep_cols, X=X
+    sp,
+    L,
+    lsp0,
+    rank,
+    H,
+    gamma,
+    sig2,
+    control,
+    intercept,
+    family,
+) -> dict:
+    """mgcv ``am.fit`` (mgcv.r:2580): the Gaussian identity additive model
+    fitted by ``magic`` on the rows with positive weight, smoothing
+    parameters by GCV (``sig2 < 0``) or by UBRE at the known scale ``sig2``.
+    ``sp`` is ``G$sp`` (the free working smoothing parameters, all -1), ``L``
+    and ``lsp0`` map them to the per-penalty log smoothing parameters,
+    ``rank`` holds the penalty ranks and ``H`` the fixed penalty. Returns
+    mgcv's fit list: ``coefficients``, ``fitted`` (= the linear predictor,
+    offset included), ``deviance``, ``null_deviance``, ``df_null``,
+    ``sig2``, ``edf``, ``edf1``, ``hat`` (rows with positive weight), ``R``,
+    ``rV``, ``Ve``, ``Vp``, ``sp``, ``mgcv_conv``, ``gcv_ubre``, ``aic``,
+    ``rank``, ``gcv_ubre_dev`` and ``residuals`` (NaN on rows of zero
+    weight)."""
+    from ._magic import magic, magic_post_proc
+
+    n = y.size
+    if X.shape[1] == 0:
+        raise ValueError("Model seems to contain no terms")
+    n_score = int(np.sum(weights != 0))
+    scale = float(sig2)
+    good = weights > 0
+    yg = y[good] - offset[good]
+    Xg = np.ascontiguousarray(X[good])
+    wg = np.sqrt(weights[good])
+    mr = magic(
+        yg,
+        Xg,
+        sp,
+        slots,
+        L=L,
+        lsp0=lsp0,
+        rank=rank,
+        H=H,
+        C=np.zeros((0, X.shape[1])),
+        w=wg,
+        gamma=gamma,
+        scale=scale,
+        gcv=scale < 0,
+        ridge_parameter=control["irls_reg"],
+        control={
+            "tol": control["mgcv_tol"],
+            "step_half": control["mgcv_half"],
+            "rank_tol": control["rank_tol"],
+        },
+        n_score=n_score,
     )
-    roots = _magic_penalty_roots(p=p, slots=slots)
-    mp = len(rho0)
-    sp0 = np.asarray(rho0, float).copy()
-    Lm = None if L is None else np.asarray(L, dtype=float)
-    l0 = None
-    if Lm is not None:
-        l0 = np.zeros(Lm.shape[0]) if lsp0 is None else np.asarray(lsp0, dtype=float)
-
-    def sp_full(sp):
-        return sp if Lm is None else Lm @ sp + l0
-
-    def feval(sp):
-        return _magic_fit_reduced(
-            sp_full(sp),
-            R,
-            y0,
-            yy,
-            wt=wt,
-            gamma=gamma,
-            slots=slots,
-            p=p,
-            norm_const=norm_const,
-            n_score=n_score,
-            scale=scale,
-            gcv=gcv,
-            H_fixed=H_fixed,
-        )
-
-    mg = feval(sp0)
-    min_score = mg["score"]
-    n_step = np.zeros(mp)
-    sd_step = np.zeros(mp)
-    use_sd = True
-    d_score = np.inf
-    grad = np.zeros(mp)
-    converged = False
-    it = 0
-    fit_calls = 1
-    step_fail = False
-    while not converged:
-        it += 1
-        if it > 400:
-            converged = True
-            break
-        last_try = 0
-        if it > 1:
-            step = sd_step if use_sd else n_step
-            try_i = 0
-            ok = True
-            while ok:
-                try_i += 1
-                if try_i == 4 and not use_sd:
-                    use_sd = True
-                    step = sd_step
-                nsp = sp0 + step
-                mg = feval(nsp)
-                fit_calls += 1
-                if mg["score"] < min_score:
-                    d_score = min_score - mg["score"]
-                    min_score = mg["score"]
-                    sp0 = nsp.copy()
-                    ok = False
-                else:
-                    step = step / 2
-                if try_i == max_half - 1 and ok:
-                    step = step * 0.0
-                if try_i == max_half:
-                    ok = False
-            last_try = try_i
-        if it > 3:
-            converged = True
-            if d_score > tol * (1 + min_score):
-                converged = False
-            gnorm = np.sqrt(float(grad @ grad))
-            if gnorm > tol ** (1 / 3) * (1 + abs(min_score)):
-                converged = False
-            if last_try == max_half:
-                # magic.c:599 — a fully-halved (failed) step means the
-                # score can't be improved: force convergence.
-                converged = True
-                step_fail = True
-        # mgcv's magic builds the gradient/Hessian from the fit it
-        # already has in hand — magic.c:611 calls magic_gH on the U1/V/d
-        # left by the last fit_magic, with NO re-fit at sp0. `mg` already
-        # holds the fit at the current sp0 in every branch (the it==1
-        # seed; the accepted step, which sets sp0=nsp; or the step-failure
-        # path, whose last try evaluates sp0+0), and the reduced SVD is
-        # deterministic, so reusing it is bit-identical to re-evaluating
-        # — and saves one (q+e)×q SVD per outer iteration.
-        grad, hess = _magic_gH(mg, sp_full(sp0), roots)
-        if Lm is not None:
-            # magic.c:617-620 — grad/Hess w.r.t. the working parameters.
-            grad = Lm.T @ grad
-            hess = Lm.T @ hess @ Lm
-        ev, U = np.linalg.eigh(0.5 * (hess + hess.T))
-        use_sd = bool(np.any(ev <= 0.0))
-        if not use_sd:
-            gtil = U.T @ grad
-            n_step = -(U @ (gtil / ev))
-            mx = np.max(np.abs(n_step))
-            if mx > 5.0:
-                n_step *= 5.0 / mx
-        gmx = np.max(np.abs(grad))
-        sd_step = -grad / gmx if gmx > 0 else grad * 0.0
-    # infinite-sp check (magic.c:638-656): push each sp in its descent
-    # direction by ±2 in log-sp (≤5 steps) while the score keeps improving.
-    for k in range(mp):
-        steps_left = 5
-        sign = 1.0 if grad[k] < 0.0 else -1.0
-        while steps_left:
-            sp0[k] += sign * 2.0
-            steps_left -= 1
-            sc = feval(sp0)["score"]
-            fit_calls += 1
-            if sc < min_score:
-                min_score = sc
-            else:
-                sp0[k] -= sign * 2.0
-                steps_left = 0
-    # magic.c:664 — one FINAL fit_magic at the converged sp; ITS score and
-    # scale are what magic returns (``*gamma = score``; scale in-place).
-    mg = feval(sp0)
-    fit_calls += 1
-    outer_info = {
-        "iter": it,
-        "conv": "full convergence" if converged else "iteration limit reached",
-        "grad": grad,
-        "score": mg["score"],
-        "scale": mg["scale"],
-        "step_fail": step_fail,
-        "optimizer": "magic",
+    coef = mr["b"]
+    mu = r_matprod(X, coef.reshape(-1, 1))[:, 0] + offset
+    dev = r_sum(family.dev_resids(y, mu, weights))
+    residuals = np.full(n, np.nan)
+    residuals[good] = yg - (mu - offset)[good]
+    wtdmu = r_sum(weights * y) / r_sum(weights) if intercept else offset
+    nulldev = r_sum(family.dev_resids(y, np.broadcast_to(wtdmu, y.shape), weights))
+    n_ok = n - int(np.sum(weights == 0))
+    mv = magic_post_proc(Xg, mr, w=wg**2)
+    edf_sum = r_sum(mv["edf"])
+    dev1 = scale * r_sum(weights) if scale > 0 else dev
+    aic_model = family.aic(y, mu, dev1, weights, n) + 2 * edf_sum
+    if scale < 0:
+        gcv_ubre_dev = n_score * dev / (n_score - gamma * edf_sum) ** 2
+    else:
+        gcv_ubre_dev = dev / n_score + 2 * gamma * edf_sum / n_score - mr["scale"]
+    return {
+        "coefficients": coef,
+        "residuals": residuals,
+        "fitted": mu,
+        "deviance": dev,
+        "null_deviance": nulldev,
+        "df_null": n_ok - int(intercept),
+        "sig2": mr["scale"],
+        "edf": mv["edf"],
+        "edf1": mv["edf1"],
+        "hat": mv["hat"],
+        "R": mr["R"],
+        "rV": mr["rV"],
+        "Ve": mv["Ve"],
+        "Vp": mv["Vb"],
+        "sp": mr["sp"],
+        "mgcv_conv": mr["gcv_info"],
+        "gcv_ubre": mr["score"],
+        "aic": aic_model,
+        "rank": mr["gcv_info"]["rank"],
+        "gcv_ubre_dev": gcv_ubre_dev,
+        "good": good,
+        "scale_estimated": scale < 0,
     }
-    return {"sp": sp0, "magic_R": R, "magic_y0": y0, "outer_info": outer_info}
 
 
-def _initial_sp(Xw: np.ndarray, slots) -> np.ndarray:
-    """mgcv ``initial.sp(X, S, off)`` (mgcv.r:4626-4673) on an (already
-    weighted, if applicable) design: per penalty
-    across 0.4 (mgcv.r:4666-4670). Returns def.sp (not logged).
-    ``initial.spg`` calls this on ``√w·X`` (mgcv.r:4605); plain ``magic``
-    calls it on the raw X (mgcv.r:4712).
-    """
-    ldxx = np.einsum("ij,ij->j", Xw, Xw)  # diag(X'X)
-    ldss = np.zeros_like(ldxx)
+def _total_penalty_space(slots, p: int, H=None):
+    """mgcv ``totalPenaltySpace(S, H, off, p)`` (gam.fit3.r:2661-2683): the
+    balanced total penalty ``St = H/||H|| + sum_i S_i/||S_i||`` (norms
+    ``sqrt(sum(S*S))``, H first), ``eigen(St, symmetric = TRUE)``, and with
+    ``ind`` the eigenvalues above ``max * eps^0.66`` the range basis ``Y``,
+    the null basis ``Z`` and the root ``E = sqrt(values[ind]) * t(Y)``
+    (``E'E = St``). Returns ``(Y, Z, E)``."""
+    St = np.zeros((p, p))
+    if H is not None:
+        hscale = math.sqrt(r_sum(H * H))
+        if hscale != 0:
+            St = np.asarray(H, dtype=float) / hscale
+    for s in slots:
+        a, b = s.col_start, s.col_end
+        nrm = math.sqrt(r_sum(s.S * s.S))
+        if nrm > 0:
+            St[a:b, a:b] = St[a:b, a:b] + s.S / nrm
+    ev, V = _r_eigen_sym(St)
+    ind = ev > float(ev.max()) * float(np.finfo(float).eps) ** 0.66
+    Y = V[:, ind]
+    return Y, V[:, ~ind], np.sqrt(ev[ind])[:, None] * np.ascontiguousarray(Y.T)
+
+
+def _penalty_rank(S: np.ndarray) -> int:
+    """The rank initial.spg reads from ``G$rank`` for penalty ``S``: the
+    number of eigenvalues above ``eps^0.8`` times the largest. mgcv takes it
+    from the smooth constructor; counting it from the penalty gives the
+    same number for every smooth class."""
+    S = np.asarray(S, dtype=float)
+    if S.size == 0:
+        return 0
+    w = np.linalg.eigvalsh(0.5 * (S + S.T))
+    return int(np.sum(w > float(np.finfo(float).eps) ** 0.8 * float(w.max())))
+
+
+def _null_space_dim(b) -> int:
+    """A smooth block's unpenalized dimension, the count summary.gam
+    compares with 0 to choose reTest over testStat (mgcv's
+    ``null.space.dim``): the columns less the rank of the summed
+    penalties. mgcv's own value is the constructor's; the two are both
+    zero or both positive for every smooth class."""
+    p_b = b.X.shape[1]
+    if not b.S:
+        return p_b
+    S = b.S[0].copy()
+    for S_i in b.S[1:]:
+        S = S + S_i
+    return p_b - _penalty_rank(S)
+
+
+def _lm_on_L(lsp: np.ndarray, L: np.ndarray, lsp0=None) -> np.ndarray:
+    """``as.numeric(coef(lm(lsp ~ L - 1 + offset(lsp0))))``: ``lm.fit``'s
+    LINPACK ``Cdqrls`` on ``lsp - lsp0`` at tol 1e-7, aliased coefficients
+    NA, unpivoted. fast.REML.fit (fast-REML.r:1768) and bgam.fitd
+    (bam.r:690) map their initial log smoothing parameters to the working
+    space this way."""
+    from ..R.linalg import Cdqrls
+
+    L = np.asarray(L, dtype=float)
+    y = np.asarray(lsp, dtype=float)
+    if lsp0 is not None:
+        y = y - np.asarray(lsp0, dtype=float)
+    z = Cdqrls(L, y, 1e-7)
+    coef = np.array(z["coefficients"], dtype=float)
+    coef[z["rank"] :] = np.nan
+    if z["pivoted"]:
+        unpiv = np.empty_like(coef)
+        unpiv[np.asarray(z["pivot"]) - 1] = coef
+        coef = unpiv
+    return coef
+
+
+def _lsp_on_L(lsp: np.ndarray, L: np.ndarray, lsp0=None) -> np.ndarray:
+    """``initial.spg``'s tail (mgcv.r:4615-4620) with estimate.gam's ``log``
+    of its result: :func:`_lm_on_L`, then ``exp`` and ``log`` again."""
+    return np.log(np.exp(_lm_on_L(lsp, L, lsp0)))
+
+
+def _initial_sp(Xw: np.ndarray, slots, *, XX: bool = False) -> np.ndarray:
+    """mgcv ``initial.sp(X, S, off, XX = XX)`` (mgcv.r:4626-4673): per
+    penalty, the mean penalized diagonal of ``X'X`` over that of ``S``, then
+    every value scaled by powers of 10 until the mean of
+    ``diag(X'X) / (diag(X'X) + diag(S_lambda))`` crosses 0.4. ``Xw`` is the
+    (already weighted, if applicable) design, or ``X'X`` itself when ``XX``
+    is true. Returns def.sp (not logged). ``initial.spg`` calls this on
+    ``√w·X``, ``magic`` on its X, bam on ``qrx$R`` or the discrete rail's
+    ``X'WX``. Where mgcv's ``if``/``while`` meets a missing value (a penalty
+    that penalizes no column, or nothing penalized at all) it stops, and so
+    does this."""
+    ldxx = np.diag(Xw).copy() if XX else r_colsums(Xw * Xw)
+    ldss = ldxx * 0
     pen = np.zeros(ldxx.size, dtype=bool)
     n_sp = len(slots)
-    def_sp = np.ones(n_sp)
+    def_sp = np.zeros(n_sp)
     for k, slot in enumerate(slots):
         S_k = slot.S
         absS = np.abs(S_k)
-        maS = float(absS.max()) if absS.size else 0.0
-        if maS <= 0.0:
-            continue  # mgcv would stop(); a free penalty seeds at ρ=0
+        maS = float(absS.max())
+        rsS = r_rowsums(absS, mean=True)
+        csS = r_colsums(absS, mean=True)
+        dS = np.diag(absS)
         thresh = float(np.finfo(float).eps ** 0.8) * maS
-        rsS = absS.mean(axis=1)
-        csS = absS.mean(axis=0)
-        dS = np.abs(np.diag(S_k))
         ind = (rsS > thresh) & (csS > thresh) & (dS > thresh)
-        if not np.any(ind):
-            continue
         ss = np.diag(S_k)[ind]
         sl = slice(slot.col_start, slot.col_end)
         xx = ldxx[sl][ind]
         pen[sl] |= ind
-        sizeXX = float(np.mean(xx))
-        sizeS = float(np.mean(ss))
-        if sizeS <= 0.0 or sizeXX <= 0.0:
-            continue
+        sizeXX = r_mean(xx)
+        sizeS = r_mean(ss)
+        if math.isnan(sizeS):
+            raise ValueError("missing value where TRUE/FALSE needed")
+        if sizeS <= 0:
+            raise ValueError(f"S[[{k + 1}]] matrix is not +ve definite.")
         def_sp[k] = sizeXX / sizeS
-        ldss[sl] += def_sp[k] * np.diag(S_k)
+        ldss[sl] = ldss[sl] + def_sp[k] * np.diag(S_k)
+    if n_sp:
+        ind = (ldss > 0) & pen & (ldxx > 0)
+        lx = ldxx[ind]
+        ls = ldss[ind]
 
-    bind = (ldss > 0) & pen & (ldxx > 0)
-    if np.any(bind):
-        lx = ldxx[bind]
-        ls = ldss[bind].copy()
-        while float(np.mean(lx / (lx + ls))) > 0.4:
-            def_sp *= 10.0
-            ls *= 10.0
-        while float(np.mean(lx / (lx + ls))) < 0.4:
-            def_sp /= 10.0
-            ls /= 10.0
+        def frac() -> float:
+            v = r_mean(lx / (lx + ls))
+            if math.isnan(v):
+                raise ValueError("missing value where TRUE/FALSE needed")
+            return v
+
+        while frac() > 0.4:
+            def_sp = def_sp * 10
+            ls = ls * 10
+        while frac() < 0.4:
+            def_sp = def_sp / 10
+            ls = ls / 10
     return def_sp
 
 
-def _magic_gcv(y: np.ndarray, X: np.ndarray, slots, *, gamma: float = 1.0) -> dict:
-    """mgcv ``magic(y, X, sp=rep(-1,m), S, off)`` (mgcv.r:4678) essentials
-    as consumed by mvn's preinitialize (mvam.r:119): every sp estimated by
-    GCV from the ``initial.sp`` seed (mgcv.r:4712 ``def.sp``), unit
-    weights, no offset/L/H/C, magic's own control defaults (tol=1e-6,
-    step.half=25 — NOT gam.control's 1e-7/15). Returns ``{"b", "scale",
-    "sp"}`` — mgcv's ``um$b`` / ``um$scale = norm/(n−trA)``."""
-    y = np.asarray(y, dtype=float)
-    X = np.asarray(X, dtype=float)
-    n, p = X.shape
-    wt = np.ones(n)
-    if len(slots) == 0:
-        b, *_ = np.linalg.lstsq(X, y, rcond=None)
-        rsd = y - X @ b
-        scale = float(rsd @ rsd) / max(n - p, 1)
-        return {"b": b, "scale": scale, "sp": np.zeros(0)}
-    def_sp = _initial_sp(X, slots)
-    rho0 = np.log(np.maximum(def_sp, 1e-300))
-    res = _magic_optimize(
-        rho0,
-        tol=1e-6,
-        max_half=25,
-        wt=wt,
-        y=y,
-        offset=np.zeros(n),
-        struct_R=None,
-        keep_cols=None,
-        X=X,
-        gamma=gamma,
-        slots=slots,
-        p=p,
-    )
-    mg = _magic_fit_reduced(
-        res["sp"],
-        res["magic_R"],
-        res["magic_y0"],
-        float(y @ y),
-        wt=wt,
-        gamma=gamma,
-        slots=slots,
-        p=p,
-    )
-    return {
-        "b": mg["beta"],
-        "scale": float(mg["scale"]),
-        "sp": np.exp(np.asarray(res["sp"], dtype=float)),
-    }
-
-
 def _magic_fit_state(
+    am,
     rho,
     *,
-    magic_R,
-    magic_y0,
-    fit_given_rho_fn,
     family,
     X,
     offset,
@@ -6243,42 +6037,26 @@ def _magic_fit_state(
     reparam_cache,
     H_fixed=None,
 ):
-    """Build the Gaussian-identity ``_FitState`` at ρ̂ from magic's cached
-    QR, WITHOUT the full (n+e)×q re-fit. The reduced augmented system
-    ``[R_mag; E]`` (R_mag = QR factor of √w·X, cached by `_magic_optimize`)
-    has ``R_fin'R_fin = R_mag'R_mag + Sλ = X'WX + Sλ`` and RHS reduces to
-    ``[y0; 0]`` (y0 = Q_mag'(√w·z), z = y−off) — so β, A_chol, log|A| are
-    the same as `_pls_qr`'s full solve at (q+e)×q cost. Mirrors the
-    Gaussian branch of `_fit_given_rho` field-for-field. Falls back to the
-    full fit if anything is degenerate (rank deficiency / non-finite)."""
-    R_mag = magic_R
-    y0 = magic_y0
-    if R_mag is None:
-        return fit_given_rho_fn(rho)
+    """The Gaussian identity ``_FitState`` of an ``am.fit`` result ``am`` at
+    the per-penalty log smoothing parameters ``rho``: am.fit's coefficients,
+    fitted values and deviance, the working quantities of `_fit_given_rho`'s
+    Gaussian branch, and a factor of ``X'WX + Sλ`` from the QR of magic's
+    ``R`` (``R'R = X'WX``) stacked on the penalty root."""
     link = family.link
-    off = offset
-    q = R_mag.shape[1]
+    beta = np.asarray(am["coefficients"], dtype=float)
     Sλ = _s_lambda(slots, p, rho, H_fixed=H_fixed)
     Sλ = 0.5 * (Sλ + Sλ.T)
     E_aug = _penalty_root_of(
         slots, p, UrS, reparam_Y, keep_cols, reparam_cache, rho, H_fixed=H_fixed
     )
-    aug = np.vstack([R_mag, E_aug])
-    Q, R_fin = np.linalg.qr(aug)
+    R_fin = np.linalg.qr(np.vstack([np.asarray(am["R"], dtype=float), E_aug]), mode="r")
     diag_R = np.diag(R_fin)
-    if (not np.all(np.isfinite(R_fin))) or np.any(diag_R == 0.0):
-        return fit_given_rho_fn(rho)
-    c = Q[:q].T @ y0
-    beta = solve_triangular(R_fin, c, lower=False)
-    if not np.all(np.isfinite(beta)):
-        return fit_given_rho_fn(rho)
     log_det_A = 2.0 * float(np.sum(np.log(np.abs(diag_R))))
     sgn = np.where(diag_R < 0, -1.0, 1.0)
     A_chol = R_fin * sgn[:, None]
-    eta = X @ beta  # offset-stripped
-    eta_full = eta + off
+    eta_full = np.asarray(am["fitted"], dtype=float)
+    eta = eta_full - offset
     mu = link.linkinv(eta_full)
-    dev = float(np.sum(family.dev_resids(y, mu, wt)))
     pen = float(beta @ Sλ @ beta)
     mu_eta_v = link.mu_eta(eta_full)
     V = family.variance(mu)
@@ -6291,7 +6069,7 @@ def _magic_fit_state(
     w = np.where(good, wt * alpha * mu_eta_v**2 / V, 0.0)
     return _FitState(
         beta=beta,
-        dev=dev,
+        dev=float(am["deviance"]),
         pen=pen,
         A_chol=A_chol,
         A_chol_lower=False,
@@ -6332,6 +6110,7 @@ class _G:
         scale_known_fit,
         pearson_scale_criterion,
         control,
+        fixed_lsp0=None,
     ):
         self.n = n
         self.n_sp = n_sp
@@ -6339,6 +6118,7 @@ class _G:
         self.Mp = Mp
         self.L = L
         self.lsp0 = lsp0
+        self.fixed_lsp0 = fixed_lsp0
         self.wt = wt
         self.y_arr = y_arr
         self.family = family
@@ -6407,11 +6187,11 @@ def estimate_gam(
     outer_newton,
     fit_given_rho=None,
     initial_sp_rho=None,
-    use_magic=None,
+    use_am=None,
+    am_fit=None,
     phi_pearson=None,
     profile_log_phi_fixed_sp=None,
     magic_fit_state=None,
-    magic_optimize=None,
     get_outer_fit=None,
     general=None,
     outer_bfgs=None,
@@ -6424,14 +6204,15 @@ def estimate_gam(
     """mgcv ``estimate.gam`` (mgcv.r:1872) — smoothness selection + final fit,
     for BOTH ordinary and general families (mgcv branches internally on the
     family class; hea takes the general slice via ``general=``). Ordinary
-    returns ``{fit, rho_hat, sp, log_phi_hat, used_magic, tw_info}``; general
+    returns ``{fit, rho_hat, sp, log_phi_hat, used_magic, tw_info}``
+    (``used_magic``: the fit is ``am.fit``'s); general
     returns ``{fit, rho_hat, sp, outer_info, REML_criterion, converged}``. The
     caller (``gam.__init__`` / ``gam._init_general``) assigns these onto ``self``.
 
     mgcv threads the setup bundle ``G`` (data) and calls ``gam.fit3`` by name
     (it dispatches to fit4/fit5 internally). hea threads ``G`` plus the fitter
     callables — ``fit_given_rho`` (= gam.fit3/gam.fit4 dispatch), ``outer_newton``
-    (= newton), ``magic_optimize`` (= magic driver), etc. This is the same C1
+    (= newton), ``am_fit`` (= am.fit), etc. This is the same C1
     seam newton/bfgs use one level down; ``fit_given_rho``/``initial_sp_rho`` are
     bam-polymorphic, but ``estimate_gam`` is only ever called on a plain ``gam``
     (bam has its own ``__init__``), so the callables always resolve to gam's.
@@ -6574,7 +6355,7 @@ def estimate_gam(
             outer_info = get_outer_info()
 
         rho_hat = rho_full(theta_hat)
-        sp_out = np.exp(theta_hat)
+        sp_out = np.zeros(0) if sp is not None else np.exp(theta_hat)
         # The fitted model is the outer optimizer's last accepted iterate
         # (cached in g5 — mgcv's b; estimate.gam never refits). With fixed or
         # no smoothing parameters gam.outer takes its "no.sps" route:
@@ -6644,6 +6425,19 @@ def estimate_gam(
     tw_info = None
     used_magic = False
     used_nlm_optim = False
+    if use_am is not None and use_am():
+        # outer.looping FALSE (mgcv.r:1933): am.fit selects the smoothing
+        # parameters by magic and is the fit (mgcv.r:2001-2003).
+        am = am_fit(sp)
+        return {
+            "fit": magic_fit_state(am),
+            "rho_hat": am["rho"],
+            "sp": np.asarray(am["sp"], dtype=float),
+            "log_phi_hat": None,
+            "used_magic": True,
+            "used_nlm_optim": False,
+            "tw_info": None,
+        }
     if n_sp == 0:
         sp_out = np.zeros(0)
         rho_hat = np.zeros(0)
@@ -6658,8 +6452,10 @@ def estimate_gam(
             )
         if np.any(sp_arr < 0):
             raise ValueError("sp entries must be non-negative")
-        rho_hat = rho_full(np.log(np.maximum(sp_arr, 1e-10)))
-        sp_out = sp_arr
+        rho_hat = np.asarray(G.fixed_lsp0, dtype=float)
+        # every parameter fixed: none is estimated, so mgcv's ``sp`` is
+        # empty and the values live in ``full.sp`` (gam.outer, mgcv.r:1714)
+        sp_out = np.zeros(0)
         fit = fit_given_rho(rho_hat)
         # Unknown-scale (RE)ML at fixed sp: set log φ̂ to the criterion
         # minimizer over log φ at this ρ (gam.fit3.r:121-123 appends log scale;
@@ -6696,19 +6492,17 @@ def estimate_gam(
             cur_rho = np.log(io[0])
         else:
             rho0_full = initial_sp_rho()
-            if G.lsp0 is not None:
-                rho0_full = rho0_full - G.lsp0
             if G.L is None:
-                cur_rho = rho0_full
+                cur_rho = rho0_full if G.lsp0 is None else rho0_full - G.lsp0
             else:
-                cur_rho, *_ = np.linalg.lstsq(G.L, rho0_full, rcond=None)
+                cur_rho = _lsp_on_L(rho0_full, G.L, G.lsp0)
         # mgcv's null.scale = Σ dev_resids(y, ȳ)/n from get.null.coef
         # (mgcv.r:1854-1870): the log φ seed (mgcv.r:2027-2029) AND the
         # fscale gam.outer hands nlm/optim (mgcv.r:2062, 1698, 1708).
         # mum = mean(y) unweighted (mgcv.r:1863) but the dev.resids
         # carry the prior weights (mgcv.r:1868).
-        mu_null0 = np.full(n, float(np.mean(G.y_arr)))
-        null_scale = float(np.sum(family.dev_resids(G.y_arr, mu_null0, G.wt))) / n
+        mu_null0 = np.full(n, r_mean(G.y_arr))
+        null_scale = r_sum(family.dev_resids(G.y_arr, mu_null0, G.wt)) / n
         if include_log_phi:
             # in.out$scale replaces the null.scale/10 seed (mgcv.r:2028-2032)
             cur_logphi = (
@@ -6771,20 +6565,7 @@ def estimate_gam(
             _criterion = "GACV"
         else:
             _criterion = "GCV"
-        if use_magic(_criterion, include_log_phi, include_family_theta):
-            # Gaussian-identity additive + GCV.Cp → mgcv's `magic` fast path
-            # (am.fit, mgcv.r:2001). theta == per-penalty ρ here (L is None).
-            # mgcv never reaches gam.outer on this path (outer.looping is
-            # FALSE, mgcv.r:1933), so optimizer[1] is ignored like mgcv.
-            used_magic = True
-            theta_hat = gam_outer(
-                theta0,
-                optimizer="magic",
-                criterion=_criterion,
-                control=G.control,
-                magic_fn=magic_optimize,
-            )
-        elif optimizer[1] in ("nlm", "optim"):
+        if optimizer[1] in ("nlm", "optim"):
             # gam.outer's "methods calling gam.fit3" branch
             # (mgcv.r:1692-1717): nlm on gam4objective / optim L-BFGS-B
             # on gam2objective+gam2derivative, then one final deriv-0
@@ -6830,14 +6611,11 @@ def estimate_gam(
         # reuses newton's accepted-step fit (object <- b$object, mgcv.r:1684).
         # magic builds from its cached QR; else use newton's cached fit; fall
         # back to a solve only if the optimizer produced none (init failure).
-        if used_magic:
-            fit = magic_fit_state(rho_hat)
+        outer_fit = get_outer_fit()
+        if outer_fit is not None:
+            fit = outer_fit
         else:
-            outer_fit = get_outer_fit()
-            if outer_fit is not None:
-                fit = outer_fit
-            else:
-                fit = fit_given_rho(rho_hat)
+            fit = fit_given_rho(rho_hat)
         if G.pearson_scale_criterion:
             log_phi_hat = float(np.log(max(phi_pearson(fit), 1e-300)))
     return {
@@ -6875,12 +6653,8 @@ def _cbind_response_intake(formula, data, family):
         )
     if isinstance(family, (_cnorm_family, _cpois_family, _clog_family, _bcg_family)):
         data = normalize_data(data)
-        cols = set(data.columns)
         yobs, yat = (
-            data.select(_eval_lhs_expr(a, cols).alias("_v"))["_v"]
-            .to_numpy()
-            .astype(float)
-            for a in lhs.args
+            _eval_lhs_series(a, data, "_v").to_numpy().astype(float) for a in lhs.args
         )
         data = data.with_columns(
             pl.Series("_hea_cnorm_y", yobs),
@@ -6890,12 +6664,8 @@ def _cbind_response_intake(formula, data, family):
         return formula, data, "censor", None
     if isinstance(family, _gfam_family):
         data = normalize_data(data)
-        cols = set(data.columns)
         yobs, yfi = (
-            data.select(_eval_lhs_expr(a, cols).alias("_v"))["_v"]
-            .to_numpy()
-            .astype(float)
-            for a in lhs.args
+            _eval_lhs_series(a, data, "_v").to_numpy().astype(float) for a in lhs.args
         )
         data = data.with_columns(
             pl.Series("_hea_gfam_y", yobs),
@@ -6910,10 +6680,8 @@ def _cbind_response_intake(formula, data, family):
             f"{family.name!r}"
         )
     data = normalize_data(data)
-    cols = set(data.columns)
     succ, fail = (
-        data.select(_eval_lhs_expr(a, cols).alias("_v"))["_v"].to_numpy().astype(float)
-        for a in lhs.args
+        _eval_lhs_series(a, data, "_v").to_numpy().astype(float) for a in lhs.args
     )
     if np.any(succ < 0) or np.any(fail < 0):
         raise ValueError("negative counts in cbind() response")
@@ -7088,9 +6856,9 @@ class gam:
     sigma, sigma_squared : float
         Residual SD and variance (``scale`` in mgcv).
     sp : np.ndarray
-        Optimized (or fixed) *working* smoothing parameters (mgcv's
-        ``m$sp``): one per estimated parameter — fixed entries are
-        folded out, id-linked penalties share one.
+        Optimized *working* smoothing parameters (mgcv's ``m$sp``): one per
+        estimated parameter - fixed entries are folded out (empty when every
+        one is fixed), id-linked penalties share one.
     full_sp : np.ndarray
         Per-penalty expansion ``exp(L·log(sp) + lsp0)`` (mgcv's
         ``m$full.sp``); equals ``sp`` when nothing is linked or fixed.
@@ -7148,6 +6916,13 @@ class gam:
     # zeros — set only when sp= / s(..., sp=) fixes a strict subset of
     # the smoothing parameters (mgcv.r:1513-1538's fold).
     _lsp0: np.ndarray | None = None
+    # mgcv's ``lsp0`` when sp= / s(..., sp=) fixes every smoothing
+    # parameter: the per-penalty log sp the fit runs at (mgcv.r:1513-1538).
+    _fixed_lsp0: np.ndarray | None = None
+    # ``am.fit``'s result on the Gaussian additive GCV/UBRE path.
+    _am: dict | None = None
+    # magic's ``gcv.info`` (mgcv's ``mgcv.conv``) when magic chose the sp.
+    _mgcv_conv: dict | None = None
     _control: dict | None = None
     # Resolved gam(scale=) state (mgcv estimate.gam, mgcv.r:1936-1971):
     # > 0 ⇒ the scale is KNOWN/fixed at that value, < 0 ⇒ estimated.
@@ -7792,7 +7567,7 @@ class gam:
                     )
                 sp_work[wstart : wstart + nS] = bsp
             fixed_mask = sp_work >= 0.0
-            if np.any(fixed_mask) and not np.all(fixed_mask):
+            if np.any(fixed_mask):
                 L_cur = self._L if self._L is not None else np.eye(len(slots))
                 fixed_vals = sp_work[fixed_mask]
                 log_fixed = np.empty(fixed_vals.shape[0])
@@ -7808,17 +7583,23 @@ class gam:
                     for i, dst in enumerate(np.flatnonzero(zero)):
                         sl = slots[i]
                         Xblk = X[:, sl.col_start : sl.col_end]
-                        ef0 = (
-                            np.linalg.norm(Xblk) ** 2 / np.linalg.norm(sl.S) * eps * 0.1
-                        )
+                        nX = r_norm(Xblk, "F")
+                        ef0 = nX * nX / r_norm(sl.S, "F") * eps * 0.1
                         log_fixed[dst] = np.log(ef0)
-                self._lsp0 = L_cur[:, fixed_mask] @ log_fixed
-                self._L = L_cur[:, ~fixed_mask]
-                n_work = int(np.count_nonzero(~fixed_mask))
-                self._n_work = n_work
-                sp = None  # the outer machinery estimates the rest
-            elif np.all(fixed_mask):
-                sp = sp_work  # all fixed (possibly via s(..., sp=))
+                lsp0_fixed = r_matprod(L_cur[:, fixed_mask], log_fixed.reshape(-1, 1))[
+                    :, 0
+                ]
+                if np.all(fixed_mask):
+                    # Every sp fixed (possibly via s(..., sp=)): the fit runs
+                    # at the folded per-penalty log sp, nothing estimated.
+                    self._fixed_lsp0 = lsp0_fixed
+                    sp = sp_work
+                else:
+                    self._lsp0 = lsp0_fixed
+                    self._L = L_cur[:, ~fixed_mask]
+                    n_work = int(np.count_nonzero(~fixed_mask))
+                    self._n_work = n_work
+                    sp = None  # the outer machinery estimates the rest
             else:
                 sp = None  # nothing fixed — free optimization
 
@@ -7932,6 +7713,19 @@ class gam:
             if ms.shape != (n,):
                 raise ValueError(f"mustart must have length {n}")
             self._pirls_mustart = ms
+        # gam.setup's G$P, on the model matrices before any column drop.
+        self._G_P = None
+        if any(b.spec is not None and b.spec.Xp is not None for b in blocks):
+            Xp_full = X.copy()
+            for b, (a, bcol) in zip(blocks, block_col_ranges):
+                if b.spec is not None and b.spec.Xp is not None:
+                    if b.spec.Xp.shape[1] != bcol - a:
+                        raise NotImplementedError(
+                            f"{b.label}: its prediction basis lost its match with "
+                            "the fit basis (columns removed by gam.side)"
+                        )
+                    Xp_full[:, a:bcol] = b.spec.Xp
+            self._G_P = _gam_setup_P(X, Xp_full)
         w0 = self._init_fisher_w(y, X=X)
         Xw0 = X * np.sqrt(np.maximum(w0, 0.0))[:, None]
         rank0, drop0, R0_struct = _pls_rank_drop(Xw0, slots, p)
@@ -8091,6 +7885,7 @@ class gam:
             scale_known_fit=self._scale_known_fit,
             pearson_scale_criterion=self._pearson_scale_criterion,
             control=self._control,
+            fixed_lsp0=self._fixed_lsp0,
         )
         _res = estimate_gam(
             G,
@@ -8099,12 +7894,12 @@ class gam:
             fit_given_rho=self._fit_given_rho,
             rho_full=self._rho_full,
             initial_sp_rho=self._initial_sp_rho,
-            use_magic=self._use_magic,
+            use_am=self._use_am,
+            am_fit=self._am_fit_run,
             phi_pearson=self._phi_pearson,
             profile_log_phi_fixed_sp=self._profile_log_phi_fixed_sp,
             magic_fit_state=self._magic_fit_state,
             outer_newton=self._outer_newton,
-            magic_optimize=self._magic_optimize,
             get_outer_fit=lambda: self._outer_fit,
             optimizer=self.optimizer,
             outer_efsudr=self._outer_efsudr,
@@ -8160,17 +7955,25 @@ class gam:
         self._fisher_w = (
             np.asarray(fit_F.w, dtype=float).copy() if fit_F.w is not None else None
         )
-        A_inv = cho_solve((A_chol, A_chol_lower), np.eye(p))
-        if fit_F.w is None or np.allclose(fit_F.w, 1.0):
-            Xw_F = X
+        am = self._am if self._used_magic else None
+        if am is not None:
+            # am.fit's magic.post.proc (mgcv.r:2646-2650): V = rV rV'.
+            A_inv = r_tcrossprod(np.asarray(am["rV"], dtype=float))
+            A_inv_XtWX = None
+            edf = np.asarray(am["edf"], dtype=float)
+            edf_total = r_sum(edf)
         else:
-            Xw_F = X * np.sqrt(np.maximum(fit_F.w, 0.0))[:, None]
-        C_F = np.triu(A_chol) if not A_chol_lower else np.triu(A_chol.T)
-        Kw_F = solve_triangular(C_F, Xw_F.T, lower=False, trans="T").T
-        KtK_F = Kw_F.T @ Kw_F
-        A_inv_XtWX = solve_triangular(C_F, KtK_F @ C_F, lower=False)
-        edf = np.diag(A_inv_XtWX).copy()
-        edf_total = float(edf.sum())
+            A_inv = cho_solve((A_chol, A_chol_lower), np.eye(p))
+            if fit_F.w is None or np.allclose(fit_F.w, 1.0):
+                Xw_F = X
+            else:
+                Xw_F = X * np.sqrt(np.maximum(fit_F.w, 0.0))[:, None]
+            C_F = np.triu(A_chol) if not A_chol_lower else np.triu(A_chol.T)
+            Kw_F = solve_triangular(C_F, Xw_F.T, lower=False, trans="T").T
+            KtK_F = Kw_F.T @ Kw_F
+            A_inv_XtWX = solve_triangular(C_F, KtK_F @ C_F, lower=False)
+            edf = np.diag(A_inv_XtWX).copy()
+            edf_total = float(edf.sum())
         wt = self._wt
         # df.residual used in mgcv = n - edf_total. For unknown-scale
         # families, mgcv reports `m$sig2 = m$scale = scale.est`, regardless
@@ -8210,7 +8013,10 @@ class gam:
             deviance_scale = pearson_scale
         self._pearson_scale = pearson_scale
         self._fletcher_scale = fletcher_scale
-        if self._scale_known_fit:
+        if am is not None:
+            # am.fit's sig2: magic's scale estimate, or the known scale.
+            scale = float(am["sig2"])
+        elif self._scale_known_fit:
             # mgcv: G$sig2 <- scale (mgcv.r:1942) — the known value is
             # reported, 1.0 on the family-default paths.
             scale = self._scale_fixed_value
@@ -8232,37 +8038,23 @@ class gam:
             else float("nan")
         )
 
-        Vp = sigma_squared * A_inv
-        Ve = sigma_squared * A_inv_XtWX @ A_inv
+        if am is not None:
+            Vp = np.asarray(am["Vp"], dtype=float)
+            Ve = np.asarray(am["Ve"], dtype=float)
+        else:
+            Vp = sigma_squared * A_inv
+            Ve = sigma_squared * A_inv_XtWX @ A_inv
 
-        # ------------- coefficient basis change (G_P) -----------------------
-        # When a smooth's predict basis differs from its fit basis (today
-        # only ``t2`` with null_dim ≥ 1), β was fit in a basis that doesn't
-        # match what ``predict_mat`` returns. ``estimate.gam`` (mgcv,
-        # smooth.r:264-267) handles this with a single ``coefficients <-
-        # G$P %*% coefficients`` (and ``Vp <- G$P Vp G$P^T``) post-fit.
-        # ``G_P`` is identity except: each remapped block's columns rotate
-        # by ``M`` and contribute ``X̄ · β_block`` into the intercept row,
-        # encoding ``X_fit = 1·X̄ + X_predict @ M`` exactly. With this in
-        # place ``X_fit @ β_partial = X_predict @ (M β_partial) + (X̄ ·
-        # β_partial)·1`` — so the in-sample η is unchanged and out-of-sample
-        # ``predict_mat(new) @ G_P @ β_partial`` equals what the fit basis
-        # would have produced.
-        intercept_idx: int | None = (
-            column_names.index("(Intercept)") if has_intercept else None
-        )
-        if any(b.spec is not None and b.spec.coef_remap is not None for b in blocks):
-            G_P = np.eye(p)
-            for b, (a_col, b_col) in zip(blocks, block_col_ranges):
-                if b.spec is None or b.spec.coef_remap is None:
-                    continue
-                M_b, X_bar_b = b.spec.coef_remap
-                G_P[a_col:b_col, a_col:b_col] = M_b
-                if intercept_idx is not None:
-                    G_P[intercept_idx, a_col:b_col] = X_bar_b
-            beta = G_P @ beta
-            Vp = G_P @ Vp @ G_P.T
-            Ve = G_P @ Ve @ G_P.T
+        # estimate.gam (mgcv.r:2102-2105): coefficients and covariances to the
+        # prediction parameterization by G$P.
+        G_P = getattr(self, "_G_P", None)
+        if G_P is not None:
+            if self._keep_cols is not None:
+                G_P = G_P[np.ix_(self._keep_cols, self._keep_cols)]
+            G_Pt = np.ascontiguousarray(G_P.T)
+            beta = r_matprod(G_P, np.asarray(beta, dtype=float).reshape(-1, 1))[:, 0]
+            Vp = r_matprod(r_matprod(G_P, Vp), G_Pt)
+            Ve = r_matprod(r_matprod(G_P, Ve), G_Pt)
 
         from ..R import NamedVector
 
@@ -8305,9 +8097,15 @@ class gam:
         self.sigma_squared = sigma_squared
         self.scale = sigma_squared  # mgcv's `$scale`
 
-        w_F = fit_F.w if fit_F.w is not None else np.ones(n)
-        HX = X @ A_inv
-        self.leverage = (HX * X).sum(axis=1) * w_F
+        if am is not None:
+            # am.fit's hat: magic.post.proc's leverages of the rows with
+            # positive weight; the others have none.
+            self.leverage = np.zeros(n)
+            self.leverage[am["good"]] = am["hat"]
+        else:
+            w_F = fit_F.w if fit_F.w is not None else np.ones(n)
+            HX = X @ A_inv
+            self.leverage = (HX * X).sum(axis=1) * w_F
         sigma_for_std = sigma if np.isfinite(sigma) and sigma > 0 else 1.0
         denom = sigma_for_std * np.sqrt(np.clip(1.0 - self.leverage, 1e-12, None))
         try:
@@ -8332,16 +8130,22 @@ class gam:
         # as.integer(intercept) term is always 1 via gam).
         # For Gaussian (V=1, wt=1, offset=0) this reduces to
         # Σ(y - mean(y))² = tss.
-        mu_null_const = float(np.sum(wt * y) / np.sum(wt))
-        mu_null = np.full(n, mu_null_const)
-        self.null_deviance = float(np.sum(self.family.dev_resids(y, mu_null, wt)))
+        if am is not None:
+            # am.fit's own (mgcv.r:2632-2635): the intercept-free model's
+            # null deviance is that of the offset.
+            self.null_deviance = float(am["null_deviance"])
+            self.df_null = float(am["df_null"])
+        else:
+            mu_null_const = float(np.sum(wt * y) / np.sum(wt))
+            mu_null = np.full(n, mu_null_const)
+            self.null_deviance = float(np.sum(self.family.dev_resids(y, mu_null, wt)))
+            self.df_null = float(n - int(np.sum(wt == 0.0)) - 1)
         if (
             has_intercept
             and np.any(self._offset != 0.0)
             and not self._family_mgcv_extended
         ):
             self.null_deviance = self._offset_only_null_deviance(y, wt)
-        self.df_null = float(n - int(np.sum(wt == 0.0)) - 1)
         # Extended-family postproc (estimate.gam, mgcv.r:2092-2098):
         # replaces null.deviance with find.null.dev's optimized constant
         # — NOT the weighted-mean value above (≠ at 1e-3 level even at
@@ -8388,9 +8192,9 @@ class gam:
             r_squared = float("nan")
         if df_resid > 0 and n > 1:
             sqrt_wt = np.sqrt(wt)
-            mean_y_w = float(np.sum(wt * y) / np.sum(wt))
-            v_resid = float(np.var(sqrt_wt * (y - mu), ddof=1))
-            v_total = float(np.var(sqrt_wt * (y - mean_y_w), ddof=1))
+            mean_y_w = r_sum(wt * y) / r_sum(wt)
+            v_resid = r_var(sqrt_wt * (y - mu))
+            v_total = r_var(sqrt_wt * (y - mean_y_w))
             if v_total > 0:
                 r_squared_adjusted = 1.0 - v_resid * (n - 1) / (v_total * df_resid)
             else:
@@ -8486,9 +8290,18 @@ class gam:
         compute_edf2 = (
             method in ("REML", "ML", "P-REML", "P-ML") and not self._outer_deriv0
         )
-        if n_sp > 0 and (self._used_magic or not compute_edf2):
-            # mgcv's magic.post.proc (mgcv.r:4475-4501): edf1 = 2·edf − diag(FF)
-            # only; NO edf2 / Vc. edf2 := edf so logLik.gam/AIC use edf.
+        if am is not None:
+            # am.fit returns magic.post.proc's edf1 and no edf2 or Vc
+            # (mgcv.r:2664-2669); edf2 := edf so logLik.gam/AIC use edf.
+            self.edf1 = np.asarray(am["edf1"], dtype=float)
+            self.edf2 = edf.copy()
+            self.edf1_total = r_sum(self.edf1)
+            self.edf2_total = edf_total
+            Vc_corr = np.zeros_like(Vp)
+        elif n_sp > 0 and not compute_edf2:
+            # gam.fit3.post.proc leaves edf2 and Vc NULL off (RE)ML:
+            # edf1 = 2·edf − diag(FF) only; edf2 := edf so logLik.gam/AIC
+            # use edf.
             F = A_inv_XtWX
             edf1_per_coef = 2.0 * np.diag(F) - np.einsum("ij,ji->i", F, F)
             self.edf1 = edf1_per_coef
@@ -8608,8 +8421,11 @@ class gam:
         # (gam.fit3.r:850) — distinct from wt = pw·n when extra prior
         # weights are present.
         n_aic = self._binom_n if self._binom_n is not None else n
-        family_aic = float(self.family.aic(y, fit.mu, dev1, wt, n_aic))
-        mgcv_aic = family_aic + 2.0 * edf_total  # mgcv's m$aic
+        if am is not None:
+            mgcv_aic = float(am["aic"])
+        else:
+            family_aic = float(self.family.aic(y, fit.mu, dev1, wt, n_aic))
+            mgcv_aic = family_aic + 2.0 * edf_total  # mgcv's m$aic
         logLik = sc_p + edf_total - 0.5 * mgcv_aic  # mgcv's logLik value
         # mgcv leaves edf2 NULL on the GCV/UBRE/GACV path (gam.fit3.post.proc
         # gates on reml.scale), so logLik.gam's df falls back to edf there;
@@ -8664,13 +8480,18 @@ class gam:
             # (gam.fit3.r:751). Stored in the GCV_score slot (mgcv's shared
             # `gcv.ubre`). Scale-known GACV.Cp falls through to UBRE below.
             self.GCV_score = float(self._gacv(rho_hat, fit=fit))
+        elif am is not None:
+            self.GCV_score = float(am["gcv_ubre"])
         else:
             self.GCV_score = float(self._gcv(rho_hat, fit=fit))
 
         self.vcomp = self._compute_vcomp()
 
         _fw_now = self._fisher_w if self._fisher_w is not None else np.ones(n)
-        if _fw_now.shape == w0.shape and np.array_equal(_fw_now, w0):
+        if am is not None:
+            # am.fit's rank: magic's at convergence (mgcv.r:2652).
+            self.rank = int(am["rank"])
+        elif _fw_now.shape == w0.shape and np.array_equal(_fw_now, w0):
             self.rank = self.p
         else:
             self.rank = self._estimate_rank()
@@ -8711,7 +8532,7 @@ class gam:
         if self._L is None:
             rho = theta_sp
         else:
-            rho = self._L @ theta_sp
+            rho = r_matprod(self._L, np.reshape(theta_sp, (-1, 1)))[:, 0]
         if self._lsp0 is not None:
             rho = rho + self._lsp0
         return rho
@@ -8743,72 +8564,41 @@ class gam:
         return np.log(np.maximum(def_sp, 1e-300))
 
     def _offset_only_null_deviance(self, y: np.ndarray, wt: np.ndarray) -> float:
-        """Deviance of ``glm(y ~ offset(off))`` — the intercept-only model
-        refit *with* the offset, which is what mgcv reports as
-        ``null.deviance`` for intercept+offset models (estimate.gam,
-        mgcv.r:2072-2075 literally calls glm). Fisher IRLS on the single
-        free coefficient with glm.fit's control (epsilon=1e-8, maxit=25,
-        convergence on |Δdev|/(|dev|+0.1))."""
-        family = self.family
-        link = family.link
-        off = self._offset
-        mu = family.initialize(y, wt)
-        eta = link.link(mu)
-        dev = float(np.sum(family.dev_resids(y, mu, wt)))
-        for _ in range(25):
-            mu_eta_v = link.mu_eta(eta)
-            V = family.variance(mu)
-            good = mu_eta_v != 0.0
-            safe = np.where(good, mu_eta_v, 1.0)
-            z = np.where(good, eta - off + (y - mu) / safe, 0.0)
-            w = np.where(good, wt * mu_eta_v**2 / V, 0.0)
-            b0 = float(np.sum(w * z) / np.sum(w))
-            eta = b0 + off
-            mu = link.linkinv(eta)
-            dev_new = float(np.sum(family.dev_resids(y, mu, wt)))
-            done = abs(dev_new - dev) / (abs(dev_new) + 0.1) < 1e-8
-            dev = dev_new
-            if done:
-                break
-        return float(dev)
+        """Deviance of ``glm(y ~ offset(off), family, weights)`` — the
+        intercept-only model refit *with* the offset, which is what mgcv
+        reports as ``null.deviance`` for intercept+offset models
+        (estimate.gam, mgcv.r:2072-2075): R's ``glm.fit`` on a column of
+        ones."""
+        from ..R.glm_fit import glm_fit
+
+        return glm_fit(
+            np.ones((y.size, 1)),
+            y,
+            family=self.family,
+            weights=wt,
+            offset=self._offset,
+        )["deviance"]
 
     def _resolve_null_coef(self) -> np.ndarray:
-        """mgcv get.null.coef (mgcv.r:1863): ρ-independent null-model
-        coefficients used as the PIRLS divergence baseline. Projects a
-        constant valid η onto colspan(X); returns the coefficient vector
-        passed as ``null_coef`` to `_gam_fit3`/`_gam_fit4`."""
+        """mgcv ``get.null.coef`` (mgcv.r:1854-1869): the null model's
+        coefficients, gam.fit3/gam.fit4's divergence baseline and shrink
+        target. ``mean(y)`` linked and projected on the model matrix by
+        ``qr.coef(qr(X), etam)`` (R's LINPACK QR), NA coefficients set to 0;
+        the offset plays no part. A family with its own ``get_null_coef``
+        (gfam, gfam.r:569-587) supplies it instead."""
         if self._null_baseline_cache is None:
             family = self.family
-            link = family.link
             X = self._X_full
             y = self._y_arr
-            wt = self._wt
-            off = self._offset
-            n, p = self.n, self.p
             fam_hook = getattr(family, "get_null_coef", None)
             if fam_hook is not None:
-                # Family-supplied null model (mgcv.r:2022 — gfam's
-                # per-member means, gfam.r:569-587).
-                nc, _null_scale = fam_hook(X, y, wt, off)
-                en = X @ nc
-                mn = link.linkinv(en + off)
-                self._null_baseline_cache = (nc, en, mn)
-                return nc
-            mu = (
-                family.gam_initialize(y, wt, n=self._binom_n)
-                if self._binom_n is not None
-                else family.gam_initialize(y, wt)
-            )
-            mu_null_const = float(np.average(mu, weights=wt))
-            eta_null_full = link.link(np.full(n, mu_null_const))
-            nc, *_ = np.linalg.lstsq(X, eta_null_full - off, rcond=None)
-            en = X @ nc
-            mn = link.linkinv(en + off)
-            if not (link.valideta(en + off) and family.validmu(mn)):
-                nc = np.zeros(p)
-                en = np.zeros(n)
-                mn = link.linkinv(off)
-            self._null_baseline_cache = (nc, en, mn)
+                nc, _null_scale = fam_hook(X, y, self._wt, self._offset)
+            else:
+                mum = np.full(self.n, r_mean(y))
+                etam = family.link.link(mum)
+                nc = r_qr_coef(r_qr(X), etam)
+                nc[np.isnan(nc)] = 0.0
+            self._null_baseline_cache = (nc,)
         return self._null_baseline_cache[0]
 
     def _h_fixed_fit(self) -> np.ndarray | None:
@@ -8971,22 +8761,10 @@ class gam:
         # totalPenaltySpace's balanced St INCLUDES the fixed penalty
         # H/‖H‖ (mgcv.r:2666-2677), so the range basis Y matches mgcv even
         # though min.sp's H adds no new range directions.
-        St = np.zeros((p, p))
-        for slot in slots:
-            a, b = slot.col_start, slot.col_end
-            nrm = float(np.linalg.norm(slot.S, "fro"))
-            if nrm > 0:
-                St[a:b, a:b] += slot.S / nrm
-        if has_H:
-            Hnrm = float(np.linalg.norm(H_fixed, "fro"))
-            if Hnrm > 0:
-                St += H_fixed / Hnrm
-        w, V = np.linalg.eigh(St)
-        w_max = float(w.max()) if w.size else 0.0
-        if w_max <= 0:
+        Y, _Z, _E = _total_penalty_space(slots, p, H_fixed if has_H else None)
+        if Y.shape[1] == 0:
             return
-        ind = w > w_max * float(np.finfo(float).eps) ** 0.66
-        q_r = int(np.sum(ind))
+        q_r = Y.shape[1]
         if q_r != self._penalty_rank:
             import warnings as _w
 
@@ -8998,18 +8776,18 @@ class gam:
             )
             self._reparam_cache = {}
             return
-        Y = V[:, ind]
+        YT = np.ascontiguousarray(Y.T)
         UrS = []
         for slot in slots:
             a, b = slot.col_start, slot.col_end
-            b_root = _mroot(slot.S)  # estimated-rank columns
+            b_root = _mroot(slot.S, rank=_penalty_rank(slot.S))  # mini.roots
             full = np.zeros((p, b_root.shape[1]))
             full[a:b, :] = b_root
-            UrS.append(Y.T @ full)
+            UrS.append(r_matprod(YT, full))
         if has_H:
             # the fixed penalty's root goes LAST (mgcv.r:1928); get_stableS
             # treats the last root as sp≡1 with no derivative.
-            UrS.append(Y.T @ _mroot(H_fixed))
+            UrS.append(r_matprod(YT, _mroot(H_fixed)))
         self._UrS = UrS
         self._reparam_Y = Y
 
@@ -9587,17 +9365,18 @@ class gam:
         ipiv = fit["ipiv"]
 
         # pre-condition lbb before testing rank (gam.fit4.r:1597)
-        lbb_pre = D * (D * lbb).T
+        lbb_pre = D[:, None] * (D[:, None] * lbb).T
         R_f, piv_R, rank_R = _pivoted_chol(lbb_pre)
         if rank_R < p:
             tol, dtol = 0.0, 1e-7
-            ev, V = np.linalg.eigh(lbb_pre)
+            ev, V = _r_eigen_sym(lbb_pre)
             mev = float(ev.max())
+            St_f = np.asarray(fit["St"], dtype=float)
             while True:
                 ev[ev < tol * mev] = tol * mev
-                R_f = np.sqrt(ev)[:, None] * V.T
-                lbb_pre = R_f.T @ R_f
-                Hp = lbb_pre + D * (D * np.asarray(fit["St"], dtype=float)).T
+                R_f = np.sqrt(ev)[:, None] * np.ascontiguousarray(V.T)
+                lbb_pre = r_crossprod(R_f)
+                Hp = lbb_pre + D[:, None] * (D[:, None] * St_f).T
                 L_new, piv_n, rank_n = _pivoted_chol(Hp)
                 if rank_n == p:
                     R_f = R_f / D[None, :]  # R'R = lbb (original)
@@ -9612,9 +9391,10 @@ class gam:
             ipiv_R[piv_R] = np.arange(p)
             R_f = R_f[:, ipiv_R] / D[None, :]  # R'R = lbb (original)
 
+        # Vb <- crossprod(forwardsolve(t(L), diag(D)[piv,])[ipiv,])
         Dm = np.diag(D)[piv, :]
-        sol = solve_triangular(L_fac, Dm, lower=False, trans="T")[ipiv, :]
-        Vb = sol.T @ sol
+        sol = r_backsolve(np.ascontiguousarray(L_fac.T), Dm, upper=False)[ipiv, :]
+        Vb = r_crossprod(sol)
 
         bdrop = np.asarray(fit["bdrop"], dtype=bool)
         if bdrop.any():  # reinsert zero rows
@@ -9679,14 +9459,15 @@ class gam:
                     self._hess1_ec = hess_k  # sp.vcov's hess1 attr
                     self._lsp1_ec = th1.copy()
                 db = db_k @ self._L if self._L is not None else db_k
-                ev_h, V_h = np.linalg.eigh(hess_k)
+                ev_h, V_h = _r_eigen_sym(hess_k)
+                VhT = np.ascontiguousarray(V_h.T)
                 nonpos = ev_h <= 0
                 d = ev_h.copy()
                 d[nonpos] = 0.0
                 d[~nonpos] = 1.0 / np.sqrt(d[~nonpos])
                 db = _sl_inirep(sl, db, lt=1, r=0)  # undo initial repara
-                tmp = (d[:, None] * V_h.T) @ db.T
-                Vc_corr = tmp.T @ tmp  # first correction
+                tmp = r_matprod(d[:, None] * VhT, np.ascontiguousarray(db.T))
+                Vc_corr = r_crossprod(tmp)  # first correction
                 d2 = ev_h.copy()
                 d2[nonpos] = 0.0
                 d2 = (
@@ -9694,7 +9475,7 @@ class gam:
                     if k == 1
                     else 1.0 / np.sqrt(d2 + 1e-7)
                 )
-                Vr = (V_h * (d2 * d2)) @ V_h.T
+                Vr = r_crossprod(d2[:, None] * VhT)
                 if k == 1:
                     Vc1_corr = Vc_corr  # un-shifted, for edf2
                     Vr1 = Vr
@@ -9711,9 +9492,9 @@ class gam:
             Vc1 = Vb + Vc1
         R_f = _sl_repa(fit["rp"], R_f, r=1)
         R_f = _sl_initial_repara(sl, R_f, inverse=True, both_sides=False, cov=False)
-        RtR = R_f.T @ R_f
-        F = Vb @ RtR
-        Ve = F @ Vb
+        RtR = r_crossprod(R_f)
+        F = r_matprod(Vb, RtR)
+        Ve = r_matprod(F, Vb)
         edf = np.diag(F).copy()
         if have_corr:
             # second correction in the original parameterization —
@@ -9722,13 +9503,13 @@ class gam:
             # the reported Vc uses (lsp1, Vr_k2), edf2's Vc1 the
             # fitted-model (lsp, Vr1) pair (gam.fit4.r:1709-1712).
             Vc = Vc + self._vb_corr_fit5(
-                RtR, Vr, rho=rho1_full if edge_correct else None
+                R_f, Vr, rho=rho1_full if edge_correct else None
             )
             if edge_correct:
-                Vc1 = Vc1 + self._vb_corr_fit5(RtR, Vr1)
-        edf1 = 2.0 * edf - np.einsum("ij,ji->i", F, F)
-        edf2 = np.sum((Vc1 if edge_correct else Vc) * RtR, axis=1)
-        if float(np.sum(edf2)) > float(np.sum(edf1)):
+                Vc1 = Vc1 + self._vb_corr_fit5(R_f, Vr1)
+        edf1 = 2.0 * edf - r_rowsums(F.T * F)
+        edf2 = r_rowsums((Vc1 if edge_correct else Vc) * RtR)
+        if r_sum(edf2) > r_sum(edf1):
             edf2 = edf1.copy()
         return {
             "Vc": Vc,
@@ -9742,30 +9523,57 @@ class gam:
         }
 
     def _vb_corr_fit5(
-        self, RtR: np.ndarray, Vr: np.ndarray, rho: np.ndarray | None = None
+        self, R: np.ndarray, Vr: np.ndarray, rho: np.ndarray | None = None
     ) -> np.ndarray:
         """gam.fit5.post.proc's ``Vb.corr`` call (gam.fit3.r:869-952
-        with w=NULL): rebuild H = R'R + Σλ_k S_k in MODEL coordinates,
-        Cholesky it (bail to 0 like mgcv when that fails), and reuse
-        the `_compute_Vc2` factor-derivative chain (≡ vcorr) — with
-        penalty-only dH and NO σ² scaling ("NOTE: unscaled!!").
+        with w=NULL): rebuild H = crossprod(R) + Σλ_k S_k in MODEL
+        coordinates, ``chol`` it (bail to 0 like mgcv when that fails), take
+        each penalty's dH (mapped to the working parameters through L),
+        ``dchol``, the two triangular solves and ``vcorr`` - unscaled, as
+        mgcv notes.
         ``rho`` overrides the fitted full-space log-sp (edge.correct's
         k=2 call evaluates at the walked-back lsp1, gam.fit4.r:1709)."""
         p = self.p
-        A = RtR.copy()
+        H = r_crossprod(R)
         rho_use = np.asarray(self._rho_hat if rho is None else rho, dtype=float)
         lam = np.exp(rho_use)
         for k, slot in enumerate(self._slots):
             a, b = slot.col_start, slot.col_end
-            A[a:b, a:b] += lam[k] * slot.S
+            H[a:b, a:b] = H[a:b, a:b] + lam[k] * slot.S
         try:
-            C = np.linalg.cholesky(0.5 * (A + A.T))
-        except np.linalg.LinAlgError:
+            Rh = r_chol(H)
+        except ValueError:
             return np.zeros((p, p))
-        import types
-
-        duck = types.SimpleNamespace(A_chol=C, A_chol_lower=True)
-        return self._compute_Vc2(rho_use, duck, Vr, 1.0)
+        dH = []
+        for k, slot in enumerate(self._slots):
+            a, b = slot.col_start, slot.col_end
+            dHk = np.zeros((p, p))
+            dHk[a:b, a:b] = dHk[a:b, a:b] + lam[k] * slot.S
+            dH.append(dHk)
+        if self._L is not None:
+            # dH w.r.t. the working parameters: sum_i dH1[[i]]*L[i,j]
+            Lm = np.asarray(self._L, dtype=float)
+            dH1, dH = dH, []
+            for j in range(Lm.shape[1]):
+                acc = None
+                for i in range(Lm.shape[0]):
+                    if Lm[i, j] != 0.0:
+                        acc = (
+                            dH1[i] * Lm[i, j]
+                            if acc is None
+                            else acc + dH1[i] * Lm[i, j]
+                        )
+                dH.append(acc if acc is not None else np.zeros((p, p)))
+        if not dH:
+            return np.zeros((p, p))
+        Rt = np.ascontiguousarray(Rh.T)
+        dR = []
+        for dHk in dH:
+            dRk = _mgcv_dchol(dHk, Rh)
+            # -t(forwardsolve(t(R), t(backsolve(R, dR))))
+            inner = np.ascontiguousarray(r_backsolve(Rh, dRk).T)
+            dR.append(-np.ascontiguousarray(r_backsolve(Rt, inner, upper=False).T))
+        return _mgcv_vcorr(dR, np.asarray(Vr, dtype=float))
 
     def sp_vcov(self, edge_correct: bool = True, reg: float = 1e-3):
         """mgcv ``sp.vcov`` (mgcv.r:4221-4234): covariance of the
@@ -9864,7 +9672,14 @@ class gam:
         ``self`` and threads the polymorphic fit/score/view machinery as
         callables (bam overrides `_fit_given_rho`/`_dw_deta`), then persists
         the ``outer_info``/``outer_fit``/``edge_theta1`` writes mgcv's newton
-        returns in its result list."""
+        returns in its result list. With nothing to optimise gam.outer
+        skips the optimiser ("no.sps", mgcv.r:1646) and leaves
+        ``outer.info`` NULL."""
+        if np.asarray(theta0).size == 0:
+            self._outer_info = None
+            self._outer_fit = None
+            self._edge_theta1 = None
+            return np.asarray(theta0, dtype=float)
         res = newton(
             theta0,
             include_log_phi=include_log_phi,
@@ -10223,53 +10038,63 @@ class gam:
             n=self.n,
         )
 
-    def _use_magic(
-        self, criterion: str, include_log_phi: bool, include_family_theta: bool
-    ) -> bool:
-        """mgcv's ``outer.looping == FALSE`` dispatch (mgcv.r:1932): Gaussian
-        family + identity link (``G$am``, mgcv.r:2327), GCV (scale unknown),
-        no id-linkage / fixed-sp (so working-sp == per-penalty log-sp)."""
+    def _use_am(self) -> bool:
+        """estimate.gam's ``outer.looping`` FALSE (mgcv.r:1933): a Gaussian
+        identity model (``G$am``, mgcv.r:2327) selected by GCV.Cp, which
+        mgcv fits by ``am.fit`` whatever the smoothing parameters."""
         return (
-            criterion == "GCV"
-            and not self._scale_known_fit
+            self.method == "GCV.Cp"
             and isinstance(self.family, Gaussian)
             and getattr(self.family.link, "name", None) == "identity"
-            and self._L is None
-            and self._lsp0 is None
-            and not include_log_phi
-            and not include_family_theta
-            and len(self._slots) > 0
         )
 
-    def _magic_optimize(self, rho0, tol: float = 1e-7, max_half: int = 15):
-        """Shim → free `_magic_optimize`; persists the cached QR + outer_info."""
-        res = _magic_optimize(
-            rho0,
-            tol=tol,
-            max_half=max_half,
-            wt=self._wt,
-            y=self._y_arr,
-            offset=self._offset,
-            struct_R=self._struct_R,
-            keep_cols=self._keep_cols,
+    def _am_fit_run(self, sp):
+        """``am.fit(G)`` with this model's ``G``: ``G$sp`` all -1 with the
+        free smoothing parameters' ``G$L``/``G$lsp0``, or, when ``sp`` fixes
+        every one, ``G$sp`` empty and ``G$L`` without columns, the fixed
+        values folded into ``G$lsp0`` (gam.setup, mgcv.r:1513-1538). Adds
+        ``rho``, the per-penalty log smoothing parameters
+        ``log(full.sp)`` (mgcv.r:2398-2401), and keeps the result as
+        ``self._am``."""
+        n_p = len(self._slots)
+        if sp is not None:
+            L = np.zeros((n_p, 0))
+            lsp0 = np.asarray(self._fixed_lsp0, dtype=float)
+            sp_g = np.zeros(0)
+        else:
+            L = self._L
+            lsp0 = np.zeros(n_p) if self._lsp0 is None else np.asarray(self._lsp0)
+            sp_g = np.full(self._n_work, -1.0)
+        am = _am_fit(
             X=self._X_full,
-            gamma=self._gamma,
+            y=self._y_arr,
+            weights=self._wt,
+            offset=self._offset,
             slots=self._slots,
-            p=self.p,
-            H_fixed=self._h_fixed_fit(),
+            sp=sp_g,
+            L=L,
+            lsp0=lsp0,
+            rank=[_penalty_rank(sl.S) for sl in self._slots],
+            H=self._h_fixed_fit(),
+            gamma=self._gamma,
+            sig2=self._scale_resolved,
+            control=self._control or _GAM_CONTROL_DEFAULTS,
+            intercept=self._has_intercept,
+            family=self.family,
         )
-        self._magic_R = res["magic_R"]
-        self._magic_y0 = res["magic_y0"]
-        self._outer_info = res["outer_info"]
-        return res["sp"]
+        lsp = np.log(np.asarray(am["sp"], dtype=float))
+        if L is not None:
+            lsp = r_matprod(L, lsp.reshape(-1, 1))[:, 0]
+        am["rho"] = lsp + lsp0
+        self._am = am
+        self._mgcv_conv = am["mgcv_conv"]
+        return am
 
-    def _magic_fit_state(self, rho):
-        """Shim → free `_magic_fit_state`."""
+    def _magic_fit_state(self, am):
+        """Shim → free `_magic_fit_state` at ``am``'s smoothing parameters."""
         return _magic_fit_state(
-            rho,
-            magic_R=self._magic_R,
-            magic_y0=self._magic_y0,
-            fit_given_rho_fn=self._fit_given_rho,
+            am,
+            am["rho"],
             family=self.family,
             X=self._X_full,
             offset=self._offset,
@@ -10522,24 +10347,22 @@ class gam:
         Wood (2013) Biometrika 100(1), 221-228. Direct port of
         mgcv.r:3759-3855 including the p-value computation.
         """
-        _, R = np.linalg.qr(X_b, mode="reduced")
-        V_rot = R @ V_b @ R.T
-        V_rot = 0.5 * (V_rot + V_rot.T)
-        d_eig, U = np.linalg.eigh(V_rot)
-        d_eig = d_eig[::-1]
-        U = U[:, ::-1]
+        qrx = r_qr(X_b, tol=0.0)
+        R = r_qr_R(qrx)
+        piv = np.asarray(qrx["pivot"]) - 1
+        RT = np.ascontiguousarray(R.T)
+        V_rot = r_matprod(r_matprod(R, V_b[np.ix_(piv, piv)]), RT)
+        V_rot = (V_rot + V_rot.T) / 2
+        d_eig, U = _r_eigen_sym(V_rot)
         siv = np.sign(U[0, :])
         siv = np.where(siv == 0, 1.0, siv)
-        U = U * siv
+        U = U * siv[None, :]
 
         k = max(0, int(np.floor(rank)))
         nu = abs(rank - k)
         k1 = k + 1 if nu > 0 else k
 
-        if d_eig.size > 0 and d_eig[0] > 0:
-            r_est = int(np.sum(d_eig > d_eig[0] * np.finfo(float).eps ** 0.9))
-        else:
-            r_est = 0
+        r_est = int(np.sum(d_eig > float(d_eig.max()) * np.finfo(float).eps ** 0.9))
         if r_est < k1:
             k1 = k = r_est
             nu = 0.0
@@ -10548,37 +10371,42 @@ class gam:
         if k1 == 0 or U.shape[1] == 0:
             return 0.0, 1.0, float(rank)
 
-        vec = U[:, :k1].copy()
+        vec = U[:, :k1].copy() if k1 < U.shape[1] else U.copy()
 
         if nu > 0 and k > 0:
             if k > 1:
-                scales = 1.0 / np.sqrt(d_eig[: k - 1])
-                vec[:, : k - 1] = vec[:, : k - 1] * scales[np.newaxis, :]
+                vec[:, : k - 1] = vec[:, : k - 1] / np.sqrt(d_eig[: k - 1])[None, :]
             b12 = 0.5 * nu * (1.0 - nu)
-            b12 = float(np.sqrt(max(b12, 0.0)))
+            if b12 < 0:
+                b12 = 0.0
+            b12 = math.sqrt(b12)
             B = np.array([[1.0, b12], [b12, nu]], dtype=float)
-            ev = np.diag(d_eig[k - 1 : k + 1] ** -0.5)
-            B = ev @ B @ ev
-            eb_d, eb_v = np.linalg.eigh(B)
-            rB = eb_v @ np.diag(np.sqrt(np.maximum(eb_d, 0.0))) @ eb_v.T
-            cols_orig = vec[:, k - 1 : k + 1].copy()
-            cols_neg = cols_orig.copy()
-            cols_neg[:, 0] = -cols_neg[:, 0]
-            vec[:, k - 1 : k + 1] = cols_orig @ rB.T
+            ev = np.diag(_rpow(d_eig[k - 1 : k1], -0.5))
+            B = r_matprod(r_matprod(ev, B), ev)
+            eb_d, eb_v = _r_eigen_sym(B)
+            rB = r_matprod(
+                r_matprod(eb_v, np.diag(np.sqrt(eb_d))), np.ascontiguousarray(eb_v.T)
+            )
+            cols_t = np.ascontiguousarray(vec[:, k - 1 : k1].T)
             vec1 = vec.copy()
-            vec1[:, k - 1 : k + 1] = cols_neg @ rB.T
+            vec1[:, k - 1 : k1] = r_matprod(
+                r_matprod(rB, np.diag([-1.0, 1.0])), cols_t
+            ).T
+            vec[:, k - 1 : k1] = r_matprod(rB, cols_t).T
         else:
             if k == 0:
-                if d_eig[0] > 0:
-                    vec = vec * (1.0 / np.sqrt(d_eig[0]))
+                vec = vec * np.sqrt(1.0 / d_eig[0])
             else:
-                scales = 1.0 / np.sqrt(d_eig[:k])
-                vec = vec * scales[np.newaxis, :]
+                vec = vec / np.sqrt(d_eig[:k])[None, :]
+            if k == 1:
+                rank = 1.0
             vec1 = vec
 
-        Rp = R @ beta_b
-        d = float(np.sum((vec.T @ Rp) ** 2))
-        d1 = float(np.sum((vec1.T @ Rp) ** 2))
+        Rp = r_matprod(R, np.asarray(beta_b, dtype=float).reshape(-1, 1))
+        dv = r_matprod(np.ascontiguousarray(vec.T), Rp)[:, 0]
+        d = r_sum(dv * dv)
+        dv1 = r_matprod(np.ascontiguousarray(vec1.T), Rp)[:, 0]
+        d1 = r_sum(dv1 * dv1)
 
         rank1 = float(rank)  # rank for the fallback below
 
@@ -10642,38 +10470,15 @@ class gam:
         # the working ``b$sp`` shorter (mgcv.r:3612); exp(ρ̂_full) is that.
         sp = np.exp(np.asarray(self._rho_hat, dtype=float))
 
-        # R factor — mgcv's ``b$R``, consumed verbatim by recov
-        # (mgcv.r:3624 ``rbind(b$R, …)``, :3656 ``b$R[, !rind]``). General
-        # families: gam.fit5.post.proc's root, R'R = −lbb — exactly mgcv's
-        # ``object$R`` on this path (cf. the testStat branch at
-        # ``_smooth_significance_rows``). PIRLS: R'R = X'WX from stored
-        # Fisher working weights; eigendecomp when XtWX is borderline-PSD
-        # (gam.side rank-trim, near-singular weights, etc.).
-        if getattr(self, "_md", None) is not None:
-            R_factor = self._R_fit5
-        else:
-            if self._fisher_w is None:
-                XtWX = self._XtX
-            else:
-                Xw = self._X_full * np.sqrt(self._fisher_w)[:, None]
-                XtWX = Xw.T @ Xw
-            try:
-                R_factor = np.linalg.cholesky(XtWX).T
-            except np.linalg.LinAlgError:
-                ev, U = np.linalg.eigh(0.5 * (XtWX + XtWX.T))
-                ev = np.clip(ev, 0.0, None)
-                R_factor = (U * np.sqrt(ev)).T
+        # mgcv's ``b$R``, consumed verbatim by recov (mgcv.r:3624
+        # ``rbind(b$R, …)``, :3656 ``b$R[, !rind]``).
+        R_factor = self._object_R()
 
         def _mroot_rows(S: np.ndarray) -> np.ndarray:
-            """Rows B' of an eigen square root B·B' = S (rank rows)."""
+            """``t(mroot(S))``: the rows of mgcv's pivoted-Cholesky root."""
             if S.size == 0:
                 return np.zeros((0, S.shape[1] if S.ndim == 2 else 0))
-            ev, U = np.linalg.eigh(0.5 * (S + S.T))
-            max_ev = ev.max() if ev.size else 0.0
-            keep = ev > max(max_ev, 0.0) * 1e-12
-            if not keep.any():
-                return np.zeros((0, S.shape[0]), dtype=float)
-            return (U[:, keep] * np.sqrt(ev[keep])).T
+            return np.ascontiguousarray(_mroot(S).T)
 
         def _rm_from(
             data_rows: np.ndarray, pen_rows: np.ndarray, a: int, b: int
@@ -10685,7 +10490,7 @@ class gam:
             target = list(range(a, b))
             other = [j for j in range(n_cols) if j < a or j >= b]
             LRB_perm = LRB[:, other + target]
-            _, R_qr = np.linalg.qr(LRB_perm, mode="reduced")
+            R_qr = r_qr_R(r_qr(LRB_perm, tol=0.0))
             k = b - a
             return R_qr[-k:, -k:]
 
@@ -10728,15 +10533,14 @@ class gam:
             inv_d[ind] = 1.0 / ds2[ind]
             B2 = np.diag(np.sqrt(inv_d))
         else:
-            ev2, V2 = np.linalg.eigh(0.5 * (S2 + S2.T))
+            ev2, V2 = _r_eigen_sym((S2 + S2.T) / 2)
             ind = ev2 > ev2.max() * np.finfo(float).eps ** 0.8
             inv_v = np.zeros_like(ev2)
             inv_v[ind] = 1.0 / ev2[ind]
-            B2 = np.sqrt(inv_v)[:, None] * V2.T
+            B2 = np.sqrt(inv_v)[:, None] * np.ascontiguousarray(V2.T)
 
-        M2 = B2 @ R2.T  # (p2, p)
-        A_L = np.eye(p) + M2.T @ M2
-        L = np.linalg.cholesky(0.5 * (A_L + A_L.T)).T
+        # L <- chol(diag(p) + crossprod(S2 %*% t(R2))), mgcv.r:3694
+        L = r_chol(np.eye(p) + r_crossprod(r_matprod(B2, np.ascontiguousarray(R2.T))))
 
         Rm = _rm_from(
             L @ R1,
@@ -10775,16 +10579,13 @@ class gam:
         Ve_full, Rm = self._recov(m_idx, re_idx, v_scale=v_scale)
         a_m, b_m = self._block_col_ranges[m_idx]
         Ve_b = Ve_full[a_m:b_m, a_m:b_m]
-        ev_b, U_b = np.linalg.eigh(0.5 * (Ve_b + Ve_b.T))
-        ev_b = np.clip(ev_b, 0.0, None)
-        B = U_b * np.sqrt(ev_b)
-        d = Rm @ beta_b
-        stat = float((d * d).sum() / sig2)
-        M = Rm @ B
-        ev = np.linalg.eigvalsh(0.5 * ((M.T @ M) + (M.T @ M).T) / sig2)
-        ev = np.clip(ev, 0.0, None)
+        B = _mroot(Ve_b)  # BB' = Ve
+        d = r_matprod(Rm, np.asarray(beta_b, dtype=float).reshape(-1, 1))[:, 0]
+        stat = r_sum(d * d) / sig2
+        ev = _r_eigen_sym(r_crossprod(r_matprod(Rm, B)) / sig2, only_values=True)
+        ev[ev < 0] = 0.0
         max_ev = ev.max() if ev.size else 0.0
-        rank = int(np.sum(ev > max(max_ev, 0.0) * np.finfo(float).eps ** 0.8))
+        rank = int(np.sum(ev > max_ev * np.finfo(float).eps ** 0.8))
         if self._scale_known_fit:
             pval = psum_chisq(stat, ev) if ev.size else float("nan")
         else:
@@ -10795,6 +10596,22 @@ class gam:
             )
             pval = psum_chisq(0.0, lb, df) if ev.size else float("nan")
         return stat, float(pval), float(rank)
+
+    def _object_R(self) -> np.ndarray:
+        """mgcv's ``object$R``, the factor with ``R'R = X'WX``: for a
+        general family gam.fit5.post.proc's root of ``-lbb``; otherwise
+        gam.fit3.post.proc's (gam.fit3.r:975-977) ``pqr(sqrt(w) * X)`` -
+        one thread, so ``mgcv_qr``'s LAPACK ``dgeqp3`` - with the columns of
+        ``pqr.R`` put back in their original order."""
+        if getattr(self, "_md", None) is not None:
+            return self._R_fit5
+        X = self._X_full
+        WX = X if self._fisher_w is None else np.sqrt(self._fisher_w)[:, None] * X
+        qrx = r_qr_lapack(WX)
+        R = r_qr_R(qrx)
+        out = np.empty_like(R)
+        out[:, qrx["pivot"] - 1] = R
+        return out
 
     def _smooth_significance_rows(
         self,
@@ -10832,13 +10649,7 @@ class gam:
         v_scale = (
             1.0 if dispersion is None else float(dispersion) / float(self.sigma_squared)
         )
-        if getattr(self, "_md", None) is not None:
-            X_w = self._R_fit5
-        elif self._fisher_w is not None:
-            sqw = np.sqrt(self._fisher_w)
-            X_w = self._X_full * sqw[:, None]
-        else:
-            X_w = self._X_full
+        X_w = self._object_R()
         rows: list[tuple[str, float, float, float, float]] = []
         for m_idx, (b, (a, bcol)) in enumerate(
             zip(self._blocks, self._block_col_ranges)
@@ -10849,15 +10660,7 @@ class gam:
             edf_b = float(self.edf[a:bcol].sum())
             edf1_b = float(self.edf1[a:bcol].sum()) if hasattr(self, "edf1") else edf_b
             p_b = bcol - a
-            if b.S:
-                S_sum = b.S[0].copy()
-                for S_i in b.S[1:]:
-                    S_sum = S_sum + S_i
-                rank_S = int(np.linalg.matrix_rank(S_sum))
-                null_dim = p_b - rank_S
-            else:
-                null_dim = p_b
-            if null_dim == 0:
+            if _null_space_dim(b) == 0:
                 if not re_test:
                     continue
                 stat, p_val, ref_df = self._re_test(
@@ -10982,32 +10785,38 @@ class gam:
                             np.arange(th_start, H_aug.shape[0]),
                         ]
                     )
-            w, V = np.linalg.eigh(H_aug)
+            w, V = _r_eigen_sym(H_aug)
+            VT = np.ascontiguousarray(V.T)
             if prior_var is not None:
-                d_reg = np.where(w > 0, w, 0.0) + float(prior_var)
-                H_inv = (V / d_reg) @ V.T
+                # gam.fit3.r:1001-1012: d <- 1/sqrt(max(v, 0) + prior);
+                # Vr <- crossprod(d * t(vectors))
+                d = 1.0 / np.sqrt(np.where(w > 0, w, 0.0) + float(prior_var))
+                H_inv = r_crossprod(d[:, None] * VT)
                 return H_inv[np.ix_(sel, sel)]
             w_max = float(w.max()) if w.size > 0 else 0.0
             keep = (w > w_max * 1e-7) if w_max > 0 else np.zeros_like(w, dtype=bool)
             if not keep.any():
                 return np.zeros((sel.size, sel.size))
-            Vk = V[:, keep]
-            H_inv = (Vk / w[keep]) @ Vk.T
+            iv = np.zeros_like(w)
+            iv[keep] = 1.0 / w[keep]
+            H_inv = r_matprod(V, iv[:, None] * VT)
             return H_inv[np.ix_(sel, sel)]
         H_full = 0.5 * self._reml_hessian(rho, 0.0, include_log_phi=False)
         if self._L is not None:
             H_full = self._L.T @ H_full @ self._L
         H = 0.5 * (H_full + H_full.T)
-        w, V = np.linalg.eigh(H)
+        w, V = _r_eigen_sym(H)
+        VT = np.ascontiguousarray(V.T)
         if prior_var is not None:
-            d_reg = np.where(w > 0, w, 0.0) + float(prior_var)
-            return (V / d_reg) @ V.T
+            d = 1.0 / np.sqrt(np.where(w > 0, w, 0.0) + float(prior_var))
+            return r_crossprod(d[:, None] * VT)
         w_max = float(w.max()) if w.size > 0 else 0.0
         keep = (w > w_max * 1e-7) if w_max > 0 else np.zeros_like(w, dtype=bool)
         if not keep.any():
             return np.zeros((n_w, n_w))
-        Vk = V[:, keep]
-        return (Vk / w[keep]) @ Vk.T
+        iv = np.zeros_like(w)
+        iv[keep] = 1.0 / w[keep]
+        return r_matprod(V, iv[:, None] * VT)
 
     def _compute_Vc2(self, rho, fit, Vr, sigma_squared):
         """Shim → free `_compute_Vc2`."""
@@ -11096,13 +10905,14 @@ class gam:
                 }
             )
 
-        w, V = np.linalg.eigh(H)
+        w, V = _r_eigen_sym(H)
         w_max = float(w.max()) if w.size > 0 else 0.0
-        keep = (w > w_max * 1e-7) if w_max > 0 else np.zeros_like(w, dtype=bool)
-        Hinv = np.zeros_like(H)
-        if keep.any():
-            Vk = V[:, keep]
-            Hinv = (Vk / w[keep]) @ Vk.T
+        # mgcv.r:4320 tests w > max(w) * .Machine$double.eps^75, which
+        # underflows to w > 0.
+        keep = w > w_max * float(np.finfo(float).eps) ** 75
+        iv = np.zeros_like(w)
+        iv[keep] = 1.0 / w[keep]
+        Hinv = r_matprod(V, iv[:, None] * np.ascontiguousarray(V.T))
 
         n_work = self._work_dim
         J = np.zeros((n_sp + 1, H.shape[0]))
@@ -11116,8 +10926,9 @@ class gam:
         Vc = J @ Hinv @ J.T
         se = np.sqrt(np.maximum(np.diag(Vc), 0.0))
         z = float(_nmath.qnorm5(1.0 - (1.0 - conf_lev) / 2.0))
-        lower = np.exp(log_sd - z * se)
-        upper = np.exp(log_sd + z * se)
+        with np.errstate(over="ignore"):  # Inf bounds, silently, as in R
+            lower = np.exp(log_sd - z * se)
+            upper = np.exp(log_sd + z * se)
         return pl.DataFrame(
             {
                 "name": [nm for nm, k in zip(names, row_keep) if k],
@@ -11351,31 +11162,33 @@ class gam:
             )
             return _na_pass_expand(out, na_mask)
 
-        if newdata is None:
-            X_new = self._X_full
-            off_new = self._offset
+        # predict.gam with no newdata predicts on object$model through the
+        # same machinery (mgcv.r:2763-2766): PredictMat on the fit frame,
+        # whose design can differ from the fit-time one in the last bits.
+        # The offset is then the fit's. predict.gam's block loop
+        # (mgcv.r:2884-2911) builds the design in row chunks of block.size
+        # (default 1000; <1 means all rows) for memory only - every build
+        # is row-independent.
+        pred_data = self.data if newdata is None else newdata
+        nrows = pred_data.height
+        bs = 1000 if block_size is None else int(block_size)
+        if bs < 1:
+            bs = max(nrows, 1)
+        if nrows > bs:
+            X_parts = []
+            off_parts = []
+            for s0 in range(0, nrows, bs):
+                Xc, offc = self._predict_design_rows(
+                    pred_data.slice(s0, min(bs, nrows - s0))
+                )
+                X_parts.append(Xc)
+                off_parts.append(offc)
+            X_new = np.vstack(X_parts)
+            off_new = np.concatenate(off_parts)
         else:
-            # predict.gam's block loop (mgcv.r:2884-2911): the design is
-            # built in row chunks of block.size (default 1000; <1 means
-            # all rows) purely for memory control — every build is
-            # row-independent so the stacked result is bit-identical.
-            nrows = newdata.height
-            bs = 1000 if block_size is None else int(block_size)
-            if bs < 1:
-                bs = max(nrows, 1)
-            if nrows > bs:
-                X_parts = []
-                off_parts = []
-                for s0 in range(0, nrows, bs):
-                    Xc, offc = self._predict_design_rows(
-                        newdata.slice(s0, min(bs, nrows - s0))
-                    )
-                    X_parts.append(Xc)
-                    off_parts.append(offc)
-                X_new = np.vstack(X_parts)
-                off_new = np.concatenate(off_parts)
-            else:
-                X_new, off_new = self._predict_design_rows(newdata)
+            X_new, off_new = self._predict_design_rows(pred_data)
+        if newdata is None:
+            off_new = self._offset
         if offset is not None:
             extra = np.asarray(offset, dtype=float).flatten()
             if extra.shape != off_new.shape:
@@ -11568,11 +11381,8 @@ class gam:
         if newdata is None:
             return self.data["_hea_gfam_fi"].to_numpy().astype(float)
         try:
-            cols = set(newdata.columns)
             return (
-                newdata.select(_eval_lhs_expr(self._gfam_fi_expr, cols).alias("_v"))[
-                    "_v"
-                ]
+                _eval_lhs_series(self._gfam_fi_expr, newdata, "_v")
                 .to_numpy()
                 .astype(float)
             )
@@ -11719,7 +11529,11 @@ class gam:
             )
         md = self._md
         if newdata is None:
-            X_new = np.asarray(md.X, dtype=float)
+            # predict.gam predicts on object$model (mgcv.r:2763-2766): the
+            # design rebuilt from the fit's data, the fit's offsets.
+            X_new, _ = _multi_lpmatrix(md, self.data)
+            if getattr(self, "_drop_intercept_col", None) is not None:
+                X_new = np.delete(X_new, self._drop_intercept_col, axis=1)
             offs = list(md.offsets)
         else:
             from ..formula import _eval_atom, normalize_data
@@ -13333,11 +13147,31 @@ class gam:
         # ("perf","chol") and fast-REML rails take the dump.
         newton_like = len(optimizer) > 1 and optimizer[1] in ("newton", "bfgs")
         if info is None:
-            # No outer info: mgcv distinguishes only "no sp to select" from the
-            # performance-iteration/AM case (plots.r:314-323) — it never claims
-            # the user fixed the sp.
-            if not self._slots:
+            # No outer info (plots.r:314-326): no sp estimated, or the magic
+            # fit's convergence report from ``mgcv.conv``.
+            mc = getattr(self, "_mgcv_conv", None)
+            if np.size(self.sp) == 0:
                 out.append("Model required no smoothing parameter selection")
+            elif mc is not None:
+                iters = int(mc["iter"])
+                line = (
+                    "Smoothing parameter selection converged after "
+                    f"{iters} iteration{'s' if iters > 1 else ''}"
+                )
+                if mc["fully_converged"]:
+                    out.append(line + ".")
+                else:
+                    out.append(line + " by steepest")
+                    out.append("descent step failure.")
+                out.append(
+                    f"The RMS {method_label} score gradient at convergence was "
+                    f"{float(mc['rms_grad']):.7g} ."
+                )
+                out.append(
+                    "The Hessian was positive definite."
+                    if mc["hess_pos_def"]
+                    else "The Hessian was not positive definite."
+                )
             else:
                 out.append("Smoothing parameter selection converged.")
         elif not newton_like:
@@ -13363,7 +13197,7 @@ class gam:
                 else np.zeros(0)
             )
             if H.size > 0:
-                ev = np.linalg.eigvalsh(0.5 * (H + H.T))
+                ev = _r_eigen_sym(H, only_values=False)[0]
                 ev_min, ev_max = float(ev.min()), float(ev.max())
                 pd_text = (
                     "Hessian positive definite, "
@@ -13446,15 +13280,13 @@ class gam:
         mgcv's behavior. The design is the unweighted model matrix; on
         rank-dropped fits it is the reduced (identifiable) design.
         """
-        from scipy.linalg import solve_triangular as _sla_tri
-
         if not self._blocks:
             raise ValueError("nothing to do for this model")
-        md = getattr(self, "_md", None)
-        X = np.asarray(md.X if md is not None else self._X_full, dtype=float)
-        # Speed step (mgcv.r:3351): reduce to the p×p R factor — every
-        # measure below is quadratic in columns, so spans are preserved.
-        Rf = np.linalg.qr(X, mode="r")
+        # model.matrix(b) is predict(b, type = "lpmatrix"), its complete rows
+        # reduced to qr.R of the unpivoted LINPACK QR (mgcv.r:3348-3351).
+        X = np.asarray(self.predict(type="lpmatrix"), dtype=float)
+        X = X[~np.isnan(X).any(axis=1)]
+        Rf = r_qr_R(r_qr(X, tol=0.0))
         p = Rf.shape[1]
         blocks = [(a, b) for a, b in self._block_col_ranges]
         labels = [b.label for b in self._blocks]
@@ -13469,17 +13301,25 @@ class gam:
 
         def _measures(Xi, Xj, bj):
             """The three concurvity measures of Xj's span explained by
-            Xi (mgcv.r:3376-3387): unpivoted QR of [Xi Xj], the Xj
-            columns' R block split into the projection rows (1:r) and
-            the orthogonal remainder."""
+            Xi (mgcv.r:3376-3387): the Xj columns of the unpivoted qr.R of
+            [Xi Xj], split into the projection rows (1:r) and the rest,
+            and qr.R of that block. With r = 0 R's ``-(1:r)`` and
+            ``[1:r, ]`` read 1:0 = c(1, 0): the first column is dropped and
+            the first row taken."""
             r = Xi.shape[1]
-            Rq = np.linalg.qr(np.concatenate([Xi, Xj], axis=1), mode="r")[:, r:]
-            Rt = np.linalg.qr(Rq, mode="r")
-            M = _sla_tri(Rt.T, Rq[:r].T, lower=True)
-            worst = float(np.linalg.svd(M, compute_uv=False)[0] ** 2)
-            observed = float(np.sum((Rq[:r] @ bj) ** 2)) / float(np.sum((Rt @ bj) ** 2))
-            estimate = float(np.sum(Rq[:r] ** 2)) / float(np.sum(Rq**2))
-            return worst, observed, estimate
+            Q = r_qr_R(r_qr(np.concatenate([Xi, Xj], axis=1), tol=0.0))
+            Rq = Q[:, r:] if r > 0 else Q[:, 1:]
+            top = Rq[:r] if r > 0 else Rq[:1]
+            Rt = r_qr_R(r_qr(Rq, tol=0.0))
+            M = r_backsolve(
+                np.ascontiguousarray(Rt.T), np.ascontiguousarray(top.T), upper=False
+            )
+            d1 = float(r_svd(M)["d"][0])
+            fb = r_matprod(top, bj.reshape(-1, 1))[:, 0]
+            gb = r_matprod(Rt, bj.reshape(-1, 1))[:, 0]
+            observed = r_sum(fb * fb) / r_sum(gb * gb)
+            estimate = r_sum(top * top) / r_sum(Rq * Rq)
+            return d1 * d1, observed, estimate
 
         names = ["worst", "observed", "estimate"]
         if full:
@@ -14713,21 +14553,36 @@ def _add_null_space_penalties(blocks: list[SmoothBlock]) -> list[SmoothBlock]:
         if not S_list:
             out.append(b)
             continue
-        St = S_list[0].copy()
-        for Sj in S_list[1:]:
-            St += Sj
-        eigvals, eigvecs = np.linalg.eigh(St)
-        max_eig = float(eigvals.max()) if eigvals.size else 0.0
-        if max_eig <= 0.0:
+        p = b.X.shape[1]
+        Sf = None
+        need_full = True
+        if len(S_list) == 1:
+            # smooth.r:4231-4246: a penalty already diag(S11, .., 0, ..)
+            # gets the complementary 0/1 diagonal directly.
+            S1 = S_list[0]
+            S11 = float(S1[0, 0])
+            rank = _penalty_rank(S1)
+            D = np.diag(np.concatenate([np.full(rank, S11), np.zeros(p - rank)]))
+            if float(np.max(np.abs(S1 - D))) <= abs(S11) * eps**0.8:
+                need_full = False
+                if p > rank:
+                    Sf = np.diag(np.concatenate([np.zeros(rank), np.ones(p - rank)]))
+        if need_full:
+            # smooth.r:4249-4250: the loop starts at 1, so with several
+            # penalties S[[1]] enters St twice.
+            St = S_list[0].copy()
+            if len(S_list) > 1:
+                for Sj in S_list:
+                    St = St + Sj
+            eigvals, eigvecs = _r_eigen_sym(St)
+            max_eig = float(eigvals.max()) if eigvals.size else 0.0
+            null_mask = eigvals < max_eig * threshold_factor
+            if max_eig > 0.0 and bool(np.any(null_mask)):
+                U = eigvecs[:, null_mask]
+                Sf = r_matprod(U, np.ascontiguousarray(U.T))
+        if Sf is None:
             out.append(b)
             continue
-        null_mask = eigvals < max_eig * threshold_factor
-        if not bool(np.any(null_mask)):
-            out.append(b)
-            continue
-        U = eigvecs[:, null_mask]
-        Sf = U @ U.T
-        Sf = 0.5 * (Sf + Sf.T)
         out.append(
             SmoothBlock(
                 label=b.label,
@@ -14737,6 +14592,7 @@ def _add_null_space_penalties(blocks: list[SmoothBlock]) -> list[SmoothBlock]:
                 S=S_list + [Sf],
                 spec=b.spec,
                 S_scale=(None if b.S_scale is None else list(b.S_scale) + [1.0]),
+                margin_X=b.margin_X,
             )
         )
     return out
@@ -14821,18 +14677,18 @@ def _apply_gam_side(
     if len(all_names) == len(set(all_names)):
         return blocks  # no repeats => no nesting
 
-    # intercept present in X_param, directly or in span (mgcv.r:597-604)
+    # intercept present in X_param: a column with ``sd`` below eps^.75, or
+    # the constant in its span by ``qr.fitted(qr(Xp), 1)`` (mgcv.r:597-604)
     intercept = False
     if ncol_xp:
         Xp = np.asarray(X_param, dtype=float)
-        if np.any(np.std(Xp, axis=0, ddof=1) < float(np.finfo(float).eps) ** 0.75):
+        tol_i = float(np.finfo(float).eps) ** 0.75
+        if any(math.sqrt(r_var(Xp[:, j])) < tol_i for j in range(ncol_xp)):
             intercept = True
         else:
-            from ..R.linalg import dqrls
-
-            f = np.ones(nobs)
-            rsd = dqrls(Xp, f)[2]
-            if float(np.max(np.abs(rsd))) < float(np.finfo(float).eps) ** 0.75:
+            f = np.ones(Xp.shape[0])
+            ff = r_qr_fitted(r_qr(Xp), f)
+            if float(np.max(np.abs(ff - f))) < tol_i:
                 intercept = True
 
     # sm.id: per variable name, the side-constrained smooths that use it,
@@ -14944,6 +14800,7 @@ def _apply_gam_side(
                 S=new_S,
                 spec=new_spec,
                 S_scale=new_scale,
+                margin_X=b.margin_X,
             )
     return out
 
@@ -14962,34 +14819,33 @@ def _fix_dependence(
     tol: float = float(np.finfo(float).eps) ** 0.5,
     rank_def: int = 0,
 ) -> list[int]:
-    """Find columns of ``X2`` that are linearly dependent on ``X1``."""
+    """mgcv ``fixDependence`` (mgcv.r), the default ``strict = FALSE``
+    branch: the 0-based columns of ``X2`` to delete so that it is of full
+    rank given ``X1``. ``qr(X1, LAPACK = TRUE)``, the rows of ``Q'X2`` past
+    ``ncol(X1)``, their own LAPACK QR, and the trailing pivots of the block
+    of ``R`` whose mean absolute value falls below ``|R[1,1]| * tol`` of
+    ``X1`` (or the last ``rank_def`` when that is given)."""
     n, r = X1.shape
-    from scipy.linalg import qr as scipy_qr
-
     if r == 0 or n <= r:
         return []
-    Q1, R1, _piv1 = scipy_qr(X1, pivoting=True)
-    R11 = abs(R1[0, 0]) if R1.size else 1.0
-    QtX2 = Q1.T @ X2
-    residual = QtX2[r:, :]
-    if residual.shape[0] == 0:
-        return []
-    _Q2, R2, piv = scipy_qr(residual, mode="economic", pivoting=True)
-    nrows = R2.shape[0]
-    r_full = nrows
-    r0 = r_full
-    if 0 < rank_def <= nrows:
-        r0 = r_full - rank_def
+    qr1 = r_qr_lapack(X1)
+    R11 = abs(float(r_qr_R(qr1)[0, 0]))
+    QtX2 = r_qr_qy_lapack(qr1, X2, transpose=True)[r:n, :]
+    qr2 = r_qr_lapack(QtX2)
+    R = r_qr_R(qr2)
+    r0 = r = R.shape[0]
+    if 0 < rank_def <= R.shape[0]:
+        r0 = r - rank_def
     else:
         while (
             r0 > 0
-            and float(np.mean(np.abs(R2[r0 - 1 : r_full, r0 - 1 : r_full]))) < R11 * tol
+            and r_mean(np.abs(R[r0 - 1 : r, r0 - 1 : r]).ravel(order="F")) < R11 * tol
         ):
             r0 -= 1
     r0 += 1
-    if r0 > r_full:
+    if r0 > r:
         return []
-    return [int(p) for p in piv[r0 - 1 : r_full]]
+    return [int(c) - 1 for c in qr2["pivot"][r0 - 1 : r]]
 
 
 def _sym_rank(S: np.ndarray) -> int:
@@ -15004,14 +14860,19 @@ def _sym_rank(S: np.ndarray) -> int:
 
 
 def _r_cond(R: np.ndarray) -> float:
-    """mgcv ``R_cond`` (gdi.c:2851) — ∞-norm condition estimate of an
-    upper-triangular ``R``, by the Cline-Moler-Stewart-Wilkinson (1979)
-    growth recursion (Golub & Van Loan 1996): solve ``R'y = ±e`` choosing
-    each sign to maximize growth, then ``κ ≈ ‖R‖_∞ · ‖y‖_∞``.
-    """
+    """mgcv ``R_cond`` (gdi.c:2851): condition estimate of an upper
+    triangular ``R`` by the Cline-Moler-Stewart-Wilkinson (1979) recursion
+    (Golub & Van Loan 1996): solve ``R'y = +-e`` choosing each sign for
+    growth, then ``kappa = ||R||_inf * ||y||_inf``. As mgcv.so computes it:
+    the updates ``p[i] + R[i,k]*y`` fused on arm64 and every sum
+    accumulated in index order."""
     c = R.shape[1]
     if c == 0:
         return 0.0
+
+    def seqsum(v: np.ndarray) -> float:
+        return float(np.cumsum(v)[-1]) if v.size else 0.0
+
     y = np.zeros(c)
     p_acc = np.zeros(c)
     y_inf = 0.0
@@ -15019,9 +14880,9 @@ def _r_cond(R: np.ndarray) -> float:
         for k in range(c - 1, -1, -1):
             yp = (1.0 - p_acc[k]) / R[k, k]
             ym = (-1.0 - p_acc[k]) / R[k, k]
-            pp = p_acc[:k] + R[:k, k] * yp
-            pm = p_acc[:k] + R[:k, k] * ym
-            if abs(yp) + float(np.abs(pp).sum()) >= abs(ym) + float(np.abs(pm).sum()):
+            pp = _rfma_vec(R[:k, k], yp, p_acc[:k])
+            pm = _rfma_vec(R[:k, k], ym, p_acc[:k])
+            if abs(yp) + seqsum(np.abs(pp)) >= abs(ym) + seqsum(np.abs(pm)):
                 y[k] = yp
                 p_acc[:k] = pp
             else:
@@ -15029,8 +14890,73 @@ def _r_cond(R: np.ndarray) -> float:
                 p_acc[:k] = pm
             kappa = abs(y[k])
             y_inf = max(y_inf, kappa)
-        R_inf = float(np.abs(np.triu(R[:c, :c])).sum(axis=1).max())
+        R_inf = 0.0
+        for i in range(c):
+            kappa = seqsum(np.abs(R[i, i:c]))
+            R_inf = max(R_inf, kappa)
     return R_inf * y_inf
+
+
+def _mgcv_dchol(dA: np.ndarray, R: np.ndarray) -> np.ndarray:
+    """mgcv's C ``dchol`` (mat.c): dR/dx for the Cholesky factor R of A
+    (R'R = A) given dA/dx, upper triangles only. Each element's sum adds
+    ``fma(R[k,i], dR[k,j], R[k,j]*dR[k,i])`` over k in order, unfused; the
+    off-diagonal update ``(dA - x) - R[i,j]*dR[i,i]`` is fused, as compiled."""
+    p = R.shape[0]
+    dR = np.zeros((p, p))
+    for i in range(p):
+        if i:
+            t = _rfma_vec(R[:i, i, None], dR[:i, i:], R[:i, i:] * dR[:i, i, None])
+            x = np.add.accumulate(t, axis=0)[-1]
+        else:
+            x = np.zeros(p)
+        dR[i, i] = (dA[i, i] - x[0]) * 0.5 / R[i, i]
+        for jj in range(1, p - i):
+            j = i + jj
+            dR[i, j] = _rfma(-R[i, j], dR[i, i], dA[i, j] - x[jj]) / R[i, i]
+    return dR
+
+
+def _mgcv_vcorr(dR: list[np.ndarray], Vr: np.ndarray) -> np.ndarray:
+    """mgcv's C ``vcorr`` (mat.c) for ``trans = FALSE``: the covariance of
+    ``sum_k dR_k z r_k``. For each row i, ``Vi`` (rows i.. of the dR_k laid
+    out side by side) times ``Vr`` by ``dgemm``, then each entry one fused
+    multiply-add chain over k and the row."""
+    p = dR[0].shape[0]
+    M = len(dR)
+    Vb = np.zeros((p, p))
+    for i in range(p):
+        Vi = np.column_stack([d[i, i:] for d in dR])
+        ViV = _mgcv_mmult(Vi, Vr)
+        for j in range(i, p):
+            a = np.concatenate([ViV[j - i :, k] for k in range(M)])
+            b = np.concatenate([d[j, j:] for d in dR])
+            Vb[i, j] = Vb[j, i] = _rfma_dot(a, b)
+    return Vb
+
+
+def _gam_setup_P(X: np.ndarray, Xp: np.ndarray) -> np.ndarray:
+    """gam.setup's ``G$P`` (mgcv.r:1352-1374), the map from the fitted
+    coefficients to the prediction parameterization, ``Xp P = X``: through
+    ``qr(Xp, LAPACK = TRUE)``, ``Rrank``, ``qr.qty`` and ``backsolve``, or for
+    a rank-deficient ``Xp`` ``forwardsolve`` on a LINPACK ``qr`` of the
+    leading rows of ``t(R)`` and ``qr.qy``; rows put back in ``Xp``'s column
+    order."""
+    qrx = r_qr_lapack(Xp)
+    R = r_qr_R(qrx)
+    p = R.shape[1]
+    rank = _R_rank(R)
+    QtX = r_qr_qy_lapack(qrx, X, transpose=True)[:rank, :]
+    if rank < p:
+        qrr = r_qr(np.ascontiguousarray(R[:rank, :].T), tol=0.0)
+        Rr = r_qr_R(qrr)
+        P = r_backsolve(np.ascontiguousarray(Rr.T), QtX, upper=False)
+        P = r_qr_qy(qrr, np.vstack([P, np.zeros((p - rank, p))]))
+    else:
+        P = r_backsolve(R, QtX)
+    out = np.empty_like(P)
+    out[qrx["pivot"] - 1] = P
+    return out
 
 
 def _R_rank(R: np.ndarray, tol: float = float(np.finfo(float).eps) ** 0.9) -> int:
@@ -15063,16 +14989,8 @@ def _pls_rank_drop(
     the earliest twin is kept on every BLAS build — see below.
     Returns ``(rank, drop)``."""
     R1 = np.linalg.qr(Xw, mode="r")
-    St = np.zeros((p, p))
-    for slot in slots:
-        a, b = slot.col_start, slot.col_end
-        nrm = float(np.sqrt(np.sum(slot.S * slot.S)))
-        if nrm > 0:
-            St[a:b, a:b] += slot.S / nrm
-    if np.any(St):
-        ev, Y = np.linalg.eigh(0.5 * (St + St.T))
-        keep = ev > ev.max() * np.finfo(float).eps ** 0.66
-        E = (Y[:, keep] * np.sqrt(ev[keep])).T  # E'E = St
+    if slots and any(np.any(sl.S) for sl in slots):
+        _Y, _Z, E = _total_penalty_space(slots, p)  # E'E = St
     else:
         E = np.zeros((0, p))
     R1_norm = float(np.sqrt(np.sum(R1 * R1)))
@@ -15130,51 +15048,99 @@ def _mroot(A: np.ndarray, rank: int | None = None, method: str = "chol") -> np.n
     uses the symmetric eigendecomposition (mgcv's own shortcut: "same as
     svd for +ve semi def, but faster"), detecting rank from
     ``values > max(values)·eps`` when not supplied. Non-symmetric input
-    stops, per mgcv's ``isTRUE(all.equal(A, t(A)))`` guard (mean relative
-    difference < 1.5e-8, ``all.equal.numeric`` semantics)."""
+    stops, per mgcv's ``isTRUE(all.equal(A, t(A)))`` guard."""
     q = A.shape[0]
     if q == 0:
         return np.zeros((0, 0))
-    asym = float(np.mean(np.abs(A - A.T)))
-    a_scale = float(np.mean(np.abs(A)))
-    tol = 1.5e-8
-    if (asym / a_scale if a_scale > tol else asym) >= tol:
+    if not r_all_equal(A.ravel(order="F"), A.T.ravel(order="F")):
         raise ValueError("Supplied matrix not symmetric")
     if method == "svd":
-        vals, vecs = np.linalg.eigh(A)
-        vals = vals[::-1]  # R's eigen(): descending order
-        vecs = vecs[:, ::-1]
+        vals, vecs = _r_eigen_sym(A)
         if rank is None or rank < 1:
             rank = int(np.sum(vals > vals.max() * np.finfo(float).eps))
         if rank == 0:
             raise ValueError("Something wrong - matrix probably not +ve semi definite")
         return vecs[:, :rank] * np.sqrt(vals[:rank])
     elif method == "chol":
-        from scipy.linalg.lapack import dpstrf
-
-        c, piv, r_eff, _info = dpstrf(A, lower=0)
-        U = np.triu(c)
-        if r_eff < q:
-            U[r_eff:, :] = 0.0
+        # L <- chol(A, pivot=TRUE, tol=0) (its trailing block zero), then
+        # t(L[, order(pivot)][1:rank, ])
+        U, piv, r_eff = r_chol(A, pivot=True, tol=0.0)
         if rank is None or rank < 1:
-            rank = int(r_eff)
-        inv_piv = np.empty(q, dtype=int)
-        inv_piv[piv - 1] = np.arange(q)
-        return U[:rank, inv_piv].T
+            rank = r_eff
+        return np.ascontiguousarray(U[:rank, np.argsort(piv, kind="stable")].T)
     raise ValueError("method not recognised.")
 
 
+def _mgcv_mmult(B: np.ndarray, C: np.ndarray, bt: int = 0, ct: int = 0) -> np.ndarray:
+    """mgcv's ``mgcv_mmult`` (mat.c) for distinct operands: one ``dgemm``
+    with B and C transposed as ``bt``/``ct`` say."""
+    from scipy.linalg.blas import dgemm
+
+    return np.asarray(
+        dgemm(1.0, np.asfortranarray(B), np.asfortranarray(C), trans_a=bt, trans_b=ct)
+    )
+
+
+def _mgcv_getXXt(X: np.ndarray) -> np.ndarray:
+    """mgcv's ``getXXt``: ``dsyrk('L', 'N')`` for the lower triangle of
+    ``X X'``, then the upper filled from it."""
+    from scipy.linalg.blas import dsyrk
+
+    out = np.array(dsyrk(1.0, np.asfortranarray(X), lower=1, trans=0))
+    iu = np.triu_indices(out.shape[0], 1)
+    out[iu] = out.T[iu]
+    return out
+
+
+def _mgcv_trBtAB(A: np.ndarray, B: np.ndarray) -> float:
+    """mgcv's ``trBtAB`` as compiled inline in get_stableS: for each column
+    j of B and k of A, ``tr += A[i,k]*B[i,j]*B[k,j]`` over i - eight terms
+    at a time rounded (both products) and added in order, the last
+    ``n % 8`` (all when n < 8) with the final product fused."""
+    n, m = B.shape
+    nv = n - n % 8 if n >= 8 else 0
+    tr = 0.0
+    for j in range(m):
+        bj = B[:, j]
+        for k in range(n):
+            x = B[k, j]
+            ak = A[:, k]
+            if nv:
+                tr = float(
+                    np.add.accumulate(np.concatenate([[tr], (ak[:nv] * bj[:nv]) * x]))[
+                        -1
+                    ]
+                )
+            for i in range(nv, n):
+                tr = _rfma(ak[i] * bj[i], x, tr)
+    return tr
+
+
+def _mgcv_trAB(A: np.ndarray, B: np.ndarray) -> float:
+    """mgcv's ``trAB`` (n x m ``A``, m x n ``B``): ``tr += B[j,i]*A[i,j]``,
+    j outer and i inner, one fused multiply-add chain."""
+    return _rfma_dot(
+        np.ascontiguousarray(B).ravel(order="C"), np.asfortranarray(A).ravel(order="F")
+    )
+
+
 def _qr_ldet_inv(X: np.ndarray, get_inv: bool) -> tuple[float, np.ndarray | None]:
-    """mgcv ``qr_ldet_inv`` (gdi.c:257): ``log|X|`` and, optionally, the
-    inverse of ``X`` via pivoted QR.
-    """
-    Q, R, piv = qr(X, pivoting=True)
-    ldet = float(np.sum(np.log(np.abs(np.diag(R)))))
+    """mgcv ``qr_ldet_inv`` (gdi.c:257): ``mgcv_qr`` (LAPACK ``dgeqp3``),
+    ``log|X|`` as the in-order sum of ``log|R_ii|`` and, optionally, the
+    inverse ``R^{-1} Q'`` (``Q'`` by ``dormqr`` on the identity, then
+    ``mgcv_backsolve``'s ``dtrsm``) with its rows unpivoted."""
+    qrx = r_qr_lapack(X)
+    qr_a = qrx["qr"]
+    r = X.shape[0]
+    ldet = 0.0
+    for i in range(r):
+        ldet += math.log(abs(qr_a[i, i]))
     Xi = None
     if get_inv:
-        RiQt = solve_triangular(R, Q.T, lower=False)
-        Xi = np.empty_like(X)
-        Xi[piv, :] = RiQt
+        Qt = r_qr_qy_lapack(qrx, np.eye(r), transpose=True)
+        RiQt = r_backsolve(np.triu(qr_a[:r, :r]), Qt)
+        Xi = np.empty_like(RiQt)
+        Xi[qrx["pivot"] - 1, :] = RiQt
     return ldet, Xi
 
 
@@ -15186,19 +15152,21 @@ def _get_stable_S(
     r_tol: float,
     fixed_penalty: bool = False,
 ):
-    """mgcv ``get_stableS`` (gdi.c:550-792), line-by-line: similarity
-    transform of ``S = Σ λ_i S_i`` (S_i = rS_i rS_i') that prevents
-    "dominant machine zero leakage" between penalty components when the
-    λ's differ by ≫ 1/eps, plus log|S| and its first/second derivatives
-    wrt log(sp) computed in the transformed (stable) space.
-    """
+    """mgcv ``get_stableS`` (gdi.c:550-792) as compiled: similarity
+    transform of ``S = Σ λ_i S_i`` (S_i = rS_i rS_i', ``getXXt``) that
+    prevents "dominant machine zero leakage" between penalty components,
+    plus log|S| and its first/second derivatives wrt log(sp) in the
+    transformed space. The weighted sums ``+= S_i * sp_i`` are fused,
+    the Frobenius norms one fused chain, the products ``mgcv_mmult``'s
+    dgemm with its transposes and the eigen-decompositions mgcv_symeig's
+    dsyevr."""
     q = rS_list[0].shape[0]
     Mf = len(rS_list)
     M = Mf - 1 if fixed_penalty else Mf
     spf = np.ones(Mf)
     spf[:M] = np.asarray(sp, dtype=float)
     rS = [np.asarray(r, dtype=float).copy() for r in rS_list]
-    Si = [r @ r.T for r in rS]  # shrinking Q×Q blocks
+    Si = [_mgcv_getXXt(r) for r in rS]  # shrinking Q×Q blocks
     gamma = np.ones(Mf, dtype=bool)
     K = 0
     Q = q
@@ -15211,7 +15179,8 @@ def _get_stable_S(
         max_frob = 0.0
         for i in range(Mf):
             if gamma[i]:
-                frob[i] = float(np.linalg.norm(Si[i], "fro"))
+                v = Si[i].ravel(order="F")
+                frob[i] = math.sqrt(_rfma_dot(v, v))
                 max_frob = max(max_frob, frob[i] * spf[i])
         alpha = np.zeros(Mf, dtype=bool)
         gamma1 = np.zeros(Mf, dtype=bool)
@@ -15225,7 +15194,7 @@ def _get_stable_S(
             Sb = np.zeros((Q, Q))
             for i in range(Mf):
                 if alpha[i]:
-                    Sb += Si[i] / frob[i]
+                    Sb = Sb + Si[i] / frob[i]
             ev_asc = _r_eigen_sym(Sb, only_values=True)[::-1]  # ascending
             r = 1
             while r < Q and ev_asc[Q - r - 1] > ev_asc[Q - 1] * r_tol:
@@ -15235,40 +15204,39 @@ def _get_stable_S(
         if Q == r:
             if it == 1:
                 for i in range(Mf):
-                    S += spf[i] * Si[i]
+                    S = _rfma_vec(Si[i], spf[i], S)
                 Qf = np.eye(q)
             break
         Sb = np.zeros((Q, Q))
         for i in range(Mf):
             if alpha[i]:
-                Sb += spf[i] * Si[i]
+                Sb = _rfma_vec(Si[i], spf[i], Sb)
         ev, U = _r_eigen_sym(Sb)  # mgcv_symeig, descending
         if it == 1:
             Qf = U.copy()  # Q == q here
         else:
-            Qf[:, K : K + Q] = Qf[:, K : K + Q] @ U
+            Qf[:, K : K + Q] = _mgcv_mmult(Qf[:, K : K + Q], U)
         Sg = np.zeros((Q, Q))
         for i in range(Mf):
             if gamma1[i]:
-                Sg += spf[i] * Si[i]
+                Sg = _rfma_vec(Si[i], spf[i], Sg)
         if K > 0:
-            Bblk = S[:K, K : K + Q] @ U
+            Bblk = _mgcv_mmult(S[:K, K : K + Q], U)
             S[:K, K : K + Q] = Bblk
             S[K : K + Q, :K] = Bblk.T
-        C = U.T @ Sg @ U
+        C = _mgcv_mmult(U, _mgcv_mmult(Sg, U), bt=1)
         C[np.arange(r), np.arange(r)] += ev[:r]
         S[K : K + Q, K : K + Q] = C
         for k in range(M):
             if alpha[k]:
-                Bk = U[:, :r].T @ rS[k][K : K + Q, :]
-                rS[k][K : K + r, :] = Bk
+                rS[k][K : K + r, :] = _mgcv_mmult(U[:, :r], rS[k][K : K + Q, :], bt=1)
                 rS[k][K + r : K + Q, :] = 0.0
             elif gamma1[k]:
-                rS[k][K : K + Q, :] = U.T @ rS[k][K : K + Q, :]
+                rS[k][K : K + Q, :] = _mgcv_mmult(U, rS[k][K : K + Q, :], bt=1)
         Un = U[:, r:]
         for i in range(Mf):
             if gamma1[i]:
-                Si[i] = Un.T @ Si[i] @ Un
+                Si[i] = _mgcv_mmult(_mgcv_mmult(Un, Si[i], bt=1), Un)
         K += r
         Q -= r
         gamma = gamma1
@@ -15277,17 +15245,13 @@ def _get_stable_S(
     det1 = None
     det2 = None
     if deriv:
-        det1 = np.array(
-            [float(np.sum((rS[i].T @ B) * rS[i].T)) * spf[i] for i in range(M)]
-        )
+        det1 = np.array([_mgcv_trBtAB(B, rS[i]) * sp[i] for i in range(M)])
     if deriv == 2:
-        P = [B @ rS[i] @ rS[i].T for i in range(M)]
+        P = [_mgcv_mmult(_mgcv_mmult(B, rS[i]), rS[i], ct=1) for i in range(M)]
         det2 = np.empty((M, M))
         for i in range(M):
             for j in range(i, M):
-                det2[i, j] = det2[j, i] = (
-                    -spf[i] * spf[j] * float(np.sum(P[i] * P[j].T))
-                )
+                det2[i, j] = det2[j, i] = -(sp[i] * sp[j]) * _mgcv_trAB(P[i], P[j])
         det2[np.arange(M), np.arange(M)] += det1
     return S, Qf, rS, float(det), det1, det2
 
@@ -15310,7 +15274,7 @@ def _gam_reparam(
     )
     S = 0.5 * (S + S.T)
     q = S.shape[0]
-    p = np.sqrt(np.abs(np.diag(S)))
+    p = _rpow(np.abs(np.diag(S)), 0.5)  # abs(diag(S))^.5: R_pow, i.e. libm pow
     p[p == 0] = 1.0
     St = S / p[:, None] / p[None, :]
     St = 0.5 * (St + St.T)
@@ -15519,7 +15483,7 @@ def _sl_setup(slots: list[_PenaltySlot], p: int) -> _Sl:
                 )
             else:
                 # Eigen reparameterization (fast-REML.r:288-302).
-                w, U = _r_eigen_sym(0.5 * (S1 + S1.T))
+                w, U = _r_eigen_sym(S1)
                 rank = int(np.sum(w > eps**0.8 * float(w.max())))
                 Dv = w.copy()
                 ind = np.zeros(k, dtype=bool)
@@ -15553,13 +15517,14 @@ def _sl_setup(slots: list[_PenaltySlot], p: int) -> _Sl:
             St = S_list[0].copy()
             for Sj in S_list[1:]:
                 St = St + Sj
-            w, U = _r_eigen_sym(0.5 * (St + St.T))
+            w, U = _r_eigen_sym(St)
             rank = int(np.sum(w > eps**0.8 * float(w.max())))
             Ur = U[:, :rank]
+            UrT = np.ascontiguousarray(Ur.T)
             S_proj = []
             rS = []
             for Sj in S_list:
-                bob = Ur.T @ Sj @ Ur
+                bob = r_matprod(r_matprod(UrT, Sj), Ur)
                 bob = 0.5 * (bob + bob.T)
                 S_proj.append(bob)
                 rS.append(_mroot(bob, rank))
@@ -15581,7 +15546,7 @@ def _sl_setup(slots: list[_PenaltySlot], p: int) -> _Sl:
             # (fast-REML.r:394-417): Σ S_j/‖S_j‖ over the projected S.
             St2 = np.zeros((rank, rank))
             for Sj in S_proj:
-                nrm = float(np.abs(Sj).sum(axis=0).max())  # R one-norm
+                nrm = r_norm(Sj, "O")
                 St2 = St2 + Sj / nrm
                 lam0_parts.append(1.0 / nrm)
             St2 = 0.5 * (St2 + St2.T)
@@ -15619,8 +15584,8 @@ def _sl_initial_repara(
                 if cov:
                     if D.ndim == 2:
                         if both_sides:
-                            X[ind, :] = D @ X[ind, :]
-                        X[:, ind] = X[:, ind] @ D.T
+                            X[ind, :] = _r_mm(D, X[ind, :])
+                        X[:, ind] = _r_mm(X[:, ind], D.T)
                     else:
                         X[:, ind] = X[:, ind] * D[None, :]
                         if both_sides:
@@ -15629,8 +15594,8 @@ def _sl_initial_repara(
                     if D.ndim == 2:
                         Di = D.T if blk.Di is None else blk.Di
                         if both_sides:
-                            X[ind, :] = Di.T @ X[ind, :]
-                        X[:, ind] = X[:, ind] @ Di
+                            X[ind, :] = _r_mm(Di.T, X[ind, :])
+                        X[:, ind] = _r_mm(X[:, ind], Di)
                     else:
                         Di = 1.0 / D
                         X[:, ind] = X[:, ind] * Di[None, :]
@@ -15638,15 +15603,15 @@ def _sl_initial_repara(
                             X[ind, :] = Di[:, None] * X[ind, :]
             else:
                 if D.ndim == 2:
-                    X[ind] = D @ X[ind]
+                    X[ind] = _r_mm(D, X[ind])
                 else:
                     X[ind] = D * X[ind]
         else:
             if X.ndim == 2:
                 if D.ndim == 2:
                     if both_sides:
-                        X[ind, :] = D.T @ X[ind, :]
-                    X[:, ind] = X[:, ind] @ D
+                        X[ind, :] = _r_mm(D.T, X[ind, :])
+                    X[:, ind] = _r_mm(X[:, ind], D)
                 else:
                     if both_sides:
                         X[ind, :] = D[:, None] * X[ind, :]
@@ -15654,16 +15619,68 @@ def _sl_initial_repara(
             else:
                 if both_sides:
                     if D.ndim == 2:
-                        X[ind] = D.T @ X[ind]
+                        X[ind] = _r_mm(D.T, X[ind])
                     else:
                         X[ind] = D * X[ind]
                 else:
                     if D.ndim == 2:
                         Di = D.T if blk.Di is None else blk.Di
-                        X[ind] = Di @ X[ind]
+                        X[ind] = _r_mm(Di, X[ind])
                     else:
                         X[ind] = X[ind] / D
     return X
+
+
+def _mgcv_pcrossprod(A: np.ndarray, nb: int = 30) -> np.ndarray:
+    """mgcv's ``pcrossprod(A)`` (misc.r, C ``pcrossprod``, one thread):
+    ``A'A`` from ``dsyrk('U', 'T')`` when ``A`` has at most ``nb`` columns,
+    otherwise blocked - ``nb``-column blocks of the upper triangle, each
+    accumulated over ``nb``-row blocks of ``A`` (``dsyrk`` on the diagonal,
+    ``dgemm('T', 'N')`` off it) - then the lower triangle copied from the
+    upper."""
+    from scipy.linalg.blas import dgemm, dsyrk
+
+    A = np.asarray(A, dtype=float)
+    R, C = A.shape
+    M = -(-C // nb)
+    N = -(-R // nb)
+    B = np.zeros((C, C))
+    if M == 1:
+        B = np.array(dsyrk(1.0, np.asfortranarray(A), trans=1, lower=0))
+    else:
+        nf = C - (M - 1) * nb
+        nrf = R - (N - 1) * nb
+        for r in range(M):
+            bn = nf if r == M - 1 else nb
+            bs = r * nb
+            for c in range(r, M):
+                cn = nf if c == M - 1 else nb
+                cs = c * nb
+                for k in range(N):
+                    a0 = k * nb
+                    an = nrf if k == N - 1 else nb
+                    beta = 1.0 if k else 0.0
+                    if c == r:
+                        B[bs : bs + bn, bs : bs + bn] = dsyrk(
+                            1.0,
+                            np.asfortranarray(A[a0 : a0 + an, bs : bs + bn]),
+                            beta=beta,
+                            c=np.asfortranarray(B[bs : bs + bn, bs : bs + bn]),
+                            trans=1,
+                            lower=0,
+                        )
+                    else:
+                        B[bs : bs + bn, cs : cs + cn] = dgemm(
+                            1.0,
+                            np.asfortranarray(A[a0 : a0 + an, bs : bs + bn]),
+                            np.asfortranarray(A[a0 : a0 + an, cs : cs + cn]),
+                            beta=beta,
+                            c=np.asfortranarray(B[bs : bs + bn, cs : cs + cn]),
+                            trans_a=1,
+                        )
+    lo = np.tril_indices(C, -1)
+    B[lo] = B.T[lo]
+    return B
 
 
 def _ldet_s_block(
@@ -15672,31 +15689,29 @@ def _ldet_s_block(
     """mgcv ``ldetSblock`` (fast-REML.r:593-635): derivatives w.r.t. ρ of
     ``log|S|`` where ``S = Σ_i tcrossprod(rS_i)·exp(ρ_i)``, when S is full
     rank +ve def and no reparameterization is required — the per-block
-    engine of ``ldetS(repara=FALSE)`` (Sl.fitChol's log|Sλ|₊ oracle).
-    """
-    from scipy.linalg.lapack import dpstrf
-
+    engine of ``ldetS(repara=FALSE)`` (Sl.fitChol's log|Sλ|₊ oracle). The
+    cross products are mgcv's ``pcrossprod``, the factor R's ``chol(pivot =
+    TRUE)``, the solves ``pforwardsolve`` (one ``dtrsm``), the sums R's."""
     rho = np.asarray(rho, dtype=float)
     lam = np.exp(rho)
     m = len(rS_list)
-    S = (rS_list[0] @ rS_list[0].T) * lam[0]
+    S = _mgcv_pcrossprod(np.asarray(rS_list[0], dtype=float).T) * lam[0]
     p = S.shape[1]
     for i in range(1, m):
-        S = S + (rS_list[i] @ rS_list[i].T) * lam[i]
+        S = S + _mgcv_pcrossprod(np.asarray(rS_list[i], dtype=float).T) * lam[i]
     E = None if root else S.copy()
     d = np.diag(S).copy()
     d[d <= 0.0] = 1.0
     d = np.sqrt(d)
-    S_pre = (S / d).T / d  # t(S/d)/d
-    c, piv_1based, r, _info = dpstrf(S_pre, lower=0)
-    R = np.triu(c)
+    S_pre = (S / d[:, None]).T / d[:, None]  # t(S/d)/d
+    R, piv_1based, r = r_chol(S_pre, pivot=True)
     piv = np.asarray(piv_1based, dtype=int) - 1
     if r < p:
         R[r:, r:] = 0.0  # fix chol bug (:611)
     if root:
         rp = np.empty(p, dtype=int)  # reverse pivot (:613)
         rp[piv] = np.arange(p)
-        E = R[:, rp] * d[None, :]  # t(t(R[,rp])*d)
+        E = (R[:, rp].T * d[:, None]).T  # t(t(R[,rp])*d)
     if r < p:  # rank deficiency (:616)
         R = R[:r, :r]
         piv = piv[:r]
@@ -15704,16 +15719,20 @@ def _ldet_s_block(
     dS2 = np.zeros((m, m))
     RrS: list[np.ndarray] = []
     for i in range(m):
-        Xi = solve_triangular(R.T, rS_list[i][piv, :] / d[piv, None], lower=True)
-        dS1[i] = float(np.sum(Xi * Xi)) * lam[i]
+        Xi = r_backsolve(
+            R,
+            np.asarray(rS_list[i], dtype=float)[piv, :] / d[piv, None],
+            upper=True,
+            transpose=True,
+        )
+        dS1[i] = r_sum(Xi * Xi) * lam[i]
         if deriv == 2:
-            Mi = Xi @ Xi.T  # tcrossprod (:626)
-            RrS.append(Mi)
+            RrS.append(_mgcv_pcrossprod(Xi.T))
             for j in range(i + 1):
-                v = -float(np.sum(RrS[i] * RrS[j])) * lam[i] * lam[j]
+                v = -r_sum(RrS[i] * RrS[j]) * lam[i] * lam[j]
                 dS2[i, j] = dS2[j, i] = v
             dS2[i, i] += dS1[i]
-    det = 2.0 * float(np.sum(np.log(np.diag(R)) + np.log(d[piv])))
+    det = 2.0 * r_sum(np.log(np.diag(R)) + np.log(d[piv]))
     return {"det": det, "det1": dS1, "det2": dS2, "E": E}
 
 
@@ -15804,7 +15823,9 @@ def _ldet_s(
                     }
                 )
                 blk.Srp = [
-                    blk.lam[i] * (grp["rS"][i] @ grp["rS"][i].T) for i in range(m)
+                    blk.lam[i]
+                    * r_matprod(grp["rS"][i], np.ascontiguousarray(grp["rS"][i].T))
+                    for i in range(m)
                 ]
                 blk.St = grp["S"]
             else:
@@ -15849,15 +15870,15 @@ def _sl_repara(
         if inverse:
             if X.ndim == 2:
                 if both_sides:
-                    X[ind, :] = Qs @ X[ind, :]
-                X[:, ind] = X[:, ind] @ Qs.T
+                    X[ind, :] = _r_mm(Qs, X[ind, :])
+                X[:, ind] = _r_mm(X[:, ind], Qs.T)
             else:
-                X[ind] = Qs @ X[ind]
+                X[ind] = _r_mm(Qs, X[ind])
         else:
             if X.ndim == 2:
-                X[:, ind] = X[:, ind] @ Qs
+                X[:, ind] = _r_mm(X[:, ind], Qs)
             else:
-                X[ind] = Qs.T @ X[ind]
+                X[ind] = _r_mm(Qs.T, X[ind])
     return X
 
 
@@ -15886,15 +15907,15 @@ def _sl_repa(rp: list[dict], X: np.ndarray, lt: int = 0, r: int = 0):
         if lt:
             T = _T(lt)
             if X.ndim == 2:
-                X[ind, :] = T @ X[ind, :]
+                X[ind, :] = _r_mm(T, X[ind, :])
             else:
-                X[ind] = T @ X[ind]
+                X[ind] = _r_mm(T, X[ind])
         if r:
             T = _T(r)
             if X.ndim == 2:
-                X[:, ind] = X[:, ind] @ T
+                X[:, ind] = _r_mm(X[:, ind], T)
             else:
-                X[ind] = X[ind] @ T
+                X[ind] = _r_vm(X[ind], T)
     return X
 
 
@@ -15936,15 +15957,15 @@ def _sl_inirep(sl: _Sl, X: np.ndarray, lt: int = 0, r: int = 0):
         if lt:
             T = _mat(lt)
             if X.ndim == 2:
-                X[ind, :] = T @ X[ind, :]
+                X[ind, :] = _r_mm(T, X[ind, :])
             else:
-                X[ind] = T @ X[ind]
+                X[ind] = _r_mm(T, X[ind])
         if r:
             T = _mat(r)
             if X.ndim == 2:
-                X[:, ind] = X[:, ind] @ T
+                X[:, ind] = _r_mm(X[:, ind], T)
             else:
-                X[ind] = X[ind] @ T
+                X[ind] = _r_vm(X[ind], T)
     return X
 
 
@@ -15964,7 +15985,7 @@ def _sl_mult(sl: _Sl, A: np.ndarray, k: int | None = None, full: bool = True):
                 B[pcols] = blk.lam[0] * A[pcols]
             else:
                 pcols = blk.pen_cols()
-                B[pcols] = blk.St @ A[pcols]
+                B[pcols] = _r_mm(blk.St, A[pcols])
         return B
     j = 0
     for blk in sl.blocks:
@@ -15975,9 +15996,9 @@ def _sl_mult(sl: _Sl, A: np.ndarray, k: int | None = None, full: bool = True):
                     part = blk.lam[0] * A[pcols]
                 else:
                     part = (
-                        blk.Srp[i] @ A[pcols]
+                        _r_mm(blk.Srp[i], A[pcols])
                         if blk.Srp is not None
-                        else blk.lam[i] * (blk.S[i] @ A[pcols])
+                        else blk.lam[i] * _r_mm(blk.S[i], A[pcols])
                     )
                 if full:
                     B = np.zeros_like(A)
@@ -16003,9 +16024,9 @@ def _sl_term_mult(sl: _Sl, A: np.ndarray, full: bool = False):
                 part = blk.lam[0] * A[pcols]
             else:
                 part = (
-                    blk.Srp[i] @ A[pcols]
+                    _r_mm(blk.Srp[i], A[pcols])
                     if blk.Srp is not None
-                    else blk.lam[i] * (blk.S[i] @ A[pcols])
+                    else blk.lam[i] * _r_mm(blk.S[i], A[pcols])
                 )
             if full:
                 B = np.zeros_like(A)
@@ -16583,28 +16604,47 @@ def _zero_terms_exclude(X, terms, exclude, plabels, pidx, icols, slabels, srange
 
 
 def _pivoted_chol(A: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
-    """R ``chol(A, pivot=TRUE)`` via LAPACK dpstrf: upper ``U``, 0-based
-    pivot vector and detected rank, with ``A[piv][:, piv] = U'U`` (rows
-    past the rank zeroed)."""
-    from scipy.linalg.lapack import dpstrf
+    """R ``chol(A, pivot=TRUE)`` (``r_chol``): upper ``U``, 0-based pivot
+    vector and detected rank, with ``A[piv][:, piv] = U'U`` (the upper
+    triangle past the rank zeroed)."""
+    U, piv, rank = r_chol(A, pivot=True)
+    return U, piv - 1, rank
 
-    c, piv, r_eff, _info = dpstrf(A, lower=0)
-    U = np.triu(c)
-    if int(r_eff) < A.shape[0]:
-        U[int(r_eff) :, :] = 0.0
-    return U, piv.astype(int) - 1, int(r_eff)
+
+def _r_quad(a: np.ndarray, S: np.ndarray, b: np.ndarray | None = None) -> float:
+    """``drop(t(a) %*% S %*% b)`` (``b`` defaults to ``a``): R's two
+    ``matprod`` calls."""
+    a2 = np.asarray(a, dtype=float).reshape(1, -1)
+    b2 = a2 if b is None else np.asarray(b, dtype=float).reshape(1, -1)
+    return float(r_matprod(r_matprod(a2, S), np.ascontiguousarray(b2.T))[0, 0])
+
+
+def _r_vm(x: np.ndarray, A: np.ndarray) -> np.ndarray:
+    """``x %*% A`` for a vector ``x``: R treats it as one row, ``matprod``'s
+    ``dgemv('T')``."""
+    return r_matprod(np.asarray(x, dtype=float).reshape(1, -1), A)[0]
+
+
+def _r_mm(A: np.ndarray, B: np.ndarray) -> np.ndarray:
+    """``A %*% B`` for a matrix or a vector ``B`` (R's ``matprod``)."""
+    B = np.asarray(B, dtype=float)
+    return _r_mv(A, B) if B.ndim == 1 else r_matprod(A, B)
+
+
+def _r_mv(S: np.ndarray, c: np.ndarray) -> np.ndarray:
+    """``S %*% c`` for a vector ``c`` (``matprod``'s dgemv)."""
+    return r_matprod(S, np.asarray(c, dtype=float).reshape(-1, 1))[:, 0]
 
 
 def _fit5_solve(
     L: np.ndarray, piv: np.ndarray, ipiv: np.ndarray, D: np.ndarray, v: np.ndarray
 ) -> np.ndarray:
-    """gam.fit5's preconditioned penalized-Hessian solve:
-    ``D·(U⁻¹ U'⁻¹ (D·v)[piv])[ipiv]`` — i.e. Hp⁻¹ v through the pivoted
-    upper factor of the preconditioned Hp (gam.fit4.r:1082)."""
-    u = D[:, None] * v if v.ndim == 2 else D * v
-    u = u[piv]
-    t1 = solve_triangular(L, u, lower=False, trans="T")
-    t2 = solve_triangular(L, t1, lower=False)
+    """gam.fit5's preconditioned penalized-Hessian solve (gam.fit4.r:1082),
+    ``D*(backsolve(L, forwardsolve(t(L), (D*v)[piv]))[ipiv])`` with R's
+    ``backsolve``/``forwardsolve`` (``dtrsm``) and row scaling."""
+    u = (D[:, None] * v if v.ndim == 2 else D * v)[piv]
+    t1 = r_backsolve(np.ascontiguousarray(L.T), u, upper=False)
+    t2 = r_backsolve(L, t1)
     out = t2[ipiv]
     return D[:, None] * out if v.ndim == 2 else D * out
 
@@ -16790,8 +16830,8 @@ def _gam_fit5(
             return family.ll(y, x, b, weights, lpi=lpi, offset=offset, deriv=d, **kw)
 
     ll = llf(coef, 1)
-    ll0 = ll["l"] - float(coef @ St @ coef) / 2.0
-    grad = ll["lb"] - St @ coef
+    ll0 = ll["l"] - _r_quad(coef, St) / 2.0
+    grad = ll["lb"] - _r_mv(St, coef)
     iconv = bool(np.max(np.abs(grad)) < epsilon * abs(ll0))
     Hp = -ll["lbb"] + St
     rank_checked = False
@@ -16828,8 +16868,8 @@ def _gam_fit5(
             Hp = Hp + Ip + Ib
             D = np.ones(Hp.shape[0])
         else:  # +ve def: cheap pivoted Cholesky
-            D = D**-0.5  # diagonal pre-conditioner
-            Hp = D * (D * Hp).T
+            D = _rpow(D, -0.5)  # diagonal pre-conditioner
+            Hp = D[:, None] * (D[:, None] * Hp).T  # D*t(D*Hp)
             Ip = np.eye(rank) * eps_mach**0.5
         L, piv, L_rank = _pivoted_chol(Hp)
         while L_rank < rank:  # rank deficient: escalate ridge ×100
@@ -16843,17 +16883,17 @@ def _gam_fit5(
             break  # L and D now match the final Hp
 
         step = _fit5_solve(L, piv, ipiv, D, grad)
-        c_norm = float(np.sum(coef**2))
+        c_norm = r_sum(coef * coef)
         if c_norm > 0:  # limit step length to .1 of coef length
-            s_norm = float(np.sqrt(np.sum(step**2)))
+            s_norm = math.sqrt(r_sum(step * step))
             c_norm = float(np.sqrt(c_norm))
             if s_norm > 0.1 * c_norm:
-                step = step * (0.1 * c_norm / s_norm)
-        s_norm = float(np.sqrt(np.sum(step**2)))
+                step = step * 0.1 * c_norm / s_norm
+        s_norm = math.sqrt(r_sum(step * step))
 
         coef1 = coef + step  # try the Newton step
         ll = llf(coef1, 1)
-        ll1 = ll["l"] - float(coef1 @ St @ coef1) / 2.0
+        ll1 = ll["l"] - _r_quad(coef1, St) / 2.0
         khalf = 0
         fac = 2.0
         llold = ll  # keep an lbb slot through step failure
@@ -16862,7 +16902,7 @@ def _gam_fit5(
             step = step / fac
             coef1 = coef + step
             ll = llf(coef1, 0)
-            ll1 = ll["l"] - float(coef1 @ St @ coef1) / 2.0
+            ll1 = ll["l"] - _r_quad(coef1, St) / 2.0
             if np.isfinite(ll1) and ll1 >= ll0:  # no worse: get derivs
                 ll = llf(coef1, 1)
             if np.isfinite(ll1) and ll1 == ll0:
@@ -16877,7 +16917,7 @@ def _gam_fit5(
                 fac = 5.0
 
         if (not np.isfinite(ll1)) or (ll1 <= ll0 and not iconv):
-            step = grad * (s_norm / float(np.sqrt(np.sum(grad**2))))
+            step = grad * s_norm / math.sqrt(r_sum(grad * grad))
             khalf = 0
 
         no_change = 0
@@ -16885,7 +16925,7 @@ def _gam_fit5(
             step = step / 10.0
             coef1 = coef + step
             ll = llf(coef1, 0)
-            ll1 = ll["l"] - float(coef1 @ St @ coef1) / 2.0
+            ll1 = ll["l"] - _r_quad(coef1, St) / 2.0
             if np.isfinite(ll1) and ll1 >= ll0:
                 ll = llf(coef1, 1)
             if np.isfinite(ll1) and ll1 == ll0:
@@ -16901,7 +16941,7 @@ def _gam_fit5(
             np.isfinite(ll1) and ll1 >= ll0 and (khalf < 25 or indefinite)
         ) or iter_ == maxit:
             coef = coef + step
-            grad = ll["lb"] - St @ coef
+            grad = ll["lb"] - _r_mv(St, coef)
             Hp = -ll["lbb"] + St
             ok = iter_ == maxit or np.max(np.abs(grad)) < epsilon * abs(ll0)
             if ok:
@@ -16918,8 +16958,8 @@ def _gam_fit5(
                             + (alt - 0.5) * np.mean(np.abs(coef)) * 1e-5 * perturbed
                         )
                         ll = llf(coef, 1)
-                        ll0 = ll["l"] - float(coef @ St @ coef) / 2.0
-                        grad = ll["lb"] - St @ coef
+                        ll0 = ll["l"] - _r_quad(coef, St) / 2.0
+                        grad = ll["lb"] - _r_mv(St, coef)
                         Hp = -ll["lbb"] + St
                     else:
                         rank_checked = True
@@ -16932,9 +16972,9 @@ def _gam_fit5(
                         with _deterministic_xwx():
                             lbb = llf(coef, 1)["lbb"]
                         if penalized:
-                            Hb = -lbb / np.linalg.norm(lbb) + Sb / np.linalg.norm(Sb)
+                            Hb = -lbb / r_norm(lbb, "F") + Sb / r_norm(Sb, "F")
                         else:
-                            Hb = -lbb / np.linalg.norm(lbb)
+                            Hb = -lbb / r_norm(lbb, "F")
                         Db = np.abs(np.diag(Hb)).copy()
                         Db[Db < 1e-50] = 1.0
                         Db = Db**-0.5
@@ -16959,8 +16999,8 @@ def _gam_fit5(
                                 ij[keep] = np.arange(int(keep.sum()))
                                 lpi = [ij[ix[~np.isin(ix, drop)]] for ix in lpi]
                             ll = llf(coef, 1)
-                            ll0 = ll["l"] - float(coef @ St @ coef) / 2.0
-                            grad = ll["lb"] - St @ coef
+                            ll0 = ll["l"] - _r_quad(coef, St) / 2.0
+                            grad = ll["lb"] - _r_mv(St, coef)
                             Hp = -ll["lbb"] + St
                 else:  # not indefinite: really converged
                     converged = True
@@ -16977,7 +17017,7 @@ def _gam_fit5(
                 converged = False
                 coefp = coef * (1.0 + np.resize([-1.0, 1.0], coef.size) * eps_mach**0.9)
                 llp = llf(coef, 1)
-                gradp = llp["lb"] - St @ coefp
+                gradp = llp["lb"] - _r_mv(St, coefp)
                 kappaH = _r_kappa(Hp_top)
                 err = min(
                     1e-3,
@@ -17003,7 +17043,7 @@ def _gam_fit5(
             f"gam.fit5 iteration limit reached: max abs grad = {np.max(np.abs(grad))}"
         )
 
-    ldetHp = 2.0 * float(np.sum(np.log(np.diag(L)))) - 2.0 * float(np.sum(np.log(D)))
+    ldetHp = 2.0 * r_sum(np.log(np.diag(L))) - 2.0 * r_sum(np.log(D))
 
     if drop is not None:  # full coef with zeros for unidentifiable
         fcoef = np.zeros(q)
@@ -17023,7 +17063,7 @@ def _gam_fit5(
             d1b[:, i] = -_fit5_solve(L, piv, ipiv, D, Sib[i][keep])
 
         # curvature check matrix (gam.fit4.r:1253)
-        dVkk = (L[:, ipiv] @ (d1b / D[:, None])).T @ (L[:, ipiv] @ (d1b / D[:, None]))
+        dVkk = r_crossprod(r_matprod(L[:, ipiv], d1b / D[:, None]))
 
         if drop is not None:
             fd1b = np.zeros((q, m))
@@ -17033,7 +17073,7 @@ def _gam_fit5(
 
         invU = solve_triangular(L, np.eye(L.shape[0]), lower=False)
         Hp_inv_perm = invU @ invU.T
-        Hp_inv = D[:, None] * Hp_inv_perm[np.ix_(ipiv, ipiv)] * D[None, :]
+        Hp_inv = D[:, None] * (D[:, None] * Hp_inv_perm[np.ix_(ipiv, ipiv)]).T
         ll = llf(coef, 2 + (1 if deriv > 1 else 0), d1b=d1b, fh=Hp_inv)
 
         if deriv > 1:  # second derivatives of β̂
@@ -17042,7 +17082,7 @@ def _gam_fit5(
             for i in range(m):
                 for j in range(i, m):
                     v = (
-                        -ll["d1H"][i] @ d1b[:, j]
+                        _r_mv(-ll["d1H"][i], d1b[:, j])
                         + _sl_mult(sl, fd1b[:, j], k=i)[keep]
                         + _sl_mult(sl, fd1b[:, i], k=j)[keep]
                     )
@@ -17051,12 +17091,12 @@ def _gam_fit5(
                         d2b[:, k] = d2b[:, k] + d1b[:, i]
                     k += 1
 
-            llr = llf(coef, 4, d1b=d1b, d2b=d2b, fh=(L, piv), D=D)
+            llr = llf(coef, 4, d1b=d1b, d2b=d2b, Hp=Hp, rank=rank, fh=(L, piv), D=D)
 
             d2l = np.zeros((m, m))
             for i in range(m):
                 for j in range(i, m):
-                    d2l[j, i] = d2l[i, j] = float(d1b[:, i] @ ll["lbb"] @ d1b[:, j])
+                    d2l[j, i] = d2l[i, j] = _r_quad(d1b[:, i], ll["lbb"], d1b[:, j])
 
     # ----- REML score and its derivatives (gam.fit4.r:1343-1414) -----
     if deriv > 0:
@@ -17067,29 +17107,27 @@ def _gam_fit5(
                 bind = np.sum(np.abs(A), axis=1) != 0
                 A = A[:, bind]
                 A = _fit5_solve(L, piv, ipiv, D, A)
-                d1ldetH[i] += float(np.trace(A[bind, :]))
+                d1ldetH[i] = d1ldetH[i] + r_sum(np.diag(A[bind, :]))
         else:
             d1ldetH = np.zeros(m)
             d1Hp = []
             for i in range(m):
                 A = -ll["d1H"][i] + _sl_mult(sl, np.eye(q), k=i)[np.ix_(keep, keep)]
                 d1Hp.append(_fit5_solve(L, piv, ipiv, D, A))
-                d1ldetH[i] = float(np.trace(d1Hp[i]))
+                d1ldetH[i] = r_sum(np.diag(d1Hp[i]))
 
     if deriv > 1:
         d2ldetH = np.zeros((m, m))
         k = 0
         for i in range(m):
             for j in range(i, m):
-                d2ldetH[i, j] = -float(np.sum(d1Hp[i] * d1Hp[j].T)) - float(
-                    llr["trHid2H"][k]
-                )
+                d2ldetH[i, j] = -r_sum(d1Hp[i] * d1Hp[j].T) - float(llr["trHid2H"][k])
                 if i == j:  # add the smoothing-penalty term
                     A = _sl_mult(sl, np.eye(q), k=i, full=True)[np.ix_(keep, keep)]
                     bind = np.sum(np.abs(A), axis=1) != 0
                     A = A[:, bind]
                     A = _fit5_solve(L, piv, ipiv, D, A)
-                    d2ldetH[i, j] += float(np.trace(A[bind, :]))
+                    d2ldetH[i, j] = d2ldetH[i, j] + r_sum(np.diag(A[bind, :]))
                 else:
                     d2ldetH[j, i] = d2ldetH[i, j]
                 k += 1
@@ -17097,19 +17135,19 @@ def _gam_fit5(
     if deriv > 0:  # derivatives of β'Sβ
         Skb, _ = _sl_term_mult(sl, fcoef, full=True)
         Skb = [s[keep] for s in Skb]
-        d1bSb = np.array([float(np.sum(coef * Skb[i])) for i in range(m)])
+        d1bSb = np.array([r_sum(coef * Skb[i]) for i in range(m)])
 
     if deriv > 1:
         d2bSb = np.zeros((m, m))
         for i in range(m):
-            Sd1b = St @ d1b[:, i]
+            Sd1b = _r_mv(St, d1b[:, i])
             for j in range(i, m):
-                d2bSb[j, i] = d2bSb[i, j] = 2.0 * float(
-                    np.sum(d1b[:, i] * Skb[j] + d1b[:, j] * Skb[i] + d1b[:, j] * Sd1b)
+                d2bSb[j, i] = d2bSb[i, j] = 2.0 * r_sum(
+                    d1b[:, i] * Skb[j] + d1b[:, j] * Skb[i] + d1b[:, j] * Sd1b
                 )
-            d2bSb[i, i] += float(np.sum(coef * Skb[i]))
+            d2bSb[i, i] = d2bSb[i, i] + r_sum(coef * Skb[i])
 
-    bSb = float(coef @ St @ coef)
+    bSb = _r_quad(coef, St)
     REML = -float(
         (ll["l"] - bSb / 2.0) / gamma
         + rp["ldetS"] / 2.0
@@ -17139,7 +17177,7 @@ def _gam_fit5(
         eta_j = (
             _Xbd_kernel(x.design, coef_x, lt=x.lpid[j])
             if discrete
-            else x[:, lpi[j]] @ coef[lpi[j]]
+            else _r_mv(x[:, lpi[j]], coef[lpi[j]])
         )
         if offset[j] is not None:
             eta_j = eta_j + offset[j]
@@ -17326,27 +17364,24 @@ def _single_sp(X, S, target: float = 0.5, tol: float | None = None) -> float:
     on a backsolve failure (rank-deficient ``X``). mgcv calls it only from
     ``initial.sp``'s ``expensive = TRUE`` branch (mgcv.r:4663).
     """
-    from scipy.optimize import brentq
-
-    from ..R.linalg import dqrdc2
+    from ..R.nmath import uniroot
 
     if tol is None:
         tol = float(np.finfo(float).eps) * 100.0
     X = np.asarray(X, dtype=float)
     S = np.asarray(S, dtype=float)
-    qr_mat, _, _, _ = dqrdc2(X)
-    R = np.triu(qr_mat[: min(X.shape), :])
+    R = r_qr_R(r_qr(X))
     try:
-        RS = solve_triangular(R, S, lower=False, trans="T")
-        RSR = solve_triangular(R, RS.T, lower=False, trans="T")
+        RS = r_backsolve(R, S, transpose=True)
+        RSR = r_backsolve(R, np.ascontiguousarray(RS.T), transpose=True)
     except (np.linalg.LinAlgError, ValueError):
         return -1.0
-    RSR = 0.5 * (RSR + RSR.T)
-    d = np.linalg.eigvalsh(RSR)
+    RSR = (RSR + RSR.T) / 2
+    d = _r_eigen_sym(RSR)[0]
     d = d[d > d.max() * tol]
 
     def ff(lam):
-        return float(np.mean(1.0 / (1.0 + np.exp(lam) * d)) - target)
+        return r_mean(1.0 / (1.0 + math.exp(lam) * d)) - target
 
     lower = 0.0
     while ff(lower) <= 0.0:
@@ -17354,8 +17389,7 @@ def _single_sp(X, S, target: float = 0.5, tol: float | None = None) -> float:
     upper = lower
     while ff(upper) > 0.0:
         upper += 1.0
-    root = brentq(ff, lower, upper, xtol=float(np.finfo(float).eps) ** 0.25)
-    return float(np.exp(root))
+    return math.exp(uniroot(ff, lower, upper))
 
 
 def _initial_sp_general(
@@ -17393,18 +17427,9 @@ def _initial_sp_general(
     y = np.asarray(y, dtype=float)
     if weights is None:
         weights = np.ones(y.shape[0])
-    eps = float(np.finfo(float).eps)
 
-    St = np.zeros((p, p))
-    for s in slots:
-        a, b = s.col_start, s.col_end
-        nrm = float(np.sqrt(np.sum(s.S * s.S)))
-        if nrm > 0:
-            St[a:b, a:b] += s.S / nrm
-    if np.any(St):
-        ev, Y = _r_eigen_sym(0.5 * (St + St.T))
-        kept = ev > ev.max() * eps**0.66
-        Eb = (np.sqrt(ev[kept]) * Y[:, kept]).T
+    if slots:
+        _Y, _Z, Eb = _total_penalty_space(slots, p)
     else:
         Eb = np.zeros((0, p))
 
@@ -17426,21 +17451,21 @@ def _initial_sp_general(
         a, b = s.col_start, s.col_end
         S_i = np.asarray(s.S, dtype=float)
         k = S_i.shape[1]
-        w_ev = np.linalg.eigvalsh(0.5 * (S_i + S_i.T))
-        rank_i = int(np.sum(w_ev > eps**0.8 * float(w_ev.max()))) if w_ev.size else 0
+        rank_i = _penalty_rank(S_i)
         if rank_i < k:
             _U, piv_i, _r = _pivoted_chol(S_i)
             Z = S_i[:, piv_i[:rank_i]]
-            Z = Z / float(np.abs(Z).sum(axis=0).max())  # R norm(Z), "O"
-            ZHZ = -(Z.T @ lbb[a:b, a:b] @ Z)
-            ZSZ = Z.T @ S_i @ Z
+            Z = Z / r_norm(Z, "O")
+            ZT = np.ascontiguousarray(Z.T)
+            ZHZ = r_matprod(r_matprod(-ZT, np.ascontiguousarray(lbb[a:b, a:b])), Z)
+            ZSZ = r_matprod(r_matprod(ZT, S_i), Z)
         else:
             ZHZ = -lbb[a:b, a:b]
             ZSZ = S_i
         lam[i] = 0.3 * float(np.abs(ZHZ).max()) / float(np.abs(ZSZ).max())
     lsp = np.log(lam)
     if L is not None:
-        lsp = np.linalg.lstsq(np.asarray(L, dtype=float), lsp, rcond=None)[0]
+        lsp = _lsp_on_L(lsp, L)
     return lsp
 
 
@@ -17503,7 +17528,7 @@ def _parametric_penalty(terms, assign, paraPen, sp0):
             if Si.shape[0] != Si.shape[1] or Si.shape[0] != len(ind):
                 raise ValueError(" a parametric penalty has wrong dimension")
             if ranki is None:
-                ev = np.linalg.eigvalsh(0.5 * (Si + Si.T))
+                ev = _r_eigen_sym(Si, only_values=True)
                 rank.append(int(np.sum(ev > ev.max() * eps * 10)))
             else:
                 rank.append(int(np.atleast_1d(ranki)[i]))
@@ -17602,15 +17627,14 @@ def _wald_pinv(V: np.ndarray, M: int, rank_tol: float) -> tuple[np.ndarray, int]
     the rank is the test's df, so rank-deficient blocks (zero rows from
     dropped coefficients, truncated parametric space) test on reduced
     df exactly like mgcv."""
-    vals, vecs = np.linalg.eigh(V)
-    vals = vals[::-1]  # R eigen: descending
-    vecs = vecs[:, ::-1]
+    vals, vecs = _r_eigen_sym(V)
     M1 = int(np.sum(vals > rank_tol * vals[0])) if vals.size else 0
     M = min(M, M1)
-    ivals = np.zeros_like(vals)
-    if M > 0:
-        ivals[:M] = 1.0 / vals[:M]
-    return (vecs * ivals) @ vecs.T, M
+    vals = vals.copy()
+    vals[M:] = 1.0
+    vals = 1.0 / vals
+    vals[M:] = 0.0
+    return r_matprod(vecs, vals[:, None] * np.ascontiguousarray(vecs.T)), M
 
 
 class _FitState:

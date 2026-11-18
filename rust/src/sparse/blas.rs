@@ -229,23 +229,6 @@ extern "C" {
         x: *mut c_double,
         incx: *const c_int,
     );
-    #[cfg_attr(not(accelerate), link_name = "scipy_ddot_")]
-    fn ddot_(
-        n: *const c_int,
-        x: *const c_double,
-        incx: *const c_int,
-        y: *const c_double,
-        incy: *const c_int,
-    ) -> c_double;
-    #[cfg_attr(not(accelerate), link_name = "scipy_daxpy_")]
-    fn daxpy_(
-        n: *const c_int,
-        a: *const c_double,
-        x: *const c_double,
-        incx: *const c_int,
-        y: *mut c_double,
-        incy: *const c_int,
-    );
     #[cfg_attr(not(accelerate), link_name = "scipy_dgemv_")]
     fn dgemv_(
         trans: *const c_char,
@@ -550,22 +533,6 @@ pub fn gemv_t_set(m: usize, n: usize, a: &[f64], lda: usize, x: &[f64], y: &mut 
             &inc,
         );
     }
-}
-
-/// One LINPACK ``dqrsl`` reflector step on ``y``: ``t = -ddot(u, y)/u[0]``,
-/// ``y += t*u`` (``daxpy``) — the calls R's ``qr.qty``/``qr.qy`` make per
-/// Householder vector, with ``u[0]`` already set to ``qraux``.
-pub fn dqrsl_reflect(u: &[f64], y: &mut [f64]) {
-    let n = u.len();
-    if n == 0 {
-        return;
-    }
-    let (ni, inc) = (n as c_int, 1 as c_int);
-    /* SAFETY: `u` and `y` are both `n` long (checked by the caller) and
-     * distinct; `y` is the only `&mut`. */
-    let d = unsafe { ddot_(&ni, u.as_ptr(), &inc, y.as_ptr(), &inc) };
-    let t = -d / u[0];
-    unsafe { daxpy_(&ni, &t, u.as_ptr(), &inc, y.as_mut_ptr(), &inc) };
 }
 
 pub fn trsm_lln(m: usize, n: usize, a: &[f64], lda: usize, b: &mut [f64], ldb: usize) {

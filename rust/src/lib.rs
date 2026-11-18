@@ -24,14 +24,23 @@ mod cluster;
 mod discrete;
 mod family;
 mod fexact;
+#[cfg(vendor_blas)]
+mod lapack;
+#[cfg(vendor_blas)]
+mod lapack_py;
 mod linalg;
 mod loess;
+#[cfg(vendor_blas)]
+mod magic;
 mod nmath;
 mod optimize;
 mod par;
+mod ralign;
 mod rng;
 mod sparse;
 mod tprs;
+#[cfg(vendor_blas)]
+mod xwxd;
 
 #[pymodule]
 fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -46,5 +55,11 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     optimize::register(m)?;
     fexact::register(m)?;
     sparse::register(m)?;
+    #[cfg(vendor_blas)]
+    lapack_py::register(m)?;
+    #[cfg(vendor_blas)]
+    magic::register(m)?;
+    #[cfg(vendor_blas)]
+    xwxd::register(m)?;
     Ok(())
 }

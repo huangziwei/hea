@@ -10,6 +10,7 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
+from .._rquantile import r_quantile7
 from .._rsum import r_mean
 
 
@@ -181,6 +182,9 @@ def IQR(x, na_rm=True, type=7):
     arr = np.asarray(x, dtype=float)
     if na_rm:
         arr = arr[~np.isnan(arr)]
+    if int(type) == 7 and arr.size and not np.isnan(arr).any():
+        q1, q3 = r_quantile7(arr, [0.25, 0.75])
+        return float(q3 - q1)
     method = _R_QUANTILE_METHOD[int(type)]
     q1, q3 = np.quantile(arr, [0.25, 0.75], method=method)
     return float(q3 - q1)
@@ -212,7 +216,10 @@ def quantile(x, probs=(0, 0.25, 0.5, 0.75, 1.0), na_rm=True):
     arr = np.asarray(x, dtype=float)
     if na_rm:
         arr = arr[~np.isnan(arr)]
-    return np.quantile(arr, probs)
+    if arr.size == 0 or np.isnan(arr).any():
+        return np.quantile(arr, probs)
+    q = r_quantile7(arr, probs)
+    return float(q[0]) if is_scalar else q
 
 
 def cor(x, y=None, na_rm=True):

@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -29,6 +30,28 @@ def assert_fp_equiv(a, b):
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
+
+
+def load_hex_fixture(path: Path) -> dict:
+    """A fixture file written by an R script's ``dumpl``: per line an array's
+    name, its dimensions joined by commas and its values as hexadecimal
+    floats (matrices column-major), R's ``NA`` as NaN; ``None`` where the
+    line says "NULL"."""
+    out: dict = {}
+    for line in Path(path).read_text().splitlines():
+        parts = line.split()
+        if parts[1] == "NULL":
+            out[parts[0]] = None
+            continue
+        dims = [int(v) for v in parts[1].split(",")]
+        vals = np.array(
+            [math.nan if v == "NA" else float.fromhex(v) for v in parts[2:]],
+            dtype=float,
+        )
+        out[parts[0]] = vals.reshape(dims, order="F") if len(dims) > 1 else vals
+    return out
+
+
 DATA_ROOT = Path(__file__).parent.parent / "datasets"
 MANIFEST_PATH = FIXTURE_ROOT / "manifest.json"
 
@@ -39,9 +62,14 @@ def _pinned_arithmetic() -> bool:
 
     import scipy
 
+    from hea._dispatch import HAVE_RS
     from hea.sparse import build_info
 
     if sys.platform != "darwin" or platform.machine() != "arm64":
+        return False
+    if not HAVE_RS:
+        # the reference-LAPACK ports (QR, Cholesky, the symmetric eigen
+        # solvers) exist only in the extension
         return False
     deps = scipy.show_config(mode="dicts")["Build Dependencies"]
     return (

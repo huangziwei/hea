@@ -224,39 +224,75 @@ fn tp_uz_rows<'py>(
         .into_pyarray(py))
 }
 
-/// Apply one ``dqrsl`` Householder step to every row of ``Y`` (m, n):
-/// ``y += t*u`` with ``t = -ddot(u, y)/u[0]``, BLAS ``ddot``/``daxpy`` per row
-/// as R's ``qr.qty(qrc, t(X))`` issues them. Rows are independent.
+/// R's ``qr.qty(qr, t(Y))`` as LINPACK ``dqrqty`` computes it, returned as
+/// ``t(.)``: ``dqrsl`` with ``job = 1000`` on each row of ``Y`` (n columns),
+/// which is a column of ``t(Y)``. For ``j < min(k, n - 1)`` with
+/// ``qraux[j] != 0``, ``x(j,j)`` is set to ``qraux(j)`` for the step and
+/// ``qty(j:) += t x(j:, j)`` with ``t = -ddot(x(j:, j), qty(j:)) / x(j,j)``.
+/// ``x`` is the factor ``qr_t`` (``t(qr)``, so ``x`` column-major in its
+/// rows) and ``qty`` the rows of ``Y``, in a buffer laid out as the copy of
+/// ``t(Y)`` that ``.Fortran`` passes, so each row sits where ``dqrsl``
+/// addresses it: the vendor ``ddot`` rounds by its second operand's
+/// alignment. Columns are
+/// independent, so each worker updates its own copy of ``x``.
 #[cfg(vendor_blas)]
 #[pyfunction]
-fn householder_rows<'py>(
+fn dqrqty_rows<'py>(
     py: Python<'py>,
+    qr_t: PyReadonlyArray2<'py, f64>,
+    qraux: numpy::PyReadonlyArray1<'py, f64>,
+    k: usize,
     y: PyReadonlyArray2<'py, f64>,
-    u: numpy::PyReadonlyArray1<'py, f64>,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let (yv, uv) = (y.as_array(), u.as_array());
-    let (m, n) = (yv.shape()[0], yv.shape()[1]);
-    if uv.len() != n {
+    use crate::lapack::blas::{daxpy, ddot};
+    let (xv, qv, yv) = (qr_t.as_array(), qraux.as_array(), y.as_array());
+    let (kq, n) = (xv.shape()[0], xv.shape()[1]);
+    let ny = yv.shape()[0];
+    if yv.shape()[1] != n || qv.len() < kq.min(k) {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "householder_rows: u must match the row length",
+            "dqrqty_rows: Y rows must match nrow(qr), qraux must cover k",
         ));
     }
-    let uvec: Vec<f64> = uv.iter().copied().collect();
-    let mut out: Vec<f64> = yv.iter().copied().collect();
-    if n > 0 {
+    let x: Vec<f64> = xv.iter().copied().collect();
+    let qa: Vec<f64> = qv.iter().copied().collect();
+    let ycopy: Vec<f64> = yv.iter().copied().collect();
+    let mut qty_buf = crate::ralign::RVec::from_slice(&ycopy);
+    let ju = k.min(kq).min(n.saturating_sub(1));
+    if n > 0 && ju > 0 {
+        let out = qty_buf.as_mut_slice();
         py.allow_threads(|| {
-            out.par_chunks_mut(n)
-                .for_each(|row| crate::sparse::blas::dqrsl_reflect(&uvec, row));
+            out.par_chunks_mut(n).for_each_init(
+                || x.clone(),
+                |xl, qty| {
+                    for j in 0..ju {
+                        if qa[j] == 0.0 {
+                            continue;
+                        }
+                        let dj = j * n + j;
+                        let temp = xl[dj];
+                        xl[dj] = qa[j];
+                        let len = (n - j) as i32;
+                        // SAFETY: `x(j:, j)` and `qty(j:)` both hold `n - j`
+                        // entries of their own buffers, which do not alias.
+                        unsafe {
+                            let t =
+                                -ddot(len, xl.as_ptr().add(dj), 1, qty.as_ptr().add(j), 1) / xl[dj];
+                            daxpy(len, t, xl.as_ptr().add(dj), 1, qty.as_mut_ptr().add(j), 1);
+                        }
+                        xl[dj] = temp;
+                    }
+                },
+            );
         });
     }
-    Ok(Array2::from_shape_vec((m, n), out)
+    Ok(Array2::from_shape_vec((ny, n), qty_buf.as_slice().to_vec())
         .unwrap()
         .into_pyarray(py))
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(vendor_blas)]
-    m.add_function(wrap_pyfunction!(householder_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(dqrqty_rows, m)?)?;
     #[cfg(vendor_blas)]
     m.add_function(wrap_pyfunction!(tp_uz_rows, m)?)?;
     m.add_function(wrap_pyfunction!(tp_col_sumsq, m)?)?;

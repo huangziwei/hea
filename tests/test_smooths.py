@@ -323,7 +323,7 @@ def test_mgcv_predict_mat_matches_R(fx_id: str):
             use_predfit_anchor = (
                 xpredfit_path.exists()
                 and blk.spec is not None
-                and blk.spec.coef_remap is not None
+                and blk.spec.Xp is not None
             )
             if use_predfit_anchor:
                 anchor_ref = np.asarray(
@@ -371,3 +371,164 @@ def test_mgcv_predict_mat_matches_R(fx_id: str):
                 f"(max abs diff = {float(np.max(np.abs(X_pred_aligned - X_pred_ref))):.2e}, "
                 f"tol = {tol:.2e})"
             )
+
+
+def test_smooth_ranks_match_mgcv():
+    # initial.spg reads each penalty's rank from mgcv's G$rank (set by the
+    # smooth constructors); hea counts it from the penalty. The two agree
+    # for every class here (G$rank from tests/scripts/make_initial_spg_fixtures.R).
+    import polars as pl
+
+    from hea.formula import expand, materialize_smooths, parse
+    from hea.models.gam import _penalty_rank
+    from hea.R.rng import RGenerator
+
+    fx = FIXTURE_ROOT / "initial_spg"
+    specs = (fx / "rank_specs.txt").read_text().split("\n")
+    specs = [s for s in specs if s]
+    ref = [
+        [int(v) for v in line.split()]
+        for line in (fx / "rank_values.txt").read_text().split("\n")
+        if line
+    ]
+    g = RGenerator(7)
+    n = 300
+    x, z, w = g.uniform(size=n), g.uniform(size=n), g.uniform(size=n)
+    fi = np.floor(g.uniform(size=n) * 4).astype(int)
+    data = pl.DataFrame(
+        {
+            "x": x,
+            "z": z,
+            "w": w,
+            "f": pl.Series([f"L{i}" for i in fi]).cast(pl.Categorical),
+            "y": x,
+        }
+    )
+    for spec, r in zip(specs, ref, strict=True):
+        blocks = [
+            b
+            for grp in materialize_smooths(expand(parse("y ~ " + spec)), data)
+            for b in grp
+        ]
+        got = [_penalty_rank(S) for b in blocks for S in b.S]
+        assert got == r, f"{spec}: hea {got} mgcv {r}"
+
+
+@pytest.mark.parametrize("bs", ["cr", "cs", "cc"])
+@pytest.mark.parametrize("k", [4, 5, 12])
+def test_cubic_regression_bases_match_mgcv(bs, k):
+    # mgcv's cr/cs (C getFS + crspl, LAPACK dptsv; knots by quantile type 7)
+    # and cc (getBD, solve, pred.mat) without constraints or penalty
+    # scaling, and Predict.matrix at points on and outside the knot range
+    # (tests/scripts/make_crspl_fixtures.R). Exact under the arithmetic the
+    # fixtures were written with.
+    import polars as pl
+    from conftest import PINNED_ARITHMETIC
+
+    from hea._crspl import crspl
+    from hea._dispatch import HAVE_RS
+    from hea.formula import (
+        _cc_basis,
+        _cc_raw,
+        _cr_raw,
+        _shrink_null_penalty,
+        expand,
+        parse,
+    )
+
+    if bs == "cs" and not HAVE_RS:
+        # cs adds the penalty's null-space eigenvectors with unequal weights,
+        # and that space is degenerate: the vectors are the dsyevr port's
+        pytest.skip("the dsyevr port lives in hea._rs")
+    fx = FIXTURE_ROOT / "crspl"
+    x = np.fromfile(fx / "x.bin")
+    xp = np.fromfile(fx / "xp.bin")
+    data = pl.DataFrame({"x": x})
+    call = expand(parse(f"y ~ s(x, bs='{bs}', k={k})")).smooths[0]
+    if bs == "cc":
+        X, S_list, kn, BD = _cc_raw(call, data, ["x"])
+        P = _cc_basis(xp, kn, BD)
+    else:
+        X, S_list, kn = _cr_raw(call, data, ["x"])
+        if bs == "cs":
+            S_list = [_shrink_null_penalty(S_list[0], null_dim=2, cascade=True)]
+        P = crspl(xp, kn)[0]
+    tag = f"{bs}_{k}"
+    for got, name in ((X, "X"), (S_list[0], "S"), (kn, "knots"), (P, "P")):
+        ref = np.fromfile(fx / f"{tag}_{name}.bin").reshape(got.shape, order="F")
+        if PINNED_ARITHMETIC:
+            np.testing.assert_array_equal(got, ref, err_msg=f"{tag} {name}")
+        else:
+            scale = max(1.0, float(np.abs(ref).max()))
+            np.testing.assert_allclose(got, ref, rtol=0, atol=1e-12 * scale)
+
+
+def test_r_var_matches_r():
+    # apply(X, 2, var) picks the column sweep-and-drop removes; R's var is
+    # stats' C cov (two-pass mean, then the compiled accumulation). Values
+    # from set.seed(3); var() of runif(5), runif(8), runif(13),
+    # rnorm(100, 1e6, 1), rnorm(1000), runif(31) * 1e-8 + 3, and one fixed
+    # vector with cancellation.
+    from conftest import PINNED_ARITHMETIC
+
+    from hea._rsum import r_var
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(3)
+    cases = [
+        g.uniform(size=5),
+        g.uniform(size=8),
+        g.uniform(size=13),
+        g.normal(1e6, 1, size=100),
+        g.normal(size=1000),
+        g.uniform(size=31) * 1e-8 + 3,
+        np.array([1e16, 1, -1e16, 3.5, 2, 7, 11, 13, 1e-3]),
+    ]
+    want = [
+        0.06232729495017453,
+        0.030374799189426715,
+        0.11398326756259443,
+        0.7214558056170995,
+        1.0617213091961508,
+        5.3378144671802664e-18,
+        2.4999999999999997e31,
+    ]
+    for x, w in zip(cases, want, strict=True):
+        if PINNED_ARITHMETIC:
+            assert r_var(x) == w
+        else:
+            np.testing.assert_allclose(r_var(x), w, rtol=1e-12)
+    assert np.isnan(r_var([1.0]))
+
+
+def test_t2_prediction_map_matches_mgcv():
+    # gam.setup's G$P for t2 (dgeqp3 of the prediction-basis model matrix,
+    # Rrank, qr.qty, backsolve), with and without a parametric term, and the
+    # t2 block bam fits in the prediction basis (modCon = 2)
+    # (tests/scripts/make_t2_P_fixtures.R).
+    import polars as pl
+    from conftest import PINNED_ARITHMETIC
+
+    from hea.models import bam, gam
+    from hea.R.rng import RGenerator
+
+    g = RGenerator(2)
+    n = 100
+    x = g.uniform(size=n)
+    z = g.uniform(size=n)
+    y = np.sin(3 * x) + z**2 + g.normal(size=n) * 0.2
+    w = g.uniform(size=n)
+    data = pl.DataFrame({"x": x, "z": z, "y": y, "w": w})
+    fx = FIXTURE_ROOT / "t2_P"
+
+    def check(got, name):
+        ref = np.fromfile(fx / name).reshape(got.shape, order="F")
+        if PINNED_ARITHMETIC:
+            np.testing.assert_array_equal(got, ref)
+        else:
+            np.testing.assert_allclose(got, ref, rtol=0, atol=1e-12)
+
+    check(gam("y ~ t2(x, z)", data, method="REML")._G_P, "P.bin")
+    check(gam("y ~ t2(x, z, k=c(4, 5)) + w", data, method="REML")._G_P, "P_param.bin")
+    b = bam("y ~ t2(x, z)", data)
+    check(np.column_stack([np.ones(n), b._blocks[0].X]), "bam_X.bin")

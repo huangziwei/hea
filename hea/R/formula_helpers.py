@@ -36,6 +36,7 @@ from dataclasses import dataclass
 import numpy as np
 import polars as pl
 
+from .._rpow import _rpow
 from .._rsum import r_colsums, r_mean
 from ..formula import (
     BinOp,
@@ -52,7 +53,7 @@ from ..formula import (
     expand,
     parse,
 )
-from .linalg import dqrdc2, dqrsl
+from .linalg import dqrdc2, dqrsl, r_vector_like
 
 __all__ = [
     "DF2formula",
@@ -516,16 +517,19 @@ def _poly_fit(x: np.ndarray, degree: int):
     xc = x - xbar
     n = x.size
     p = degree + 1
-    X = np.column_stack([xc**d for d in range(p)])  # outer(x, 0:degree, ^)
+    X = np.column_stack(
+        [_rpow(xc, float(d)) for d in range(p)]
+    )  # outer(x, 0:degree, `^`)
     qr, qraux, _jpvt, rank = dqrdc2(X, 1e-7)
     if rank < degree:
         raise ValueError("'degree' must be less than number of unique points")
-    Z = np.empty((n, p))
-    for j in range(p):  # z <- QR$qr*(row==col)
+    # qr.qy(QR, z), z <- QR$qr*(row==col): dqrqy applies dqrsl to each column
+    # of its own copy of z, so every column lies where R's n x p copy has it
+    Z = r_vector_like((n, p))
+    for j in range(p):
         col = np.zeros(n)
         col[j] = qr[j, j]
-        qy, *_ = dqrsl(qr, n, rank, qraux, col, 10000)  # qr.qy(QR, z)
-        Z[:, j] = qy
+        dqrsl(qr, n, rank, qraux, col, 10000, qy=Z[:, j])
     Z2 = Z * Z
     norm2 = r_colsums(Z2)  # colSums(Z^2)
     alpha = (r_colsums(xc[:, None] * Z2) / norm2 + xbar)[:degree]
@@ -581,7 +585,7 @@ def poly(x, *args, degree=1, coefs=None, raw=False, simple=False):
         raise ValueError("'degree' must be at least 1")
     x = x.astype(float)
     if raw:
-        Z = np.column_stack([x**d for d in range(1, degree + 1)])
+        Z = np.column_stack([_rpow(x, float(d)) for d in range(1, degree + 1)])
         names = [str(d) for d in range(1, degree + 1)]
         if simple:
             return Z

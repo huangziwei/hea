@@ -3038,7 +3038,7 @@ def test_poly_polym_vs_r():
     P = poly(x, 3)
     assert P.shape == (10, 3)
     assert P.colnames == ["1", "2", "3"]
-    _assert_r_tol(
+    _assert_r(
         [
             (float(P[0, 0]), f"poly({X}, 3)[1,1]", -0.48794634266742815),
             (float(P[0, 2]), f"poly({X}, 3)[1,3]", -0.48225328622075542),
@@ -3057,14 +3057,14 @@ def test_poly_polym_vs_r():
         ]
     )
     Rraw = poly(x, 3, raw=True)
-    _assert_r_tol(
+    _assert_r(
         [
             (float(Rraw[1, 2]), f"poly({X}, 3, raw=TRUE)[2,3]", 15.625),
             (float(Rraw[3, 1]), f"poly({X}, 3, raw=TRUE)[4,2]", 17.64),
         ]
     )
     pred = predict_poly(P, np.array([2.0, 5.5, 9.9]))
-    _assert_r_tol(
+    _assert_r(
         [
             (
                 float(pred[0, 2]),
@@ -3085,7 +3085,7 @@ def test_poly_polym_vs_r():
     M = polym(x1, x2, degree=2)
     assert M.colnames == ["1.0", "2.0", "0.1", "1.1", "0.2"]
     assert M.shape == (5, 5)
-    _assert_r_tol(
+    _assert_r(
         [
             (float(M[0, 0]), f"polym({X1}, {X2}, degree=2)[1,1]", -0.632455532033676),
             (float(M[0, 3]), f"polym({X1}, {X2}, degree=2)[1,4]", 0.197278784766429),

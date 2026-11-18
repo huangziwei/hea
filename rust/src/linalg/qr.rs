@@ -3,6 +3,8 @@ use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2}
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
+use crate::ralign::RVec;
+
 pub(crate) fn dnrm2(v: &[f64]) -> f64 {
     let mut scale = 0.0_f64;
     let mut ssq = 1.0_f64;
@@ -26,13 +28,54 @@ pub(crate) fn dnrm2(v: &[f64]) -> f64 {
     }
 }
 
-fn ddot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
+/// The BLAS calls `dqrdc2.f` and `dqrsl.f` make (`dnrm2`, `ddot`, `daxpy`),
+/// issued to the vendor library R's BLAS is, on sub-vectors at the
+/// addresses the Fortran uses, and the norm downdate `1 - q**2` as one
+/// fused multiply-subtract, as R's arm64 build computes it.
+#[cfg(vendor_blas)]
+mod rblas {
+    use crate::lapack::blas;
+
+    pub(super) fn nrm2(v: &[f64]) -> f64 {
+        // SAFETY: `v` holds `v.len()` contiguous doubles.
+        unsafe { blas::dnrm2(v.len() as i32, v.as_ptr(), 1) }
+    }
+
+    pub(super) fn dot(a: &[f64], b: &[f64]) -> f64 {
+        debug_assert_eq!(a.len(), b.len());
+        // SAFETY: both slices hold `a.len()` contiguous doubles.
+        unsafe { blas::ddot(a.len() as i32, a.as_ptr(), 1, b.as_ptr(), 1) }
+    }
+
+    pub(super) fn axpy(t: f64, x: &[f64], y: &mut [f64]) {
+        debug_assert_eq!(x.len(), y.len());
+        // SAFETY: both slices hold `x.len()` contiguous doubles and do not
+        // overlap (`y` is borrowed mutably).
+        unsafe { blas::daxpy(x.len() as i32, t, x.as_ptr(), 1, y.as_mut_ptr(), 1) }
+    }
+
+    pub(super) fn one_minus_sq(q: f64) -> f64 {
+        crate::lapack::fma(-q, q, 1.0)
+    }
 }
 
-fn daxpy(t: f64, x: &[f64], y: &mut [f64]) {
-    for (yi, &xi) in y.iter_mut().zip(x) {
-        *yi += t * xi;
+/// Portable stand-ins for the BLAS calls when no vendor BLAS is linked.
+#[cfg(not(vendor_blas))]
+mod rblas {
+    pub(super) use super::dnrm2 as nrm2;
+
+    pub(super) fn dot(a: &[f64], b: &[f64]) -> f64 {
+        a.iter().zip(b).map(|(x, y)| x * y).sum()
+    }
+
+    pub(super) fn axpy(t: f64, x: &[f64], y: &mut [f64]) {
+        for (yi, &xi) in y.iter_mut().zip(x) {
+            *yi += t * xi;
+        }
+    }
+
+    pub(super) fn one_minus_sq(q: f64) -> f64 {
+        1.0 - q * q
     }
 }
 
@@ -62,7 +105,7 @@ fn dqrdc2(x: &mut [f64], n: usize, p: usize, tol: f64) -> (Vec<f64>, Vec<usize>,
 
     if n > 0 {
         for j in 0..p {
-            let nrm = dnrm2(&x[j * n..j * n + n]);
+            let nrm = rblas::nrm2(&x[j * n..j * n + n]);
             qraux[j] = nrm;
             work1[j] = nrm;
             work2[j] = if nrm == 0.0 { 1.0 } else { nrm };
@@ -93,7 +136,7 @@ fn dqrdc2(x: &mut [f64], n: usize, p: usize, tol: f64) -> (Vec<f64>, Vec<usize>,
         }
         if l != n {
             let col_l = l0 * n; // base of column l0
-            let mut nrmxl = dnrm2(&x[col_l + l0..col_l + n]);
+            let mut nrmxl = rblas::nrm2(&x[col_l + l0..col_l + n]);
             if nrmxl != 0.0 {
                 if x[col_l + l0] != 0.0 {
                     nrmxl = nrmxl.copysign(x[col_l + l0]);
@@ -108,21 +151,18 @@ fn dqrdc2(x: &mut [f64], n: usize, p: usize, tol: f64) -> (Vec<f64>, Vec<usize>,
                 let cl = &left[col_l + l0..col_l + n]; // pivot col, rows l0..n
                 let update = |cj: &mut [f64], qx: &mut f64, w1: &mut f64| {
                     let cj = &mut cj[l0..n]; // rows l0..n of this column
-                    let dot: f64 = cl.iter().zip(cj.iter()).map(|(a, b)| a * b).sum();
-                    let t = -dot / pivot_diag;
-                    for (b, &a) in cj.iter_mut().zip(cl.iter()) {
-                        *b += t * a; // daxpy
-                    }
+                    let t = -rblas::dot(cl, cj) / pivot_diag;
+                    rblas::axpy(t, cl, cj);
                     if *qx != 0.0 {
                         let ratio = cj[0].abs() / *qx; // |x(l,j)|
-                        let mut tt = 1.0 - ratio * ratio;
+                        let mut tt = rblas::one_minus_sq(ratio);
                         if tt < 0.0 {
                             tt = 0.0;
                         }
                         if tt.abs() >= 1e-6 {
                             *qx *= tt.sqrt();
                         } else {
-                            *qx = dnrm2(&cj[1..]); // dnrm2(x(l+1:n, j))
+                            *qx = rblas::nrm2(&cj[1..]); // dnrm2(x(l+1:n, j))
                             *w1 = *qx;
                         }
                     }
@@ -152,29 +192,29 @@ fn dqrdc2(x: &mut [f64], n: usize, p: usize, tol: f64) -> (Vec<f64>, Vec<usize>,
     (qraux, jpvt, rank)
 }
 
+/// `dqrsl` with `job = 1110`, as `dqrls.f` calls it: `qty` (holding `y` on
+/// entry), the `k` coefficients in `b` and the residuals in `rsd`, written
+/// into the caller's buffers.
 fn dqrsl_1110(
     x: &mut [f64],
     n: usize,
     k: usize,
     qraux: &[f64],
-    y: &[f64],
-) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let mut qty = y.to_vec();
-    let mut b = vec![0.0_f64; k];
-    let mut rsd = vec![0.0_f64; n];
+    qty: &mut [f64],
+    b: &mut [f64],
+    rsd: &mut [f64],
+) {
+    let y0 = qty[0];
     let ju = k.min(n.saturating_sub(1));
 
     if ju == 0 {
-        if n >= 1 {
-            qty[0] = y[0];
-            if k >= 1 {
-                if x[0] != 0.0 {
-                    b[0] = y[0] / x[0];
-                }
-                rsd[0] = 0.0;
+        if n >= 1 && k >= 1 {
+            if x[0] != 0.0 {
+                b[0] = y0 / x[0];
             }
+            rsd[0] = 0.0;
         }
-        return (qty, b, rsd);
+        return;
     }
 
     for j in 1..=ju {
@@ -183,9 +223,8 @@ fn dqrsl_1110(
             let col = j0 * n;
             let temp = x[col + j0];
             x[col + j0] = qraux[j0];
-            let dot = ddot(&x[col + j0..col + n], &qty[j0..n]);
-            let t = -dot / x[col + j0];
-            daxpy(t, &x[col + j0..col + n], &mut qty[j0..n]); // x, qty distinct
+            let t = -rblas::dot(&x[col + j0..col + n], &qty[j0..n]) / x[col + j0];
+            rblas::axpy(t, &x[col + j0..col + n], &mut qty[j0..n]);
             x[col + j0] = temp;
         }
     }
@@ -208,9 +247,7 @@ fn dqrsl_1110(
         b[j0] /= x[col + j0];
         if j != 1 {
             let t = -b[j0];
-            for i in 0..j0 {
-                b[i] += t * x[col + i]; // daxpy(j-1, t, x(1,j), b)
-            }
+            rblas::axpy(t, &x[col..col + j0], &mut b[..j0]);
         }
     }
 
@@ -220,13 +257,11 @@ fn dqrsl_1110(
             let col = j0 * n;
             let temp = x[col + j0];
             x[col + j0] = qraux[j0];
-            let dot = ddot(&x[col + j0..col + n], &rsd[j0..n]);
-            let t = -dot / x[col + j0];
-            daxpy(t, &x[col + j0..col + n], &mut rsd[j0..n]); // x, rsd distinct
+            let t = -rblas::dot(&x[col + j0..col + n], &rsd[j0..n]) / x[col + j0];
+            rblas::axpy(t, &x[col + j0..col + n], &mut rsd[j0..n]);
             x[col + j0] = temp;
         }
     }
-    (qty, b, rsd)
 }
 
 #[allow(clippy::type_complexity)]
@@ -237,16 +272,31 @@ fn dqrls_impl(
     y: &[f64],
     tol: f64,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>, usize, Vec<usize>, Vec<f64>) {
+    // Cdqrls's coefficients, residuals and effects vectors, as R lays them out.
     let (qraux, jpvt, rank) = dqrdc2(xcol, n, p, tol);
-    let mut coef = vec![0.0_f64; p];
-    let (qty, rsd) = if rank > 0 {
-        let (qty, b, rsd) = dqrsl_1110(xcol, n, rank, &qraux, y);
-        coef[..rank].copy_from_slice(&b[..rank]);
-        (qty, rsd)
-    } else {
-        (y.to_vec(), y.to_vec())
-    };
-    (coef, rsd, qty, rank, jpvt, qraux)
+    let mut coef = RVec::zeros(p);
+    let mut qty = RVec::from_slice(y);
+    let mut rsd = RVec::from_slice(y);
+    if rank > 0 {
+        rsd.as_mut_slice().fill(0.0);
+        dqrsl_1110(
+            xcol,
+            n,
+            rank,
+            &qraux,
+            qty.as_mut_slice(),
+            coef.as_mut_slice(),
+            rsd.as_mut_slice(),
+        );
+    }
+    (
+        coef.as_slice().to_vec(),
+        rsd.as_slice().to_vec(),
+        qty.as_slice().to_vec(),
+        rank,
+        jpvt,
+        qraux,
+    )
 }
 
 #[pyfunction]
@@ -269,10 +319,11 @@ pub fn dqrls<'py>(
     let xv = x.as_array();
     let (n, p) = (xv.nrows(), xv.ncols());
     let yv = y.as_array();
-    let mut xcol = to_colmajor(&xv);
+    let mut xr = RVec::from_slice(&to_colmajor(&xv));
+    let xcol = xr.as_mut_slice();
     let yvec: Vec<f64> = yv.iter().copied().collect();
 
-    let (coef, rsd, qty, rank, jpvt, qraux) = dqrls_impl(&mut xcol, n, p, &yvec, tol);
+    let (coef, rsd, qty, rank, jpvt, qraux) = dqrls_impl(xcol, n, p, &yvec, tol);
 
     let mut qr = Array2::<f64>::zeros((n, p));
     for j in 0..p {
@@ -301,8 +352,8 @@ pub fn dqrls_rank<'py>(
 ) -> PyResult<(usize, Bound<'py, PyArray1<i64>>)> {
     let xv = x.as_array();
     let (n, p) = (xv.nrows(), xv.ncols());
-    let mut xcol = to_colmajor(&xv);
-    let (_qraux, jpvt, rank) = dqrdc2(&mut xcol, n, p, tol);
+    let mut xr = RVec::from_slice(&to_colmajor(&xv));
+    let (_qraux, jpvt, rank) = dqrdc2(xr.as_mut_slice(), n, p, tol);
     let pivot: Vec<i64> = jpvt.iter().map(|&v| v as i64).collect();
     Ok((rank, PyArray1::from_vec(py, pivot)))
 }

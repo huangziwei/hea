@@ -16,13 +16,13 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-from scipy.linalg import qr, solve_triangular
 
+from .._rlinalg import r_chol2inv, r_matprod, r_qr, r_qr_coef, r_qr_R
+from .._rsum import r_sum
 from ..family import (
     Binomial,
     Family,
     Gaussian,
-    Link,
     QuasiBinomial,
     _coerce_response,
 )
@@ -40,179 +40,6 @@ from ..utils import (
 from .lm import _label_top_n, _lowess, _qq_plot
 
 __all__ = ["glm"]
-
-
-class _IRLSResult:
-    """Converged Fisher-IRLS state. Same shape downstream code consumes for
-    the main fit and the null-deviance fit."""
-
-    __slots__ = (
-        "R",
-        "X_used",
-        "beta",
-        "converged",
-        "deviance",
-        "eta",
-        "iter",
-        "mu",
-        "rank",
-        "w",
-    )
-
-    def __init__(self, *, beta, eta, mu, w, deviance, iter, converged, R, rank, X_used):
-        self.beta = beta
-        self.eta = eta  # η = Xβ + offset
-        self.mu = mu
-        self.w = w  # IRLS weights at convergence
-        self.deviance = deviance
-        self.iter = iter
-        self.converged = converged
-        self.R = R  # upper-triangular R of QR(√w · X)
-        self.rank = rank
-        self.X_used = X_used  # X with rank-deficient columns dropped
-
-
-def _fit_irls(
-    X: np.ndarray,
-    y: np.ndarray,
-    *,
-    family: Family,
-    prior_w: np.ndarray,
-    offset: np.ndarray,
-    epsilon: float = 1e-8,
-    maxit: int = 25,
-    qr_tol: float = 1e-7,
-    binom_n: np.ndarray | None = None,
-) -> _IRLSResult:
-    """Fisher-scored IRLS — drop-in replacement for ``stats::glm.fit``."""
-    link: Link = family.link
-    _n, p = X.shape
-
-    mu = (
-        family.initialize(y, prior_w, n=binom_n)
-        if binom_n is not None
-        else family.initialize(y, prior_w)
-    )
-    eta = link.link(mu) - offset  # η excludes offset; offset added on use
-    beta = np.zeros(p)
-
-    ii = 0
-    while not (link.valideta(eta + offset) and family.validmu(mu)):
-        ii += 1
-        if ii > 20:
-            raise FloatingPointError("glm IRLS init: cannot find valid starting μ̂")
-        eta = 0.9 * eta
-        mu = link.linkinv(eta + offset)
-
-    dev = float(np.sum(family.dev_resids(y, mu, prior_w)))
-
-    R = np.empty((p, p))
-    rank = p
-    converged = False
-    last_iter = 0
-
-    for it in range(1, maxit + 1):
-        last_iter = it
-        eta_full = eta + offset
-        mu_eta_v = link.mu_eta(eta_full)
-        V = family.variance(mu)
-        if np.any(V == 0) or np.any(~np.isfinite(V)):
-            raise FloatingPointError("V(μ) is 0 or non-finite in glm IRLS")
-        w = prior_w * mu_eta_v**2 / V
-        z = eta + (y - mu) / mu_eta_v
-
-        good = w > 0
-        if not np.all(good):
-            sw = np.sqrt(w[good])
-            X_w = X[good] * sw[:, None]
-            z_w = z[good] * sw
-        else:
-            sw = np.sqrt(w)
-            X_w = X * sw[:, None]
-            z_w = z * sw
-
-        Q, R = qr(X_w, mode="economic")
-        diag_R = np.abs(np.diag(R))
-        if diag_R.size and diag_R[0] > 0:
-            keep = diag_R >= qr_tol * diag_R[0]
-        else:
-            keep = np.zeros(p, dtype=bool)
-        rank = int(keep.sum())
-        if rank < p:
-            X_w_keep = X_w[:, keep]
-            Q, R_keep = qr(X_w_keep, mode="economic")
-            f = Q.T @ z_w
-            beta_keep = solve_triangular(R_keep, f)
-            beta_new = np.full(p, np.nan)
-            beta_new[keep] = beta_keep
-            R_full = np.full((p, p), np.nan)
-            R_full[np.ix_(keep, keep)] = R_keep
-            R = R_full
-            X_used = X[:, keep]
-        else:
-            f = Q.T @ z_w
-            beta_new = solve_triangular(R, f)
-            X_used = X
-
-        eta_new = X @ np.nan_to_num(beta_new)
-        eta_full_new = eta_new + offset
-        mu_new = link.linkinv(eta_full_new)
-
-        ii = 0
-        while not (link.valideta(eta_full_new) and family.validmu(mu_new)):
-            ii += 1
-            if ii > maxit:
-                raise FloatingPointError("glm IRLS: validity step-halving failed")
-            beta_new = 0.5 * (beta_new + beta)
-            eta_new = X @ np.nan_to_num(beta_new)
-            eta_full_new = eta_new + offset
-            mu_new = link.linkinv(eta_full_new)
-
-        dev_new = float(np.sum(family.dev_resids(y, mu_new, prior_w)))
-
-        ii = 0
-        while (not np.isfinite(dev_new)) or (it > 1 and dev_new > dev):
-            ii += 1
-            if ii > maxit:
-                break
-            beta_new = 0.5 * (beta_new + beta)
-            eta_new = X @ np.nan_to_num(beta_new)
-            eta_full_new = eta_new + offset
-            mu_new = link.linkinv(eta_full_new)
-            if not (link.valideta(eta_full_new) and family.validmu(mu_new)):
-                continue
-            dev_new = float(np.sum(family.dev_resids(y, mu_new, prior_w)))
-
-        if abs(dev_new - dev) / (0.1 + abs(dev_new)) < epsilon:
-            beta = beta_new
-            eta = eta_new
-            mu = mu_new
-            dev = dev_new
-            converged = True
-            break
-
-        beta = beta_new
-        eta = eta_new
-        mu = mu_new
-        dev = dev_new
-
-    eta_full = eta + offset
-    mu_eta_v = link.mu_eta(eta_full)
-    V = family.variance(mu)
-    w_final = prior_w * mu_eta_v**2 / V
-
-    return _IRLSResult(
-        beta=beta,
-        eta=eta_full,
-        mu=mu,
-        w=w_final,
-        deviance=dev,
-        iter=last_iter,
-        converged=converged,
-        R=R,
-        rank=rank,
-        X_used=X_used,
-    )
 
 
 def _row_frame(values: np.ndarray, columns: list[str]) -> pl.DataFrame:
@@ -246,6 +73,9 @@ class glm:
         (η = Xβ + offset). Defaults to zeros.
     control : dict
         IRLS control: ``epsilon`` (default 1e-8), ``maxit`` (25). Match R.
+    start, etastart, mustart : array-like or None
+        R's starting coefficients, linear predictor or means for the IRLS
+        (``glm.fit``).
 
     Attributes
     ----------
@@ -279,6 +109,9 @@ class glm:
         weights: None | np.ndarray | list = None,
         offset: None | np.ndarray | list = None,
         control: dict | None = None,
+        start: None | np.ndarray | list = None,
+        etastart: None | np.ndarray | list = None,
+        mustart: None | np.ndarray | list = None,
     ):
         self.formula = formula
         self.data = data
@@ -376,38 +209,46 @@ class glm:
         self.n = n
         self.p = p
 
-        fit = _fit_irls(
+        from ..R.glm_fit import glm_fit
+
+        fit = glm_fit(
             X,
             y,
             family=self.family,
-            prior_w=prior_w,
+            weights=prior_w,
             offset=off,
+            start=start,
+            etastart=etastart,
+            mustart=mustart,
             epsilon=ctl["epsilon"],
             maxit=ctl["maxit"],
+            intercept=self.has_intercept,
             binom_n=self._binom_n,
         )
         self._fit = fit
-        self.iter = fit.iter
-        self.converged = fit.converged
-        self.rank = fit.rank
-        self.df_residual = n - fit.rank
+        self._X = X
+        self._has_offset = offset is not None or len(d.expanded.offsets) > 0
+        self.iter = fit["iter"]
+        self.converged = fit["converged"]
+        self.rank = fit["rank"]
+        self.df_residual = fit["df_residual"]
         self.df_residuals = self.df_residual  # lm-style alias
 
-        self._bhat_arr = fit.beta.copy()
+        self._bhat_arr = np.asarray(fit["coefficients"], dtype=float).copy()
         self.bhat = _row_frame(self._bhat_arr, self.column_names)
         from ..R import NamedVector
 
         self.coef = NamedVector(self.column_names, self._bhat_arr)
         self.coefficients = self.coef
 
-        self.fitted_values = fit.mu
-        self.linear_predictors = fit.eta
-        self.yhat = pl.DataFrame({"fit": fit.mu})  # lm-style
+        self.fitted_values = fit["fitted"]
+        self.linear_predictors = fit["linear_predictors"]
+        self.yhat = pl.DataFrame({"fit": fit["fitted"]})  # lm-style
         self.fitted = self.fitted_values
 
-        self.deviance = fit.deviance
+        self.deviance = fit["deviance"]
 
-        self.dispersion = self._compute_dispersion(fit, prior_w, y)
+        self.dispersion = self._compute_dispersion(fit)
         self.scale = self.dispersion  # gam-style alias
         self.sigma_squared = self.dispersion  # lm-style alias
         self.sigma = float(np.sqrt(self.dispersion))
@@ -423,7 +264,7 @@ class glm:
             Xk = X[:, keep]
             XtWXinv_k = self._XtWXinv[np.ix_(keep, keep)]
             HXk = Xk @ XtWXinv_k
-            self.leverage = (HXk * Xk).sum(axis=1) * fit.w
+            self.leverage = (HXk * Xk).sum(axis=1) * fit["weights"]
         else:
             self.leverage = np.zeros(n)
         denom = np.sqrt(self.dispersion) * np.sqrt(
@@ -441,40 +282,44 @@ class glm:
         self.p_values = _row_frame(self._wald_p(stat), self.column_names)
         self.ci_bhat = self._compute_ci(0.05)
 
-        self.null_deviance, self.df_null = self._compute_null_deviance(y, prior_w, off)
-        self.npar = fit.rank + (0 if self.family.scale_known else 1)
-        self.aic = self._compute_aic(y, fit.mu, prior_w, k_for_aic=fit.rank)
+        self.null_deviance = self._compute_null_deviance(y, prior_w, off, ctl)
+        self.df_null = fit["df_null"]
+        self.npar = fit["rank"] + (0 if self.family.scale_known else 1)
+        self.aic = fit["aic"]
         self.AIC = self.aic
         self.loglike = float(self.npar) - 0.5 * self.aic
         self.bic = -2.0 * self.loglike + float(np.log(self.n)) * self.npar
         self.BIC = self.bic
 
-    def _compute_dispersion(
-        self, fit: _IRLSResult, prior_w: np.ndarray, y: np.ndarray
-    ) -> float:
+    def _compute_dispersion(self, fit: dict) -> float:
+        """summary.glm's dispersion: 1 for poisson and binomial, otherwise
+        the working weights times the squared working residuals summed over
+        the rows of positive weight, over the residual df (NaN without
+        residual df)."""
         if self.family.scale_known:
             return 1.0
         if self.df_residual <= 0:
             return float("nan")
-        V = self.family.variance(fit.mu)
-        chi2 = float(np.sum(prior_w * (y - fit.mu) ** 2 / V))
-        return chi2 / self.df_residual
+        wts = fit["weights"]
+        res = fit["residuals"]
+        return r_sum((wts * res**2)[wts > 0]) / self.df_residual
 
-    def _compute_vcov(self, fit: _IRLSResult):
+    def _compute_vcov(self, fit: dict):
+        """vcov.glm: ``chol2inv`` of the leading rank-by-rank block of the
+        last IRLS step's QR factor, in pivoted order, times the dispersion;
+        the aliased coefficients' rows and columns NA. Returns the scaled
+        and the unscaled covariance."""
         p = self.p
-        rank = fit.rank
+        rank = fit["rank"]
         V = np.full((p, p), np.nan)
+        U = np.full((p, p), np.nan)
         if rank == 0:
-            return V, V.copy()
-        diag = np.diag(fit.R)
-        keep = ~np.isnan(diag)
-        R_keep = fit.R[np.ix_(keep, keep)]
-        Rinv = solve_triangular(R_keep, np.eye(rank))
-        XtWXinv_keep = Rinv @ Rinv.T
-        XtWXinv = np.full((p, p), np.nan)
-        XtWXinv[np.ix_(keep, keep)] = XtWXinv_keep
-        V[np.ix_(keep, keep)] = self.dispersion * XtWXinv_keep
-        return V, XtWXinv
+            return V, U
+        piv = np.asarray(fit["qr"]["pivot"])[:rank] - 1
+        cov_unscaled = r_chol2inv(np.asarray(fit["qr"]["qr"])[:rank, :rank])
+        U[np.ix_(piv, piv)] = cov_unscaled
+        V[np.ix_(piv, piv)] = self.dispersion * cov_unscaled
+        return V, U
 
     def _wald_p(self, stat: np.ndarray) -> np.ndarray:
         with np.errstate(invalid="ignore"):
@@ -496,47 +341,37 @@ class glm:
             }
         )
 
-    def _compute_null_deviance(self, y, prior_w, offset):
-        """Intercept-only fit deviance."""
-        df_null = self.n - (1 if self.has_intercept else 0)
-        if not self.has_intercept:
-            mu0 = self.family.link.linkinv(offset)
-            null_dev = float(np.sum(self.family.dev_resids(y, mu0, prior_w)))
-            return null_dev, df_null
+    def _compute_null_deviance(self, y, prior_w, offset, ctl) -> float:
+        """glm's null deviance: glm.fit's (the weighted mean, or the offset
+        alone without an intercept), refitted by glm.fit on the intercept
+        from the model's fitted values when there is an offset and an
+        intercept (glm.R)."""
+        if not (self._has_offset and self.has_intercept):
+            return self._fit["null_deviance"]
+        from ..R.glm_fit import glm_fit
 
-        if np.allclose(offset, 0.0):
-            mu0_const = float(np.sum(prior_w * y) / np.sum(prior_w))
-            mu0 = np.full(self.n, mu0_const)
-            null_dev = float(np.sum(self.family.dev_resids(y, mu0, prior_w)))
-            return null_dev, df_null
-
-        X1 = np.ones((self.n, 1))
-        try:
-            null_fit = _fit_irls(
-                X1,
-                y,
-                family=self.family,
-                prior_w=prior_w,
-                offset=offset,
-                binom_n=self._binom_n,
-            )
-            null_dev = null_fit.deviance
-        except FloatingPointError:
-            null_dev = float("nan")
-        return null_dev, df_null
-
-    def _compute_aic(self, y, mu, prior_w, *, k_for_aic: int) -> float:
-        n_aic = self._binom_n if self._binom_n is not None else self.n
-        family_aic = float(
-            self.family.aic(
-                y,
-                mu,
-                self.deviance,
-                prior_w,
-                n_aic,
-            )
+        icol = self.column_names.index("(Intercept)")
+        fit2 = glm_fit(
+            self._X[:, [icol]],
+            y,
+            family=self.family,
+            weights=prior_w,
+            offset=offset,
+            mustart=self._fit["fitted"],
+            epsilon=ctl["epsilon"],
+            maxit=ctl["maxit"],
+            intercept=True,
+            binom_n=self._binom_n,
         )
-        return family_aic + 2.0 * k_for_aic
+        if not fit2["converged"]:
+            import warnings
+
+            warnings.warn(
+                "fitting to calculate the null deviance did not converge -- "
+                "increase 'maxit'?",
+                stacklevel=3,
+            )
+        return fit2["deviance"]
 
     def residuals_of(self, type: str = "deviance") -> np.ndarray:
         """Residuals of the requested type.
@@ -580,11 +415,15 @@ class glm:
 
         ``type='response'`` returns μ̂ = linkinv(η̂); ``type='link'`` returns
         η̂. Returns a ``pl.DataFrame`` with column ``fit``; if ``se_fit=True``
-        also a column ``se.fit``. Link-scale SE is ``√diag(X·vcov·Xᵀ)``;
-        response-scale SE multiplies by ``|dμ/dη|`` (delta method, matches R).
+        also a column ``se.fit``. Without new data and standard errors the
+        fit's own values come back; otherwise ``predict.lm``'s
+        ``X[, piv] %*% beta[piv]`` plus the offset, and its standard errors
+        from ``X[, piv]`` times the inverse of the QR factor at the scale
+        ``sqrt(dispersion)``; on the response scale they are multiplied by
+        ``|dμ/dη|``.
         """
         if new is None:
-            X_new = self.X.to_numpy().astype(float)
+            X_new = self._X
             n_new = self.n
             default_off = self._offset
         else:
@@ -604,29 +443,53 @@ class glm:
         if off_new.shape != (n_new,):
             raise ValueError(f"offset must have length {n_new}")
 
-        beta = np.nan_to_num(self._bhat_arr)
-        eta = X_new @ beta + off_new
-        if type == "link":
-            fit = eta
-        elif type == "response":
-            fit = self.family.link.linkinv(eta)
-        else:
+        if new is None and offset is None and not se_fit:
+            # predict.glm without newdata returns the fit's own values.
+            if type == "link":
+                return pl.DataFrame({"fit": self.linear_predictors})
+            if type == "response":
+                return pl.DataFrame({"fit": self.fitted_values})
+        if type not in ("link", "response"):
             raise ValueError(
                 f"unknown predict type {type!r}; expected 'response' or 'link'"
             )
-
+        # predict.lm: X[, piv] %*% beta[piv] plus the offset.
+        rank = self.rank
+        piv = np.asarray(self._fit["qr"]["pivot"])[:rank] - 1
+        if rank > 0:
+            eta = (
+                r_matprod(
+                    np.ascontiguousarray(X_new[:, piv]),
+                    self._bhat_arr[piv].reshape(-1, 1),
+                )[:, 0]
+                + off_new
+            )
+        else:
+            eta = np.zeros(n_new) + off_new
+        fit = eta if type == "link" else self.family.link.linkinv(eta)
         if not se_fit:
             return pl.DataFrame({"fit": fit})
-
-        keep = ~np.isnan(np.diag(self.vcov))
-        Xk = X_new[:, keep]
-        Vk = self.vcov[np.ix_(keep, keep)]
-        var_link = np.einsum("ij,jk,ik->i", Xk, Vk, Xk)
-        se_link = np.sqrt(np.maximum(var_link, 0.0))
+        # predict.lm's se.fit at scale sqrt(dispersion): X[, piv] times the
+        # inverse of the QR factor's leading block (qr.solve), squared and
+        # summed against res.var = scale^2.
+        if rank > 0:
+            Rp = r_qr_R(self._fit["qr"])[:rank, :rank]
+            qrR = r_qr(Rp)
+            if qrR["rank"] != rank:
+                raise ValueError("singular matrix 'a' in solve")
+            Rinv = r_qr_coef(qrR, np.eye(rank))
+            Rinv[np.isnan(Rinv)] = 0.0
+            XRinv = r_matprod(np.ascontiguousarray(X_new[:, piv]), Rinv)
+            scale = float(np.sqrt(self.dispersion))
+            res_var = scale * scale
+            ip = r_matprod(XRinv * XRinv, np.full((rank, 1), res_var))[:, 0]
+        else:
+            ip = np.zeros(n_new)
+        se_link = np.sqrt(ip)
         if type == "link":
             return pl.DataFrame({"fit": fit, "se.fit": se_link})
         mu_eta_v = self.family.link.mu_eta(eta)
-        return pl.DataFrame({"fit": fit, "se.fit": np.abs(mu_eta_v) * se_link})
+        return pl.DataFrame({"fit": fit, "se.fit": se_link * np.abs(mu_eta_v)})
 
     def __repr__(self) -> str:
         d = f"glm({self.formula!r}, family={self.family!r})\n\n"

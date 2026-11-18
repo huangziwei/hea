@@ -29,10 +29,26 @@ import numpy as np
 from .._dispatch import rs_fn
 from .._rfma import _rfma
 
-__all__ = ["Cdqrls", "dqrdc2", "dqrls", "dqrls_rank", "dqrsl", "kappa"]
+__all__ = ["Cdqrls", "dqrdc2", "dqrls", "dqrls_rank", "dqrsl", "kappa", "r_vector_like"]
 
 _rs_dqrls = rs_fn("dqrls")
 _rs_dqrls_rank = rs_fn("dqrls_rank")
+
+
+def r_vector_like(shape, order: str = "F") -> np.ndarray:
+    """A zeroed double array of ``shape`` whose data sits where R puts the
+    data of a double vector of that total length: 8 bytes past a 16-byte
+    boundary for lengths 2 to 16 (R's small-vector pools), on a boundary
+    otherwise. The vendor ``ddot`` rounds by the alignment of its second
+    operand, so a port of R code that hands R vectors to the BLAS lays its
+    copies out the same way."""
+    shape = (shape,) if np.isscalar(shape) else tuple(shape)
+    size = int(np.prod(shape)) if shape else 1
+    want = 8 if 2 <= size <= 16 else 0
+    buf = np.zeros(size + 2)
+    skip = ((want - buf.ctypes.data) % 16) // 8
+    out = buf[skip : skip + size].reshape(shape, order=order)
+    return out
 
 
 def dqrls_rank(x: np.ndarray, tol: float = 1e-7):
@@ -64,7 +80,9 @@ def dqrdc2(x: np.ndarray, tol: float = 1e-7):
     kept contiguous, as in R's column-major storage."""
     from scipy.linalg.blas import daxpy, ddot, dnrm2
 
-    qr = np.array(x, dtype=float, order="F", copy=True)
+    x = np.asarray(x, dtype=float)
+    qr = r_vector_like(x.shape)
+    qr[...] = x
     n, p = qr.shape
     qraux = np.zeros(p)
     work = np.zeros((p, 2))
@@ -152,23 +170,41 @@ def _job_flags(job: int):
     )
 
 
-def dqrsl(qr: np.ndarray, n: int, k: int, qraux: np.ndarray, y: np.ndarray, job: int):
+def dqrsl(
+    qr: np.ndarray,
+    n: int,
+    k: int,
+    qraux: np.ndarray,
+    y: np.ndarray,
+    job: int,
+    *,
+    qy: np.ndarray | None = None,
+    qty: np.ndarray | None = None,
+    b: np.ndarray | None = None,
+    rsd: np.ndarray | None = None,
+    xb: np.ndarray | None = None,
+):
     """Mechanical port of ``dqrsl.f`` — apply the ``dqrdc2`` factorization.
     Returns ``(qy, qty, b, rsd, xb, info)``; only the parts selected by ``job``
     (decimal ``abcde``: a=qy, b/c/d/e⇒qty, c=b, d=rsd, e=xb) are meaningful.
     Each reflector is applied with the Fortran's BLAS ``ddot`` and ``daxpy``
-    through scipy's BLAS, on a column-major copy of ``qr``."""
+    through scipy's BLAS, on a copy of ``qr`` laid out as R's. Output
+    vectors passed in (views into the caller's R-laid-out argument copies,
+    as ``dqrqy``/``dqrqty``/``dqrcf`` pass columns) are written in place;
+    the rest are new vectors laid out as R's."""
     from scipy.linalg.blas import daxpy, ddot
 
-    qr = np.array(qr, dtype=float, order="F", copy=True)
+    qr_in = np.asarray(qr, dtype=float)
+    qr = r_vector_like(qr_in.shape)
+    qr[...] = qr_in
     cqy, cqty, cb, cr, cxb = _job_flags(job)
     info = 0
     y = np.asarray(y, dtype=float).reshape(-1)
-    qy = np.zeros(n)
-    qty = np.zeros(n)
-    b = np.zeros(k)
-    rsd = np.zeros(n)
-    xb = np.zeros(n)
+    qy = r_vector_like(n) if qy is None else qy
+    qty = r_vector_like(n) if qty is None else qty
+    b = r_vector_like(k) if b is None else b
+    rsd = r_vector_like(n) if rsd is None else rsd
+    xb = r_vector_like(n) if xb is None else xb
     ju = min(k, n - 1)
 
     if ju == 0:  # special action when n == 1

@@ -903,20 +903,20 @@ def test_tweedie_ls_zero_weights_dropped():
     np.testing.assert_allclose(ls_drop, ls_two, rtol=1e-12)
 
 
-def test_tw_dls_dp_chain_to_theta_oracle_p15():
-    """dls/dp · dp/dθ_tw must equal Σ ldTweedie[, 'th'] at default (a=1.01, b=1.99)."""
+def test_tw_ls_theta_derivative_oracle_p15():
+    """tw()$ls's θ-derivative (``lsth1[1]``) equals mgcv's
+    ``sum(ldTweedie(y, y, rho = log(phi), theta)[, "th"])`` at the default
+    (a, b) = (1.01, 1.99)."""
     f = tw()
-    dls_dp = f.dls_dp(_TW_DEV_Y, np.ones(5), scale=1.0)
-    np.testing.assert_allclose(dls_dp * f.dp_dtheta(), -0.1740833687231026, rtol=1e-9)
+    lsth1 = f.ls_extended(_TW_DEV_Y, np.ones(5), scale=1.0)["lsth1"]
+    np.testing.assert_allclose(lsth1[0], -0.1740833687231026, rtol=1e-14)
 
 
-def test_tw_dls_dp_chain_to_theta_oracle_p17():
+def test_tw_ls_theta_derivative_oracle_p17():
     f = tw()
     f.set_theta(np.log((1.7 - 1.01) / (1.99 - 1.7)))
-    dls_dp = f.dls_dp(_TW_DEV_Y, np.ones(5), scale=2.0)
-    np.testing.assert_allclose(
-        dls_dp * f.dp_dtheta(), -0.0302015497694411161, rtol=1e-9
-    )
+    lsth1 = f.ls_extended(_TW_DEV_Y, np.ones(5), scale=2.0)["lsth1"]
+    np.testing.assert_allclose(lsth1[0], -0.0302015497694411161, rtol=1e-14)
 
 
 def test_tw_default_theta_zero_gives_p_15():
@@ -2191,6 +2191,8 @@ def test_cox_ph_ll_matches_mgcv_oracle():
         deriv=4,
         d1b=d1b,
         d2b=d2b,
+        Hp=Hp,
+        rank=p,
         fh=(L, np.arange(p)),
         D=np.ones(p),
     )
@@ -3133,15 +3135,14 @@ def test_ld_tweedie_work_matches_mgcv():
 
 
 def test_tweedious_work_census_matches_mgcv():
-    """Census gate for the faithful tweedious/tweedious2 port (per-term θ-chain,
-    up-then-down sweep from the located peak, ``eps = double.eps²``) vs live
-    mgcv ldTweedie(all.derivs=TRUE). Block A: constant θ/ρ (buffer=TRUE scalar
-    C_tweedious). Block B: per-row θ/ρ (vector C_tweedious2 with the lgamma(j+1)
-    recursion). ``y[0]=0`` exercises the closed-form point mass.
-    ``w2i/wi − (w1i/wi)²`` cancellation (mgcv misc.c:499-500) amplifies the
-    last-ulp floor of exp and of the accumulation by about 150x, so the
-    pins allow for it; references are 17-digit values from mgcv 1.9-4.
+    """``_ld_tweedie_work`` against mgcv 1.9-4's ldTweedie(all.derivs=TRUE),
+    17-digit references. Block A: one θ/ρ for every row (the C
+    ``tweedious``). Block B: θ/ρ per row (``tweedious2``, with its
+    ``lgamma(j+1)`` recursion). ``y[0] = 0`` is the closed-form point mass.
+    Bit-exact on the pinned arithmetic.
     """
+    from conftest import PINNED_ARITHMETIC
+
     from hea.family import _ld_tweedie_work
 
     a, b = 1.001, 1.999
@@ -3374,6 +3375,8 @@ def test_tweedious_work_census_matches_mgcv():
     ha = _ld_tweedie_work(
         y, mu, np.full(y.size, 0.42), np.full(y.size, -0.18), a=a, b=b
     )
+    if PINNED_ARITHMETIC:
+        np.testing.assert_array_equal(ha, ref_a)
     da = np.abs(ha - ref_a)
     assert np.all(da <= tol), (
         "block A over tol at cols "
@@ -3603,6 +3606,8 @@ def test_tweedious_work_census_matches_mgcv():
         ]
     )
     hb = _ld_tweedie_work(y, mu, th_b, rho_b, a=a, b=b)
+    if PINNED_ARITHMETIC:
+        np.testing.assert_array_equal(hb, ref_b)
     db = np.abs(hb - ref_b)
     assert np.all(db <= tol), (
         "block B over tol at cols "

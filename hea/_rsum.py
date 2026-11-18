@@ -43,6 +43,13 @@ def _ld_sum(xl: np.ndarray) -> np.longdouble:
     return _ld_sum_rows(np.asarray(xl, dtype=np.longdouble).reshape(-1, 1))[0]
 
 
+def r_sum(x) -> float:
+    """R's ``sum(x)`` for a double vector or matrix: the elements in R's
+    (column-major) order accumulated left to right in ``LDOUBLE``."""
+    x = np.asarray(x, dtype=float)
+    return float(_ld_sum(x.ravel(order="F")))
+
+
 def r_mean(x) -> float:
     """``real_mean`` (R summary.c), the body of ``mean.default`` for a double
     vector: the in-order sum divided by n, then the in-order sum of the
@@ -114,3 +121,66 @@ def r_rowsums(x: np.ndarray, na_rm: bool = False, mean: bool = False) -> np.ndar
         with np.errstate(invalid="ignore", divide="ignore"):
             s = s / cnt
     return s.astype(float)
+
+
+def r_var(x) -> float:
+    """R's ``var(x)`` for a double vector without NA: stats' C ``cov`` on its
+    ``"everything"`` path (``cov_na_1``). The mean is ``MEAN_``'s two passes
+    in ``LDOUBLE`` (the sum over n, then the in-order sum of the residuals
+    from it over n added back); the variance accumulates
+    ``(LDOUBLE)(x[k] - m) * (x[k] - m)`` over ``n - 1``. Where ``LDOUBLE``
+    is ``double`` and the build fuses (arm64 macOS), clang forms eight
+    products at a time rounded and adds them in order, fusing only the last
+    ``n % 8`` terms (every term when n < 8); elsewhere the loop is a plain
+    ``long double`` accumulation. n < 2 gives NaN, as R's NA."""
+    from ._rfma import _R_FMA, _rfma
+
+    xd = np.asarray(x, dtype=float).ravel()
+    n = xd.size
+    if n < 2:
+        return float("nan")
+    xl = xd.astype(np.longdouble)
+    with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+        tmp = _ld_sum(xl) / n
+        if math.isfinite(float(tmp)):
+            tmp = tmp + _ld_sum(xl - tmp) / n
+        m = float(tmp)
+        d = xd - m
+        if _R_FMA and np.finfo(np.longdouble).bits == 64:
+            nv = n - n % 8 if n >= 8 else 0
+            s = float(_ld_sum(d[:nv] * d[:nv])) if nv else 0.0
+            for v in d[nv:].tolist():
+                s = _rfma(v, v, s)
+            return s / (n - 1)
+        dl = d.astype(np.longdouble)
+        return float(_ld_sum(dl * dl) / (n - 1))
+
+
+def r_all_equal(target, current, tolerance: float | None = None) -> bool:
+    """``isTRUE(all.equal(target, current, tolerance))`` for two plain double
+    vectors (``all.equal.numeric``, ``scale = NULL``, ``countEQ = FALSE``):
+    the entries equal in both (or NA in both) are set aside, and the rest
+    compared by their mean absolute difference, relative to the mean
+    absolute target unless that is not above ``tolerance``. The default
+    tolerance is ``sqrt(.Machine$double.eps)``."""
+    if tolerance is None:
+        tolerance = math.sqrt(float(np.finfo(float).eps))
+    t = np.asarray(target, dtype=float).ravel()
+    c = np.asarray(current, dtype=float).ravel()
+    if t.size != c.size:
+        return False
+    out = np.isnan(t)
+    if np.any(out != np.isnan(c)):
+        return False
+    out = out | (t == c)
+    if np.all(out):
+        return True
+    keep = ~out
+    t = t[keep]
+    c = c[keep]
+    N = t.size
+    scale = r_sum(np.abs(t) / N)
+    if not (math.isfinite(scale) and scale > tolerance):
+        scale = 1.0
+    xy = r_sum(np.abs(t - c) / (N * scale))
+    return not (math.isnan(xy) or xy > tolerance)

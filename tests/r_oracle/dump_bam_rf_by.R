@@ -18,8 +18,17 @@
 ##     (and from hea-discrete) by ~1e-3; bamF is the home of hea's
 ##     bam(discrete=FALSE). Pinned loosely to document that gap.
 ##
-## Data is dumped so python reproduces the identical fit without R's RNG.
+## Data is dumped so python reproduces the identical fit without R's RNG, and
+## every model is fitted on the data read back from those CSVs - the exact
+## bytes hea sees - with results written at 17 significant digits.
 suppressMessages(library(mgcv))
+
+wr <- function(x, path) writeLines(sprintf("%.17g", as.numeric(x)), path)
+read_back <- function(tag, cols) {
+  dat <- list(y = as.numeric(read.csv(file.path(out_dir, paste0(tag, "_y.csv")))[[1]]))
+  for (c in cols) dat[[c]] <- as.matrix(read.csv(file.path(out_dir, paste0(tag, "_", c, ".csv"))))
+  dat
+}
 
 dump_model <- function(tag, f, dat) {
   bF <- bam(f, family = poisson, data = dat, discrete = FALSE)
@@ -30,13 +39,11 @@ dump_model <- function(tag, f, dat) {
               paste(sprintf("%.5g", bT$sp), collapse = ", ")))
   d <- file.path("tests/fixtures/bam_rf_by", tag)
   dir.create(d, showWarnings = FALSE, recursive = TRUE)
-  write.table(fitted(bF), file.path(d, "bamF_fitted.csv"),
-              row.names = FALSE, col.names = FALSE)
-  write.table(bF$sp,  file.path(d, "bamF_sp.csv"),  row.names = FALSE, col.names = FALSE)
-  write.table(sum(bF$edf), file.path(d, "bamF_edfsum.csv"), row.names = FALSE, col.names = FALSE)
-  write.table(fitted(bT), file.path(d, "bamT_fitted.csv"),
-              row.names = FALSE, col.names = FALSE)
-  write.table(sum(bT$edf), file.path(d, "bamT_edfsum.csv"), row.names = FALSE, col.names = FALSE)
+  wr(fitted(bF), file.path(d, "bamF_fitted.csv"))
+  wr(bF$sp, file.path(d, "bamF_sp.csv"))
+  wr(sum(bF$edf), file.path(d, "bamF_edfsum.csv"))
+  wr(fitted(bT), file.path(d, "bamT_fitted.csv"))
+  wr(sum(bT$edf), file.path(d, "bamT_edfsum.csv"))
 }
 
 out_dir <- "tests/fixtures/bam_rf_by"
@@ -57,28 +64,16 @@ write.csv(data.frame(y = y),  file.path(out_dir, "te_y.csv"),    row.names = FAL
 write.csv(as.data.frame(Lag), file.path(out_dir, "te_Lag.csv"),  row.names = FALSE)
 write.csv(as.data.frame(Xc),  file.path(out_dir, "te_Xc.csv"),   row.names = FALSE)
 write.csv(as.data.frame(Stim),file.path(out_dir, "te_Stim.csv"), row.names = FALSE)
-dump_model("te", y ~ te(Lag, Xc, by = Stim, k = c(4, 3)),
-           list(y = y, Lag = Lag, Xc = Xc, Stim = Stim))
+te_dat <- read_back("te", c("Lag", "Xc", "Stim"))
+dump_model("te", y ~ te(Lag, Xc, by = Stim, k = c(4, 3)), te_dat)
 
-## RF4: extended-family (Tweedie, fixed p) + matrix-by on the SAME te data.
-## Confirms the extended-family fREML cadence (B2) composes with the matrix-arg
-## summation design. discrete=FALSE (exact-by); hea pins to this. NOTE: the te
-## data is near-ridge (one margin sp ~1e8), so the Tweedie scale estimate is
-## sensitive to tiny data perturbations — re-read the dumped CSVs so the oracle
-## fits the EXACT bytes hea sees (an in-memory fit drifts ~7e-4 in edf vs the
-## CSV round-trip; Poisson is insensitive to it but Tweedie is not).
-tw_y  <- as.numeric(read.csv(file.path(out_dir, "te_y.csv"))[[1]])
-tw_L  <- as.matrix(read.csv(file.path(out_dir, "te_Lag.csv")))
-tw_X  <- as.matrix(read.csv(file.path(out_dir, "te_Xc.csv")))
-tw_S  <- as.matrix(read.csv(file.path(out_dir, "te_Stim.csv")))
+## RF4: extended-family (Tweedie, fixed p) + matrix-by on the same te data,
+## discrete=FALSE (exact-by). The te data is near-ridge (one margin sp ~1e8).
 bTw <- bam(y ~ te(Lag, Xc, by = Stim, k = c(4, 3)), family = Tweedie(p = 1.5),
-           data = list(y = tw_y, Lag = tw_L, Xc = tw_X, Stim = tw_S),
-           discrete = FALSE)
+           data = te_dat, discrete = FALSE)
 cat(sprintf("te   Tweedie(1.5) bamF: edf=%.6f scale=%.5f\n", sum(bTw$edf), bTw$scale))
-write.table(fitted(bTw), file.path(out_dir, "te", "bamF_tw_fitted.csv"),
-            row.names = FALSE, col.names = FALSE)
-write.table(sum(bTw$edf), file.path(out_dir, "te", "bamF_tw_edfsum.csv"),
-            row.names = FALSE, col.names = FALSE)
+wr(fitted(bTw), file.path(out_dir, "te", "bamF_tw_fitted.csv"))
+wr(sum(bTw$edf), file.path(out_dir, "te", "bamF_tw_edfsum.csv"))
 
 ## --- 1-D temporal RF: s(Lag, by=Stim) -----------------------------------
 set.seed(2)
@@ -92,8 +87,7 @@ y    <- rpois(n, exp(eta))
 write.csv(data.frame(y = y),   file.path(out_dir, "s_y.csv"),    row.names = FALSE)
 write.csv(as.data.frame(Lag),  file.path(out_dir, "s_Lag.csv"),  row.names = FALSE)
 write.csv(as.data.frame(Stim), file.path(out_dir, "s_Stim.csv"), row.names = FALSE)
-dump_model("s", y ~ s(Lag, by = Stim, k = 8),
-           list(y = y, Lag = Lag, Stim = Stim))
+dump_model("s", y ~ s(Lag, by = Stim, k = 8), read_back("s", c("Lag", "Stim")))
 
 ## --- 2-D NEAR-RIDGE RF: te(Lag, Xc, by=Stim) on an asymmetric surface ----
 ## RF1b regression guard: the true RF varies strongly in Lag but is ~flat in
@@ -118,6 +112,6 @@ write.csv(as.data.frame(Lag), file.path(out_dir, "te_ridge_Lag.csv"),  row.names
 write.csv(as.data.frame(Xc),  file.path(out_dir, "te_ridge_Xc.csv"),   row.names = FALSE)
 write.csv(as.data.frame(Stim),file.path(out_dir, "te_ridge_Stim.csv"), row.names = FALSE)
 dump_model("te_ridge", y ~ te(Lag, Xc, by = Stim, k = c(4, 3)),
-           list(y = y, Lag = Lag, Xc = Xc, Stim = Stim))
+           read_back("te_ridge", c("Lag", "Xc", "Stim")))
 
 cat("\nwrote oracle to", out_dir, "\n")

@@ -44,7 +44,7 @@ import matplotlib
 import numpy as np
 import polars as pl
 import pytest
-from conftest import PINNED_ARITHMETIC, load_dataset
+from conftest import FIXTURE_ROOT, PINNED_ARITHMETIC, load_dataset
 from conftest import assert_fp_equiv as _assert_fp_equiv
 
 from hea.family import Gamma, Poisson, Tweedie, tw
@@ -492,9 +492,15 @@ def test_sp_passthrough_matches_optimized():
 
 
 def test_predict_inSample_matches_fitted():
+    """predict() with no newdata predicts on the fit's data through
+    PredictMat, as mgcv's predict.gam does from object$model: the values of
+    predict(data), and the fitted values up to that re-evaluation of the
+    design."""
     d = load_dataset("MASS", "mcycle")
     m = gam("accel ~ s(times)", d, method="REML")
-    np.testing.assert_array_equal(m.predict()["fit"].to_numpy(), m.fitted)
+    p = m.predict()["fit"].to_numpy()
+    np.testing.assert_array_equal(p, m.predict(d)["fit"].to_numpy())
+    np.testing.assert_allclose(p, m.fitted, rtol=0, atol=1e-10)
 
 
 def test_pirls_init_canonical_inverse_gaussian():
@@ -3712,8 +3718,10 @@ def test_gam_control_validation():
     df = _mixed_sp_fixture()
     with pytest.raises(ValueError, match="scale_est"):
         gam_control(scale_est="bogus")
-    with pytest.raises(NotImplementedError, match="irls_reg"):
-        gam_control(irls_reg=0.5)
+    with pytest.raises(ValueError, match="IRLS regularizing parameter"):
+        gam_control(irls_reg=-0.5)
+    c = gam_control(irls_reg=0.5, mgcv_tol=1e-6, mgcv_half=10)
+    assert (c["irls_reg"], c["mgcv_tol"], c["mgcv_half"]) == (0.5, 1e-6, 10)
     with pytest.raises(NotImplementedError, match="idLinksBases"):
         gam_control(idLinksBases=False)
     with pytest.raises(ValueError, match="newton control"):
@@ -4940,7 +4948,11 @@ def test_gaulss_efs_optimizer_matches_mgcv():
     # R: gam(list(...), family=gaulss(), optimizer="efs") on the fixture's
     # exact bits (writeBin/readBin). EFS stops on a loose REML band
     # (efs.tol = 0.1), so tolerances are wider than the newton pins.
+    from hea._dispatch import HAVE_RS
     from hea.family import gaulss
+
+    if not HAVE_RS:
+        pytest.skip("the EFS steps' eigen and Cholesky ports live in hea._rs")
 
     class _gaulss_efs(gaulss):
         available_derivs = 0
@@ -5018,7 +5030,8 @@ def test_gaulss_fixed_sp_through_gam_matches_mgcv():
         rtol=0,
         atol=1e-7,
     )
-    np.testing.assert_allclose(m.sp, [2.0, 0.5])
+    assert m.sp.size == 0
+    np.testing.assert_allclose(m.full_sp, [2.0, 0.5])
 
 
 def test_multilp_parametric_collinearity_matches_mgcv_olid():
@@ -6131,6 +6144,8 @@ def test_general_family_newton_reml_nlp4_robustness():
             deriv=0,
             d1b=None,
             d2b=None,
+            Hp=None,
+            rank=0,
             fh=None,
             D=None,
         ):
@@ -6667,31 +6682,29 @@ def test_cox_ph_through_gam_matches_mgcv():
     assert m.column_names == ["z"] + [f"s(x).{i}" for i in range(1, 10)]
     assert "(Intercept)" not in m.column_names
     np.testing.assert_allclose(
-        m.REML_criterion / 2, 619.504025083614, rtol=0, atol=1e-3
+        m.REML_criterion / 2, 619.504025083614, rtol=0, atol=1e-9
     )
-    np.testing.assert_allclose(float(np.sum(m.edf)), 5.04951670043, rtol=0, atol=1e-2)
-    np.testing.assert_allclose(m.sp[0], 0.0888380593715, rtol=2e-3, atol=0)
-    np.testing.assert_allclose(m.null_deviance, 251.817485857, rtol=0, atol=1e-4)
-    np.testing.assert_allclose(m.deviance, 244.337920299, rtol=0, atol=1e-3)
+    np.testing.assert_allclose(float(np.sum(m.edf)), 5.04951670043, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(m.sp[0], 0.0888380593715, rtol=1e-9, atol=0)
+    np.testing.assert_allclose(m.null_deviance, 251.817485857, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(m.deviance, 244.337920299, rtol=0, atol=1e-9)
     beta = np.asarray(m._beta)
-    np.testing.assert_allclose(beta[0], 0.5347033442229, rtol=0, atol=1e-3)
+    np.testing.assert_allclose(beta[0], 0.5347033442229, rtol=0, atol=1e-11)
     np.testing.assert_allclose(
-        np.abs(beta[1:]),
-        np.abs(
-            [
-                1.1918412609676,
-                0.9055424491633,
-                -0.0820593633819,
-                -0.1120411669932,
-                -0.0370197861409,
-                -0.3200248848103,
-                -0.1442647042816,
-                0.7227752645372,
-                0.5849763355643,
-            ]
-        ),
+        beta[1:],
+        [
+            1.1918412609676,
+            0.9055424491633,
+            -0.0820593633819,
+            -0.1120411669932,
+            -0.0370197861409,
+            -0.3200248848103,
+            -0.1442647042816,
+            0.7227752645372,
+            0.5849763355643,
+        ],
         rtol=0,
-        atol=2e-3,
+        atol=1e-11,
     )
     fitted = np.asarray(m.fitted_values)
     assert fitted.shape == (200,)
@@ -6705,7 +6718,7 @@ def test_cox_ph_through_gam_matches_mgcv():
             0.544964819219,
         ],
         rtol=0,
-        atol=1e-5,
+        atol=1e-11,
     )
 
 
@@ -6721,13 +6734,13 @@ def test_cox_ph_residuals_predict_match_mgcv():
         np.asarray(m.residuals)[:5],
         [2.52471540, 0.98282250, 1.13211646, -0.48296411, 0.46087840],
         rtol=0,
-        atol=1e-4,
+        atol=1e-8,
     )
     np.testing.assert_allclose(
         np.asarray(m.residuals_of("martingale"))[:5],
         [0.98457348, 0.69080138, 0.75151039, -0.11662717, 0.39296596],
         rtol=0,
-        atol=1e-4,
+        atol=1e-8,
     )
     with pytest.raises(NotImplementedError, match="score/schoenfeld"):
         m.residuals_of("score")
@@ -6744,7 +6757,7 @@ def test_cox_ph_residuals_predict_match_mgcv():
             0.0735293562,
         ],
         rtol=0,
-        atol=1e-5,
+        atol=1e-10,
     )
     np.testing.assert_allclose(
         np.asarray(pr["se.fit"]),
@@ -6757,7 +6770,7 @@ def test_cox_ph_residuals_predict_match_mgcv():
             0.04388060327,
         ],
         rtol=0,
-        atol=1e-4,
+        atol=1e-10,
     )
 
 
@@ -6801,26 +6814,38 @@ def test_cox_ph_pbc_textbook_matches_mgcv():
     )
     assert "(Intercept)" not in m.column_names
     assert m.column_names[:2] == ["trt", "sexf"]
+    # mgcv 1.9.4: 2*gcv.ubre/2, sum(edf), null.deviance, coef, s.table
+    tight = PINNED_ARITHMETIC
     np.testing.assert_allclose(
-        m.REML_criterion / 2, 547.256744526281, rtol=0, atol=5e-2
+        m.REML_criterion / 2, 547.25671877178765, rtol=0, atol=1e-9 if tight else 5e-2
     )
-    np.testing.assert_allclose(float(np.sum(m.edf)), 15.3095029449, rtol=0, atol=5e-2)
-    np.testing.assert_allclose(m.null_deviance, 413.412618165, rtol=0, atol=1e-2)
+    np.testing.assert_allclose(
+        float(np.sum(m.edf)), 15.309220943363961, rtol=0, atol=1e-9 if tight else 5e-2
+    )
+    np.testing.assert_allclose(
+        m.null_deviance, 413.41261816488634, rtol=0, atol=1e-9 if tight else 1e-2
+    )
     beta = dict(zip(m.column_names, np.asarray(m._beta)))
-    np.testing.assert_allclose(beta["trt"], 0.06715634, rtol=0, atol=2e-3)
-    np.testing.assert_allclose(beta["sexf"], -0.49515759, rtol=0, atol=3e-3)
+    np.testing.assert_allclose(
+        beta["trt"], 0.067148745011105349, rtol=0, atol=1e-11 if tight else 2e-3
+    )
+    np.testing.assert_allclose(
+        beta["sexf"], -0.49515756948993356, rtol=0, atol=1e-11 if tight else 3e-3
+    )
     rows = {r[0]: r for r in m._smooth_significance_rows()}
-    np.testing.assert_allclose(rows["s(age)"][1], 6.042792, rtol=0, atol=2e-2)
-    np.testing.assert_allclose(rows["s(age)"][3], 29.417277, rtol=0, atol=0.3)
-    np.testing.assert_allclose(rows["s(bili)"][1], 4.264429, rtol=0, atol=2e-2)
-    np.testing.assert_allclose(rows["s(bili)"][3], 89.540337, rtol=0, atol=0.5)
-    for lab, chi in (
-        ("s(sqrt(protime))", 13.333751),
-        ("s(platelet)", 5.787376),
-        ("s(albumin)", 31.086251),
+    for lab, edf, chi in (
+        ("s(sqrt(protime))", 1.0007184178442337, 13.334697261877379),
+        ("s(platelet)", 1.0011950197109067, 5.7881136318245776),
+        ("s(age)", 6.0427907224168642, 29.417009337073594),
+        ("s(bili)", 4.2644333714868061, 89.541484094914154),
+        ("s(albumin)", 1.000083411905152, 31.086190210993383),
     ):
-        np.testing.assert_allclose(rows[lab][1], 1.0, rtol=0, atol=2e-2)
-        np.testing.assert_allclose(rows[lab][3], chi, rtol=0, atol=0.3)
+        np.testing.assert_allclose(
+            rows[lab][1], edf, rtol=0, atol=1e-9 if tight else 2e-2
+        )
+        np.testing.assert_allclose(
+            rows[lab][3], chi, rtol=0, atol=1e-8 if tight else 0.5
+        )
     for lab in rows:
         assert 0.0 <= rows[lab][4] <= 1.0
     m.summary()
@@ -7004,7 +7029,11 @@ def test_mvn_through_gam_matches_mgcv():
     np.testing.assert_allclose(m.REML_criterion / 2, 205.7441216777, rtol=0, atol=1e-5)
     np.testing.assert_allclose(m.sp, [0.2006855377, 3.4818966647], rtol=2e-3)
     np.testing.assert_allclose(m.edf_total, 11.51223604, rtol=0, atol=2e-3)
-    np.testing.assert_allclose(m.deviance, 400.0, rtol=0, atol=1e-6)
+    # n*d exactly only at the optimum: off mgcv's arithmetic the last Newton
+    # iterate stops elsewhere within newton's tolerance (grad < 1e-6 |score|)
+    np.testing.assert_allclose(
+        m.deviance, 400.0, rtol=0, atol=1e-6 if PINNED_ARITHMETIC else 1e-4
+    )
     np.testing.assert_allclose(m.null_deviance, 627.91988172, rtol=0, atol=2e-2)
     np.testing.assert_allclose(
         np.asarray(m._beta)[-3:],
@@ -8156,6 +8185,40 @@ def test_concurvity_full_and_pairwise_match_mgcv():
         float(cp["estimate"]["s(z)"][1]),  # mgcv
         0.0640022213,
         rtol=1e-5,
+    )
+
+
+@pytest.mark.skipif(not PINNED_ARITHMETIC, reason="exact pins need R's arithmetic")
+def test_concurvity_design_measures_match_mgcv_exactly():
+    """``worst`` and ``estimate`` depend on the design alone - mgcv's
+    lpmatrix, the unpivoted LINPACK QRs, ``forwardsolve`` and ``svd`` - so
+    they are mgcv's to the bit, full and pairwise (values from mgcv on this
+    fixture)."""
+    m = gam("ygau ~ f4 + s(x) + s(z)", _pterms_fixture(), method="REML")
+    cf = m.concurvity()
+    np.testing.assert_array_equal(
+        cf.to_numpy()[[0, 2], 1:].astype(float),
+        [
+            [0.7888546767574715, 0.16905060982052295, 0.14081988645151347],
+            [0.7888546767574713, 0.05079473182461739, 0.07372275751426231],
+        ],
+    )
+    cp = m.concurvity(full=False)
+    np.testing.assert_array_equal(
+        cp["worst"].to_numpy()[:, 1:].astype(float),
+        [
+            [1.0, 1.42485014831889e-26, 4.501365479142955e-27],
+            [1.4442557462137973e-26, 1.0, 0.12898789653179693],
+            [4.54768697914216e-27, 0.1289878965317973, 1.0],
+        ],
+    )
+    np.testing.assert_array_equal(
+        cp["estimate"].to_numpy()[:, 1:].astype(float),
+        [
+            [1.0, 3.958646299844634e-29, 1.1381470356582559e-29],
+            [1.4442557462137968e-26, 1.0, 0.06400222125862262],
+            [4.547686979142159e-27, 0.03870803062077145, 1.0],
+        ],
     )
 
 
@@ -9590,7 +9653,7 @@ def test_te_ad_multi_penalty_margin():
         method="REML",
         sp=[1.0] * 10,
     )
-    assert np.asarray(m.sp).size == 10
+    assert np.asarray(m.sp).size == 0 and np.asarray(m.full_sp).size == 10
     assert np.isfinite(np.asarray(m.coef)).all()
 
 
@@ -10408,3 +10471,146 @@ def test_plot_smooth_xlim_sets_evaluation_range():
 
     xs0, _ = _plot_curve(m, select=0, rug=False, n_grid_1d=10)
     np.testing.assert_allclose(xs0[[0, -1]], [x.min(), x.max()], rtol=1e-12)
+
+
+def test_gaulss_mcycle_adaptive_follows_mgcv_outer_path():
+    # mgcv 1.9-4: gam(list(accel ~ s(times, k=20, bs="ad"), ~ s(times)),
+    # gaulss(), data=MASS::mcycle) reaches REML 580.04420493350881 after 11
+    # outer Newton iterations. initial.spg pairs the reparameterized model
+    # matrix with the penalties in their original basis, so the starting
+    # smoothing parameters, and with them the path, follow the signs of
+    # Sl.setup's eigenvectors of the adaptive smooth's five penalties: the
+    # same path needs those penalties and their eigendecomposition to be R's
+    # to the bit.
+    from hea.family import gaulss
+
+    d = load_dataset("MASS", "mcycle")
+    m = gam(
+        ["accel ~ s(times, k=20, bs='ad')", "~ s(times)"],
+        d,
+        family=gaulss(),
+        method="REML",
+    )
+    np.testing.assert_allclose(
+        m.REML_criterion / 2,
+        580.04420493350881,
+        rtol=0,
+        atol=1e-8 if PINNED_ARITHMETIC else 1e-5,
+    )
+    if PINNED_ARITHMETIC:
+        assert m.outer_info["iter"] == 11
+    # the fitted model itself (tests/scripts/make_initial_spg_fixtures.R):
+    # every gam.fit5 call, the outer path and gam.fit5.post.proc as mgcv's
+    q = 30
+    ref = np.fromfile(FIXTURE_ROOT / "initial_spg" / "mcycle_gaulss_fit.bin")
+    want = {
+        "coef": ref[:q],
+        "edf": ref[q : 2 * q],
+        "edf1": ref[2 * q : 3 * q],
+        "edf2": ref[3 * q : 4 * q],
+        "Vp": ref[4 * q : 4 * q + q * q].reshape((q, q), order="F"),
+        "Vc": ref[4 * q + q * q : 4 * q + 2 * q * q].reshape((q, q), order="F"),
+        "lsp": ref[4 * q + 2 * q * q : 4 * q + 2 * q * q + 6],
+    }
+    got = {
+        "coef": np.asarray(m.coef, dtype=float),
+        "edf": np.asarray(m.edf, dtype=float),
+        "edf1": np.asarray(m.edf1, dtype=float),
+        "edf2": np.asarray(m.edf2, dtype=float),
+        "Vp": np.asarray(m.Vp, dtype=float),
+        "Vc": np.asarray(m.Vc, dtype=float),
+        "lsp": np.log(np.asarray(m.sp, dtype=float)),
+    }
+    for k, w in want.items():
+        if PINNED_ARITHMETIC:
+            np.testing.assert_array_equal(got[k], w, err_msg=k)
+        else:
+            np.testing.assert_allclose(got[k], w, rtol=1e-6, atol=1e-6, err_msg=k)
+
+
+@pytest.mark.skipif(
+    not PINNED_ARITHMETIC,
+    reason="the start lives in Sl.setup's eigenbasis, whose signs follow the BLAS",
+)
+def test_gaulss_initial_spg_matches_mgcv(monkeypatch):
+    # mgcv's initial.spg for gam(list(accel ~ s(times, k=20, bs="ad"),
+    # ~ s(times)), gaulss()) on MASS::mcycle (fixtures from
+    # tests/scripts/make_initial_spg_fixtures.R): the family's start (pen.reg
+    # on the reparameterized X with the balanced penalty root) and the
+    # initial log smoothing parameters, to the bit.
+    import sys
+
+    from conftest import FIXTURE_ROOT
+
+    from hea.family import gaulss
+
+    G = sys.modules["hea.models.gam"]
+    cap: dict = {}
+    orig = G._initial_sp_general
+
+    def wrap(X, y, family, slots, lpi, **kw):
+        ic = family.initialize_coef
+
+        def ic_w(*a, **k):
+            out = ic(*a, **k)
+            cap.setdefault("start", np.array(out))
+            return out
+
+        monkeypatch.setattr(family, "initialize_coef", ic_w)
+        out = orig(X, y, family, slots, lpi, **kw)
+        cap.setdefault("lsp0", np.array(out))
+        return out
+
+    monkeypatch.setattr(G, "_initial_sp_general", wrap)
+    d = load_dataset("MASS", "mcycle")
+    gam(
+        ["accel ~ s(times, k=20, bs='ad')", "~ s(times)"],
+        d,
+        family=gaulss(),
+        method="REML",
+    )
+    fx = FIXTURE_ROOT / "initial_spg"
+    np.testing.assert_array_equal(
+        cap["start"], np.fromfile(fx / "mcycle_gaulss_ad_start.bin", dtype="<f8")
+    )
+    np.testing.assert_array_equal(
+        cap["lsp0"], np.fromfile(fx / "mcycle_gaulss_ad_lsp0.bin", dtype="<f8")
+    )
+
+
+@pytest.mark.skipif(
+    not PINNED_ARITHMETIC, reason="exact bits are pinned under the fixtures' arithmetic"
+)
+def test_initial_spg_linked_sp_regression_matches_mgcv(monkeypatch):
+    # initial.spg regresses the per-penalty log sps on the id-linking L,
+    # lm(lsp ~ L - 1 + offset(lsp0)) (LINPACK Cdqrls on R's short vectors),
+    # then estimate.gam logs exp() of it: to the bit, from
+    # tests/scripts/make_initial_spg_fixtures.R.
+    import sys
+
+    import polars as pl
+    from conftest import FIXTURE_ROOT
+
+    from hea.family import binomial
+    from hea.R.rng import RGenerator
+
+    G = sys.modules["hea.models.gam"]
+    cap: dict = {}
+    orig = G._lsp_on_L
+
+    def wrap(lsp, L, lsp0=None):
+        out = orig(lsp, L, lsp0)
+        cap.setdefault("lsp", np.array(out))
+        return out
+
+    monkeypatch.setattr(G, "_lsp_on_L", wrap)
+    g = RGenerator(45)
+    x = g.uniform(size=200)
+    z = g.uniform(size=200)
+    yb = (g.uniform(size=200) < 0.5 + 0.3 * np.sin(6 * x)).astype(float)
+    d = pl.DataFrame({"x": x, "z": z, "yb": yb})
+    gam("yb ~ s(x, id=1) + s(z, id=1)", d, family=binomial(), method="REML")
+    np.testing.assert_array_equal(
+        cap["lsp"],
+        np.fromfile(FIXTURE_ROOT / "initial_spg" / "binomial_id_lsp0.bin", dtype="<f8"),
+    )

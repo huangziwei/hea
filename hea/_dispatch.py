@@ -2,11 +2,13 @@
 
 The compiled ``hea._rs`` (Rust/PyO3, crate ``hea-rs`` in ``rust/``) accelerates
 hea's hot numeric kernels — nmath d/p/q, the RNG, clustering/distance, linalg,
-and the tp smooth basis. It is **optional**: on sdist / no-toolchain installs,
-on an unsupported platform, or when ``HEA_NO_RS`` is set to a truthy value, the
-pure-Python kernels run instead. Those kernels are the bit-exact reference (and
-the oracle the Rust path is checked against, tests/test_rs_parity.py) — so the
-fallback is never "wrong", only slower.
+and the tp smooth basis — and carries the ports of R's reference LAPACK
+routines. It is **optional**: on sdist / no-toolchain installs, on an
+unsupported platform, or when ``HEA_NO_RS`` is set to a truthy value, the
+pure-Python kernels run instead. Where a kernel has a pure-Python twin, the twin
+computes the same expressions (tests/test_rs_parity.py checks the pairs); the
+LAPACK ports have none, and without the extension those calls go to SciPy's
+LAPACK, so results that depend on them are not R's to the last bit.
 
 This lives at the top level (not under ``hea/R/``) because the Rust extension is
 package-wide: consumers include ``hea.R.*`` (nmath/rng/clustering/distance/
