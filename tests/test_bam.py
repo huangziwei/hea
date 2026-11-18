@@ -3835,7 +3835,26 @@ def _bam_freml_fixture(name):
     }
 
 
-def _assert_bam_freml_matches(m, want):
+# Fixtures whose comparison off PINNED_ARITHMETIC needs more than a tolerance:
+# fits on a basis whose columns are eigenvectors, with signs that follow the
+# arithmetic (t2's marginals), and fits whose criterion is flat along a
+# smoothing parameter (or nb's theta), so that where the optimizer stops
+# moves with the arithmetic.
+_SIGN_FREE_BASIS = frozenset({"t2_xz", "d_t2"})
+_FLAT_OPTIMUM = frozenset(
+    {"d_t2", "d_nb", "d_pois_te", "d_sz_2fac", "d_side_bynum", "sz_2fac"}
+)
+
+
+def _assert_bam_freml_matches(m, name):
+    """The fit against mgcv's fixture ``name``: to the bit under
+    PINNED_ARITHMETIC, else to rtol 1e-8. Off the pinned arithmetic, for a
+    basis in ``_SIGN_FREE_BASIS`` coefficients and covariances are compared
+    after giving each coefficient mgcv's sign; in ``_FLAT_OPTIMUM`` the
+    score and scale keep rtol 1e-8 and the fitted values take 1e-6, while
+    the smoothing parameters and everything that follows from them take
+    1e-2."""
+    want = _bam_freml_fixture(name)
     got = {
         "coef": np.asarray(m.coef, dtype=float),
         "sp": np.asarray(m.sp, dtype=float),
@@ -3849,11 +3868,19 @@ def _assert_bam_freml_matches(m, want):
         "Ve": np.asarray(m.Ve, dtype=float),
         "fitted": np.asarray(m.fitted_values, dtype=float),
     }
+    if not PINNED_ARITHMETIC and name in _SIGN_FREE_BASIS:
+        s = np.where(got["coef"] * want["coef"] < 0, -1.0, 1.0)
+        got["coef"] = got["coef"] * s
+        for k in ("Vp", "Vc", "Ve"):
+            got[k] = got[k] * np.outer(s, s)
     for k, w in want.items():
         if PINNED_ARITHMETIC:
             np.testing.assert_array_equal(got[k], w, err_msg=k)
-        else:
-            np.testing.assert_allclose(got[k], w, rtol=1e-8, atol=1e-10, err_msg=k)
+            continue
+        rtol = 1e-8
+        if name in _FLAT_OPTIMUM and k not in ("scale", "reml"):
+            rtol = 1e-6 if k == "fitted" else 1e-2
+        np.testing.assert_allclose(got[k], w, rtol=rtol, atol=1e-10, err_msg=k)
 
 
 @_needs_rs
@@ -3871,7 +3898,7 @@ def test_bam_freml_gaussian_matches_mgcv_exactly(name, formula):
         {"x": raw[1 : n + 1], "z": raw[n + 1 : 2 * n + 1], "y": raw[2 * n + 1 :]}
     )
     m = hea.models.bam(formula, data, method="fREML")
-    _assert_bam_freml_matches(m, _bam_freml_fixture(name))
+    _assert_bam_freml_matches(m, name)
 
 
 @_needs_rs
@@ -3893,7 +3920,7 @@ def test_bam_freml_pirls_matches_mgcv_exactly(name, response, family):
     m = hea.models.bam(
         f"{response} ~ s(x) + s(z)", pl.DataFrame(cols), family=family, method="fREML"
     )
-    _assert_bam_freml_matches(m, _bam_freml_fixture(name))
+    _assert_bam_freml_matches(m, name)
 
 
 @_needs_rs
@@ -3930,7 +3957,7 @@ def test_bam_discrete_freml_matches_mgcv_exactly(
         discrete=True,
         rho=rho,
     )
-    _assert_bam_freml_matches(m, _bam_freml_fixture(name))
+    _assert_bam_freml_matches(m, name)
 
 
 def _discrete_survey_data():
@@ -3978,7 +4005,17 @@ def _discrete_survey_data():
         ("d_te_bynum", "y ~ te(x, z, by = zb)", "gaussian"),
         ("d_t2", "y ~ t2(x, z)", "gaussian"),
         ("d_ti_k", "y ~ s(x) + s(z) + ti(x, z, k = c(5, 4))", "gaussian"),
-        ("d_fs", "y ~ s(x, fac, bs = 'fs', k = 5)", "gaussian"),
+        pytest.param(
+            "d_fs",
+            "y ~ s(x, fac, bs = 'fs', k = 5)",
+            "gaussian",
+            marks=pytest.mark.skipif(
+                not PINNED_ARITHMETIC,
+                reason="fs penalizes each direction of the base smooth's null "
+                "space apart, and eigen() picks those directions by the "
+                "arithmetic's last bits",
+            ),
+        ),
         ("d_re_slope", "y ~ s(x) + s(fac, z, bs = 're')", "gaussian"),
         ("d_re_2fac", "y ~ s(x) + s(fac, g, bs = 're')", "gaussian"),
         ("d_sz", "y ~ s(x) + s(fac, x, bs = 'sz')", "gaussian"),
@@ -4008,7 +4045,7 @@ def test_bam_discrete_terms_match_mgcv_exactly(name, formula, family):
     m = hea.models.bam(
         formula, _discrete_survey_data(), family=fam, method="fREML", discrete=True
     )
-    _assert_bam_freml_matches(m, _bam_freml_fixture(name))
+    _assert_bam_freml_matches(m, name)
 
 
 @_needs_rs
@@ -4020,7 +4057,7 @@ def test_bam_discrete_fixed_sp_matches_mgcv_exactly():
     m = hea.models.bam(
         "y ~ s(x) + s(z)", _discrete_survey_data(), sp=[0.3, 2.0], discrete=True
     )
-    _assert_bam_freml_matches(m, _bam_freml_fixture("d_fixsp"))
+    _assert_bam_freml_matches(m, "d_fixsp")
     assert m.method == "REML" and m.sp.size == 0
     np.testing.assert_array_equal(m.full_sp, [0.3, 2.0])
 
@@ -4048,7 +4085,10 @@ def test_bam_no_free_sp_matches_mgcv(name, formula, family, sp):
     assert m.method == "REML" and m.sp.size == 0
     np.testing.assert_allclose(m.coef, coef, rtol=1e-11, atol=1e-13)
     np.testing.assert_allclose(m.scale, sig2, rtol=1e-11)
-    np.testing.assert_allclose(m.REML_criterion / 2, score, rtol=1e-12)
+    # With the scale estimated, the reported score moves to first order with
+    # where the Newton on log phi stops, which moves with the arithmetic.
+    reml_rtol = 1e-12 if PINNED_ARITHMETIC or family != "gaussian" else 1e-6
+    np.testing.assert_allclose(m.REML_criterion / 2, score, rtol=reml_rtol)
     np.testing.assert_allclose(m.edf, edf, rtol=1e-11, atol=1e-13)
     np.testing.assert_allclose(m.fitted_values, fitted, rtol=1e-11, atol=1e-13)
     assert fitted.size == n
@@ -4068,7 +4108,7 @@ def test_bam_random_effect_terms_match_mgcv_exactly(name, formula):
     factors (``model.matrix(~ f:z - 1)``, which bam also replays through
     PredictMat for its linear predictor), and ``sz`` over two factors."""
     m = hea.models.bam(formula, _discrete_survey_data(), method="fREML")
-    _assert_bam_freml_matches(m, _bam_freml_fixture(name))
+    _assert_bam_freml_matches(m, name)
 
 
 @_needs_rs
@@ -4094,7 +4134,7 @@ def test_bam_extended_family_fits_match_mgcv_exactly(name, formula, family):
     df = pl.DataFrame({"x": x, "z": z, "yb": yb, "yz": yz, "yo": yo - 1.0})
     fam = {"betar": betar(), "ziP": ziP(), "ocat": ocat(R=4)}[family]
     m = hea.models.bam(formula, df, family=fam, method="fREML")
-    _assert_bam_freml_matches(m, _bam_freml_fixture(name))
+    _assert_bam_freml_matches(m, name)
     ref = np.fromfile(FIXTURE_ROOT / "bam_freml" / f"{name}_resid.bin")
     want_res, want_dev, want_null = ref[n : 2 * n], ref[2 * n], ref[2 * n + 1]
     got = (np.asarray(m.residuals, dtype=float), m.deviance, m.null_deviance)
@@ -4130,4 +4170,4 @@ def test_bam_use_chol_matches_mgcv_exactly(name, response, family, data_file):
         method="fREML",
         use_chol=True,
     )
-    _assert_bam_freml_matches(m, _bam_freml_fixture(name))
+    _assert_bam_freml_matches(m, name)

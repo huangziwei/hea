@@ -6902,7 +6902,10 @@ def test_negbin_components_match_mgcv():
             0.038014875766715139,
         ],
     )
-    assert f.aic(y, mu, None, w, None) == 14.422747381464536
+    # R's sum() accumulates in LDOUBLE, and the terms sum to the first value
+    # in a double one (arm64 macOS) and to the next double up in the wider
+    # ones (x86-64 and aarch64 Linux).
+    assert f.aic(y, mu, None, w, None) in (14.422747381464536, 14.422747381464537)
     np.testing.assert_array_equal(f.ls(y, w, 1.0), [-5.8830735480899392, 0.0, 0.0])
     np.testing.assert_array_equal(f.variance(mu), [2.625, 4.0, 5.625, 24.0])
     np.testing.assert_array_equal(f.dvar(mu), [2.5, 3.0, 3.5, 7.0])

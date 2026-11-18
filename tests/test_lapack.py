@@ -212,7 +212,18 @@ def test_cdqrls_matches_r(name: str, n: int, p: int, deficient: bool):
     if PINNED_ARITHMETIC:
         np.testing.assert_array_equal(got, ref)
     else:
-        np.testing.assert_allclose(got, ref, rtol=0, atol=1e-11)
+        # dqrdc2 still builds a Householder reflector for each column it moved
+        # past the rank, from what rounding left of that column, scaled to
+        # unit length: those rows of qr and that qraux are the residue of
+        # this BLAS's rounding, not the data's.
+        rank = int(z["rank"])
+        keep = np.ones(got.size, dtype=bool)
+        at_qraux = p + 2 * n
+        keep[at_qraux + rank : at_qraux + p] = False
+        at_qr = at_qraux + p
+        for j in range(rank, p):
+            keep[at_qr + j * n + rank : at_qr + (j + 1) * n] = False
+        np.testing.assert_allclose(got[keep], ref[keep], rtol=0, atol=1e-11)
 
 
 @pytest.mark.parametrize(

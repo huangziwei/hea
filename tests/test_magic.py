@@ -7,7 +7,8 @@ is an offset, and bam's id-linked bases. The fixtures in
 
 With the compiled port under the arithmetic the fixtures were written with
 (``PINNED_ARITHMETIC``) every value must be mgcv's to the bit; elsewhere the
-BLAS and LAPACK round differently and the comparisons take a tolerance.
+BLAS and LAPACK round differently, the comparisons take a tolerance and the
+singular vectors in ``rV`` may change sign.
 """
 
 from __future__ import annotations
@@ -15,7 +16,12 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 import pytest
-from conftest import FIXTURE_ROOT, PINNED_ARITHMETIC, load_hex_fixture
+from conftest import (
+    FIXTURE_ROOT,
+    PINNED_ARITHMETIC,
+    assert_allclose_up_to_signs,
+    load_hex_fixture,
+)
 
 import hea
 from hea._dispatch import HAVE_RS, rs_fn
@@ -31,10 +37,22 @@ def _load(name: str) -> dict:
 
 
 def _same(got, want, name, rtol=1e-8, atol=1e-10):
+    """Exact under PINNED_ARITHMETIC, else to the tolerance. Off the pinned
+    arithmetic ``rV``'s columns, singular vectors, may each be mgcv's
+    negated; and ``R``, the pivoted QR factor with its columns unpivoted,
+    is compared through ``R'R = X'X``: when columns of X tie in norm (two of
+    norm 20 in the ``big`` case), the pivot order and with it the rows of
+    ``R`` follow the arithmetic."""
     got = np.asarray(got, dtype=float)
     want = np.asarray(want, dtype=float)
     if PINNED_ARITHMETIC:
         np.testing.assert_array_equal(got, want, err_msg=name)
+    elif name == "rV":
+        assert_allclose_up_to_signs(got, want, rtol=rtol, atol=atol, err_msg=name)
+    elif name == "R":
+        np.testing.assert_allclose(
+            got.T @ got, want.T @ want, rtol=rtol, atol=atol, err_msg=name
+        )
     else:
         np.testing.assert_allclose(got, want, rtol=rtol, atol=atol, err_msg=name)
 

@@ -426,7 +426,6 @@ def test_cubic_regression_bases_match_mgcv(bs, k):
     from conftest import PINNED_ARITHMETIC
 
     from hea._crspl import crspl
-    from hea._dispatch import HAVE_RS
     from hea.formula import (
         _cc_basis,
         _cc_raw,
@@ -436,10 +435,6 @@ def test_cubic_regression_bases_match_mgcv(bs, k):
         parse,
     )
 
-    if bs == "cs" and not HAVE_RS:
-        # cs adds the penalty's null-space eigenvectors with unequal weights,
-        # and that space is degenerate: the vectors are the dsyevr port's
-        pytest.skip("the dsyevr port lives in hea._rs")
     fx = FIXTURE_ROOT / "crspl"
     x = np.fromfile(fx / "x.bin")
     xp = np.fromfile(fx / "xp.bin")
@@ -456,11 +451,35 @@ def test_cubic_regression_bases_match_mgcv(bs, k):
     tag = f"{bs}_{k}"
     for got, name in ((X, "X"), (S_list[0], "S"), (kn, "knots"), (P, "P")):
         ref = np.fromfile(fx / f"{tag}_{name}.bin").reshape(got.shape, order="F")
+        scale = max(1.0, float(np.abs(ref).max()))
         if PINNED_ARITHMETIC:
             np.testing.assert_array_equal(got, ref, err_msg=f"{tag} {name}")
+        elif bs == "cs" and name == "S":
+            _assert_cs_penalty_matches(got, ref, kn, 1e-11 * scale)
         else:
-            scale = max(1.0, float(np.abs(ref).max()))
             np.testing.assert_allclose(got, ref, rtol=0, atol=1e-12 * scale)
+
+
+def _assert_cs_penalty_matches(S, S_ref, knots, atol):
+    """cs's penalty is cr's with its two null-space eigenvalues raised by
+    unequal amounts, along whichever orthonormal pair of eigenvectors the
+    symmetric eigensolver returns for that degenerate space, a pair that
+    follows the arithmetic. The space is that of the straight lines,
+    span{1, knots}, so split along it the penalty's range block and its
+    coupling to the null space must be mgcv's, and its null block mgcv's up
+    to a rotation: the same eigenvalues."""
+    N = np.linalg.qr(np.column_stack([np.ones_like(knots), knots]))[0]
+    R = np.eye(knots.size) - N @ N.T
+    for got, want, what in (
+        (R @ S @ R, R @ S_ref @ R, "range block"),
+        (R @ S @ N, R @ S_ref @ N, "coupling"),
+        (
+            np.linalg.eigvalsh(N.T @ S @ N),
+            np.linalg.eigvalsh(N.T @ S_ref @ N),
+            "null block",
+        ),
+    ):
+        np.testing.assert_allclose(got, want, rtol=0, atol=atol, err_msg=what)
 
 
 def test_r_var_matches_r():
@@ -507,7 +526,7 @@ def test_t2_prediction_map_matches_mgcv():
     # t2 block bam fits in the prediction basis (modCon = 2)
     # (tests/scripts/make_t2_P_fixtures.R).
     import polars as pl
-    from conftest import PINNED_ARITHMETIC
+    from conftest import PINNED_ARITHMETIC, assert_allclose_up_to_signs
 
     from hea.models import bam, gam
     from hea.R.rng import RGenerator
@@ -521,14 +540,21 @@ def test_t2_prediction_map_matches_mgcv():
     data = pl.DataFrame({"x": x, "z": z, "y": y, "w": w})
     fx = FIXTURE_ROOT / "t2_P"
 
-    def check(got, name):
+    def check(got, name, rows):
+        # Off PINNED_ARITHMETIC the marginal bases' eigenvectors may change
+        # sign, flipping columns of the model matrix and rows and columns of
+        # the map between the two parameterizations.
         ref = np.fromfile(fx / name).reshape(got.shape, order="F")
         if PINNED_ARITHMETIC:
             np.testing.assert_array_equal(got, ref)
         else:
-            np.testing.assert_allclose(got, ref, rtol=0, atol=1e-12)
+            assert_allclose_up_to_signs(got, ref, rows=rows, atol=1e-12, err_msg=name)
 
-    check(gam("y ~ t2(x, z)", data, method="REML")._G_P, "P.bin")
-    check(gam("y ~ t2(x, z, k=c(4, 5)) + w", data, method="REML")._G_P, "P_param.bin")
+    check(gam("y ~ t2(x, z)", data, method="REML")._G_P, "P.bin", True)
+    check(
+        gam("y ~ t2(x, z, k=c(4, 5)) + w", data, method="REML")._G_P,
+        "P_param.bin",
+        True,
+    )
     b = bam("y ~ t2(x, z)", data)
-    check(np.column_stack([np.ones(n), b._blocks[0].X]), "bam_X.bin")
+    check(np.column_stack([np.ones(n), b._blocks[0].X]), "bam_X.bin", False)

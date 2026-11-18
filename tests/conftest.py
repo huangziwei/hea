@@ -29,6 +29,51 @@ def assert_fp_equiv(a, b):
     )
 
 
+def assert_allclose_up_to_signs(
+    got, want, *, rows=False, rtol=0.0, atol=0.0, err_msg=""
+):
+    """``got`` equals ``want`` with the signs of whole columns flipped (and of
+    whole rows too, with ``rows``), to the tolerance: the comparison for
+    values built from eigen- or singular vectors, whose signs follow the
+    arithmetic. A vector is one column. Column signs alone are read from
+    each column's inner product with ``want``; with ``rows`` they spread
+    from the entries of ``want`` above ``atol``, so every entry must then fit
+    one pattern of row and column signs."""
+    got = np.asarray(got, dtype=float)
+    want = np.asarray(want, dtype=float)
+    assert got.shape == want.shape, f"{err_msg}: shape {got.shape} != {want.shape}"
+    g = got.reshape(want.shape[0], -1)
+    w = want.reshape(want.shape[0], -1)
+    m, n = w.shape
+    r = np.ones(m)
+    if not rows:
+        c = np.sign(np.sum(g * w, axis=0))
+    else:
+        r[:] = 0.0
+        c = np.zeros(n)
+        big = np.abs(w) > atol
+        flip = np.sign(g) * np.sign(w)
+        for start in range(m):
+            if r[start]:
+                continue
+            r[start] = 1.0
+            todo = [(True, start)]
+            while todo:
+                is_row, k = todo.pop()
+                if is_row:
+                    for j in np.flatnonzero(big[k] & (c == 0)):
+                        c[j] = flip[k, j] * r[k] or 1.0
+                        todo.append((False, j))
+                else:
+                    for i in np.flatnonzero(big[:, k] & (r == 0)):
+                        r[i] = flip[i, k] * c[k] or 1.0
+                        todo.append((True, i))
+    c[c == 0] = 1.0
+    np.testing.assert_allclose(
+        g, r[:, None] * w * c[None, :], rtol=rtol, atol=atol, err_msg=err_msg
+    )
+
+
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 
 
