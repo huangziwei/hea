@@ -26,6 +26,7 @@ import warnings
 import numpy as np
 import polars as pl
 
+from .. import _libm as libm
 from .diagnostics import influence
 from .linalg import Cdqrls, dqrsl
 from .model_generics import coef, deviance, nobs, residuals, weights
@@ -145,7 +146,7 @@ def covratio(model, infl=None, res=None):
     with np.errstate(divide="ignore", invalid="ignore"):
         e_star = res / (sigma_i * np.sqrt(omh))
     e_star = np.where(np.isinf(e_star), np.nan, e_star)
-    return 1.0 / (omh * (((n - p - 1) + e_star**2) / (n - p)) ** p)
+    return 1.0 / (omh * libm.pow_op((((n - p - 1) + e_star**2) / (n - p)), p))
 
 
 def _abbreviate(names, minlength=4):
@@ -241,7 +242,7 @@ def influence_measures(model, infl=None):
     with np.errstate(divide="ignore", invalid="ignore"):
         dffit = e * np.sqrt(h) / (si * (1.0 - h))
     dffit = np.where(np.isinf(dffit), np.nan, dffit)
-    cov_r = (si / s) ** (2 * p) / (1.0 - h)
+    cov_r = libm.pow_op((si / s), (2 * p)) / (1.0 - h)
     with np.errstate(divide="ignore", invalid="ignore"):
         cook_d = ((e / (s * (1.0 - h))) ** 2 * h) / p
 

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from ... import _libm as libm
+
 
 def extended_breaks(
     dmin: float,
@@ -63,10 +65,10 @@ def extended_breaks(
                     break
 
                 delta = (dmax - dmin) / (k + 1) / j / q
-                z = int(np.ceil(np.log10(delta))) if delta > 0 else -300
+                z = int(np.ceil(libm.log10(delta))) if delta > 0 else -300
 
                 while z < 300:
-                    step = j * q * 10.0**z
+                    step = j * q * libm.pow_op(10.0, z)
                     cm = _coverage_max(dmin, dmax, step * (k - 1))
                     if (w[0] * sm + w[1] * cm + w[2] * dm + w[3]) < best_score:
                         break

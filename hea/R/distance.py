@@ -36,6 +36,7 @@ import warnings
 
 import numpy as np
 
+from .. import _libm as libm
 from .._dispatch import rs_fn
 from ._shared import _rfma_vec
 
@@ -119,10 +120,10 @@ def _r_pow_nonneg(x, y):
     if y == 2.0:
         return x * x
     if y == 3.0:
-        return np.where(x <= 11.0, x * x * x, np.power(x, 3.0))
+        return np.where(x <= 11.0, x * x * x, libm.power(x, 3.0))
     if y == 4.0:
-        return np.where(x <= 11.0, x * x * x * x, np.power(x, 4.0))
-    return np.power(x, y)
+        return np.where(x <= 11.0, x * x * x * x, libm.power(x, 4.0))
+    return libm.power(x, y)
 
 
 def _cdist(x, mi, p):

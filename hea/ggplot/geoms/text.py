@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from ... import _libm as libm
 from ..aes import split_layer_kwargs
 from .geom import Geom
 
@@ -896,7 +897,7 @@ def _do_repel(
         if hide_mask[i]:
             continue
         direction = anchors[i] - pos[i]
-        d_center = np.hypot(direction[0], direction[1])
+        d_center = libm.hypot(direction[0], direction[1])
         if d_center < 1e-9:
             continue  # anchor coincident with label center
         visible_hw = half_w[i] - box_pad_px

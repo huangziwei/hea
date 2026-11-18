@@ -31,6 +31,7 @@ import math
 
 import numpy as np
 
+from .. import _libm as libm
 from . import nmath as _nm
 from ._shared import NamedVector
 from .rng import RMersenneTwister
@@ -265,7 +266,7 @@ def dunif(x, min=0, max=1, log=False):
     inside = (a <= x) & (x <= b)
     with np.errstate(divide="ignore", invalid="ignore"):
         out = (
-            np.where(inside, -np.log(b - a), -np.inf)
+            np.where(inside, -libm.log(b - a), -np.inf)
             if log
             else np.where(inside, 1.0 / (b - a), 0.0)
         )
@@ -284,7 +285,7 @@ def punif(q, min=0, max=1, lower_tail=True, log_p=False):
     p = lower if lower_tail else 1.0 - lower
     if log_p:
         with np.errstate(divide="ignore"):
-            p = np.log(p)
+            p = libm.log(p)
     p = np.asarray(p, float)
     bad = (
         (b < a)
@@ -304,7 +305,7 @@ def qunif(p, min=0, max=1, lower_tail=True, log_p=False):
     a = np.asarray(min, float)
     b = np.asarray(max, float)
     if log_p:
-        pv = np.exp(p) if lower_tail else -np.expm1(p)
+        pv = libm.exp(p) if lower_tail else -libm.expm1(p)
     else:
         pv = p if lower_tail else 1.0 - p
     out = np.asarray(a + pv * (b - a), float)
@@ -435,7 +436,7 @@ def rcauchy(n, location=0, scale=1):
     loc = _recycle(location, nn)
     sc = _recycle(scale, nn)
     u = np.asarray(rng.unif_rand(nn), dtype=float)
-    return loc + sc * np.tan(np.pi * u)
+    return loc + sc * libm.tan(np.pi * u)
 
 
 def dlogis(x, location=0, scale=1, log=False):
@@ -461,7 +462,7 @@ def rlogis(n, location=0, scale=1):
     loc = _recycle(location, nn)
     sc = _recycle(scale, nn)
     u = np.asarray(rng.unif_rand(nn), dtype=float)
-    return loc + sc * np.log(u / (1.0 - u))
+    return loc + sc * libm.log(u / (1.0 - u))
 
 
 def dlnorm(x, meanlog=0, sdlog=1, log=False):
@@ -482,7 +483,7 @@ def qlnorm(p, meanlog=0, sdlog=1, lower_tail=True, log_p=False):
 def rlnorm(n, meanlog=0, sdlog=1):
     """R: ``rlnorm(n, meanlog=0, sdlog=1)`` — ``exp(rnorm(meanlog, sdlog))`` on
     R's MT stream (bit-exact)."""
-    return np.exp(rnorm(n, meanlog, sdlog))
+    return libm.exp(rnorm(n, meanlog, sdlog))
 
 
 def dweibull(x, shape, scale=1, log=False):
@@ -508,7 +509,7 @@ def rweibull(n, shape, scale=1):
     sh = _recycle(shape, nn)
     sc = _recycle(scale, nn)
     u = np.asarray(rng.unif_rand(nn), dtype=float)
-    return sc * np.power(-np.log(u), 1.0 / sh)
+    return sc * libm.power(-libm.log(u), 1.0 / sh)
 
 
 def dgeom(x, prob, log=False):
@@ -809,7 +810,7 @@ def pbirthday(n, classes=365, coincident=2):
         return 0.0
     if n > c * (k - 1):
         return 1.0
-    lhs = n * math.exp(-n / (c * k)) / (1 - n / (c * (k + 1))) ** (1.0 / k)
+    lhs = n * math.exp(-n / (c * k)) / libm.pow_op((1 - n / (c * (k + 1))), (1.0 / k))
     lxx = k * math.log(lhs) - (k - 1) * math.log(c) - _nm._lgammafn(k + 1)
     return float(-math.expm1(-math.exp(lxx)))
 

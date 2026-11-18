@@ -23,6 +23,7 @@ import warnings
 
 import numpy as np
 
+from . import _libm as libm
 from ._rfma import _rfma_vec
 
 
@@ -108,7 +109,7 @@ def _rpow(x, p):
             of[i] = _r_pow_scalar(float(v), p)
         return out
     with np.errstate(all="ignore"):
-        out = np.power(x, p)
+        out = libm.power(x, p)
     out = np.where(x == 1.0, 1.0, out)
     out = np.where(x == 0.0, 0.0 if p > 0.0 else math.inf, out)
     odd = ~np.isfinite(x)

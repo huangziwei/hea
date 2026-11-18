@@ -22,6 +22,8 @@ from functools import lru_cache
 from itertools import combinations
 from types import MappingProxyType
 
+from . import _libm as libm
+
 __all__ = [
     "BinOp",
     "Call",
@@ -1450,27 +1452,27 @@ def _eval_call(call: Call, data: pl.DataFrame):
             if base_node is None and len(call.args) >= 2:
                 base_node = call.args[1]
             if base_node is None:
-                out = np.log(v)
+                out = libm.log(v)
             else:
                 # R's logbase: log10 and log2 for those bases, else the ratio.
                 b = np.broadcast_to(_eval_numeric(base_node, data), v.shape)
                 out = np.where(
                     b == 10,
-                    np.log10(v),
-                    np.where(b == 2, np.log2(v), np.log(v) / np.log(b)),
+                    libm.log10(v),
+                    np.where(b == 2, libm.log2(v), libm.log(v) / libm.log(b)),
                 )
             return _NumBlock(values=out.reshape(-1, 1), suffixes=[""], label=label)
         f = {
-            "exp": np.exp,
+            "exp": libm.exp,
             "sqrt": np.sqrt,
             "abs": np.abs,
-            "cos": np.cos,
-            "sin": np.sin,
-            "tan": np.tan,
-            "expm1": np.expm1,
-            "log1p": np.log1p,
-            "log2": np.log2,
-            "log10": np.log10,
+            "cos": libm.cos,
+            "sin": libm.sin,
+            "tan": libm.tan,
+            "expm1": libm.expm1,
+            "log1p": libm.log1p,
+            "log2": libm.log2,
+            "log10": libm.log10,
         }[fn]
         return _NumBlock(values=f(v).reshape(-1, 1), suffixes=[""], label=label)
 
@@ -1722,7 +1724,7 @@ def _eval_call(call: Call, data: pl.DataFrame):
         raw_k = call.kwargs.get("raw")
         is_raw = isinstance(raw_k, Literal) and raw_k.value is True
         if is_raw:
-            cols = np.stack([v**d for d in range(1, degree + 1)], axis=1)
+            cols = np.stack([libm.pow_op(v, d) for d in range(1, degree + 1)], axis=1)
         else:
             store, st = _basis_capture_replay(label)
             if st is not None:  # replay training basis
@@ -1992,9 +1994,9 @@ def _harmonic_basis(x, K: int, period: float):
     cols, suffixes = [], []
     for j in range(1, K + 1):
         w = (2.0 * np.pi * j / period) * x
-        cols.append(np.cos(w))
+        cols.append(libm.cos(w))
         suffixes.append(f"cos{j}")
-        cols.append(np.sin(w))
+        cols.append(libm.sin(w))
         suffixes.append(f"sin{j}")
     return np.stack(cols, axis=1), suffixes
 
@@ -5247,10 +5249,10 @@ def _gp_p_order(call: Call) -> tuple[float, ...] | None:
 
 def _gp_apply_kernel(E: np.ndarray, type_: int, power_k: float) -> np.ndarray:
     if type_ == 1:  # spherical (compact support on [0,1])
-        return (1.0 - 1.5 * E + 0.5 * E**3) * (E <= 1.0)
+        return (1.0 - 1.5 * E + 0.5 * libm.pow_op(E, 3)) * (E <= 1.0)
     if type_ == 2:  # power exponential
-        return np.exp(-(E**power_k))
-    eE = np.exp(-E)
+        return libm.exp(-(libm.pow_op(E, power_k)))
+    eE = libm.exp(-E)
     if type_ == 3:  # Matern ν=1.5
         return (1.0 + E) * eE
     if type_ == 4:  # Matern ν=2.5
@@ -5382,7 +5384,9 @@ def _build_gp_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     null_space_dim = 1 if stationary else d + 1
     k = bs_dim - null_space_dim
     if k < nk:
-        lam, UZ = _tp_rlanczos(E, k, -1, tol=float(np.finfo(float).eps) ** 0.5)
+        lam, UZ = _tp_rlanczos(
+            E, k, -1, tol=libm.pow_op(float(np.finfo(float).eps), 0.5)
+        )
         D = np.diag(np.concatenate([lam, np.zeros(null_space_dim)]))
     else:
         D = np.zeros((bs_dim, bs_dim))
@@ -5496,7 +5500,7 @@ def _tp_fast_eta_vec(m: int, d: int, rsq: np.ndarray, f0: float) -> np.ndarray:
         if not np.any(mask):
             return out
         r = rsq[mask]
-        f = np.log(r) * 0.5
+        f = libm.log(r) * 0.5
         f *= f0
         for _ in range(m - d2):
             f *= r
@@ -5903,7 +5907,7 @@ def _tp_rlanczos(
 
     n = A.shape[0]
     if tol is None:
-        tol = float(np.finfo(float).eps) ** 0.7
+        tol = libm.pow_op(float(np.finfo(float).eps), 0.7)
     eps_stop = tol
 
     biggest = False
@@ -6339,7 +6343,9 @@ def _lowrank_kernel_reduce(
     nk = K.shape[0]
     M = T.shape[1]
     if k < nk:
-        vals, vecs = _tp_rlanczos(K, k, -1, tol=float(np.finfo(float).eps) ** 0.5)
+        vals, vecs = _tp_rlanczos(
+            K, k, -1, tol=libm.pow_op(float(np.finfo(float).eps), 0.5)
+        )
         D = np.diag(vals)
     else:
         k = nk
@@ -6379,7 +6385,7 @@ def _duchon_E(
         pos = d != 0
         E = d.copy()
         dp = d[pos]
-        E[pos] = _rpow(dp, k) * np.log(dp)
+        E[pos] = _rpow(dp, k) * libm.log(dp)
     else:
         E = _rpow(d, k)
     sign_e = 1 - 2 * ((math.floor(k / 2) + 1) % 2)
@@ -6562,7 +6568,7 @@ def _rksos(z: np.ndarray) -> np.ndarray:
     rk[m_lo] = 1.0 - np.pi**2 / 6.0 + spence(W[m_lo])  # Li2(1−W)
     m_mid = (z > 0.0) & (z < 1.0)
     Wm = W[m_mid]
-    rk[m_mid] = 1.0 - np.log(1.0 - Wm) * np.log(Wm) - spence(1.0 - Wm)  # Li2(W)
+    rk[m_mid] = 1.0 - libm.log(1.0 - Wm) * libm.log(Wm) - spence(1.0 - Wm)  # Li2(W)
     rk[z >= 1.0] = 1.0
     return rk
 
@@ -6583,36 +6589,36 @@ def _makeR(
     lo_r = np.asarray(lo, dtype=float) * p180
     lak_r = np.asarray(lak, dtype=float) * p180
     lok_r = np.asarray(lok, dtype=float) * p180
-    v = np.sin(la_r)[:, None] * np.sin(lak_r)[None, :] + np.cos(la_r)[:, None] * np.cos(
-        lak_r
-    )[None, :] * np.cos(lo_r[:, None] - lok_r[None, :])
+    v = libm.sin(la_r)[:, None] * libm.sin(lak_r)[None, :] + libm.cos(la_r)[
+        :, None
+    ] * libm.cos(lak_r)[None, :] * libm.cos(lo_r[:, None] - lok_r[None, :])
     v = np.clip(v, -1.0, 1.0)
-    gamma = np.arccos(v)
+    gamma = libm.arccos(v)
 
     def _tcols(lar, lor):
         if m == -1:
-            zc = np.sin(lar)
-            xc = np.cos(lar) * np.sin(lor)
-            yc = np.cos(lar) * np.cos(lor)
+            zc = libm.sin(lar)
+            xc = libm.cos(lar) * libm.sin(lor)
+            yc = libm.cos(lar) * libm.cos(lor)
             return np.column_stack([np.ones_like(zc), xc, yc, zc])
         return np.ones((len(lar), 1))
 
     t_la = _tcols(la_r, lo_r)
     t_lak = _tcols(lak_r, lok_r)
     if m == -2:
-        zz = 2.0 * np.sin(gamma / 2.0)
+        zz = 2.0 * libm.sin(gamma / 2.0)
         zz = np.maximum(zz, np.finfo(float).tiny * 10)
         return -zz, t_la, t_lak
     if m == -1:
-        zz = 2.0 * np.sin(gamma / 2.0)
+        zz = 2.0 * libm.sin(gamma / 2.0)
         zz = np.maximum(zz, np.finfo(float).tiny * 10)
-        return zz * zz * np.log(zz) / (8.0 * np.pi), t_la, t_lak
+        return zz * zz * libm.log(zz) / (8.0 * np.pi), t_la, t_lak
     if m == 0:
         return _rksos(v) / (4.0 * np.pi), t_la, t_lak
     zz = np.maximum(1.0 - v, np.finfo(float).eps * 1e-4)
     W = zz / 2.0
     C = np.sqrt(W)
-    A = np.log(1.0 + 1.0 / C)
+    A = libm.log(1.0 + 1.0 / C)
     C = C * 2.0
     if m == 1:
         q = 2.0 * A * W - C + 1.0
@@ -6771,7 +6777,7 @@ def _nat_param(
     the columns of X because both blocks end with the same scale."""
     from .R.linalg import dqrdc2, dqrsl
 
-    tol = float(np.finfo(float).eps) ** 0.8
+    tol = libm.pow_op(float(np.finfo(float).eps), 0.8)
     X = np.asarray(X, dtype=float)
     p = X.shape[1]
 
@@ -7403,7 +7409,7 @@ def _te_parse_margins(call: Call, data: pl.DataFrame) -> list[dict]:
     # Default k is 5^d per margin (mgcv smooth.r:414) — a 2-D margin gets 25, not 5.
     k_src = call.kwargs.get("k")
     if k_src is None:
-        k_list = [5 ** d_list[i] for i in range(n_bases)]
+        k_list = [libm.pow_op(5, d_list[i]) for i in range(n_bases)]
     else:
         k_list = _te_parse_vec(k_src, n_bases, 5, _te_cast_int)
     bs_list = _te_parse_vec(call.kwargs.get("bs"), n_bases, "cr", _te_cast_str)
@@ -7615,7 +7621,7 @@ def _te_reparam_margin(
     P = predict_basis(knt)
     sv = r_svd(P)
     d = sv["d"]
-    if d[-1] / d[0] < float(np.finfo(float).eps) ** 0.66:
+    if d[-1] / d[0] < libm.pow_op(float(np.finfo(float).eps), 0.66):
         return X, S_list, None
     # sv$v %*% (t(sv$u)/sv$d), then Xm %*% XP and t(XP) %*% Sm %*% XP
     XP = r_matprod(sv["v"], np.ascontiguousarray(sv["u"].T) / d[:, None])
@@ -8736,10 +8742,10 @@ class Design:
 
 
 _LHS_FUNCS: dict[str, callable] = {
-    "log": np.log,
-    "log2": np.log2,
-    "log10": np.log10,
-    "exp": np.exp,
+    "log": libm.log,
+    "log2": libm.log2,
+    "log10": libm.log10,
+    "exp": libm.exp,
     "sqrt": np.sqrt,
     "abs": np.abs,
 }

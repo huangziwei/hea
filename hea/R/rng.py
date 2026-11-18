@@ -39,6 +39,7 @@ import math
 import numpy as np
 from scipy.linalg.lapack import dpstrf
 
+from .. import _libm as libm
 from .._dispatch import rs as _rs_mod
 from ._shared import _rfma, _rfma_vec
 
@@ -64,7 +65,7 @@ def _R_pow_di(x: float, n: int) -> float:
         return x
     if n != 0:
         if not math.isfinite(x):
-            return x ** float(n)  # R: R_pow(x, (double)n)
+            return libm.pow_op(x, float(n))  # R: R_pow(x, (double)n)
         is_neg = n < 0
         if is_neg:
             n = -n
@@ -202,7 +203,7 @@ def _qnorm5_vec(p: np.ndarray) -> np.ndarray:
     q = p - 0.5
     rc = _rfma_vec(-q, q, 0.180625)
     val_c = q * _qn_horner(rc, _QN_A, _rfma_vec) / _qn_horner(rc, _QN_B, _rfma_vec)
-    rt = np.sqrt(-np.log(np.where(q > 0.0, 1.0 - p, p)))
+    rt = np.sqrt(-libm.log(np.where(q > 0.0, 1.0 - p, p)))
     rn = rt - 1.6
     rf = rt - 5.0
     val_t = np.where(
@@ -462,7 +463,7 @@ class RMersenneTwister:
             return self._impl.unif_index(int(dn))
         if dn <= 0:
             return 0
-        bits = int(np.ceil(np.log2(dn)))
+        bits = int(np.ceil(libm.log2(dn)))
         while True:
             dv = self._rbits(bits)
             if dv < dn:
@@ -600,7 +601,7 @@ class RMersenneTwister:
         def step_f(pois, fk, difmuk):
             if pois < 10:
                 px = -mu
-                py = mu**pois / fact[int(pois)]
+                py = libm.pow_op(mu, pois) / fact[int(pois)]
             else:
                 del_ = one_12 / fk
                 del_ = del_ * (1.0 - 4.8 * del_ * del_)

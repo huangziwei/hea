@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import polars as pl
 
+from .. import _libm as libm
 from . import _fexact
 from . import distributions as _dist
 from . import nmath as _nm
@@ -323,7 +324,7 @@ def t_test(
         else:
             sx2, sy2 = vx / nx, vy / ny
             stderr = math.sqrt(sx2 + sy2)
-            df = stderr**4 / (sx2**2 / (nx - 1) + sy2**2 / (ny - 1))
+            df = libm.pow_op(stderr, 4) / (sx2**2 / (nx - 1) + sy2**2 / (ny - 1))
         tstat = (mx - my - mu) / stderr
 
     if alternative == "less":
@@ -595,7 +596,8 @@ def wilcox_test(
             mean = n * (n + 1) / 4.0
             nties = np.unique(r, return_counts=True)[1].astype(float)
             sigma = math.sqrt(
-                n * (n + 1) * (2 * n + 1) / 24.0 - np.sum(nties**3 - nties) / 48.0
+                n * (n + 1) * (2 * n + 1) / 24.0
+                - np.sum(libm.pow_op(nties, 3) - nties) / 48.0
             )
             ic = 0 if (icorrect > 0 and (ties or zero)) else icorrect
             pval = _wilcox_pval_asymp(V - mean, sigma, alternative, ic, n=n)
@@ -639,7 +641,8 @@ def wilcox_test(
             (n_x * n_y / 12.0)
             * (
                 (n_x + n_y + 1)
-                - np.sum(nties**3 - nties) / ((n_x + n_y) * (n_x + n_y - 1))
+                - np.sum(libm.pow_op(nties, 3) - nties)
+                / ((n_x + n_y) * (n_x + n_y - 1))
             )
         )
         ic = 0 if (icorrect > 0 and ties) else icorrect
@@ -678,7 +681,7 @@ def _wilcox_pval_asymp(zdiff, sigma, alternative, icorrect, *, n, m=None):
             n4 = 12 * (3 * n**2 + 3 * n - 1)
             d4 = 5 * n * (n + 1) * (2 * n + 1)
             l4 = -n4 / d4
-            n6 = 576 * (3 * n**4 + 6 * n**2 - 3 * n + 1)
+            n6 = 576 * (3 * libm.pow_op(n, 4) + 6 * n**2 - 3 * n + 1)
             d6 = 7 * (n * (n + 1) * (2 * n + 1)) ** 2
             l6 = n6 / d6
         else:  # two-sample rank-sum Edgeworth
@@ -686,10 +689,10 @@ def _wilcox_pval_asymp(zdiff, sigma, alternative, icorrect, *, n, m=None):
             d4 = 20 * m * n * (m + n + 1)
             l4 = -n4 / d4
             n6 = (
-                2 * (m**4 + n**4)
+                2 * (libm.pow_op(m, 4) + libm.pow_op(n, 4))
                 + 4 * m * n * (m**2 + n**2)
                 + 6 * m**2 * n**2
-                + 4 * (m**3 + n**3)
+                + 4 * (libm.pow_op(m, 3) + libm.pow_op(n, 3))
                 + 7 * m * n * (m + n)
                 + (m**2 + n**2)
                 + 2 * m * n
@@ -699,9 +702,15 @@ def _wilcox_pval_asymp(zdiff, sigma, alternative, icorrect, *, n, m=None):
             l6 = n6 / d6
         e = l4 / 24 * zz * (zz**2 - 3)
         if icorrect > 1:
-            e += l6 / 720 * zz * (zz**4 - 10 * zz**2 + 15)
+            e += l6 / 720 * zz * (libm.pow_op(zz, 4) - 10 * zz**2 + 15)
         if icorrect > 2:
-            e += 35 * l4**2 / 40320 * zz * (zz**6 - 21 * zz**4 + 105 * zz**2 - 105)
+            e += (
+                35
+                * l4**2
+                / 40320
+                * zz
+                * (libm.pow_op(zz, 6) - 21 * libm.pow_op(zz, 4) + 105 * zz**2 - 105)
+            )
         return (y - e) if lower_tail else (y + e)
 
     if alternative == "less":
@@ -903,7 +912,7 @@ def cor_test(
 
     if method == "spearman":
         rho = float(np.corrcoef(_avg_rank(x), _avg_rank(y))[0, 1])
-        S = (n**3 - n) * (1.0 - rho) / 6.0
+        S = (libm.pow_op(n, 3) - n) * (1.0 - rho) / 6.0
         use_exact = True if exact is None else exact
         if ties and use_exact:
             use_exact = False  # cannot compute exact p-value with ties
@@ -911,7 +920,7 @@ def cor_test(
         def pspearman(q, lower_tail):
             if n <= 1290 and use_exact:
                 return float(_prho(n, round(q) + 2 * int(lower_tail), lower_tail))
-            den = (n**3 - n) / 6.0
+            den = (libm.pow_op(n, 3) - n) / 6.0
             if continuity:
                 den += 1.0
             rr = 1.0 - q / den
@@ -930,7 +939,7 @@ def cor_test(
         else:
             p = (
                 pspearman(S, lower_tail=False)
-                if S > (n**3 - n) / 6.0
+                if S > (libm.pow_op(n, 3) - n) / 6.0
                 else pspearman(S, lower_tail=True)
             )
             pval = float(min(2.0 * p, 1.0))
@@ -1031,7 +1040,7 @@ def kruskal_test(formula: str, data: pl.DataFrame) -> HTest:
     _, ties = np.unique(x, return_counts=True)
     ties = ties.astype(float)
     H = (12.0 * stat / (n * (n + 1)) - 3.0 * (n + 1)) / (
-        1.0 - np.sum(ties**3 - ties) / (n**3 - n)
+        1.0 - np.sum(libm.pow_op(ties, 3) - ties) / (libm.pow_op(n, 3) - n)
     )
     pval = float(_dist.pchisq(H, k - 1, lower_tail=False))
     return HTest(
@@ -1384,7 +1393,7 @@ def fisher_test(
 
     def dnhyper(ncp):
         d = logdc + math.log(ncp) * support
-        d = np.exp(d - np.max(d))
+        d = libm.exp(d - np.max(d))
         return d / _rsum_ld(d)
 
     def mnhyper(ncp):
@@ -1720,7 +1729,7 @@ def bartlett_test(x, g) -> HTest:
     vi = np.array([np.var(gr, ddof=1) for gr in groups], dtype=float)
     n_total = float(ni.sum())
     v_total = float(np.sum(ni * vi) / n_total)
-    stat = (n_total * math.log(v_total) - np.sum(ni * np.log(vi))) / (
+    stat = (n_total * math.log(v_total) - np.sum(ni * libm.log(vi))) / (
         1.0 + (np.sum(1.0 / ni) - 1.0 / n_total) / (3.0 * (k - 1))
     )
     return HTest(
@@ -2559,7 +2568,7 @@ def friedman_test(y, groups, blocks) -> HTest:
     for row in mat:
         _, cnt = np.unique(row, return_counts=True)
         cnt = cnt.astype(float)
-        tie_sum += float(np.sum(cnt**3 - cnt))
+        tie_sum += float(np.sum(libm.pow_op(cnt, 3) - cnt))
     stat = (
         12.0
         * np.sum((r.sum(axis=0) - n * (k + 1) / 2.0) ** 2)
@@ -2772,7 +2781,7 @@ def quade_test(y, groups=None, blocks=None) -> HTest:
     if A == B:
         stat = float("nan")
         df1 = df2 = float("nan")
-        pval = float(_nm.gammafn(k + 1) ** (1 - b))
+        pval = float(libm.pow_op(_nm.gammafn(k + 1), (1 - b)))
     else:
         stat = (b - 1) * B / (A - B)
         df1, df2 = float(k - 1), float((b - 1) * (k - 1))
@@ -3116,14 +3125,14 @@ def _mantelhaen_exact(arr, ns, alternative, conf_level) -> HTest:
     hi = _rsum_ld(np.minimum(m_, t_))
     support = np.arange(lo, hi + 1)
     dc = _d2x2xk(ns, m_, n_, t_)
-    logdc = np.log(dc)
+    logdc = libm.log(dc)
     eps = _nm._DBL_EPSILON
 
     def dn(ncp):
         if ncp == 1.0:
             return dc
         d = logdc + math.log(ncp) * support
-        d = np.exp(d - np.max(d))
+        d = libm.exp(d - np.max(d))
         return d / _rsum_ld(d)
 
     def mn_(ncp):
@@ -3525,7 +3534,7 @@ def _uniroot_ext(f, lower, upper, extend_int="no", tol=None, maxiter=1000):
     ``[lower, upper]`` until ``f`` changes sign, then Brent-solve via the ported
     ``zeroin2``. ``extend_int`` ∈ {"no","yes","downX","upX"}."""
     if tol is None:
-        tol = _nm._DBL_EPSILON**0.25
+        tol = libm.pow_op(_nm._DBL_EPSILON, 0.25)
     if not (lower < upper):
         raise ValueError("lower < upper is not fulfilled")
     f_lower = f(lower)

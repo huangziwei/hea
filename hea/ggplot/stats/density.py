@@ -12,6 +12,7 @@ import numpy as np
 import polars as pl
 from scipy.stats import gaussian_kde
 
+from ... import _libm as libm
 from .stat import Stat
 
 _PANEL_X_RANGE_KEY = "_stat_density_panel_x_range"
@@ -87,7 +88,7 @@ class StatDensity(Stat):
             scale = min(sigma, iqr_scaled)
         else:
             scale = sigma if sigma > 0 else 1.0
-        return max(0.9 * scale * n ** (-1 / 5), 1e-10)
+        return max(0.9 * scale * libm.pow_op(n, (-1 / 5)), 1e-10)
 
 
 def stat_density(*, bw="nrd0", adjust=1.0, n=512, trim=False):

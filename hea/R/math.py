@@ -18,6 +18,8 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
+from .. import _libm as libm
+
 pi = float(np.pi)
 
 LETTERS: list[str] = [chr(ord("A") + i) for i in range(26)]
@@ -38,38 +40,38 @@ def sqrt(x):
 
 def exp(x):
     """R: elementwise e^x."""
-    return _elementwise(x, lambda v: v.exp(), np.exp)
+    return _elementwise(x, lambda v: v.exp(), libm.exp)
 
 
 def log(x, base=None):
     """R: elementwise log. Default is natural log; ``base`` for arbitrary base."""
     if base is None:
-        return _elementwise(x, lambda v: v.log(), np.log)
+        return _elementwise(x, lambda v: v.log(), libm.log)
     if isinstance(x, (pl.Expr, pl.Series)):
         return x.log(base)
-    return np.log(x) / np.log(base)
+    return libm.log(x) / libm.log(base)
 
 
 def log2(x):
     """R: elementwise base-2 log."""
     if isinstance(x, (pl.Expr, pl.Series)):
         return x.log(2.0)
-    return np.log2(x)
+    return libm.log2(x)
 
 
 def log10(x):
     """R: elementwise base-10 log."""
-    return _elementwise(x, lambda v: v.log10(), np.log10)
+    return _elementwise(x, lambda v: v.log10(), libm.log10)
 
 
 def log1p(x):
     """R: ``log(1 + x)``, accurate for small ``x``."""
-    return _elementwise(x, lambda v: (v + 1).log(), np.log1p)
+    return _elementwise(x, lambda v: (v + 1).log(), libm.log1p)
 
 
 def expm1(x):
     """R: ``exp(x) - 1``, accurate for small ``x``."""
-    return _elementwise(x, lambda v: v.exp() - 1, np.expm1)
+    return _elementwise(x, lambda v: v.exp() - 1, libm.expm1)
 
 
 def abs(x):
@@ -83,34 +85,34 @@ def sign(x):
 
 
 def sin(x):
-    return _elementwise(x, lambda v: v.sin(), np.sin)
+    return _elementwise(x, lambda v: v.sin(), libm.sin)
 
 
 def cos(x):
-    return _elementwise(x, lambda v: v.cos(), np.cos)
+    return _elementwise(x, lambda v: v.cos(), libm.cos)
 
 
 def tan(x):
-    return _elementwise(x, lambda v: v.tan(), np.tan)
+    return _elementwise(x, lambda v: v.tan(), libm.tan)
 
 
 def asin(x):
-    return _elementwise(x, lambda v: v.arcsin(), np.arcsin)
+    return _elementwise(x, lambda v: v.arcsin(), libm.arcsin)
 
 
 def acos(x):
-    return _elementwise(x, lambda v: v.arccos(), np.arccos)
+    return _elementwise(x, lambda v: v.arccos(), libm.arccos)
 
 
 def atan(x):
-    return _elementwise(x, lambda v: v.arctan(), np.arctan)
+    return _elementwise(x, lambda v: v.arctan(), libm.arctan)
 
 
 def atan2(y, x):
     """R: two-argument arctangent."""
     if isinstance(y, (pl.Expr, pl.Series)) or isinstance(x, (pl.Expr, pl.Series)):
         return pl.arctan2(y, x)
-    return np.arctan2(y, x)
+    return libm.arctan2(y, x)
 
 
 def floor(x):

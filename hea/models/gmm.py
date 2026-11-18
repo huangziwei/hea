@@ -37,6 +37,7 @@ from scipy.optimize import minimize, minimize_scalar
 from scipy.sparse import csc_array, eye_array
 from scipy.special import digamma, polygamma, roots_hermite
 
+from .. import _libm as libm
 from .. import family as _family_mod
 from ..family import Family, Gaussian, _coerce_response
 from ..formula import (
@@ -472,7 +473,9 @@ class _GlmResponse:
             initial_gamma = family.link.link(mustart)
 
         good = weights > 0
-        log_det_weights = float(np.sum(np.log(weights[good]))) if np.any(good) else 0.0
+        log_det_weights = (
+            float(np.sum(libm.log(weights[good]))) if np.any(good) else 0.0
+        )
 
         self.family = family
         self.y = y
@@ -776,7 +779,7 @@ class _PredState:
                     "positive definite. Likely an ill-conditioned design "
                     "matrix or a θ that drove M close to singular."
                 ) from exc
-            self.log_det_rx_sq = 2.0 * float(np.log(np.diag(self.RX)).sum())
+            self.log_det_rx_sq = 2.0 * float(libm.log(np.diag(self.RX)).sum())
         else:
             self.M_inv_RZX = np.zeros((self.q, 0))
             self.RX = np.zeros((0, 0))
@@ -983,7 +986,7 @@ def _gh_rule(ord: int) -> np.ndarray:
     w = w / w.sum()
     z = (z - z[::-1]) / 2.0
     w = (w + w[::-1]) / 2.0
-    ldnorm = -0.5 * np.log(2.0 * np.pi) - 0.5 * z**2
+    ldnorm = -0.5 * libm.log(2.0 * np.pi) - 0.5 * z**2
     return np.column_stack([z, w, ldnorm])
 
 
@@ -1018,10 +1021,10 @@ def _glmm_agq_deviance(
             pred.u0 = zknot * sd
             resp.update_mu(pred.lin_pred(1.0))
             devc = _devc_col(fac, pred.u(1.0), resp.deviance_residuals(), n_levels)
-            mult += np.exp(-0.5 * (devc - devc0) - ldnorm) * w / sqrt2pi
+            mult += libm.exp(-0.5 * (devc - devc0) - ldnorm) * w / sqrt2pi
     pred.u0 = u0_saved
     resp.update_mu(pred.lin_pred(1.0))
-    return float(devc0.sum() + pred.log_det_l_sq - 2.0 * np.log(mult).sum())
+    return float(devc0.sum() + pred.log_det_l_sq - 2.0 * libm.log(mult).sum())
 
 
 def _glmm_devfun_factory(
@@ -3933,12 +3936,12 @@ def _check_scale_x(X: np.ndarray, col_names: list, kind: str) -> None:
     sd = sd[sd > 0]
     if sd.size == 0:
         return
-    logsd = np.abs(np.log(sd))
+    logsd = np.abs(libm.log(sd))
     iu = np.triu_indices(sd.size, k=1)
     logratio = (
-        np.abs(np.log(np.divide.outer(sd, sd)))[iu] if iu[0].size else np.array([0.0])
+        np.abs(libm.log(np.divide.outer(sd, sd)))[iu] if iu[0].size else np.array([0.0])
     )
-    if max(logsd.max(), logratio.max()) > np.log(tol):
+    if max(logsd.max(), logratio.max()) > libm.log(tol):
         act = {"warn+rescale": "warning", "message+rescale": "message"}.get(kind, kind)
         _emit_check(
             act,
@@ -4023,9 +4026,9 @@ def _theta_ml(y, mu, weights=None, limit=20, eps=1e-8):
                 * (
                     digamma(th + y)
                     - digamma(th)
-                    + np.log(th)
+                    + libm.log(th)
                     + 1
-                    - np.log(th + mu)
+                    - libm.log(th + mu)
                     - (y + th) / (mu + th)
                 )
             )
@@ -4077,24 +4080,24 @@ def glmer_nb(
         np.asarray(m0.fitted_values, dtype=float),
         m0.prior_weights,
     )
-    lo, hi = np.log(th0) - interval_width, np.log(th0) + interval_width
+    lo, hi = libm.log(th0) - interval_width, libm.log(th0) + interval_width
 
     def nbdev(t):
         return gmm(
-            formula, data, family=_family_mod.nb(theta=float(np.exp(t))), **kw
+            formula, data, family=_family_mod.nb(theta=float(libm.exp(t))), **kw
         ).deviance_laplace
 
     res = minimize_scalar(
         nbdev, bounds=(lo, hi), method="bounded", options={"xatol": tol}
     )
-    th_hat = float(np.exp(res.x))
+    th_hat = float(libm.exp(res.x))
 
     m = gmm(formula, data, family=_family_mod.nb(theta=th_hat), **kw)
     m._nb_theta = th_hat
     m.npar = m.npar + 1
     m.df_resid = m.n - m.npar
     m.AIC = m.deviance_laplace + 2.0 * m.npar
-    m.BIC = m.deviance_laplace + np.log(m.n) * m.npar
+    m.BIC = m.deviance_laplace + libm.log(m.n) * m.npar
     return m
 
 
@@ -4706,7 +4709,7 @@ class gmm:
             sqrt_w = np.sqrt(w_arr)
         self._sqrt_w = sqrt_w
         self._log_det_weights = (
-            0.0 if sqrt_w is None else float(np.sum(np.log(w_arr[w_arr > 0])))
+            0.0 if sqrt_w is None else float(np.sum(libm.log(w_arr[w_arr > 0])))
         )
 
         re = inputs.re_terms
@@ -4751,7 +4754,7 @@ class gmm:
         XtX = Xw.T @ Xw
         Xty = Xw.T @ yw
         yty = float(yw @ yw)
-        log2pi = float(np.log(2.0 * np.pi))
+        log2pi = float(libm.log(2.0 * np.pi))
 
         self._template = template
         self._lt_theta_pos = lt_theta_pos
@@ -4948,7 +4951,7 @@ class gmm:
             self.loglike = -0.5 * opt
             self.df_resid = n - self.npar
         self.AIC = opt + 2.0 * self.npar
-        self.BIC = opt + np.log(n) * self.npar
+        self.BIC = opt + libm.log(n) * self.npar
 
         d_grad = d_hess = None
         if inputs.calc_derivs and len(theta_hat) > 0:
@@ -5418,7 +5421,7 @@ class gmm:
         self.loglike = -0.5 * laplace
         self.df_resid = n - self.npar
         self.AIC = laplace + 2.0 * self.npar
-        self.BIC = laplace + np.log(n) * self.npar
+        self.BIC = laplace + libm.log(n) * self.npar
 
         # convergence diagnostics. Port of ``checkConv`` (checkConv.R)
         # plus ``m@optinfo`` (utilities.R:448): the singular check
@@ -5551,7 +5554,7 @@ class gmm:
             rhs = Xty - np.einsum("ij,i->j", ZLtX, M_inv_ZLty)
             cb = solve_triangular(Rx, rhs, lower=True)
             rss = yty - cu_sq - float(np.einsum("i,i->", cb, cb))
-            log_det_Rx = float(np.log(np.diag(Rx)).sum())
+            log_det_Rx = float(libm.log(np.diag(Rx)).sum())
         else:
             rss = yty - cu_sq
             log_det_Rx = 0.0
@@ -5585,9 +5588,9 @@ class gmm:
             return 1e15
         rss, log_det_Lz, _ = r
         if sigma_fix is None:
-            return 2.0 * log_det_Lz + n * (1.0 + self._log2pi + np.log(rss / n))
+            return 2.0 * log_det_Lz + n * (1.0 + self._log2pi + libm.log(rss / n))
         s2 = sigma_fix**2
-        return 2.0 * log_det_Lz + n * (self._log2pi + np.log(s2)) + rss / s2
+        return 2.0 * log_det_Lz + n * (self._log2pi + libm.log(s2)) + rss / s2
 
     def _reml_deviance(self, theta: np.ndarray) -> float:
         """REML ``-2 log L_REML`` at this θ. β profiles out, then σ."""
@@ -5600,7 +5603,7 @@ class gmm:
         return (
             2.0 * log_det_Lz
             + 2.0 * log_det_Rx
-            + df * (1.0 + self._log2pi + np.log(rss / df))
+            + df * (1.0 + self._log2pi + libm.log(rss / df))
         )
 
     def _refit_theta(self, obj_fn, theta_start: np.ndarray) -> tuple[float, np.ndarray]:
@@ -6437,7 +6440,7 @@ class gmm:
         keep = [all_names[p] if isinstance(p, (int, np.integer)) else p for p in parm]
         order = {name: i for i, name in enumerate(keep)}
         return df.filter(pl.col("parameter").is_in(keep)).sort(
-            pl.col("parameter").replace_strict(order, default=10**9)
+            pl.col("parameter").replace_strict(order, default=libm.pow_op(10, 9))
         )
 
     def confint(
@@ -8030,10 +8033,10 @@ class gmm:
     def _getme_devcomp(self) -> dict:
         """``devcomp`` — lme4's deviance-component list (``cmp`` + ``dims``)."""
         n, p, q = int(self.n), int(self.p), int(self.q)
-        ldL2 = 2.0 * float(np.log(np.abs(self.L.diagonal())).sum())
+        ldL2 = 2.0 * float(libm.log(np.abs(self.L.diagonal())).sum())
         RX, _ = self._getme_rx_rzx() if hasattr(self, "_X_solve") else (None, None)
         ldRX2 = (
-            2.0 * float(np.log(np.abs(np.diag(RX))).sum())
+            2.0 * float(libm.log(np.abs(np.diag(RX))).sum())
             if RX is not None
             else float("nan")
         )
@@ -8616,7 +8619,7 @@ def _resolve_transform(t):
     if callable(t):
         return t, "{}"
     if t == "log":
-        return np.log, "log({})"
+        return libm.log, "log({})"
     if t in ("square", "sq"):
         return np.square, "{}²"
     raise ValueError(f"unknown transform {t!r}; use 'log', 'square', or a callable")
@@ -9115,7 +9118,9 @@ class Profile:
             tx_label = {name: name for name in names}
         elif transform == "log":
             tx_fn = {
-                name: (np.log if name.startswith(".sig") else (lambda x: np.asarray(x)))
+                name: (
+                    libm.log if name.startswith(".sig") else (lambda x: np.asarray(x))
+                )
                 for name in names
             }
             tx_label = {
@@ -9156,7 +9161,7 @@ class Profile:
             return zp[keep], zo[keep]
 
         def _sacos(x):
-            return np.arccos(np.clip(x, -0.999, 0.999))
+            return libm.arccos(np.clip(x, -0.999, 0.999))
 
         def _ad(xc, yc):
             a = (xc + yc) / 2.0
@@ -9191,8 +9196,8 @@ class Profile:
                 return None
             theta = np.linspace(xs_s[0], xs_s[0] + 2 * np.pi, nseg + 1)
             tdiff = spl(theta)
-            zj = level * np.cos(theta - tdiff / 2.0)
-            zi = level * np.cos(theta + tdiff / 2.0)
+            zj = level * libm.cos(theta - tdiff / 2.0)
+            zi = level * libm.cos(theta + tdiff / 2.0)
             return np.column_stack([zi, zj])
 
         contours: dict[tuple[int, int], dict] = {}

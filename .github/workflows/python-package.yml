@@ -216,4 +216,9 @@ jobs:
         OPENBLAS_NUM_THREADS: "1"
         OMP_NUM_THREADS: "1"
         MKL_NUM_THREADS: "1"
+        # The runners' CPUs differ (Intel with AVX-512, AMD without), and
+        # OpenBLAS picks its kernels, and with them their rounding, by CPU.
+        # Every x86-64 runner can run the Haswell set, so with it each job
+        # computes the same numbers whichever machine it lands on.
+        OPENBLAS_CORETYPE: "Haswell"
       run: pytest -n auto --dist worksteal --ignore=tests/translate

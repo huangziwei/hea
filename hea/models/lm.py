@@ -7,6 +7,7 @@ import polars as pl
 from scipy.linalg import qr, solve_triangular
 from scipy.linalg.lapack import dgeqrf, dormqr
 
+from .. import _libm as libm
 from ..formula import (
     Name,
     _eval_atom,
@@ -49,7 +50,7 @@ def _zapsmall(x: np.ndarray, digits: int) -> np.ndarray:
     if finite.size == 0:
         return x
     mx = float(np.max(np.abs(finite)))
-    nd = max(0, int(digits - int(np.log10(mx)))) if mx > 0 else digits
+    nd = max(0, int(digits - int(libm.log10(mx)))) if mx > 0 else digits
     return np.round(x, nd)
 
 
@@ -164,7 +165,7 @@ def _lowess(x, y, frac=2 / 3, it=3):
     bw = np.partition(dists, r - 1, axis=1)[:, r - 1]
     bw = np.where(bw == 0, 1.0, bw)
     W = np.clip(dists / bw[:, None], 0, 1)
-    W = (1 - W**3) ** 3
+    W = libm.pow_op((1 - libm.pow_op(W, 3)), 3)
 
     yhat = ys.copy()
     delta = np.ones(n)
@@ -1306,17 +1307,20 @@ class lm:
             sum_log_w = 0.0
         else:
             nz = self._w > 0.0
-            sum_log_w = float(np.sum(np.log(self._w[nz])))
+            sum_log_w = float(np.sum(libm.log(self._w[nz])))
         return float(
             0.5
-            * (sum_log_w - n * (np.log(2 * np.pi) + 1 - np.log(n) + np.log(self.rss)))
+            * (
+                sum_log_w
+                - n * (libm.log(2 * np.pi) + 1 - libm.log(n) + libm.log(self.rss))
+            )
         )
 
     def compute_AIC(self):
         return -2 * self.loglike + 2 * self.npar
 
     def compute_BIC(self):
-        return -2 * self.loglike + np.log(self._n_eff) * self.npar
+        return -2 * self.loglike + libm.log(self._n_eff) * self.npar
 
     def predict(
         self,

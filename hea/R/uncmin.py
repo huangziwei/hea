@@ -45,6 +45,7 @@ import math
 
 import numpy as np
 
+from .. import _libm as libm
 from ._linpack import _ddot, _dnrm2, _dscal, _dtrsl
 from ._shared import _rfma
 
@@ -66,7 +67,7 @@ def fdhess(n, x, fval, fun, h, nfd, ndigit, typx):
     ``nlm(hessian=TRUE)``. Mutates ``x`` transiently; fills ``h``."""
     step = np.zeros(n)
     f = np.zeros(n)
-    eta = 10.0 ** (-ndigit / 3.0)
+    eta = libm.pow_op(10.0, (-ndigit / 3.0))
     for i in range(n):
         step[i] = eta * _fmax2(float(x[i]), float(typx[i]))
         if float(typx[i]) < 0.0:
@@ -178,7 +179,7 @@ def _qraux2(n, r, i, a, b):
     own algorithm and differs in the last ulp). The rotation's two-
     product expressions are clang-contracted on the *first* product —
     verified against R's compiled optif9 trajectories."""
-    den = float(np.hypot(a, b))
+    den = float(libm.hypot(a, b))
     c = a / den
     s = b / den
     for j in range(i, n):
@@ -202,7 +203,7 @@ def _qrupdt(n, a, u, v):
             u[i] = float(u[ii])
         else:
             _qraux2(n, a, i, float(u[i]), -float(u[ii]))
-            u[i] = float(np.hypot(float(u[i]), float(u[ii])))
+            u[i] = float(libm.hypot(float(u[i]), float(u[ii])))
         ii = i
     for j in range(n):
         a[0, j] = _rfma(float(u[0]), float(v[j]), float(a[0, j]))
@@ -820,7 +821,9 @@ def _fstocd(n, x, fcn, sx, rnoise, g):
     ``g``; ``x`` perturbed and restored in place."""
     for i in range(n):
         xtempi = float(x[i])
-        stepi = rnoise ** (1.0 / 3.0) * _fmax2(abs(xtempi), 1.0 / float(sx[i]))
+        stepi = libm.pow_op(rnoise, (1.0 / 3.0)) * _fmax2(
+            abs(xtempi), 1.0 / float(sx[i])
+        )
         x[i] = xtempi + stepi
         fplus = fcn(x)
         x[i] = xtempi - stepi
@@ -836,7 +839,9 @@ def _sndofd(n, xpls, fcn, fpls, a, sx, rnoise):
     anbr = np.zeros(n)
     for i in range(n):
         xtmpi = float(xpls[i])
-        stepsz[i] = rnoise ** (1.0 / 3.0) * _fmax2(abs(xtmpi), 1.0 / float(sx[i]))
+        stepsz[i] = libm.pow_op(rnoise, (1.0 / 3.0)) * _fmax2(
+            abs(xtmpi), 1.0 / float(sx[i])
+        )
         xpls[i] = xtmpi + float(stepsz[i])
         anbr[i] = fcn(xpls)
         xpls[i] = xtmpi
@@ -1104,7 +1109,7 @@ def optdrv(
     )
     if msg < 0:
         return 0.0, 0, itncnt, msg
-    rnf = _fmax2(10.0 ** (-float(ndigit)), epsm)
+    rnf = _fmax2(libm.pow_op(10.0, (-float(ndigit))), epsm)
     analtl = _fmax2(0.1, math.sqrt(rnf))
     f = fcn(x)
     if not iagflg:

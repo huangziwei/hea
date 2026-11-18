@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
+from .. import _libm as libm
 from .._rlinalg import r_chol2inv, r_matprod, r_qr, r_qr_coef, r_qr_R
 from .._rsum import r_sum
 from ..family import (
@@ -288,7 +289,7 @@ class glm:
         self.aic = fit["aic"]
         self.AIC = self.aic
         self.loglike = float(self.npar) - 0.5 * self.aic
-        self.bic = -2.0 * self.loglike + float(np.log(self.n)) * self.npar
+        self.bic = -2.0 * self.loglike + float(libm.log(self.n)) * self.npar
         self.BIC = self.bic
 
     def _compute_dispersion(self, fit: dict) -> float:

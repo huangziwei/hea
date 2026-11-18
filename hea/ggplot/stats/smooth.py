@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import numpy as np
 import polars as pl
 
+from ... import _libm as libm
 from ..._dispatch import rs_fn
 from ...R import nmath as _nmath
 from .._util import to_numeric_aes
@@ -156,14 +157,14 @@ def _loess_local_fit(
         return beta, np.inf
 
     u = d / h
-    tricube = np.where(u < 1, (1 - u**3) ** 3, 0.0)
+    tricube = np.where(u < 1, libm.pow_op((1 - libm.pow_op(u, 3)), 3), 0.0)
     w = tricube * extra_w
 
     if (w > 0).sum() < degree + 1:
         return np.full(degree + 1, np.nan), np.nan
 
     xc = x - x_query
-    X = np.column_stack([xc**p for p in range(degree + 1)])
+    X = np.column_stack([libm.pow_op(xc, p) for p in range(degree + 1)])
     sqrt_w = np.sqrt(w)
     Xw = X * sqrt_w[:, None]
     yw = y * sqrt_w
