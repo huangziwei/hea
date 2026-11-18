@@ -18,7 +18,6 @@ from dataclasses import dataclass
 import numpy as np
 import polars as pl
 
-from .. import _libm as libm
 from ._shared import NamedVector, _caller_names
 
 
@@ -528,7 +527,7 @@ def simulate(model, nsim=1, seed=None, **kwargs):
     if seed is None:
         import random
 
-        seed = random.Random().randint(0, libm.pow_op(2, 31) - 1)
+        seed = random.Random().randint(0, 2**31 - 1)
     rng = RMersenneTwister(int(seed))
     z = rng.rnorm(int(n * nsim))
     draws = z * np.tile(sd_vec, int(nsim))

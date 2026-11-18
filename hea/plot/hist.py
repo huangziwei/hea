@@ -5,7 +5,6 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
-from .. import _libm as libm
 from ._util import resolve_ax, to_value_series
 
 
@@ -15,7 +14,7 @@ def _resolve_breaks(vals: np.ndarray, breaks) -> np.ndarray:
         method = breaks.lower()
         if method == "sturges":
             n = max(len(vals), 1)
-            nb = int(np.ceil(libm.log2(n) + 1))
+            nb = int(np.ceil(np.log2(n) + 1))
             return np.histogram_bin_edges(vals, bins=nb)
         return np.histogram_bin_edges(vals, bins=method)
     if isinstance(breaks, (int, np.integer)):

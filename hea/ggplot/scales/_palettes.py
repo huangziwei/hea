@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import math
 
-from ... import _libm as libm
-
 _U_N = 0.1978300664283
 _V_N = 0.4683199493879
 
@@ -29,7 +27,7 @@ def _hcl_to_rgb(h: float, c: float, lightness: float) -> tuple[float, float, flo
     v = c * math.sin(h_rad)
 
     if lightness > 8:
-        y = libm.pow_op(((lightness + 16) / 116), 3)
+        y = ((lightness + 16) / 116) ** 3
     else:
         y = lightness * 27 / 24389
 
@@ -54,7 +52,7 @@ def _to_srgb(c_lin: float) -> float:
     if c_lin >= 1:
         return 1.0
     if c_lin > 0.0031308:
-        return 1.055 * libm.pow_op(c_lin, (1 / 2.4)) - 0.055
+        return 1.055 * c_lin ** (1 / 2.4) - 0.055
     return 12.92 * c_lin
 
 

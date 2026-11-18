@@ -28,7 +28,6 @@ mod fexact;
 mod lapack;
 #[cfg(vendor_blas)]
 mod lapack_py;
-mod libm_vec;
 mod linalg;
 mod loess;
 #[cfg(vendor_blas)]
@@ -46,7 +45,6 @@ mod xwxd;
 #[pymodule]
 fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     nmath::register(m)?;
-    libm_vec::register(m)?;
     rng::register(m)?;
     linalg::register(m)?;
     loess::register(m)?;

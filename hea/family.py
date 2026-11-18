@@ -44,7 +44,6 @@ from scipy.special import (
     gamma as _gamma_fn,
 )
 
-from . import _libm as libm
 from ._dispatch import rs_fn as _rs_fn
 from ._libm import libm_lgamma
 from ._rfma import _rfma
@@ -255,13 +254,13 @@ class LogLink(Link):
 
     def link(self, mu):
         with np.errstate(divide="ignore"):
-            return libm.log(np.asarray(mu, dtype=float))
+            return np.log(np.asarray(mu, dtype=float))
 
     def linkinv(self, eta):
-        return np.maximum(libm.exp(np.asarray(eta, dtype=float)), np.finfo(float).eps)
+        return np.maximum(np.exp(np.asarray(eta, dtype=float)), np.finfo(float).eps)
 
     def mu_eta(self, eta):
-        return np.maximum(libm.exp(np.asarray(eta, dtype=float)), np.finfo(float).eps)
+        return np.maximum(np.exp(np.asarray(eta, dtype=float)), np.finfo(float).eps)
 
     def d2link(self, mu):
         return -1.0 / _rpow_int(np.asarray(mu, dtype=float), 2)
@@ -341,13 +340,13 @@ class SqrtLink(Link):
         return 2.0 * np.asarray(eta, dtype=float)
 
     def d2link(self, mu):
-        return -0.25 * libm.pow_op(np.asarray(mu, dtype=float), -1.5)
+        return -0.25 * np.asarray(mu, dtype=float) ** -1.5
 
     def d3link(self, mu):
-        return 0.375 * libm.pow_op(np.asarray(mu, dtype=float), -2.5)
+        return 0.375 * np.asarray(mu, dtype=float) ** -2.5
 
     def d4link(self, mu):
-        return -0.9375 * libm.pow_op(np.asarray(mu, dtype=float), -3.5)
+        return -0.9375 * np.asarray(mu, dtype=float) ** -3.5
 
     # fix.family.link's extended-family ratios (gam.fit3.r:2243-2247):
     # g' = ½μ^-½ ⇒ g2g = g″/g′² = -μ^-½, g3g = g‴/g′³ = 3/μ,
@@ -355,7 +354,7 @@ class SqrtLink(Link):
     # zero counts) give R's silent ±Inf — numpy would warn.
     def g2g(self, mu):
         with np.errstate(divide="ignore"):
-            return -(libm.pow_op(np.asarray(mu, dtype=float), -0.5))
+            return -(np.asarray(mu, dtype=float) ** -0.5)
 
     def g3g(self, mu):
         with np.errstate(divide="ignore"):
@@ -363,7 +362,7 @@ class SqrtLink(Link):
 
     def g4g(self, mu):
         with np.errstate(divide="ignore"):
-            return -15.0 * libm.pow_op(np.asarray(mu, dtype=float), -1.5)
+            return -15.0 * np.asarray(mu, dtype=float) ** -1.5
 
     def valideta(self, eta):
         eta = np.asarray(eta)
@@ -462,7 +461,7 @@ class LogitLink(Link):
 
     def link(self, mu):
         mu = np.asarray(mu, dtype=float)
-        return libm.log(mu / (1.0 - mu))
+        return np.log(mu / (1.0 - mu))
 
     def linkinv(self, eta):
         # stats C ``logit_linkinv`` (family.c:73-90) verbatim:
@@ -473,7 +472,7 @@ class LogitLink(Link):
         # overflows, so compute it only where selected.
         eta = np.asarray(eta, dtype=float)
         eps = np.finfo(float).eps
-        tmp = libm.exp(np.where(np.abs(eta) > 30.0, 0.0, eta))
+        tmp = np.exp(np.where(np.abs(eta) > 30.0, 0.0, eta))
         tmp = np.where(eta < -30.0, eps, np.where(eta > 30.0, 1.0 / eps, tmp))
         return tmp / (1.0 + tmp)
 
@@ -483,7 +482,7 @@ class LogitLink(Link):
         # guard); else e^η/((1+e^η)·(1+e^η)).
         eta = np.asarray(eta, dtype=float)
         eps = np.finfo(float).eps
-        expE = libm.exp(np.where(np.abs(eta) > 30.0, 0.0, eta))
+        expE = np.exp(np.where(np.abs(eta) > 30.0, 0.0, eta))
         opexp = 1.0 + expE
         return np.where(np.abs(eta) > 30.0, eps, expE / (opexp * opexp))
 
@@ -545,25 +544,25 @@ class ProbitLink(Link):
     def d3link(self, mu):
         eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
         d = np.maximum(_dnorm(eta), np.finfo(float).eps)
-        return (1.0 + 2.0 * eta * eta) / libm.pow_op(d, 3)
+        return (1.0 + 2.0 * eta * eta) / d**3
 
     def d4link(self, mu):
         eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
         d = np.maximum(_dnorm(eta), np.finfo(float).eps)
-        return (7.0 * eta + 6.0 * libm.pow_op(eta, 3)) / libm.pow_op(d, 4)
+        return (7.0 * eta + 6.0 * eta**3) / d**4
 
     def d23link(self, mu):
         eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
         d = np.maximum(_dnorm(eta), np.finfo(float).eps)
-        return eta / d**2, (1.0 + 2.0 * eta * eta) / libm.pow_op(d, 3)
+        return eta / d**2, (1.0 + 2.0 * eta * eta) / d**3
 
     def d234link(self, mu):
         eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
         d = np.maximum(_dnorm(eta), np.finfo(float).eps)
         return (
             eta / d**2,
-            (1.0 + 2.0 * eta * eta) / libm.pow_op(d, 3),
-            (7.0 * eta + 6.0 * libm.pow_op(eta, 3)) / libm.pow_op(d, 4),
+            (1.0 + 2.0 * eta * eta) / d**3,
+            (7.0 * eta + 6.0 * eta**3) / d**4,
         )
 
     # extended-family ratios (gam.fit3.r:2249-2266): with η=Φ⁻¹(μ) and
@@ -577,7 +576,7 @@ class ProbitLink(Link):
 
     def g4g(self, mu):
         eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
-        return 7.0 * eta + 6.0 * libm.pow_op(eta, 3)
+        return 7.0 * eta + 6.0 * eta**3
 
 
 class CauchitLink(Link):
@@ -591,13 +590,13 @@ class CauchitLink(Link):
 
     def link(self, mu):
         mu = np.asarray(mu, dtype=float)
-        return libm.tan(np.pi * (mu - 0.5))
+        return np.tan(np.pi * (mu - 0.5))
 
     def linkinv(self, eta):
         eps = np.finfo(float).eps
-        thresh = -libm.tan(np.pi * (eps - 0.5))
+        thresh = -np.tan(np.pi * (eps - 0.5))
         eta_c = np.clip(np.asarray(eta, dtype=float), -thresh, thresh)
-        return 0.5 + libm.arctan(eta_c) / np.pi
+        return 0.5 + np.arctan(eta_c) / np.pi
 
     def mu_eta(self, eta):
         eps = np.finfo(float).eps
@@ -605,34 +604,32 @@ class CauchitLink(Link):
         return np.maximum(1.0 / (np.pi * (1.0 + eta * eta)), eps)
 
     def d2link(self, mu):
-        eta = libm.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
+        eta = np.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
         return 2.0 * np.pi**2 * eta * (1.0 + eta * eta)
 
     def d3link(self, mu):
-        eta = libm.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
+        eta = np.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
         eta2 = eta * eta
-        return 2.0 * libm.pow_op(np.pi, 3) * (1.0 + 3.0 * eta2) * (1.0 + eta2)
+        return 2.0 * np.pi**3 * (1.0 + 3.0 * eta2) * (1.0 + eta2)
 
     def d4link(self, mu):
-        eta = libm.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
+        eta = np.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
         eta2 = eta * eta
-        return (
-            2.0 * libm.pow_op(np.pi, 4) * (8.0 * eta + 12.0 * eta2 * eta) * (1.0 + eta2)
-        )
+        return 2.0 * np.pi**4 * (8.0 * eta + 12.0 * eta2 * eta) * (1.0 + eta2)
 
     # extended-family ratios (gam.fit3.r:2272-2291): η=qcauchy(μ),
     # g'=1/f(η) with f the Cauchy density — the g″/g'ᵏ ratios in η.
     def g2g(self, mu):
-        eta = libm.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
+        eta = np.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
         return eta / (1.0 + eta * eta)
 
     def g3g(self, mu):
-        eta = libm.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
+        eta = np.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
         eta2 = eta * eta
         return (1.0 + 3.0 * eta2) / (1.0 + eta2) ** 2
 
     def g4g(self, mu):
-        eta = libm.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
+        eta = np.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
         eta2 = eta * eta
         return ((8.0 + 12.0 * eta2) / (1.0 + eta2) ** 2) * (eta / (1.0 + eta2))
 
@@ -643,54 +640,48 @@ class CloglogLink(Link):
     name = "cloglog"
 
     def link(self, mu):
-        return libm.log(-libm.log1p(-np.asarray(mu, dtype=float)))
+        return np.log(-np.log1p(-np.asarray(mu, dtype=float)))
 
     def linkinv(self, eta):
         eps = np.finfo(float).eps
         eta = np.asarray(eta, dtype=float)
-        return np.clip(-libm.expm1(-libm.exp(eta)), eps, 1.0 - eps)
+        return np.clip(-np.expm1(-np.exp(eta)), eps, 1.0 - eps)
 
     def mu_eta(self, eta):
         eps = np.finfo(float).eps
         eta = np.minimum(np.asarray(eta, dtype=float), 700.0)
-        return np.maximum(libm.exp(eta) * libm.exp(-libm.exp(eta)), eps)
+        return np.maximum(np.exp(eta) * np.exp(-np.exp(eta)), eps)
 
     def d2link(self, mu):
         mu = np.asarray(mu, dtype=float)
-        l1m = libm.log1p(-mu)
+        l1m = np.log1p(-mu)
         return -1.0 / ((1.0 - mu) ** 2 * l1m) * (1.0 + 1.0 / l1m)
 
     def d3link(self, mu):
         mu = np.asarray(mu, dtype=float)
-        l1m = libm.log1p(-mu)
-        return (
-            (-2.0 - 3.0 * l1m - 2.0 * l1m**2)
-            / libm.pow_op((1.0 - mu), 3)
-            / libm.pow_op(l1m, 3)
-        )
+        l1m = np.log1p(-mu)
+        return (-2.0 - 3.0 * l1m - 2.0 * l1m**2) / (1.0 - mu) ** 3 / l1m**3
 
     def d4link(self, mu):
         mu = np.asarray(mu, dtype=float)
-        l1m = libm.log1p(-mu)
+        l1m = np.log1p(-mu)
         return (
-            (-12.0 - 11.0 * l1m - 6.0 * l1m**2 - 6.0 / l1m)
-            / libm.pow_op((1.0 - mu), 4)
-            / libm.pow_op(l1m, 3)
+            (-12.0 - 11.0 * l1m - 6.0 * l1m**2 - 6.0 / l1m) / (1.0 - mu) ** 4 / l1m**3
         )
 
     # extended-family ratios (gam.fit3.r:2293-2303), l1m = log1p(−μ):
     # g'=−1/(l1m·(1−μ)) ⇒ g2g=−l1m−1, g3g=l1m(2·l1m+3)+2,
     # g4g=−l1m(l1m(6·l1m+11)+12)−6.
     def g2g(self, mu):
-        l1m = libm.log1p(-np.asarray(mu, dtype=float))
+        l1m = np.log1p(-np.asarray(mu, dtype=float))
         return -l1m - 1.0
 
     def g3g(self, mu):
-        l1m = libm.log1p(-np.asarray(mu, dtype=float))
+        l1m = np.log1p(-np.asarray(mu, dtype=float))
         return l1m * (2.0 * l1m + 3.0) + 2.0
 
     def g4g(self, mu):
-        l1m = libm.log1p(-np.asarray(mu, dtype=float))
+        l1m = np.log1p(-np.asarray(mu, dtype=float))
         return -l1m * (l1m * (6.0 * l1m + 11.0) + 12.0) - 6.0
 
 
@@ -708,16 +699,16 @@ class InverseSquareLink(Link):
 
     def mu_eta(self, eta):
         with np.errstate(invalid="ignore"):
-            return -0.5 * libm.pow_op(np.asarray(eta, dtype=float), -1.5)
+            return -0.5 * np.asarray(eta, dtype=float) ** -1.5
 
     def d2link(self, mu):
-        return 6.0 * libm.pow_op(np.asarray(mu, dtype=float), -4)
+        return 6.0 * np.asarray(mu, dtype=float) ** -4
 
     def d3link(self, mu):
-        return -24.0 * libm.pow_op(np.asarray(mu, dtype=float), -5)
+        return -24.0 * np.asarray(mu, dtype=float) ** -5
 
     def d4link(self, mu):
-        return 120.0 * libm.pow_op(np.asarray(mu, dtype=float), -6)
+        return 120.0 * np.asarray(mu, dtype=float) ** -6
 
     def valideta(self, eta):
         eta = np.asarray(eta)
@@ -750,7 +741,7 @@ class SoftplusLink(Link):
 
     def link(self, mu):
         mu = np.maximum(np.asarray(mu, dtype=float), np.finfo(float).eps)
-        return libm.log(libm.expm1(mu))
+        return np.log(np.expm1(mu))
 
     def linkinv(self, eta):
         return np.maximum(
@@ -762,8 +753,8 @@ class SoftplusLink(Link):
 
     def _u_s(self, mu):
         mu = np.maximum(np.asarray(mu, dtype=float), np.finfo(float).eps)
-        u = libm.exp(-mu)
-        s = -libm.expm1(-mu)  # 1 − e^{−μ}, accurate as μ→0⁺
+        u = np.exp(-mu)
+        s = -np.expm1(-mu)  # 1 − e^{−μ}, accurate as μ→0⁺
         return u, s
 
     def d2link(self, mu):
@@ -772,11 +763,11 @@ class SoftplusLink(Link):
 
     def d3link(self, mu):
         u, s = self._u_s(mu)
-        return u * (1.0 + u) / libm.pow_op(s, 3)
+        return u * (1.0 + u) / s**3
 
     def d4link(self, mu):
         u, s = self._u_s(mu)
-        return -u * (1.0 + 4.0 * u + u * u) / libm.pow_op(s, 4)
+        return -u * (1.0 + 4.0 * u + u * u) / s**4
 
     def g2g(self, mu):
         u, _ = self._u_s(mu)
@@ -917,7 +908,7 @@ def find_null_dev(family: Family, y, eta, offset, weights) -> float:
     mum = float(np.mean(mu0 * weights) / np.mean(weights))
     eta0 = float(link.link(mum))
     deta = abs(eta0) * 0.1 + 1.0  # search interval half width
-    tol = libm.pow_op(float(np.finfo(float).eps), 0.25)  # optimize's default tol
+    tol = float(np.finfo(float).eps) ** 0.25  # optimize's default tol
     while True:
         lo, hi = eta0 - deta, eta0 + deta
         x_min, f_min = _brent_fmin(fnull, lo, hi, tol)
@@ -1128,9 +1119,7 @@ class Family:
                     ig14 * r["Dmu4"]
                     - 6.0 * r["Dmu3"] * ig13 * g2g
                     + r["Dmu2"] * (15.0 * g2g * g2g - 4.0 * g3g) * ig12
-                    - r["Dmu"]
-                    * (15.0 * libm.pow_op(g2g, 3) - 10.0 * g2g * g3g + g4g)
-                    * ig1
+                    - r["Dmu"] * (15.0 * g2g**3 - 10.0 * g2g * g3g + g4g) * ig1
                 )
                 d["Detath2"] = _cb(r["Dmuth2"], ig1) if has_th2 else None
                 d["Deta2th2"] = (
@@ -1308,8 +1297,8 @@ class Gaussian(Family):
         nobs = float(np.asarray(y).shape[0])
         sigma2 = dev / nobs
         with np.errstate(divide="ignore"):
-            log_wt_sum = r_sum(libm.log(wt))
-        return nobs * (libm.log(2.0 * np.pi * sigma2) + 1.0) + 2.0 - log_wt_sum
+            log_wt_sum = r_sum(np.log(wt))
+        return nobs * (np.log(2.0 * np.pi * sigma2) + 1.0) + 2.0 - log_wt_sum
 
     def _aic_dev1(self, dev, scale, wt):
         # Gaussian MLE σ² = dev/n is closed-form, so mgcv passes dev directly
@@ -1323,7 +1312,7 @@ class Gaussian(Family):
         nobs = int(np.sum(good))
         ls0 = (
             -nobs * math.log(2.0 * math.pi * scale) / 2.0
-            + r_sum(libm.log(wt[good])) / 2.0
+            + r_sum(np.log(wt[good])) / 2.0
         )
         return np.array([ls0, -0.5 * nobs, 0.0], dtype=float)
 
@@ -1354,7 +1343,7 @@ class Gamma(Family):
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         ratio = np.where(y == 0, 1.0, y / mu)
-        return -2.0 * wt * (libm.log(ratio) - (y - mu) / mu)
+        return -2.0 * wt * (np.log(ratio) - (y - mu) / mu)
 
     def initialize(self, y, wt):
         y = np.asarray(y, dtype=float)
@@ -1388,12 +1377,12 @@ class Gamma(Family):
         sw = scale / w  # per-obs scale
         usw, inv = np.unique(sw, return_inverse=True)
         isw = 1.0 / usw
-        lsw = libm.log(usw)
+        lsw = np.log(usw)
         u_lg = _lgammafn_arr(isw)
         u_dg = _nmath.psigamma_vec(isw, 0)
         u_tg = _nmath.psigamma_vec(isw, 1)
         k1 = (-u_lg - lsw / usw - isw)[inv]
-        ls0 = r_sum(k1 - libm.log(y))
+        ls0 = r_sum(k1 - np.log(y))
         k2 = ((u_dg + lsw) / (usw * usw))[inv]
         d1_phi = r_sum(k2 / w)
         k3 = ((-u_tg / usw + (1.0 - 2.0 * lsw - 2.0 * u_dg)) / _rpow(usw, 3.0))[inv]
@@ -1441,7 +1430,7 @@ class Poisson(Family):
         # a negative mu (an identity link) makes log(y/mu) NaN, silently as
         # in R's C
         with np.errstate(invalid="ignore", divide="ignore"):
-            logr = libm.log(ratio)
+            logr = np.log(ratio)
         contrib = np.where(positive, wt * (y * logr - (y - mu)), wt * mu)
         return 2.0 * contrib
 
@@ -1518,7 +1507,7 @@ class Binomial(Family):
             pos = a > 0
             safe_a = np.where(pos, a, 1.0)
             safe_b = np.where(pos, b, 1.0)
-            return np.where(pos, a * libm.log(safe_a / safe_b), 0.0)
+            return np.where(pos, a * np.log(safe_a / safe_b), 0.0)
 
         return 2.0 * wt * (yly(y, mu) + yly(1.0 - y, 1.0 - mu))
 
@@ -1607,7 +1596,7 @@ class InverseGaussian(Family):
 
     def variance(self, mu):
         mu = np.asarray(mu, dtype=float)
-        return libm.pow_op(mu, 3)
+        return mu**3
 
     def dvar(self, mu):
         mu = np.asarray(mu, dtype=float)
@@ -1641,8 +1630,8 @@ class InverseGaussian(Family):
         wt = np.asarray(wt, dtype=float)
         sw = r_sum(wt)
         return (
-            sw * (1.0 + libm.log(dev / sw * 2.0 * np.pi))
-            + 3.0 * r_sum(libm.log(y) * wt)
+            sw * (1.0 + np.log(dev / sw * 2.0 * np.pi))
+            + 3.0 * r_sum(np.log(y) * wt)
             + 2.0
         )
 
@@ -1652,8 +1641,8 @@ class InverseGaussian(Family):
         good = wt > 0
         nobs = int(np.sum(good))
         ls0 = (
-            -r_sum(libm.log(2.0 * np.pi * scale * _rpow(y[good], 3.0))) / 2.0
-            + r_sum(libm.log(wt[good])) / 2.0
+            -r_sum(np.log(2.0 * np.pi * scale * _rpow(y[good], 3.0))) / 2.0
+            + r_sum(np.log(wt[good])) / 2.0
         )
         return np.array([ls0, -0.5 * nobs, 0.0], dtype=float)
 
@@ -1663,7 +1652,7 @@ class InverseGaussian(Family):
         y = np.asarray(rng.normal(size=n)) ** 2
         mys = mu * scale * y
         x = np.empty(n)
-        big = mys < libm.pow_op(np.finfo(float).eps, -0.5)
+        big = mys < np.finfo(float).eps ** -0.5
         x[big] = mu[big] * (
             1.0 + 0.5 * (mys[big] - np.sqrt(4.0 * mys[big] + mys[big] ** 2))
         )
@@ -1734,7 +1723,7 @@ class Quasi(Family):
             y = np.asarray(y, dtype=float)
             mu = np.asarray(mu, dtype=float)
             wt = np.asarray(wt, dtype=float)
-            r = -2.0 * wt * (libm.log(np.where(y == 0, 1.0, y) / mu) - (y - mu) / mu)
+            r = -2.0 * wt * (np.log(np.where(y == 0, 1.0, y) / mu) - (y - mu) / mu)
             return np.maximum(r, 0.0)
         return self._shadow.dev_resids(y, mu, wt)
 
@@ -1780,7 +1769,7 @@ class Quasi(Family):
         wt = np.asarray(wt, dtype=float)
         good = wt > 0
         nobs = int(np.sum(good))
-        ls0 = -nobs * math.log(scale) / 2.0 + r_sum(libm.log(wt[good])) / 2.0
+        ls0 = -nobs * math.log(scale) / 2.0 + r_sum(np.log(wt[good])) / 2.0
         return np.array([ls0, -0.5 * nobs, 0.0], dtype=float)
 
     def __repr__(self) -> str:
@@ -2154,7 +2143,7 @@ def _ld_tweedie_pphi(y, mu, p, phi, a: float = 1.001, b: float = 1.999):
     p_arg = np.atleast_1d(np.asarray(p, dtype=float))
     phi_arg = np.atleast_1d(np.asarray(phi, dtype=float))
     buffer = np.unique(p_arg).size == 1 and np.unique(phi_arg).size == 1
-    rho = libm.log(phi_arg)
+    rho = np.log(phi_arg)
     if not (p_arg.min() >= 1.0 and p_arg.max() <= 2.0):
         raise ValueError("p must be in [1,2]")
     ind = (p_arg > 1.0) & (p_arg < 2.0)
@@ -2166,7 +2155,7 @@ def _ld_tweedie_pphi(y, mu, p, phi, a: float = 1.001, b: float = 1.999):
     if p_ind.max() >= b:
         b = (2.0 + p_ind.max()) / 2.0
     pabp = (p_ind - a) / (b - p_ind)
-    theta = libm.log((p_ind - a) / (b - p_ind))
+    theta = np.log((p_ind - a) / (b - p_ind))
     dthp1 = (1.0 + pabp) / (p_ind - a)
     pa = p_ind - a
     dthp2 = (pabp + 1.0) / (pa * (b - p_ind)) - (pabp + 1.0) / (pa * pa)
@@ -2188,7 +2177,7 @@ def _ld_tweedie_pphi(y, mu, p, phi, a: float = 1.001, b: float = 1.999):
     zm = zero & (mu > 0.0)
     if np.any(zm):
         mu_z, p_z, phi_z = mu[zm], p[zm], phi[zm]
-        lmu = libm.log(mu_z)
+        lmu = np.log(mu_z)
         l0 = -_rpow_v(mu_z, 2.0 - p_z) / (phi_z * (2.0 - p_z))
         ld[zm, 0] = l0
         ld[zm, 1] = -l0 / phi_z
@@ -2221,7 +2210,7 @@ def _ld_tweedie_pphi(y, mu, p, phi, a: float = 1.001, b: float = 1.999):
         w2p = w2p * (d1i * d1i) + dthp2_v[pos] * w1p
         w1p = w1p * d1i
         w2pp = w2pp * d1i / phii
-        log_mu = libm.log(mu_i)
+        log_mu = np.log(mu_i)
         onep = 1.0 - p_i
         twop = 2.0 - p_i
         mu1p = _rpow_v(mu_i, onep)
@@ -2233,7 +2222,7 @@ def _ld_tweedie_pphi(y, mu, p, phi, a: float = 1.001, b: float = 1.999):
             theta_s * y_i * (1.0 / onep - log_mu) / phii
             + k_theta * (log_mu - 1.0 / twop) / phii
         )
-        ld[pos, 0] = (l_base - libm.log(y_i)) + w
+        ld[pos, 0] = (l_base - np.log(y_i)) + w
         ld[pos, 1] = -l_base / phii + w1
         ld[pos, 2] = 2.0 * l_base / phii2 + w2
         ld[pos, 3] = x_ + w1p
@@ -2275,7 +2264,7 @@ def _ld_tweedie_work(
     # p(θ) and its θ-derivatives, the ±θ-stable branches
     # (gam.fit3.r:2849-2858)
     pos = theta > 0
-    eth = libm.exp(-np.abs(theta))
+    eth = np.exp(-np.abs(theta))
     p = np.where(pos, (b + a * eth) / (1.0 + eth), (b * eth + a) / (eth + 1.0))
     d1eth = 1.0 + eth
     d3 = d1eth * d1eth * d1eth
@@ -2286,7 +2275,7 @@ def _ld_tweedie_work(
         ((a - b) * eth + (b - a) * (eth * eth)) / d3,
         ((a - b) * (eth * eth) + (b - a) * eth) / d3,
     )
-    phi = libm.exp(rho)
+    phi = np.exp(rho)
 
     ld = np.zeros((n, 10))
 
@@ -2296,14 +2285,14 @@ def _ld_tweedie_work(
         mu_z = mu[zm]
         p_z = p[zm]
         phi_z = phi[zm]
-        lmu_z = libm.log(mu_z)
-        ld[zm, 0] = -(libm.pow_op(mu_z, (2.0 - p_z))) / (phi_z * (2.0 - p_z))
+        lmu_z = np.log(mu_z)
+        ld[zm, 0] = -(mu_z ** (2.0 - p_z)) / (phi_z * (2.0 - p_z))
         ld[zm, 1] = -ld[zm, 0] / phi_z
         ld[zm, 2] = -2.0 * ld[zm, 1] / phi_z
         ld[zm, 3] = -ld[zm, 0] * (lmu_z - 1.0 / (2.0 - p_z))
         ld[zm, 4] = 2.0 * ld[zm, 3] / (2.0 - p_z) + ld[zm, 0] * lmu_z**2
         ld[zm, 5] = -ld[zm, 3] / phi_z
-        mup = libm.pow_op(mu_z, p_z)
+        mup = mu_z**p_z
         ld[zm, 6] = -mu_z / (mup * phi_z)
         ld[zm, 7] = -(1.0 - p_z) / (mup * phi_z)
         ld[zm, 8] = lmu_z * mu_z / (mup * phi_z)
@@ -2317,15 +2306,15 @@ def _ld_tweedie_work(
         mu_i = mu[ind]
         p_i = p[ind]
         phii = phi[ind]
-        log_mu = libm.log(mu_i)
+        log_mu = np.log(mu_i)
         onep = 1.0 - p_i
         twop = 2.0 - p_i
-        mu1p = libm.pow_op(mu_i, onep)
+        mu1p = mu_i**onep
         k_theta = mu_i * mu1p / twop  # mu^(2-p)/(2-p)
         theta_s = mu1p / onep  # mu^(1-p)/(1-p)
         a1 = y_i / onep - mu_i / twop
         l_base = mu1p * a1 / phii
-        ld[ind, 0] = l_base - libm.log(y_i)
+        ld[ind, 0] = l_base - np.log(y_i)
         ld[ind, 1] = -l_base / phii
         ld[ind, 2] = 2.0 * l_base / phii**2
         x_ = (
@@ -2422,7 +2411,7 @@ def _tw_null_fit(y, a: float = 1.001, b: float = 1.999):
 
     def _ld_sums(t):
         ld = _ld_tweedie_work(
-            y, libm.exp(t[0]) * ones, t[1] * ones, t[2] * ones, a=a, b=b
+            y, np.exp(t[0]) * ones, t[1] * ones, t[2] * ones, a=a, b=b
         )
         return r_colsums(ld)
 
@@ -2441,7 +2430,7 @@ def _tw_null_fit(y, a: float = 1.001, b: float = 1.999):
         else:
             n_stall = 0
         gmag_prev = gmag
-        g[0] = g[0] * libm.exp(th[0])  # work on log scale for mu
+        g[0] = g[0] * np.exp(th[0])  # work on log scale for mu
         H = np.zeros((3, 3))  # mu, th, rh
         H[0, 0] = lds[7]
         H[1, 1] = lds[4]
@@ -2449,8 +2438,8 @@ def _tw_null_fit(y, a: float = 1.001, b: float = 1.999):
         H[0, 1] = H[1, 0] = lds[8]
         H[0, 2] = H[2, 0] = lds[9]
         H[1, 2] = H[2, 1] = lds[5]
-        H[:, 0] = H[:, 0] * libm.exp(th[0])
-        H[0, 1:] = H[0, 1:] * libm.exp(th[0])
+        H[:, 0] = H[:, 0] * np.exp(th[0])
+        H[0, 1:] = H[0, 1:] * np.exp(th[0])
         ev, V = r_eigen_sym(H)
         tol = float(np.max(np.abs(ev))) * 1e-7
         ev[ev > -tol] = -tol
@@ -2476,10 +2465,10 @@ def _tw_null_fit(y, a: float = 1.001, b: float = 1.999):
             break
     t2 = th[1]
     if t2 > 0:
-        p = (b + a * libm.exp(-t2)) / (1.0 + libm.exp(-t2))
+        p = (b + a * np.exp(-t2)) / (1.0 + np.exp(-t2))
     else:
-        p = (b * libm.exp(t2) + a) / (libm.exp(t2) + 1.0)
-    return float(libm.exp(th[0])), float(p), float(libm.exp(th[2]))
+        p = (b * np.exp(t2) + a) / (np.exp(t2) + 1.0)
+    return float(np.exp(th[0])), float(p), float(np.exp(th[2]))
 
 
 def _shash_log1pexp(x):
@@ -2492,9 +2481,9 @@ def _shash_log1pexp(x):
     m1 = x <= -37.0
     m2 = (x > -37.0) & (x <= 18.0)
     m3 = (x > 18.0) & (x <= 33.3)
-    out[m1] = libm.exp(x[m1])
-    out[m2] = libm.log1p(libm.exp(x[m2]))
-    out[m3] = x[m3] + libm.exp(-x[m3])
+    out[m1] = np.exp(x[m1])
+    out[m2] = np.log1p(np.exp(x[m2]))
+    out[m3] = x[m3] + np.exp(-x[m3])
     return out
 
 
@@ -2528,7 +2517,7 @@ def _ax2m1_div_x2m2_sq(x, m1, m2, a=1.0):
 
 
 def _sech(x):
-    return 1.0 / libm.cosh(x)
+    return 1.0 / np.cosh(x)
 
 
 def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
@@ -2541,19 +2530,19 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
     line-for-line; only `del`→`delta` renamed).
     """
     y = np.asarray(y, dtype=float)
-    sig = libm.exp(tau)
-    delta = libm.exp(phi)
+    sig = np.exp(tau)
+    delta = np.exp(phi)
     z = (y - mu) / (sig * delta)
-    dTasMe = delta * libm.arcsinh(z) - eps
+    dTasMe = delta * np.arcsinh(z) - eps
     g = -dTasMe
-    CC = libm.cosh(dTasMe)
-    SS = libm.sinh(dTasMe)
+    CC = np.cosh(dTasMe)
+    SS = np.sinh(dTasMe)
     with np.errstate(divide="ignore"):
-        log_abs_z2 = 2.0 * libm.log(np.abs(z))
+        log_abs_z2 = 2.0 * np.log(np.abs(z))
     l0 = (
         -tau
-        - 0.5 * libm.log(2.0 * np.pi)
-        + libm.log(CC)
+        - 0.5 * np.log(2.0 * np.pi)
+        + np.log(CC)
         - 0.5 * _shash_log1pexp(log_abs_z2)
         - 0.5 * SS**2
         - phi_pen * phi**2
@@ -2562,10 +2551,10 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
     if deriv >= 1:
         zsd = z * sig * delta
         sSp1 = _sqrt_x2pm(z, 1.0)  # sqrt(z² + 1)
-        asinhZ = libm.arcsinh(z)
+        asinhZ = np.arcsinh(z)
 
         # first derivatives (gamlss.r:3513-3519)
-        De = libm.tanh(g) - 0.5 * libm.sinh(2.0 * g)
+        De = np.tanh(g) - 0.5 * np.sinh(2.0 * g)
         Dm = 1.0 / (delta * sig * sSp1) * (delta * De + z / sSp1)
         Dt = zsd * Dm - 1.0
         Dp = Dt + 1.0 - delta * asinhZ * De - 2.0 * phi_pen * phi
@@ -2573,15 +2562,15 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
 
         # second derivatives, packed mm,mt,me,mp,tt,te,tp,ee,ep,pp
         # (gamlss.r:3522-3535)
-        Dme = (_sech(g) ** 2 - libm.cosh(2.0 * g)) / (sig * sSp1)
+        Dme = (_sech(g) ** 2 - np.cosh(2.0 * g)) / (sig * sSp1)
         Dte = zsd * Dme
         Dmm = (
             Dme / (sig * sSp1)
-            + z * De / (sig**2 * delta * libm.pow_op(sSp1, 3))
+            + z * De / (sig**2 * delta * sSp1**3)
             + _ax2m1_div_x2m2_sq(z, -1.0, 1.0) / (delta * sig * delta * sig)
         )
         Dmt = zsd * Dmm - Dm
-        Dee = -2.0 * libm.cosh(g) ** 2 + _sech(g) ** 2 + 1.0
+        Dee = -2.0 * np.cosh(g) ** 2 + _sech(g) ** 2 + 1.0
         Dtt = zsd * Dmt
         Dep = Dte - delta * asinhZ * Dee
         Dmp = Dmt + De / (sig * sSp1) - delta * asinhZ * Dme
@@ -2595,21 +2584,17 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
         L2 = np.column_stack([Dmm, Dmt, Dme, Dmp, Dtt, Dte, Dtp, Dee, Dep, Dpp])
     if deriv > 1:
         # third derivatives (gamlss.r:3545-3567)
-        Deee = -2 * (libm.sinh(2 * g) + _sech(g) ** 2 * libm.tanh(g))
+        Deee = -2 * (np.sinh(2 * g) + _sech(g) ** 2 * np.tanh(g))
         Dmee = Deee / (sig * sSp1)
-        Dmme = Dmee / (sig * sSp1) + z * Dee / (
-            sig * sig * delta * libm.pow_op(sSp1, 3)
-        )
+        Dmme = Dmee / (sig * sSp1) + z * Dee / (sig * sig * delta * sSp1**3)
         Dmmm = (
-            2 * z * Dme / (sig * sig * delta * libm.pow_op(sSp1, 3))
+            2 * z * Dme / (sig * sig * delta * sSp1**3)
             + Dmme / (sig * sSp1)
-            + _ax2m1_div_x2m2_sq(z, -1, 1, 2)
-            * De
-            / (libm.pow_op(sig, 3) * delta**2 * sSp1)
+            + _ax2m1_div_x2m2_sq(z, -1, 1, 2) * De / (sig**3 * delta**2 * sSp1)
             + 2
             * (z / sSp1)
             * _ax2m1_div_x2m2_sq(z, -3, 1)
-            / (libm.pow_op((sig * delta), 3) * sSp1)
+            / ((sig * delta) ** 3 * sSp1)
         )
         Dmmt = zsd * Dmmm - 2 * Dmm
         Dtee = zsd * Dmee
@@ -2624,7 +2609,7 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
         Dmmp = (
             Dmmt
             + 2 * Dme / (sig * sSp1)
-            + z * De / (delta * sig * sig * libm.pow_op(sSp1, 3))
+            + z * De / (delta * sig * sig * sSp1**3)
             - delta * asinhZ * Dmme
         )
         Dmtp = zsd * Dmmp - Dmp
@@ -2632,7 +2617,7 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
         Dmpp = (
             Dmtp
             + Dep / (sig * sSp1)
-            + z**2 * De / (sig * libm.pow_op(sSp1, 3))
+            + z**2 * De / (sig * sSp1**3)
             - delta * asinhZ * Dmep
             + delta * Dme * (z / sSp1 - asinhZ)
         )
@@ -2641,7 +2626,7 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             Dtpp
             - delta * asinhZ * Depp
             + delta * (z / sSp1 - asinhZ) * (2 * Dep + De)
-            + delta * libm.pow_op((z / sSp1), 3) * De
+            + delta * (z / sSp1) ** 3 * De
         )
 
         L3 = np.column_stack(
@@ -2679,14 +2664,14 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
         exp1 = np.e
         aaa1 = -t
         aaa2 = y - m
-        aaa3 = libm.pow_op(exp1, p) * np.asinh(libm.pow_op(exp1, (aaa1 - p)) * aaa2) - e
-        abb8 = libm.cosh(aaa3)
-        abb9 = libm.sinh(aaa3)
-        abb1 = libm.pow_op(exp1, ((-2 * t) - 2 * p))
+        aaa3 = exp1**p * np.asinh(exp1 ** (aaa1 - p) * aaa2) - e
+        abb8 = np.cosh(aaa3)
+        abb9 = np.sinh(aaa3)
+        abb1 = exp1 ** ((-2 * t) - 2 * p)
         abb3 = aaa2**2
-        abb4 = 1 / libm.pow_op(exp1, t)
+        abb4 = 1 / exp1**t
         abb5 = -t - p
-        abb7 = libm.pow_op(exp1, (2 * abb5)) * abb3 + 1
+        abb7 = exp1 ** (2 * abb5) * abb3 + 1
         abb6 = 1 / np.sqrt(abb7)
         aee5 = aaa3 + e
         aff04 = abb1 * abb3 + 1
@@ -2694,63 +2679,61 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
         aff08 = 2 * abb5
         aff10 = 1 / abb7
         aff13 = abb8**2
-        aff14 = libm.pow_op(exp1, (aaa1 + aff08))
-        aff15 = libm.pow_op(abb6, 3)
+        aff14 = exp1 ** (aaa1 + aff08)
+        aff15 = abb6**3
         aff17 = abb9**2
         agg15 = 1 / abb6
         agg17 = 1 / abb8
         aii11 = aaa3 + e
         aii12 = aii11 - abb4 * aaa2 * abb6
-        aii17 = libm.pow_op(abb6, 3)
-        ajj15 = libm.pow_op(aaa2, 3)
-        ann05 = libm.pow_op(exp1, p)
-        ann06 = np.asinh(libm.pow_op(exp1, abb5) * aaa2)
-        aoo09 = -aaa2 / (libm.pow_op(exp1, t) * agg15)
+        aii17 = abb6**3
+        ajj15 = aaa2**3
+        ann05 = exp1**p
+        ann06 = np.asinh(exp1**abb5 * aaa2)
+        aoo09 = -aaa2 / (exp1**t * agg15)
         app02 = -2 * t
-        app04 = libm.pow_op(exp1, (app02 - 2 * p)) * abb3 + 1
-        app08 = libm.pow_op(exp1, (app02 + aff08))
+        app04 = exp1 ** (app02 - 2 * p) * abb3 + 1
+        app08 = exp1 ** (app02 + aff08)
         app10 = 1 / abb7**2
-        app14 = libm.pow_op(exp1, (aaa1 + 4 * abb5))
-        app16 = 1 / libm.pow_op(agg15, 5)
-        app21 = 1 / libm.pow_op(exp1, (3 * t))
-        aqq03 = libm.pow_op(exp1, (app02 - 2 * p))
+        app14 = exp1 ** (aaa1 + 4 * abb5)
+        app16 = 1 / agg15**5
+        app21 = 1 / exp1 ** (3 * t)
+        aqq03 = exp1 ** (app02 - 2 * p)
         aqq05 = aqq03 * abb3 + 1
         aqq27 = 1 / aff13
-        arr06 = libm.pow_op(exp1, aff08) * aaa2**2 + 1
-        arr07 = 1 / libm.pow_op(np.sqrt(arr06), 3)
+        arr06 = exp1**aff08 * aaa2**2 + 1
+        arr07 = 1 / np.sqrt(arr06) ** 3
         arr12 = 1 / arr06
-        ass16 = aii11 - aaa2 / (libm.pow_op(exp1, t) * agg15)
+        ass16 = aii11 - aaa2 / (exp1**t * agg15)
         ass23 = 1 / abb8
         ass28 = 1 / aff13
-        att19 = libm.pow_op(aaa2, 4)
+        att19 = aaa2**4
         avv19 = aii11 - abb4 * aaa2 * abb6
         ayy14 = -abb4 * aaa2 * abb6
         ayy16 = aii11 + ayy14
         ayy17 = aii11 + ayy14 - aff14 * ajj15 * aii17
         ayy24 = ayy16**2
-        azz19 = libm.pow_op(aaa2, 5)
-        bdd07 = np.sqrt(libm.pow_op(exp1, aff08) * aaa2**2 + 1)
-        bdd08 = 1 / libm.pow_op(bdd07, 3)
+        azz19 = aaa2**5
+        bdd07 = np.sqrt(exp1**aff08 * aaa2**2 + 1)
+        bdd08 = 1 / bdd07**3
         bdd14 = 1 / bdd07
         bdd15 = aii11 - abb4 * aaa2 * bdd14
-        bgg4 = aee5 - aaa2 / (
-            libm.pow_op(exp1, t) * np.sqrt(libm.pow_op(exp1, (2 * abb5)) * aaa2**2 + 1)
-        )
+        bgg4 = aee5 - aaa2 / (exp1**t * np.sqrt(exp1 ** (2 * abb5) * aaa2**2 + 1))
         bhh13 = -abb4 * aaa2 * bdd14
         bhh14 = ann05 * ann06
         bii11 = aii11 + aoo09
         bii15 = aii11 + aoo09 - aff14 * ajj15 * aii17
         bjj07 = 4 * abb5
-        bjj08 = libm.pow_op(exp1, (app02 + bjj07))
-        bjj11 = 1 / libm.pow_op(abb7, 3)
-        bjj14 = 1 / libm.pow_op(exp1, (4 * t))
-        bjj18 = libm.pow_op(exp1, (aaa1 + 6 * abb5))
-        bjj21 = 1 / libm.pow_op(agg15, 7)
-        bjj24 = libm.pow_op(exp1, (aff08 - 3 * t))
-        bjj26 = libm.pow_op(exp1, (aaa1 + bjj07))
+        bjj08 = exp1 ** (app02 + bjj07)
+        bjj11 = 1 / abb7**3
+        bjj14 = 1 / exp1 ** (4 * t)
+        bjj18 = exp1 ** (aaa1 + 6 * abb5)
+        bjj21 = 1 / agg15**7
+        bjj24 = exp1 ** (aff08 - 3 * t)
+        bjj26 = exp1 ** (aaa1 + bjj07)
         j2 = (
-            (-(6 * bjj14 * app10 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
-            - (12 * bjj24 * aaa2 * app16 * libm.pow_op(abb9, 3)) / libm.pow_op(abb8, 3)
+            (-(6 * bjj14 * app10 * abb9**4) / abb8**4)
+            - (12 * bjj24 * aaa2 * app16 * abb9**3) / abb8**3
             + 8 * bjj14 * app10 * aqq27 * aff17
             + 4 * app08 * app10 * aqq27 * aff17
             - 15 * bjj08 * abb3 * bjj11 * aqq27 * aff17
@@ -2769,16 +2752,14 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - 2 * bjj14 * app10
             - 4 * app08 * app10
             + 15 * bjj08 * abb3 * bjj11
-            + (6 * libm.pow_op(exp1, ((-4 * t) - 4 * p))) / app04**2
-            - (48 * libm.pow_op(exp1, ((-6 * t) - 6 * p)) * abb3)
-            / libm.pow_op(app04, 3)
-            + (48 * libm.pow_op(exp1, ((-8 * t) - 8 * p)) * libm.pow_op(aaa2, 4))
-            / libm.pow_op(app04, 4)
+            + (6 * exp1 ** ((-4 * t) - 4 * p)) / app04**2
+            - (48 * exp1 ** ((-6 * t) - 6 * p) * abb3) / app04**3
+            + (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2**4) / app04**4
         )
-        bkk33 = 1 / libm.pow_op(abb8, 3)
-        bkk34 = libm.pow_op(abb9, 3)
+        bkk33 = 1 / abb8**3
+        bkk34 = abb9**3
         k2 = (
-            (-(6 * bjj14 * aaa2 * app10 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
+            (-(6 * bjj14 * aaa2 * app10 * abb9**4) / abb8**4)
             + 6 * app21 * aff15 * bkk33 * bkk34
             - 12 * bjj24 * abb3 * app16 * bkk33 * bkk34
             + 8 * bjj14 * aaa2 * app10 * aqq27 * aff17
@@ -2803,16 +2784,14 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - 2 * bjj14 * aaa2 * app10
             - 13 * app08 * aaa2 * app10
             + 15 * bjj08 * ajj15 * bjj11
-            + (24 * libm.pow_op(exp1, ((-4 * t) - 4 * p)) * aaa2) / app04**2
-            - (72 * libm.pow_op(exp1, ((-6 * t) - 6 * p)) * ajj15)
-            / libm.pow_op(app04, 3)
-            + (48 * libm.pow_op(exp1, ((-8 * t) - 8 * p)) * libm.pow_op(aaa2, 5))
-            / libm.pow_op(app04, 4)
+            + (24 * exp1 ** ((-4 * t) - 4 * p) * aaa2) / app04**2
+            - (72 * exp1 ** ((-6 * t) - 6 * p) * ajj15) / app04**3
+            + (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2**5) / app04**4
         )
-        bll16 = libm.pow_op(exp1, (aff08 - 2 * t))
+        bll16 = exp1 ** (aff08 - 2 * t)
         l2 = (
-            (-(6 * app21 * aff15 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
-            - (6 * bll16 * aaa2 * app10 * libm.pow_op(abb9, 3)) / libm.pow_op(abb8, 3)
+            (-(6 * app21 * aff15 * abb9**4) / abb8**4)
+            - (6 * bll16 * aaa2 * app10 * abb9**3) / abb8**3
             + 8 * app21 * aff15 * aqq27 * aff17
             + aff14 * aff15 * aqq27 * aff17
             - 3 * app14 * abb3 * app16 * aqq27 * aff17
@@ -2828,10 +2807,10 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - aff14 * aff15
             + 3 * app14 * abb3 * app16
         )
-        bmm34 = 1 / libm.pow_op(abb8, 3)
-        bmm35 = libm.pow_op(abb9, 3)
+        bmm34 = 1 / abb8**3
+        bmm35 = abb9**3
         m2 = (
-            (6 * app21 * aff15 * ass16 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4)
+            (6 * app21 * aff15 * ass16 * abb9**4) / abb8**4
             + 6 * app08 * aaa2 * app10 * ass16 * bmm34 * bmm35
             - 6 * bjj24 * abb3 * app16 * bmm34 * bmm35
             - 8 * app21 * aff15 * ass16 * ass28 * aff17
@@ -2864,14 +2843,12 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - 3 * bjj26 * abb3 * app16 * ass16
             - 6 * app08 * aaa2 * app10
             + 12 * bjj08 * ajj15 * bjj11
-            + (24 * libm.pow_op(exp1, ((-4 * t) - 4 * p)) * aaa2) / app04**2
-            - (72 * libm.pow_op(exp1, ((-6 * t) - 6 * p)) * ajj15)
-            / libm.pow_op(app04, 3)
-            + (48 * libm.pow_op(exp1, ((-8 * t) - 8 * p)) * libm.pow_op(aaa2, 5))
-            / libm.pow_op(app04, 4)
+            + (24 * exp1 ** ((-4 * t) - 4 * p) * aaa2) / app04**2
+            - (72 * exp1 ** ((-6 * t) - 6 * p) * ajj15) / app04**3
+            + (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2**5) / app04**4
         )
         n2 = (
-            (-(6 * bjj14 * abb3 * app10 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
+            (-(6 * bjj14 * abb3 * app10 * abb9**4) / abb8**4)
             + 10 * app21 * aaa2 * aff15 * bkk33 * bkk34
             - 12 * bjj24 * ajj15 * app16 * bkk33 * bkk34
             - 4 * aff05 * aff10 * aqq27 * aff17
@@ -2901,14 +2878,12 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - 19 * app08 * abb3 * app10
             + 15 * bjj08 * att19 * bjj11
             - (4 * aqq03) / aqq05
-            + (44 * libm.pow_op(exp1, ((-4 * t) - 4 * p)) * abb3) / aqq05**2
-            - (88 * libm.pow_op(exp1, ((-6 * t) - 6 * p)) * att19)
-            / libm.pow_op(aqq05, 3)
-            + (48 * libm.pow_op(exp1, ((-8 * t) - 8 * p)) * libm.pow_op(aaa2, 6))
-            / libm.pow_op(aqq05, 4)
+            + (44 * exp1 ** ((-4 * t) - 4 * p) * abb3) / aqq05**2
+            - (88 * exp1 ** ((-6 * t) - 6 * p) * att19) / aqq05**3
+            + (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2**6) / aqq05**4
         )
         o2 = (
-            (-(6 * app21 * aaa2 * aff15 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
+            (-(6 * app21 * aaa2 * aff15 * abb9**4) / abb8**4)
             + 4 * aff05 * aff10 * bkk33 * bkk34
             - 6 * bll16 * abb3 * app10 * bkk33 * bkk34
             + 8 * app21 * aaa2 * aff15 * aqq27 * aff17
@@ -2929,8 +2904,7 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             + 3 * app14 * ajj15 * app16
         )
         p2 = (
-            (6 * app21 * aaa2 * aff15 * ass16 * libm.pow_op(abb9, 4))
-            / libm.pow_op(abb8, 4)
+            (6 * app21 * aaa2 * aff15 * ass16 * abb9**4) / abb8**4
             - 4 * aff05 * aff10 * ass16 * bmm34 * bmm35
             + 6 * app08 * abb3 * app10 * ass16 * bmm34 * bmm35
             - 6 * bjj24 * ajj15 * app16 * bmm34 * bmm35
@@ -2967,15 +2941,13 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - 10 * app08 * abb3 * app10
             + 12 * bjj08 * att19 * bjj11
             - (4 * aqq03) / aqq05
-            + (44 * libm.pow_op(exp1, ((-4 * t) - 4 * p)) * abb3) / aqq05**2
-            - (88 * libm.pow_op(exp1, ((-6 * t) - 6 * p)) * att19)
-            / libm.pow_op(aqq05, 3)
-            + (48 * libm.pow_op(exp1, ((-8 * t) - 8 * p)) * libm.pow_op(aaa2, 6))
-            / libm.pow_op(aqq05, 4)
+            + (44 * exp1 ** ((-4 * t) - 4 * p) * abb3) / aqq05**2
+            - (88 * exp1 ** ((-6 * t) - 6 * p) * att19) / aqq05**3
+            + (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2**6) / aqq05**4
         )
         q2 = (
-            (-(6 * aff05 * arr12 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
-            - (2 * aff14 * aaa2 * arr07 * libm.pow_op(abb9, 3)) / libm.pow_op(abb8, 3)
+            (-(6 * aff05 * arr12 * abb9**4) / abb8**4)
+            - (2 * aff14 * aaa2 * arr07 * abb9**3) / abb8**3
             + (8 * aff05 * arr12 * aff17) / aff13
             - 4 * aff05 * arr12 * aff17
             + 4 * aff14 * aaa2 * arr07 * abb8 * abb9
@@ -2984,7 +2956,7 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - 2 * aff05 * arr12
         )
         r2 = (
-            (6 * aff05 * aff10 * ass16 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4)
+            (6 * aff05 * aff10 * ass16 * abb9**4) / abb8**4
             + 2 * aff14 * aaa2 * aff15 * ass16 * bmm34 * bmm35
             - 4 * bll16 * abb3 * app10 * bmm34 * bmm35
             - 8 * aff05 * aff10 * ass16 * ass28 * aff17
@@ -3012,11 +2984,10 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
         bss33 = (
             (-4 * aff14 * aaa2 * aff15)
             + 18 * bjj26 * ajj15 * app16
-            - (15 * libm.pow_op(exp1, (aaa1 + 6 * abb5)) * libm.pow_op(aaa2, 5))
-            / libm.pow_op(agg15, 7)
+            - (15 * exp1 ** (aaa1 + 6 * abb5) * aaa2**5) / agg15**7
         )
         s2 = (
-            (-(6 * aff05 * aff10 * bss29 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
+            (-(6 * aff05 * aff10 * bss29 * abb9**4) / abb8**4)
             - 2 * aff14 * aaa2 * aff15 * bss29 * bmm34 * bmm35
             + 2 * aff05 * aff10 * bss26 * bmm34 * bmm35
             + 8 * app08 * abb3 * app10 * bss25 * bmm34 * bmm35
@@ -3053,15 +3024,13 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - 2 * abb4 * abb6 * bss21
             + 2 * bjj08 * att19 * bjj11
             - (4 * aqq03) / aqq05
-            + (44 * libm.pow_op(exp1, ((-4 * t) - 4 * p)) * abb3) / aqq05**2
-            - (88 * libm.pow_op(exp1, ((-6 * t) - 6 * p)) * att19)
-            / libm.pow_op(aqq05, 3)
-            + (48 * libm.pow_op(exp1, ((-8 * t) - 8 * p)) * libm.pow_op(aaa2, 6))
-            / libm.pow_op(aqq05, 4)
+            + (44 * exp1 ** ((-4 * t) - 4 * p) * abb3) / aqq05**2
+            - (88 * exp1 ** ((-6 * t) - 6 * p) * att19) / aqq05**3
+            + (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2**6) / aqq05**4
         )
-        btt24 = libm.pow_op(aaa2, 6)
+        btt24 = aaa2**6
         t2 = (
-            (-(6 * bjj14 * ajj15 * app10 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
+            (-(6 * bjj14 * ajj15 * app10 * abb9**4) / abb8**4)
             + 12 * app21 * abb3 * aff15 * bkk33 * bkk34
             - 12 * bjj24 * att19 * app16 * bkk33 * bkk34
             - 7 * aff05 * aaa2 * aff10 * aqq27 * aff17
@@ -3093,14 +3062,12 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - 22 * app08 * ajj15 * app10
             + 15 * bjj08 * azz19 * bjj11
             - (8 * aqq03 * aaa2) / aqq05
-            + (56 * libm.pow_op(exp1, ((-4 * t) - 4 * p)) * ajj15) / aqq05**2
-            - (96 * libm.pow_op(exp1, ((-6 * t) - 6 * p)) * azz19)
-            / libm.pow_op(aqq05, 3)
-            + (48 * libm.pow_op(exp1, ((-8 * t) - 8 * p)) * libm.pow_op(aaa2, 7))
-            / libm.pow_op(aqq05, 4)
+            + (56 * exp1 ** ((-4 * t) - 4 * p) * ajj15) / aqq05**2
+            - (96 * exp1 ** ((-6 * t) - 6 * p) * azz19) / aqq05**3
+            + (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2**7) / aqq05**4
         )
         u2 = (
-            (-(6 * app21 * abb3 * aff15 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
+            (-(6 * app21 * abb3 * aff15 * abb9**4) / abb8**4)
             + 6 * aff05 * aaa2 * aff10 * bkk33 * bkk34
             - 6 * bll16 * ajj15 * app10 * bkk33 * bkk34
             - abb4 * abb6 * aqq27 * aff17
@@ -3125,8 +3092,7 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             + 3 * app14 * att19 * app16
         )
         v2 = (
-            (6 * app21 * abb3 * aff15 * avv19 * libm.pow_op(abb9, 4))
-            / libm.pow_op(abb8, 4)
+            (6 * app21 * abb3 * aff15 * avv19 * abb9**4) / abb8**4
             - 6 * aff05 * aaa2 * aff10 * avv19 * bmm34 * bmm35
             + 6 * app08 * ajj15 * app10 * avv19 * bmm34 * bmm35
             - 6 * bjj24 * att19 * app16 * bmm34 * bmm35
@@ -3167,14 +3133,12 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - 12 * app08 * ajj15 * app10
             + 12 * bjj08 * azz19 * bjj11
             - (8 * aqq03 * aaa2) / aqq05
-            + (56 * libm.pow_op(exp1, ((-4 * t) - 4 * p)) * ajj15) / aqq05**2
-            - (96 * libm.pow_op(exp1, ((-6 * t) - 6 * p)) * azz19)
-            / libm.pow_op(aqq05, 3)
-            + (48 * libm.pow_op(exp1, ((-8 * t) - 8 * p)) * libm.pow_op(aaa2, 7))
-            / libm.pow_op(aqq05, 4)
+            + (56 * exp1 ** ((-4 * t) - 4 * p) * ajj15) / aqq05**2
+            - (96 * exp1 ** ((-6 * t) - 6 * p) * azz19) / aqq05**3
+            + (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2**7) / aqq05**4
         )
         w2 = (
-            (-(6 * aff05 * aaa2 * aff10 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
+            (-(6 * aff05 * aaa2 * aff10 * abb9**4) / abb8**4)
             + 2 * abb4 * abb6 * bkk33 * bkk34
             - 2 * aff14 * abb3 * aff15 * bkk33 * bkk34
             + (8 * aff05 * aaa2 * aff10 * aff17) / aff13
@@ -3187,8 +3151,7 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - 2 * aff05 * aaa2 * aff10
         )
         x2 = (
-            (6 * aff05 * aaa2 * aff10 * avv19 * libm.pow_op(abb9, 4))
-            / libm.pow_op(abb8, 4)
+            (6 * aff05 * aaa2 * aff10 * avv19 * abb9**4) / abb8**4
             - 2 * abb4 * abb6 * avv19 * bmm34 * bmm35
             + 2 * aff14 * abb3 * aff15 * avv19 * bmm34 * bmm35
             - 4 * bll16 * ajj15 * app10 * bmm34 * bmm35
@@ -3215,14 +3178,10 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
         byy35 = (
             (-6 * aff14 * abb3 * aff15)
             + 21 * bjj26 * att19 * app16
-            - (15 * libm.pow_op(exp1, (aaa1 + 6 * abb5)) * libm.pow_op(aaa2, 6))
-            / libm.pow_op(agg15, 7)
+            - (15 * exp1 ** (aaa1 + 6 * abb5) * aaa2**6) / agg15**7
         )
         y2 = (
-            (
-                -(6 * aff05 * aaa2 * aff10 * bss29 * libm.pow_op(abb9, 4))
-                / libm.pow_op(abb8, 4)
-            )
+            (-(6 * aff05 * aaa2 * aff10 * bss29 * abb9**4) / abb8**4)
             + 2 * abb4 * abb6 * bss29 * bmm34 * bmm35
             - 2 * aff14 * abb3 * aff15 * bss29 * bmm34 * bmm35
             + 2 * aff05 * aaa2 * aff10 * bss26 * bmm34 * bmm35
@@ -3270,24 +3229,22 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - abb4 * aaa2 * abb6 * bss21
             + 2 * bjj08 * azz19 * bjj11
             - (8 * aqq03 * aaa2) / aqq05
-            + (56 * libm.pow_op(exp1, ((-4 * t) - 4 * p)) * ajj15) / aqq05**2
-            - (96 * libm.pow_op(exp1, ((-6 * t) - 6 * p)) * azz19)
-            / libm.pow_op(aqq05, 3)
-            + (48 * libm.pow_op(exp1, ((-8 * t) - 8 * p)) * libm.pow_op(aaa2, 7))
-            / libm.pow_op(aqq05, 4)
+            + (56 * exp1 ** ((-4 * t) - 4 * p) * ajj15) / aqq05**2
+            - (96 * exp1 ** ((-6 * t) - 6 * p) * azz19) / aqq05**3
+            + (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2**7) / aqq05**4
         )
         bzz7 = abb8**2
         bzz9 = abb9**2
         z2 = (
-            (-(6 * abb4 * abb6 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
+            (-(6 * abb4 * abb6 * abb9**4) / abb8**4)
             + (8 * abb4 * abb6 * bzz9) / bzz7
             - 4 * abb4 * abb6 * bzz9
             - 4 * abb4 * abb6 * bzz7
             - 2 * abb4 * abb6
         )
         a3 = (
-            (6 * abb4 * abb6 * aii12 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4)
-            - (2 * aff14 * abb3 * aii17 * libm.pow_op(abb9, 3)) / libm.pow_op(abb8, 3)
+            (6 * abb4 * abb6 * aii12 * abb9**4) / abb8**4
+            - (2 * aff14 * abb3 * aii17 * abb9**3) / abb8**3
             - (8 * abb4 * abb6 * aii12 * aff17) / aff13
             + 4 * abb4 * abb6 * aii12 * aff17
             + 4 * aff14 * abb3 * aii17 * abb8 * abb9
@@ -3295,11 +3252,11 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             + 4 * abb4 * abb6 * aii12 * aff13
             + 2 * abb4 * abb6 * aii12
         )
-        cbb09 = 1 / libm.pow_op(agg15, 5)
+        cbb09 = 1 / agg15**5
         cbb18 = 2 * aff14 * abb3 * aii17 - 3 * app14 * att19 * cbb09
-        cbb24 = aii11 + ayy14 - aff14 * libm.pow_op(aaa2, 3) * aii17
+        cbb24 = aii11 + ayy14 - aff14 * aaa2**3 * aii17
         b3 = (
-            (-(6 * abb4 * abb6 * ayy24 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
+            (-(6 * abb4 * abb6 * ayy24 * abb9**4) / abb8**4)
             + 2 * abb4 * abb6 * cbb24 * bmm34 * bmm35
             + 4 * aff14 * abb3 * aii17 * ayy16 * bmm34 * bmm35
             + 8 * abb4 * abb6 * ayy24 * ass28 * aff17
@@ -3317,15 +3274,14 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             + 3 * app14 * att19 * cbb09
         )
         ccc23 = aii11 + ayy14 + aff14 * ajj15 * aii17 - 3 * app14 * azz19 * cbb09
-        ccc24 = libm.pow_op(ayy16, 3)
+        ccc24 = ayy16**3
         ccc28 = (
             (-4 * aff14 * abb3 * aii17)
             + 18 * app14 * att19 * cbb09
-            - (15 * libm.pow_op(exp1, (aaa1 + 6 * abb5)) * libm.pow_op(aaa2, 6))
-            / libm.pow_op(agg15, 7)
+            - (15 * exp1 ** (aaa1 + 6 * abb5) * aaa2**6) / agg15**7
         )
         c3 = (
-            (6 * abb4 * abb6 * ccc24 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4)
+            (6 * abb4 * abb6 * ccc24 * abb9**4) / abb8**4
             - 6 * aff14 * abb3 * aii17 * ayy24 * bmm34 * bmm35
             - 6 * abb4 * abb6 * ayy16 * ayy17 * bmm34 * bmm35
             - 8 * abb4 * abb6 * ccc24 * ass28 * aff17
@@ -3351,15 +3307,13 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - 3 * aff14 * abb3 * aii17 * ayy17
             + 3 * cbb18 * ayy16
             - (8 * abb1 * aaa2) / aff04
-            + (56 * libm.pow_op(exp1, ((-4 * t) - 4 * p)) * ajj15) / aff04**2
-            - (96 * libm.pow_op(exp1, ((-6 * t) - 6 * p)) * azz19)
-            / libm.pow_op(aff04, 3)
-            + (48 * libm.pow_op(exp1, ((-8 * t) - 8 * p)) * libm.pow_op(aaa2, 7))
-            / libm.pow_op(aff04, 4)
+            + (56 * exp1 ** ((-4 * t) - 4 * p) * ajj15) / aff04**2
+            - (96 * exp1 ** ((-6 * t) - 6 * p) * azz19) / aff04**3
+            + (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2**7) / aff04**4
         )
-        cdd24 = libm.pow_op(aaa2, 7)
+        cdd24 = aaa2**7
         d3 = (
-            (-(6 * bjj14 * att19 * app10 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
+            (-(6 * bjj14 * att19 * app10 * abb9**4) / abb8**4)
             + 12 * app21 * ajj15 * aff15 * bkk33 * bkk34
             - 12 * bjj24 * azz19 * app16 * bkk33 * bkk34
             - 7 * aff05 * abb3 * aff10 * aqq27 * aff17
@@ -3391,14 +3345,12 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - 22 * app08 * att19 * app10
             + 15 * bjj08 * btt24 * bjj11
             - (8 * aqq03 * abb3) / aqq05
-            + (56 * libm.pow_op(exp1, ((-4 * t) - 4 * p)) * att19) / aqq05**2
-            - (96 * libm.pow_op(exp1, ((-6 * t) - 6 * p)) * btt24)
-            / libm.pow_op(aqq05, 3)
-            + (48 * libm.pow_op(exp1, ((-8 * t) - 8 * p)) * libm.pow_op(aaa2, 8))
-            / libm.pow_op(aqq05, 4)
+            + (56 * exp1 ** ((-4 * t) - 4 * p) * att19) / aqq05**2
+            - (96 * exp1 ** ((-6 * t) - 6 * p) * btt24) / aqq05**3
+            + (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2**8) / aqq05**4
         )
         e3 = (
-            (-(6 * app21 * ajj15 * aff15 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
+            (-(6 * app21 * ajj15 * aff15 * abb9**4) / abb8**4)
             + 6 * aff05 * abb3 * aff10 * bkk33 * bkk34
             - 6 * bll16 * att19 * app10 * bkk33 * bkk34
             - abb4 * aaa2 * abb6 * aqq27 * aff17
@@ -3423,8 +3375,7 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             + 3 * app14 * azz19 * app16
         )
         f3 = (
-            (6 * app21 * ajj15 * aff15 * avv19 * libm.pow_op(abb9, 4))
-            / libm.pow_op(abb8, 4)
+            (6 * app21 * ajj15 * aff15 * avv19 * abb9**4) / abb8**4
             - 6 * aff05 * abb3 * aff10 * avv19 * bmm34 * bmm35
             + 6 * app08 * att19 * app10 * avv19 * bmm34 * bmm35
             - 6 * bjj24 * azz19 * app16 * bmm34 * bmm35
@@ -3465,14 +3416,12 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - 12 * app08 * att19 * app10
             + 12 * bjj08 * btt24 * bjj11
             - (8 * aqq03 * abb3) / aqq05
-            + (56 * libm.pow_op(exp1, ((-4 * t) - 4 * p)) * att19) / aqq05**2
-            - (96 * libm.pow_op(exp1, ((-6 * t) - 6 * p)) * btt24)
-            / libm.pow_op(aqq05, 3)
-            + (48 * libm.pow_op(exp1, ((-8 * t) - 8 * p)) * libm.pow_op(aaa2, 8))
-            / libm.pow_op(aqq05, 4)
+            + (56 * exp1 ** ((-4 * t) - 4 * p) * att19) / aqq05**2
+            - (96 * exp1 ** ((-6 * t) - 6 * p) * btt24) / aqq05**3
+            + (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2**8) / aqq05**4
         )
         g3 = (
-            (-(6 * aff05 * abb3 * aff10 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
+            (-(6 * aff05 * abb3 * aff10 * abb9**4) / abb8**4)
             + 2 * abb4 * aaa2 * abb6 * bkk33 * bkk34
             - 2 * aff14 * ajj15 * aff15 * bkk33 * bkk34
             + (8 * aff05 * abb3 * aff10 * aff17) / aff13
@@ -3485,8 +3434,7 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - 2 * aff05 * abb3 * aff10
         )
         h3 = (
-            (6 * aff05 * abb3 * aff10 * avv19 * libm.pow_op(abb9, 4))
-            / libm.pow_op(abb8, 4)
+            (6 * aff05 * abb3 * aff10 * avv19 * abb9**4) / abb8**4
             - 2 * abb4 * aaa2 * abb6 * avv19 * bmm34 * bmm35
             + 2 * aff14 * ajj15 * aff15 * avv19 * bmm34 * bmm35
             - 4 * bll16 * att19 * app10 * bmm34 * bmm35
@@ -3510,10 +3458,7 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             + 3 * app14 * azz19 * app16
         )
         i3 = (
-            (
-                -(6 * aff05 * abb3 * aff10 * bss29 * libm.pow_op(abb9, 4))
-                / libm.pow_op(abb8, 4)
-            )
+            (-(6 * aff05 * abb3 * aff10 * bss29 * abb9**4) / abb8**4)
             + 2 * abb4 * aaa2 * abb6 * bss29 * bmm34 * bmm35
             - 2 * aff14 * ajj15 * aff15 * bss29 * bmm34 * bmm35
             + 2 * aff05 * abb3 * aff10 * bss26 * bmm34 * bmm35
@@ -3561,23 +3506,20 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - 4 * app08 * att19 * app10
             + 8 * bjj08 * btt24 * bjj11
             - (8 * aqq03 * abb3) / aqq05
-            + (56 * libm.pow_op(exp1, ((-4 * t) - 4 * p)) * att19) / aqq05**2
-            - (96 * libm.pow_op(exp1, ((-6 * t) - 6 * p)) * btt24)
-            / libm.pow_op(aqq05, 3)
-            + (48 * libm.pow_op(exp1, ((-8 * t) - 8 * p)) * libm.pow_op(aaa2, 8))
-            / libm.pow_op(aqq05, 4)
+            + (56 * exp1 ** ((-4 * t) - 4 * p) * att19) / aqq05**2
+            - (96 * exp1 ** ((-6 * t) - 6 * p) * btt24) / aqq05**3
+            + (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2**8) / aqq05**4
         )
         j3 = (
-            (-(6 * abb4 * aaa2 * abb6 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
+            (-(6 * abb4 * aaa2 * abb6 * abb9**4) / abb8**4)
             + (8 * abb4 * aaa2 * abb6 * bzz9) / bzz7
             - 4 * abb4 * aaa2 * abb6 * bzz9
             - 4 * abb4 * aaa2 * abb6 * bzz7
             - 2 * abb4 * aaa2 * abb6
         )
         k3 = (
-            (6 * abb4 * aaa2 * bdd14 * bdd15 * libm.pow_op(abb9, 4))
-            / libm.pow_op(abb8, 4)
-            - (2 * aff14 * ajj15 * bdd08 * libm.pow_op(abb9, 3)) / libm.pow_op(abb8, 3)
+            (6 * abb4 * aaa2 * bdd14 * bdd15 * abb9**4) / abb8**4
+            - (2 * aff14 * ajj15 * bdd08 * abb9**3) / abb8**3
             - (8 * abb4 * aaa2 * bdd14 * bdd15 * aff17) / aff13
             + 4 * abb4 * aaa2 * bdd14 * bdd15 * aff17
             + 4 * aff14 * ajj15 * bdd08 * abb8 * abb9
@@ -3585,16 +3527,13 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             + 4 * abb4 * aaa2 * bdd14 * bdd15 * aff13
             + 2 * abb4 * aaa2 * bdd14 * bdd15
         )
-        cll08 = 1 / libm.pow_op(bdd07, 5)
+        cll08 = 1 / bdd07**5
         cll16 = aii11 + bhh13
         cll17 = cll16**2
         cll18 = 2 * aff14 * ajj15 * bdd08 - 3 * app14 * azz19 * cll08
         cll24 = aii11 + bhh13 - aff14 * ajj15 * bdd08
         l3 = (
-            (
-                -(6 * abb4 * aaa2 * bdd14 * cll17 * libm.pow_op(abb9, 4))
-                / libm.pow_op(abb8, 4)
-            )
+            (-(6 * abb4 * aaa2 * bdd14 * cll17 * abb9**4) / abb8**4)
             + 2 * abb4 * aaa2 * bdd14 * cll24 * bmm34 * bmm35
             + 4 * aff14 * ajj15 * bdd08 * cll16 * bmm34 * bmm35
             + 8 * abb4 * aaa2 * bdd14 * cll17 * ass28 * aff17
@@ -3617,12 +3556,10 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
         cmm28 = (
             (-4 * aff14 * ajj15 * aii17)
             + 18 * app14 * azz19 * cbb09
-            - (15 * libm.pow_op(exp1, (aaa1 + 6 * abb5)) * libm.pow_op(aaa2, 7))
-            / libm.pow_op(agg15, 7)
+            - (15 * exp1 ** (aaa1 + 6 * abb5) * aaa2**7) / agg15**7
         )
         m3 = (
-            (6 * abb4 * aaa2 * abb6 * ccc24 * libm.pow_op(abb9, 4))
-            / libm.pow_op(abb8, 4)
+            (6 * abb4 * aaa2 * abb6 * ccc24 * abb9**4) / abb8**4
             - 6 * aff14 * ajj15 * aii17 * ayy24 * bmm34 * bmm35
             - 6 * abb4 * aaa2 * abb6 * ayy16 * ayy17 * bmm34 * bmm35
             - 8 * abb4 * aaa2 * abb6 * ccc24 * ass28 * aff17
@@ -3648,42 +3585,28 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - 3 * aff14 * ajj15 * aii17 * ayy17
             + 3 * cmm16 * ayy16
             - (8 * abb1 * abb3) / aff04
-            + (56 * libm.pow_op(exp1, ((-4 * t) - 4 * p)) * libm.pow_op(aaa2, 4))
-            / aff04**2
-            - (96 * libm.pow_op(exp1, ((-6 * t) - 6 * p)) * libm.pow_op(aaa2, 6))
-            / libm.pow_op(aff04, 3)
-            + (48 * libm.pow_op(exp1, ((-8 * t) - 8 * p)) * libm.pow_op(aaa2, 8))
-            / libm.pow_op(aff04, 4)
+            + (56 * exp1 ** ((-4 * t) - 4 * p) * aaa2**4) / aff04**2
+            - (96 * exp1 ** ((-6 * t) - 6 * p) * aaa2**6) / aff04**3
+            + (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2**8) / aff04**4
         )
         cnn3 = abb8**2
         cnn5 = abb9**2
-        n3 = (
-            (-(6 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
-            + (8 * cnn5) / cnn3
-            - 4 * cnn5
-            - 4 * cnn3
-            - 2
-        )
+        n3 = (-(6 * abb9**4) / abb8**4) + (8 * cnn5) / cnn3 - 4 * cnn5 - 4 * cnn3 - 2
         coo7 = abb8**2
         coo9 = abb9**2
         o3 = (
-            (6 * bgg4 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4)
+            (6 * bgg4 * abb9**4) / abb8**4
             - (8 * bgg4 * coo9) / coo7
             + 4 * bgg4 * coo9
             + 4 * bgg4 * coo7
             + 2 * bgg4
         )
-        cpp06 = -aaa2 / (libm.pow_op(exp1, t) * bdd07)
+        cpp06 = -aaa2 / (exp1**t * bdd07)
         cpp08 = (cpp06 + aii11) ** 2
-        cpp12 = (
-            aii11
-            + cpp06
-            - (libm.pow_op(exp1, (aaa1 + aff08)) * libm.pow_op(aaa2, 3))
-            / libm.pow_op(bdd07, 3)
-        )
+        cpp12 = aii11 + cpp06 - (exp1 ** (aaa1 + aff08) * aaa2**3) / bdd07**3
         p3 = (
-            (-(6 * cpp08 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
-            + (2 * cpp12 * libm.pow_op(abb9, 3)) / libm.pow_op(abb8, 3)
+            (-(6 * cpp08 * abb9**4) / abb8**4)
+            + (2 * cpp12 * abb9**3) / abb8**3
             + (8 * cpp08 * aff17) / aff13
             - 4 * cpp08 * aff17
             - 4 * cpp12 * abb8 * abb9
@@ -3693,13 +3616,13 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
         )
         cqq12 = -aff14 * ajj15 * bdd08
         cqq19 = bhh14 + bhh13
-        cqq20 = libm.pow_op(cqq19, 3)
+        cqq20 = cqq19**3
         cqq21 = bhh14 + bhh13 + aff14 * ajj15 * bdd08 - 3 * app14 * azz19 * cll08
         cqq25 = bhh14 + bhh13 + cqq12
         cqq28 = 1 / aff13
         q3 = (
-            (6 * cqq20 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4)
-            - (6 * cqq19 * cqq25 * libm.pow_op(abb9, 3)) / libm.pow_op(abb8, 3)
+            (6 * cqq20 * abb9**4) / abb8**4
+            - (6 * cqq19 * cqq25 * abb9**3) / abb8**3
             - 8 * cqq20 * cqq28 * aff17
             + cqq21 * cqq28 * aff17
             + 4 * cqq20 * aff17
@@ -3715,20 +3638,19 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             + 3 * app14 * azz19 * cll08
         )
         crr18 = aii11 + aoo09 + aff14 * ajj15 * aii17 - 3 * app14 * azz19 * cbb09
-        crr19 = libm.pow_op(bii11, 4)
+        crr19 = bii11**4
         crr21 = bii15**2
         crr25 = (
             aii11
             + aoo09
             - 3 * aff14 * ajj15 * aii17
             + 15 * app14 * azz19 * cbb09
-            - (15 * libm.pow_op(exp1, (aaa1 + 6 * abb5)) * libm.pow_op(aaa2, 7))
-            / libm.pow_op(agg15, 7)
+            - (15 * exp1 ** (aaa1 + 6 * abb5) * aaa2**7) / agg15**7
         )
         crr28 = bii11**2
         r3 = (
-            (-(6 * crr19 * libm.pow_op(abb9, 4)) / libm.pow_op(abb8, 4))
-            + (12 * crr28 * bii15 * libm.pow_op(abb9, 3)) / libm.pow_op(abb8, 3)
+            (-(6 * crr19 * abb9**4) / abb8**4)
+            + (12 * crr28 * bii15 * abb9**3) / abb8**3
             - 3 * crr21 * ass28 * aff17
             + 8 * crr19 * ass28 * aff17
             - 4 * bii11 * crr18 * ass28 * aff17
@@ -3746,12 +3668,9 @@ def _shash_derivs(y, mu, tau, eps, phi, phi_pen, deriv):
             - 2 * crr19
             + 4 * bii11 * crr18
             - (8 * abb1 * abb3) / aff04
-            + (56 * libm.pow_op(exp1, ((-4 * t) - 4 * p)) * libm.pow_op(aaa2, 4))
-            / aff04**2
-            - (96 * libm.pow_op(exp1, ((-6 * t) - 6 * p)) * libm.pow_op(aaa2, 6))
-            / libm.pow_op(aff04, 3)
-            + (48 * libm.pow_op(exp1, ((-8 * t) - 8 * p)) * libm.pow_op(aaa2, 8))
-            / libm.pow_op(aff04, 4)
+            + (56 * exp1 ** ((-4 * t) - 4 * p) * aaa2**4) / aff04**2
+            - (96 * exp1 ** ((-6 * t) - 6 * p) * aaa2**6) / aff04**3
+            + (48 * exp1 ** ((-8 * t) - 8 * p) * aaa2**8) / aff04**4
         )
 
         L4 = np.column_stack(
@@ -3810,9 +3729,9 @@ def _r_tweedie(rng, mu, p: float, phi: float) -> np.ndarray:
         raise ValueError("mean, mu, must be non negative")
     if phi <= 0:
         raise ValueError("scale parameter must be positive")
-    lam = libm.pow_op(mu, (2.0 - p)) / ((2.0 - p) * phi)
+    lam = mu ** (2.0 - p) / ((2.0 - p) * phi)
     shape = (2.0 - p) / (p - 1.0)
-    scale = phi * (p - 1.0) * libm.pow_op(mu, (p - 1.0))
+    scale = phi * (p - 1.0) * mu ** (p - 1.0)
     n = mu.shape[0]
     N = np.asarray(rng.poisson(lam)).astype(np.int64)  # n Poisson jump counts
     gs = np.repeat(scale, N)  # scale_i repeated N_i×
@@ -3848,24 +3767,20 @@ class Tweedie(Family):
         super().__init__(link=link)
 
     def variance(self, mu):
-        return libm.pow_op(np.asarray(mu, dtype=float), self.p)
+        return np.asarray(mu, dtype=float) ** self.p
 
     def dvar(self, mu):
-        return self.p * libm.pow_op(np.asarray(mu, dtype=float), (self.p - 1.0))
+        return self.p * np.asarray(mu, dtype=float) ** (self.p - 1.0)
 
     def d2var(self, mu):
-        return (
-            self.p
-            * (self.p - 1.0)
-            * libm.pow_op(np.asarray(mu, dtype=float), (self.p - 2.0))
-        )
+        return self.p * (self.p - 1.0) * np.asarray(mu, dtype=float) ** (self.p - 2.0)
 
     def d3var(self, mu):
         return (
             self.p
             * (self.p - 1.0)
             * (self.p - 2.0)
-            * libm.pow_op(np.asarray(mu, dtype=float), (self.p - 3.0))
+            * np.asarray(mu, dtype=float) ** (self.p - 3.0)
         )
 
     def dev_resids(self, y, mu, wt, theta=None):
@@ -3877,11 +3792,8 @@ class Tweedie(Family):
         tm = 2.0 - p
         zero = y == 0.0
         y_safe = np.where(zero, 1.0, y)
-        d_pos = 2.0 * (
-            y * (libm.pow_op(y_safe, om1) - libm.pow_op(mu, om1)) / om1
-            - (libm.pow_op(y_safe, tm) - libm.pow_op(mu, tm)) / tm
-        )
-        d_zero = 2.0 * libm.pow_op(mu, tm) / tm
+        d_pos = 2.0 * (y * (y_safe**om1 - mu**om1) / om1 - (y_safe**tm - mu**tm) / tm)
+        d_zero = 2.0 * mu**tm / tm
         return wt * np.where(zero, d_zero, d_pos)
 
     def initialize(self, y, wt):
@@ -3936,7 +3848,7 @@ class Tweedie(Family):
     def dvar_dp(self, mu):
         """``∂V(μ)/∂p = log(μ)·μ^p`` (since V = μ^p ⇒ log V = p·log μ)."""
         mu = np.asarray(mu, dtype=float)
-        return libm.log(mu) * libm.pow_op(mu, self.p)
+        return np.log(mu) * mu**self.p
 
     def dD_dp(self, y, mu, wt):
         """Σ_i wt_i · ∂d_i/∂p at fixed (y, μ). Used by the joint outer
@@ -3958,14 +3870,14 @@ class Tweedie(Family):
         om1 = 1.0 - p
         tm = 2.0 - p
         zero = y == 0.0
-        log_mu = libm.log(mu)
+        log_mu = np.log(mu)
         y_safe = np.where(zero, 1.0, y)
-        log_y = np.where(zero, 0.0, libm.log(y_safe))
+        log_y = np.where(zero, 0.0, np.log(y_safe))
 
-        y_om1 = libm.pow_op(y_safe, om1)
-        mu_om1 = libm.pow_op(mu, om1)
-        y_tm = libm.pow_op(y_safe, tm)
-        mu_tm = libm.pow_op(mu, tm)
+        y_om1 = y_safe**om1
+        mu_om1 = mu**om1
+        y_tm = y_safe**tm
+        mu_tm = mu**tm
         u = y_om1 - mu_om1
         v = y_tm - mu_tm
         dA1 = y * (mu_om1 * log_mu - y_om1 * log_y) / om1 + y * u / (om1 * om1)
@@ -4017,7 +3929,7 @@ class tw(Tweedie):
         self.b = float(b)
         if theta is None:
             p_init = 1.5
-            theta_init = float(libm.log((p_init - self.a) / (self.b - p_init)))
+            theta_init = float(np.log((p_init - self.a) / (self.b - p_init)))
         else:
             theta_init = float(theta)
             p_init = self._p_of_theta(theta_init)
@@ -4060,8 +3972,8 @@ class tw(Tweedie):
         y1 = y + (y == 0.0)
         om1 = 1.0 - p
         tm = 2.0 - p
-        t_term = (libm.pow_op(y1, om1) - libm.pow_op(mu, om1)) / om1
-        kappa = (libm.pow_op(y, tm) - libm.pow_op(mu, tm)) / tm
+        t_term = (y1**om1 - mu**om1) / om1
+        kappa = (y**tm - mu**tm) / tm
         return np.maximum(2.0 * (y * t_term - kappa) * wt, 0.0)
 
     def dp_dtheta(self) -> float:
@@ -4173,7 +4085,7 @@ class tw(Tweedie):
                 self.b,
             )
             Ls = wv[:, None] * ld
-            LS = np.array([r_sum(Ls[:, j]) for j in range(6)])
+            LS = np.array([_rsum(Ls[:, j]) for j in range(6)])
             lsth2 = np.array([[LS[4], LS[5]], [LS[5], LS[2]]])
             return {
                 "ls": float(LS[0]),
@@ -4196,24 +4108,20 @@ class tw(Tweedie):
         th = float(np.asarray(theta, dtype=float).ravel()[0])
         a, b = self.a, self.b
         if th > 0:
-            p = (b + a * libm.exp(-th)) / (1 + libm.exp(-th))
-            d1 = 1 + libm.exp(-th)
-            dpth1 = libm.exp(-th) * (b - a) / (d1 * d1)
-            d2 = libm.exp(-th) + 1
-            dpth2 = ((a - b) * libm.exp(-th) + (b - a) * libm.exp(-2 * th)) / (
-                d2 * d2 * d2
-            )
+            p = (b + a * np.exp(-th)) / (1 + np.exp(-th))
+            d1 = 1 + np.exp(-th)
+            dpth1 = np.exp(-th) * (b - a) / (d1 * d1)
+            d2 = np.exp(-th) + 1
+            dpth2 = ((a - b) * np.exp(-th) + (b - a) * np.exp(-2 * th)) / (d2 * d2 * d2)
         else:
-            p = (b * libm.exp(th) + a) / (libm.exp(th) + 1)
-            d1 = libm.exp(th) + 1
-            dpth1 = libm.exp(th) * (b - a) / (d1 * d1)
-            d2 = libm.exp(th) + 1
-            dpth2 = ((a - b) * libm.exp(2 * th) + (b - a) * libm.exp(th)) / (
-                d2 * d2 * d2
-            )
-        mu1p = libm.pow_op(mu, (1 - p))
-        mup = libm.pow_op(mu, p)
-        mupm1 = libm.pow_op(mu, (-1 - p))
+            p = (b * np.exp(th) + a) / (np.exp(th) + 1)
+            d1 = np.exp(th) + 1
+            dpth1 = np.exp(th) * (b - a) / (d1 * d1)
+            d2 = np.exp(th) + 1
+            dpth2 = ((a - b) * np.exp(2 * th) + (b - a) * np.exp(th)) / (d2 * d2 * d2)
+        mu1p = mu ** (1 - p)
+        mup = mu**p
+        mupm1 = mu ** (-1 - p)
         r = {}
         ymupi = y / mup
         r["Dmu"] = 2 * wt * (mu1p - ymupi)
@@ -4222,9 +4130,9 @@ class tw(Tweedie):
         if level > 0:
             i1p = 1 / (1 - p)
             y1 = y + (y == 0)
-            logmu = libm.log(mu)
-            logy1 = libm.log(y1)
-            y2p = libm.pow_op(y, (2 - p))
+            logmu = np.log(mu)
+            logy1 = np.log(y1)
+            y2p = y ** (2 - p)
             y2plogy = y2p * logy1
             mu2p = mu * mu1p
             mup1 = mupm1
@@ -4372,10 +4280,10 @@ class Scat(Family):
                 )
             if np.any(t < 0):
                 ini = np.array(
-                    [libm.log(abs(t[0]) - min_df), libm.log(abs(t[1]))], dtype=float
+                    [np.log(abs(t[0]) - min_df), np.log(abs(t[1]))], dtype=float
                 )
             else:
-                ini = np.array([libm.log(t[0] - min_df), libm.log(t[1])], dtype=float)
+                ini = np.array([np.log(t[0] - min_df), np.log(t[1])], dtype=float)
                 n_theta = 0
         else:
             ini = np.array([-2.0, -1.0], dtype=float)
@@ -4399,7 +4307,7 @@ class Scat(Family):
         Mirrors mgcv ``getTheta(trans=)``.
         """
         if trans:
-            out = libm.exp(self._theta).copy()
+            out = np.exp(self._theta).copy()
             out[0] += self._min_df
             return out
         return self._theta.copy()
@@ -4409,8 +4317,8 @@ class Scat(Family):
         return self._min_df
 
     def variance(self, mu):
-        nu = np.float64(libm.exp(self._theta[0]) + self._min_df)
-        sig = np.float64(libm.exp(self._theta[1]))
+        nu = np.float64(np.exp(self._theta[0]) + self._min_df)
+        sig = np.float64(np.exp(self._theta[1]))
         return np.full(np.shape(mu), sig * sig * nu / max(nu - 2.0, 1e-10), dtype=float)
 
     def dvar(self, mu):
@@ -4425,12 +4333,12 @@ class Scat(Family):
     def dev_resids(self, y, mu, wt, theta=None):
         # mgcv: wt * (ν+1) * log1p((1/ν) * ((y-μ)/σ)²)  (efam.r:3609-3614)
         th = self._theta if theta is None else np.asarray(theta, dtype=float)
-        nu = np.float64(libm.exp(th[0]) + self._min_df)
-        sig = np.float64(libm.exp(th[1]))
+        nu = np.float64(np.exp(th[0]) + self._min_df)
+        sig = np.float64(np.exp(th[1]))
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
-        return wt * (nu + 1.0) * libm.log1p((1.0 / nu) * ((y - mu) / sig) ** 2)
+        return wt * (nu + 1.0) * np.log1p((1.0 / nu) * ((y - mu) / sig) ** 2)
 
     def initialize(self, y, wt):
         y = np.asarray(y, dtype=float)
@@ -4448,16 +4356,16 @@ class Scat(Family):
         #                          + (ν+1)·log1p(((y-μ)/σ)²/ν)/2 ]
         # (efam.r:3690-3697)
         th = self._theta if theta is None else np.asarray(theta, dtype=float)
-        nu = np.float64(libm.exp(th[0]) + self._min_df)
-        sig = np.float64(libm.exp(th[1]))
+        nu = np.float64(np.exp(th[0]) + self._min_df)
+        sig = np.float64(np.exp(th[1]))
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         term = (
             -_r_lgamma((nu + 1.0) / 2.0)
             + _r_lgamma(nu / 2.0)
-            + libm.log(sig * np.sqrt(np.pi * nu))
-            + (nu + 1.0) * libm.log1p(((y - mu) / sig) ** 2 / nu) / 2.0
+            + np.log(sig * np.sqrt(np.pi * nu))
+            + (nu + 1.0) * np.log1p(((y - mu) / sig) ** 2 / nu) / 2.0
         )
         return 2.0 * r_sum(term * wt)
 
@@ -4480,13 +4388,13 @@ class Scat(Family):
         w = np.asarray(wt, dtype=float)
         if w.size == 1:
             w = np.full(y.shape, float(w))
-        nu = np.float64(libm.exp(th[0]) + self._min_df)
-        sig = np.float64(libm.exp(th[1]))
+        nu = np.float64(np.exp(th[0]) + self._min_df)
+        sig = np.float64(np.exp(th[1]))
         nu2 = nu - self._min_df  # = exp(th[0])
         nu2nu = nu2 / nu
         nu12 = (nu + 1.0) / 2.0
         term0 = (
-            _r_lgamma(nu12) - _r_lgamma(nu / 2.0) - libm.log(sig * np.sqrt(np.pi * nu))
+            _r_lgamma(nu12) - _r_lgamma(nu / 2.0) - np.log(sig * np.sqrt(np.pi * nu))
         )
         ls0 = float(r_sum(term0 * w))
         col0 = (
@@ -4525,8 +4433,8 @@ class Scat(Family):
         """
         y = np.asarray(y, dtype=float)
         wt = np.asarray(wt, dtype=float)
-        nu = np.float64(libm.exp(self._theta[0]) + self._min_df)
-        sig = np.float64(libm.exp(self._theta[1]))
+        nu = np.float64(np.exp(self._theta[0]) + self._min_df)
+        sig = np.float64(np.exp(self._theta[1]))
         term = (
             _nmath._lgammafn(float((nu + 1.0) / 2.0))
             - _nmath._lgammafn(float(nu / 2.0))
@@ -4540,8 +4448,8 @@ class Scat(Family):
     def Dd(self, y, mu, theta, wt, level: int = 0) -> dict:
         min_df = self._min_df
         th = np.asarray(theta, dtype=float)
-        nu = np.float64(libm.exp(th[0]) + min_df)
-        sig = np.float64(libm.exp(th[1]))
+        nu = np.float64(np.exp(th[0]) + min_df)
+        sig = np.float64(np.exp(th[1]))
         nu1 = nu + 1.0
         nu2 = nu - min_df
         y = np.asarray(y, dtype=float)
@@ -4575,7 +4483,7 @@ class Scat(Family):
             Dmuth = np.zeros((n, 2), dtype=float)
             Dmu2th = np.zeros((n, 2), dtype=float)
             EDmu2th = np.zeros((n, 2), dtype=float)
-            Dth[:, 0] = w * nu2 * (libm.log(a) - fym / nu)
+            Dth[:, 0] = w * nu2 * (np.log(a) - fym / nu)
             Dth[:, 1] = -2.0 * w * fym
             Dmuth[:, 0] = 2.0 * w * (f - ymsig2a - fymf1) * nu2nu
             Dmuth[:, 1] = 4.0 * w * f * (1.0 - f1ym)
@@ -4595,7 +4503,7 @@ class Scat(Family):
             Dmu2th[:, 1] = 4.0 * w * (-nu1nusig2a + ff1 * 5.0 - 4.0 * ff1 * f1ym)
             EDmu3 = np.zeros(n, dtype=float)
             EDmu2th[:, 0] = (
-                4.0 / (sig * sig * (nu + 3.0) ** 2) * np.float64(libm.exp(th[0]))
+                4.0 / (sig * sig * (nu + 3.0) ** 2) * np.float64(np.exp(th[0]))
             )
             EDmu2th[:, 1] = -2.0 * oo["EDmu2"]
 
@@ -4630,7 +4538,7 @@ class Scat(Family):
                     + 3.0 * f1 / sig2a
                     + 18.0 * ff1 * f1
                     - 4.0 * f1ymf1 / sig2a
-                    - 12.0 * nu1ym * libm.pow_op(f1, 4)
+                    - 12.0 * nu1ym * f1**4
                 )
                 * nu2nu
             )
@@ -4639,7 +4547,7 @@ class Scat(Family):
             )
 
             Dth2[:, 0] = w * (
-                nu2 * libm.log(a)
+                nu2 * np.log(a)
                 + nu2nu
                 * ym**2
                 * (-2.0 * nu2 - nu1 + 2.0 * nu1 * nu2nu - nu1 * nu2nu * f1ym)
@@ -4683,7 +4591,7 @@ class Scat(Family):
                     - 8.0 * nu2nu * f1ym**2
                     + 26.0 * fymf1ym * nu2nu / nu
                     - 4.0 * nu1nu * f1ym**2
-                    - 12.0 * nu1nu * nu2nu * libm.pow_op(f1ym, 3)
+                    - 12.0 * nu1nu * nu2nu * f1ym**3
                 )
                 / nusig2a
             )
@@ -4730,7 +4638,7 @@ class Scat(Family):
             y = np.asarray(y, dtype=float)
             sd_y = float(np.std(y, ddof=1)) if y.size > 1 else 1.0
             sd_y = max(sd_y, 1e-10)  # guard against constant y
-            return {"Theta": np.array([1.5, libm.log(0.8 * sd_y)], dtype=float)}
+            return {"Theta": np.array([1.5, np.log(0.8 * sd_y)], dtype=float)}
         return None
 
     def postproc(
@@ -4802,10 +4710,10 @@ class nb(Family):
         n_theta = 1
         if theta is not None and theta != 0.0:
             if theta > 0:
-                ini = float(libm.log(theta))
+                ini = float(np.log(theta))
                 n_theta = 0
             else:
-                ini = float(libm.log(-theta))
+                ini = float(np.log(-theta))
         else:
             ini = 0.0
         self.n_theta = int(n_theta)
@@ -4822,20 +4730,20 @@ class nb(Family):
 
     def get_theta(self, trans: bool = False) -> np.ndarray:
         if trans:
-            return libm.exp(self._theta).copy()
+            return np.exp(self._theta).copy()
         return self._theta.copy()
 
     def variance(self, mu):
-        Th = float(libm.exp(self._theta[0]))
+        Th = float(np.exp(self._theta[0]))
         mu = np.asarray(mu, dtype=float)
         return mu + mu * mu / Th
 
     def dvar(self, mu):
-        Th = float(libm.exp(self._theta[0]))
+        Th = float(np.exp(self._theta[0]))
         return 1.0 + 2.0 * np.asarray(mu, dtype=float) / Th
 
     def d2var(self, mu):
-        Th = float(libm.exp(self._theta[0]))
+        Th = float(np.exp(self._theta[0]))
         return np.full_like(np.asarray(mu, dtype=float), 2.0 / Th)
 
     def d3var(self, mu):
@@ -4845,7 +4753,7 @@ class nb(Family):
         # mgcv (efam.r:199-205): 2·wt·[y·log(max(1,y)/μ)
         #                              − (y+Θ)·log((y+Θ)/(μ+Θ))]
         th = self._theta if theta is None else np.asarray(theta, dtype=float)
-        Th = float(libm.exp(np.asarray(th).reshape(-1)[0]))
+        Th = float(np.exp(np.asarray(th).reshape(-1)[0]))
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
@@ -4853,14 +4761,14 @@ class nb(Family):
             2.0
             * wt
             * (
-                y * libm.log(np.maximum(1.0, y) / mu)
-                - (y + Th) * libm.log((y + Th) / (mu + Th))
+                y * np.log(np.maximum(1.0, y) / mu)
+                - (y + Th) * np.log((y + Th) / (mu + Th))
             )
         )
 
     def Dd(self, y, mu, theta, wt, level: int = 0) -> dict:
         # mgcv nb()$Dd verbatim (efam.r:207-237); θ = log Θ supplied.
-        Th = float(libm.exp(np.asarray(theta, dtype=float).reshape(-1)[0]))
+        Th = float(np.exp(np.asarray(theta, dtype=float).reshape(-1)[0]))
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
@@ -4871,7 +4779,7 @@ class nb(Family):
         r["Dmu2"] = -2.0 * wt * (yth / muth**2 - y / mu**2)
         r["EDmu2"] = 2.0 * wt * (1.0 / mu - 1.0 / muth)
         if level > 0:
-            r["Dth"] = -2.0 * wt * Th * (libm.log(yth / muth) + (1.0 - yth / muth))
+            r["Dth"] = -2.0 * wt * Th * (np.log(yth / muth) + (1.0 - yth / muth))
             r["Dmuth"] = 2.0 * wt * Th * (1.0 - yth / muth) / muth
             r["Dmu3"] = 4.0 * wt * (yth / _rpow_int(muth, 3) - y / _rpow_int(mu, 3))
             r["Dmu2th"] = 2.0 * wt * Th * (2.0 * yth / muth - 1.0) / muth**2
@@ -4885,7 +4793,7 @@ class nb(Family):
                 * wt
                 * Th
                 * (
-                    libm.log(yth / muth)
+                    np.log(yth / muth)
                     + Th * yth / muth**2
                     - yth / muth
                     - 2.0 * Th / muth
@@ -4914,15 +4822,15 @@ class nb(Family):
         # mgcv nb()$aic (efam.r:239-246); `dev` is unused (Θ-form direct).
         # R-level lgamma is nmath lgammafn (see ls_extended note).
         th = self._theta if theta is None else np.asarray(theta, dtype=float)
-        Th = float(libm.exp(np.asarray(th).reshape(-1)[0]))
+        Th = float(np.exp(np.asarray(th).reshape(-1)[0]))
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         term = (
-            (y + Th) * libm.log(mu + Th)
-            - y * libm.log(mu)
+            (y + Th) * np.log(mu + Th)
+            - y * np.log(mu)
             + _lgammafn_arr(y + 1.0)
-            - Th * libm.log(Th)
+            - Th * np.log(Th)
             + _nmath._lgammafn(Th)
             - _lgammafn_arr(Th + y)
         )
@@ -4933,7 +4841,7 @@ class nb(Family):
         # the single θ derivative (no scale slot).
         th = self._theta if theta is None else np.asarray(theta, dtype=float)
         th0 = float(np.asarray(th).reshape(-1)[0])
-        Th = float(libm.exp(th0))
+        Th = float(np.exp(th0))
         y = np.asarray(y, dtype=float)
         w = np.asarray(wt, dtype=float)
         cache = getattr(self, "_ls_cache", None)
@@ -4951,23 +4859,23 @@ class nb(Family):
         hit = cache.get(key)
         if hit is not None:
             return hit
-        ylogy = np.where(y > 0, y * libm.log(np.maximum(y, 1e-300)), 0.0)
+        ylogy = np.where(y > 0, y * np.log(np.maximum(y, 1e-300)), 0.0)
         term = (
-            (y + Th) * libm.log(y + Th)
+            (y + Th) * np.log(y + Th)
             - ylogy
             + _lgammafn_arr(y + 1.0)
-            - Th * libm.log(Th)
+            - Th * np.log(Th)
             + _nmath._lgammafn(Th)
             - _lgammafn_arr(Th + y)
         )
-        ls0 = -float(r_sum(term * w))
+        ls0 = -float(_rsum(term * w))
         yth = y + Th
-        lyth = libm.log(yth)
+        lyth = np.log(yth)
         psi0_yth = _nmath.psigamma_vec(yth, 0.0)
         psi0_th = _nmath.psigamma5(Th, 0.0)
         term1 = Th * (lyth - psi0_yth + psi0_th - th0)
         LSTH = (-term1 * w)[:, None]
-        lsth = float(r_sum(LSTH.ravel()))
+        lsth = float(_rsum(LSTH.ravel()))
         psi1_yth = _polygamma(1, yth)
         psi1_th = _polygamma(1, Th)
         term2 = Th * (
@@ -4980,7 +4888,7 @@ class nb(Family):
             - th0
             - 1.0
         )
-        lsth2 = -float(r_sum(term2 * w))
+        lsth2 = -float(_rsum(term2 * w))
         res = {
             "ls": ls0,
             "lsth1": np.array([lsth]),
@@ -5120,8 +5028,8 @@ class negbin(Family):
             2.0
             * wt
             * (
-                y * libm.log(np.maximum(1.0, y) / mu)
-                - (y + Th) * libm.log((y + Th) / (mu + Th))
+                y * np.log(np.maximum(1.0, y) / mu)
+                - (y + Th) * np.log((y + Th) / (mu + Th))
             )
         )
 
@@ -5131,8 +5039,8 @@ class negbin(Family):
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
         term = (
-            (y + Th) * libm.log(mu + Th)
-            - y * libm.log(mu)
+            (y + Th) * np.log(mu + Th)
+            - y * np.log(mu)
             + _lgammafn_arr(y + 1.0)
             - Th * math.log(Th)
             + _nmath._lgammafn(float(Th))
@@ -5144,9 +5052,9 @@ class negbin(Family):
         Th = self._th
         y = np.asarray(y, dtype=float)
         wt = np.asarray(wt, dtype=float)
-        ylogy = np.where(y > 0, y * libm.log(np.maximum(y, 1e-300)), y)
+        ylogy = np.where(y > 0, y * np.log(np.maximum(y, 1e-300)), y)
         term = (
-            (y + Th) * libm.log(y + Th)
+            (y + Th) * np.log(y + Th)
             - ylogy
             + _lgammafn_arr(y + 1.0)
             - Th * math.log(Th)
@@ -5236,10 +5144,10 @@ class betar(Family):
         n_theta = 1
         if theta is not None and theta != 0.0:
             if theta > 0:
-                ini = float(libm.log(theta))
+                ini = float(np.log(theta))
                 n_theta = 0
             else:
-                ini = float(libm.log(-theta))
+                ini = float(np.log(-theta))
         else:
             ini = 0.0
         self.n_theta = int(n_theta)
@@ -5257,21 +5165,21 @@ class betar(Family):
 
     def get_theta(self, trans: bool = False) -> np.ndarray:
         if trans:
-            return libm.exp(self._theta).copy()
+            return np.exp(self._theta).copy()
         return self._theta.copy()
 
     def variance(self, mu):
         th = float(self._theta[0])
         mu = np.asarray(mu, dtype=float)
-        return mu * (1.0 - mu) / (1.0 + libm.exp(th))
+        return mu * (1.0 - mu) / (1.0 + np.exp(th))
 
     def dvar(self, mu):
         th = float(self._theta[0])
-        return (1.0 - 2.0 * np.asarray(mu, dtype=float)) / (1.0 + libm.exp(th))
+        return (1.0 - 2.0 * np.asarray(mu, dtype=float)) / (1.0 + np.exp(th))
 
     def d2var(self, mu):
         th = float(self._theta[0])
-        return np.full_like(np.asarray(mu, dtype=float), -2.0 / (1.0 + libm.exp(th)))
+        return np.full_like(np.asarray(mu, dtype=float), -2.0 / (1.0 + np.exp(th)))
 
     def d3var(self, mu):
         return np.zeros_like(np.asarray(mu, dtype=float))
@@ -5280,7 +5188,7 @@ class betar(Family):
         # mgcv betar dev.resids (efam.r:3316-3324): −2logLik per datum
         # (the saturated reference is added later via saturated_ll).
         th = self._theta if theta is None else np.asarray(theta, dtype=float)
-        theta = float(libm.exp(np.asarray(th).reshape(-1)[0]))
+        theta = float(np.exp(np.asarray(th).reshape(-1)[0]))
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
@@ -5292,16 +5200,16 @@ class betar(Family):
                 -_r_lgamma(theta)
                 + _r_lgamma(muth)
                 + _r_lgamma(theta - muth)
-                - muth * (libm.log(y) - libm.log1p(-y))
-                - theta * libm.log1p(-y)
-                + libm.log(y)
-                + libm.log1p(-y)
+                - muth * (np.log(y) - np.log1p(-y))
+                - theta * np.log1p(-y)
+                + np.log(y)
+                + np.log1p(-y)
             )
         )
 
     def Dd(self, y, mu, theta, wt, level: int = 0) -> dict:
         # mgcv betar()$Dd verbatim (efam.r:3326-3367); θ = log φ supplied.
-        theta = float(libm.exp(np.asarray(theta, dtype=float).reshape(-1)[0]))
+        theta = float(np.exp(np.asarray(theta, dtype=float).reshape(-1)[0]))
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
@@ -5318,7 +5226,7 @@ class betar(Family):
         psi2_onemuth = _polygamma(2, onemuth)
         psi3_muth = _polygamma(3, muth)
         psi3_onemuth = _polygamma(3, onemuth)
-        log_yoney = libm.log(y) - libm.log1p(-y)
+        log_yoney = np.log(y) - np.log1p(-y)
         r: dict = {}
         r["Dmu"] = 2.0 * wt * theta * (psi0_muth - psi0_onemuth - log_yoney)
         r["Dmu2"] = 2.0 * wt * (theta * theta) * (psi1_muth + psi1_onemuth)
@@ -5330,7 +5238,7 @@ class betar(Family):
                 * theta
                 * (
                     -mu * log_yoney
-                    - libm.log1p(-y)
+                    - np.log1p(-y)
                     + mu * psi0_muth
                     + onemu * psi0_onemuth
                     - psi0_th
@@ -5369,7 +5277,7 @@ class betar(Family):
     def aic(self, y, mu, dev, wt, n, theta=None):
         # mgcv betar()$aic (efam.r:3369-3376); `dev` unused.
         th = self._theta if theta is None else np.asarray(theta, dtype=float)
-        theta = float(libm.exp(np.asarray(th).reshape(-1)[0]))
+        theta = float(np.exp(np.asarray(th).reshape(-1)[0]))
         y = np.asarray(y, dtype=float)
         mu = np.asarray(mu, dtype=float)
         wt = np.asarray(wt, dtype=float)
@@ -5378,8 +5286,8 @@ class betar(Family):
             -_r_lgamma(theta)
             + _r_lgamma(muth)
             + _r_lgamma(theta - muth)
-            - (muth - 1.0) * libm.log(y)
-            - (theta - muth - 1.0) * libm.log1p(-y)
+            - (muth - 1.0) * np.log(y)
+            - (theta - muth - 1.0) * np.log1p(-y)
         )
         return 2.0 * r_sum(term * wt)
 
@@ -5411,9 +5319,7 @@ class betar(Family):
             b = 1.0 - a
             ind = eta > 0
             expeta = np.where(
-                ind,
-                libm.exp(-np.where(ind, eta, 0.0)),
-                libm.exp(np.where(ind, 0.0, eta)),
+                ind, np.exp(-np.where(ind, eta, 0.0)), np.exp(np.where(ind, 0.0, eta))
             )
             mu = np.where(
                 ind,
@@ -5426,8 +5332,8 @@ class betar(Family):
             g = h = None
             if deriv:
                 g = (
-                    phi * libm.log(yy)
-                    - phi * libm.log1p(-yy)
+                    phi * np.log(yy)
+                    - phi * np.log1p(-yy)
                     - phi * _r_digamma(mu * phi)
                     + phi * _r_digamma((1.0 - mu) * phi)
                 )
@@ -5453,7 +5359,7 @@ class betar(Family):
         yc[yc > 1.0 - eps] = 1.0 - eps
         eta[yc <= eps * 1.2] = eps * 1.2
         eta[yc >= 1.0 - eps * 1.2] = 1.0 - eps * 1.2
-        eta = libm.log((eta - a) / (b - eta))
+        eta = np.log((eta - a) / (b - eta))
         yw = yc
         LS = np.zeros(n)
         muout = np.zeros(n)
@@ -5612,7 +5518,7 @@ def _ocat_alpha_full(theta: np.ndarray) -> tuple[np.ndarray, int]:
     alpha[R] = np.inf
     alpha[1] = -1.0
     if R > 2:
-        alpha[2:R] = alpha[1] + np.cumsum(libm.exp(th))
+        alpha[2:R] = alpha[1] + np.cumsum(np.exp(th))
     return alpha, R
 
 
@@ -5623,10 +5529,10 @@ def _ocat_Fdiff(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     b = np.asarray(b, dtype=float)
     hb = np.ones_like(b)
     hb[b > 0] = -1.0
-    eb = libm.exp(b * hb)
+    eb = np.exp(b * hb)
     ha = np.ones_like(a)
     ha[a > 0] = -1.0
-    ea = libm.exp(a * ha)
+    ea = np.exp(a * ha)
     out = np.empty_like(b)
     indb = b < 0
     out[indb] = eb[indb] / (1.0 + eb[indb]) - ea[indb] / (1.0 + ea[indb])
@@ -5644,7 +5550,7 @@ def _ocat_abcd(x: np.ndarray, level: int) -> tuple:
     x = np.asarray(x, dtype=float)
     h = np.ones_like(x)
     h[x > 0] = -1.0
-    ex = libm.exp(x * h)
+    ex = np.exp(x * h)
     ex1 = ex + 1.0
     ex1k = ex1**2
     aj = -ex / ex1k
@@ -5688,7 +5594,7 @@ def _ocat_Dd(y1, mu, theta, wt, level: int = 0) -> dict:
         d = d1 - d0
     n = y1.shape[0]
     oo: dict = {}
-    oo["D"] = -2.0 * wt * libm.log(f)
+    oo["D"] = -2.0 * wt * np.log(f)
     if level >= 0:
         oo["Dmu"] = -2.0 * wt * a / f
         a2 = a**2
@@ -5709,7 +5615,7 @@ def _ocat_Dd(y1, mu, theta, wt, level: int = 0) -> dict:
         Dmuth = np.zeros((n, R - 2))
         Dmu2th = np.zeros((n, R - 2))
         for kk in range(R - 2):
-            etk = libm.exp(theta[kk])
+            etk = np.exp(theta[kk])
             ind = y1 == kk + 2
             Dth[ind, kk] = wt[ind] * Da1[ind] * etk
             Dmuth[ind, kk] = wt[ind] * Dmua1[ind] * etk
@@ -5790,19 +5696,19 @@ def _ocat_Dd(y1, mu, theta, wt, level: int = 0) -> dict:
             for kk in range(jj, R - 2):
                 i += 1
                 ind = y1 >= jj + 1
-                ar_k = np.full(n, libm.exp(theta[kk]))
+                ar_k = np.full(n, np.exp(theta[kk]))
                 ar1_k = ar_k.copy()
                 ar_k[(y1 == R) | (y1 <= kk + 1)] = 0.0
                 ar1_k[y1 < kk + 3] = 0.0
-                ar_j = np.full(n, libm.exp(theta[jj]))
+                ar_j = np.full(n, np.exp(theta[jj]))
                 ar1_j = ar_j.copy()
                 ar_j[(y1 == R) | (y1 <= jj + 1)] = 0.0
                 ar1_j[y1 < jj + 3] = 0.0
                 ar_kj = np.zeros(n)
                 ar1_kj = np.zeros(n)
                 if kk == jj:
-                    ar_kj[(y1 > kk + 1) & (y1 < R)] = libm.exp(theta[kk])
-                    ar1_kj[y1 > kk + 2] = libm.exp(theta[kk])
+                    ar_kj[(y1 > kk + 1) & (y1 < R)] = np.exp(theta[kk])
+                    ar1_kj[y1 > kk + 2] = np.exp(theta[kk])
                     Dmu3th[ind, kk] = wt[ind] * (
                         Dmu3a1[ind] * ar_k[ind] + Dmu3a0[ind] * ar1_k[ind]
                     )
@@ -5848,7 +5754,7 @@ def _ocat_dev_signed(y1, mu, wt, theta) -> tuple[np.ndarray, np.ndarray]:
     al0 = alpha[y1 - 1]
     s = np.sign((al1 + al0) / 2.0 - mu)
     f = _ocat_Fdiff(al0 - mu, al1 - mu)
-    return -2.0 * wt * libm.log(f), s
+    return -2.0 * wt * np.log(f), s
 
 
 def _ocat_ini(R: int, y0) -> np.ndarray | None:
@@ -5862,13 +5768,13 @@ def _ocat_ini(R: int, y0) -> np.ndarray | None:
     yy = yy[np.isfinite(yy)].astype(int)
     counts = np.bincount(yy, minlength=R + 1)[1 : R + 1].astype(float)
     p = np.cumsum(counts / yy.shape[0])
-    eta = 5.0 if p[0] == 0 else -1.0 - libm.log(p[0] / (1.0 - p[0]))
+    eta = 5.0 if p[0] == 0 else -1.0 - np.log(p[0] / (1.0 - p[0]))
     theta = np.full(R - 1, -1.0)
     for i in range(1, R - 1):
-        theta[i] = libm.log(p[i] / (1.0 - p[i])) + eta
+        theta[i] = np.log(p[i] / (1.0 - p[i])) + eta
     theta = np.diff(theta)
     theta[theta <= 0.01] = 0.01
-    return libm.log(theta)
+    return np.log(theta)
 
 
 def _ocat_prob(theta, lp, se=None) -> tuple:
@@ -5934,9 +5840,9 @@ class ocat(Family):
         n_theta = R - 2
         if theta is not None and np.sum(theta == 0.0) == 0:
             if np.sum(theta < 0.0):
-                ini = libm.log(np.abs(theta))  # initial θ supplied
+                ini = np.log(np.abs(theta))  # initial θ supplied
             else:
-                ini = libm.log(theta)  # fixed θ
+                ini = np.log(theta)  # fixed θ
                 n_theta = 0
         else:
             ini = np.full(R - 2, -1.0)
@@ -5961,7 +5867,7 @@ class ocat(Family):
         alpha = np.zeros(R - 1)
         alpha[0] = -1.0
         if R > 2:
-            alpha[1:] = alpha[0] + np.cumsum(libm.exp(th))
+            alpha[1:] = alpha[0] + np.cumsum(np.exp(th))
         return alpha
 
     def dev_resids(self, y, mu, wt, theta=None):
@@ -5983,7 +5889,7 @@ class ocat(Family):
         al1 = alpha[y1]
         al0 = alpha[y1 - 1]
         f = _ocat_Fdiff(al0 - mu, al1 - mu)
-        return -2.0 * r_sum(libm.log(f) * wt)
+        return -2.0 * r_sum(np.log(f) * wt)
 
     def ls_extended(self, y, wt, theta=None, scale: float = 1.0) -> dict:
         # ocat ls ≡ 0 (efam.r:2918-2921).
@@ -6022,7 +5928,7 @@ class ocat(Family):
         alpha[0] = -2.0
         alpha[1] = -1.0
         if R > 2:
-            alpha[2:R] = alpha[1] + np.cumsum(libm.exp(self._theta))
+            alpha[2:R] = alpha[1] + np.cumsum(np.exp(self._theta))
         alpha[R] = alpha[R - 1] + 1.0
         y1 = y0 + 1
         return (alpha[y1] + alpha[y1 - 1]) / 2.0
@@ -6094,7 +6000,7 @@ class ocat(Family):
         alpha, R = _ocat_alpha_full(self._theta)
         mu = np.asarray(mu, dtype=float)
         u = rng.uniform(size=mu.shape[0])
-        lat = mu + libm.log(u / (1.0 - u))
+        lat = mu + np.log(u / (1.0 - u))
         y = np.zeros(mu.shape[0], dtype=float)
         for i in range(R):  # 0-based class i
             y[(lat > alpha[i]) & (lat <= alpha[i + 1])] = i
@@ -6121,7 +6027,7 @@ def _zip_lind(mu, theta, deriv, k=0.0):
     ``p = θ₁ + (k+e^θ₂)·μ`` and its μ/θ derivatives. Linear in μ, so
     ``p_ll = p_lll = p_llll = 0``."""
     mu = np.asarray(mu, dtype=float)
-    th2 = libm.exp(theta[1])
+    th2 = np.exp(theta[1])
     n = mu.shape[0]
     r = {
         "p": theta[0] + (k + th2) * mu,
@@ -6199,7 +6105,7 @@ def _zip_Dd(y, mu, theta, wt, b, level: int = 0) -> dict:
                 + 3.0 * l3[:, 1] * pL
                 + 3.0 * l3[:, 2] * pL**2
                 + 3.0 * l2[:, 1] * pll
-                + l3[:, 3] * libm.pow_op(pL, 3)
+                + l3[:, 3] * pL**3
                 + 3.0 * l2[:, 2] * pL * pll
                 + l1[:, 1] * plll
             )
@@ -6268,7 +6174,7 @@ def _zip_Dd(y, mu, theta, wt, b, level: int = 0) -> dict:
                 + c3[2] * (6.0 * plth * pL + 3.0 * pth * pll)
                 + 3.0 * c2g * pllth
                 + c4[3] * pth * pL**2
-                + c4[4] * pth * libm.pow_op(pL, 3)
+                + c4[4] * pth * pL**3
                 + 3.0 * c3[3] * (pL**2 * plth + pth * pL * pll)
                 + c2e * (3.0 * plth * pll + 3.0 * pL * pllth + pth * plll)
                 + c1 * plllth
@@ -6282,10 +6188,10 @@ def _zip_Dd(y, mu, theta, wt, b, level: int = 0) -> dict:
                 + 4.0 * l4[:, 1] * pL
                 + 6.0 * l4[:, 2] * pL**2
                 + 6.0 * l3[:, 1] * pll
-                + 4.0 * l4[:, 3] * libm.pow_op(pL, 3)
+                + 4.0 * l4[:, 3] * pL**3
                 + 12.0 * l3[:, 2] * pL * pll
                 + 4.0 * l2[:, 1] * plll
-                + l4[:, 4] * libm.pow_op(pL, 4)
+                + l4[:, 4] * pL**4
                 + 6.0 * l3[:, 3] * pL**2 * pll
                 + l2[:, 2] * (4.0 * pL * plll + 3.0 * pll**2)
                 + l1[:, 1] * pllll
@@ -6344,11 +6250,11 @@ class ziP(Family):
     def get_theta(self, trans: bool = False) -> np.ndarray:
         th = self._theta.copy()
         if trans:
-            th[1] = self._b + libm.exp(th[1])
+            th[1] = self._b + np.exp(th[1])
         return th
 
     def _presence_lp(self, mu, theta):
-        return theta[0] + (self._b + libm.exp(theta[1])) * np.asarray(mu, dtype=float)
+        return theta[0] + (self._b + np.exp(theta[1])) * np.asarray(mu, dtype=float)
 
     def dev_resids(self, y, mu, wt, theta=None):
         th = self._theta if theta is None else np.asarray(theta, dtype=float)
@@ -6403,7 +6309,7 @@ class ziP(Family):
         wp = wt[pind]
         if yp.shape[0] == 0:
             return np.zeros(y.shape[0])
-        mu = libm.log(yp)
+        mu = np.log(yp)
         r = self.Dd(yp, mu, theta, wp, level=0)
         l = self.dev_resids(yp, mu, wp, theta=theta)
         lmax = float(np.max(np.abs(l)))
@@ -6444,7 +6350,7 @@ class ziP(Family):
             raise ValueError("Non-integer response variables are not allowed with ziP ")
         if y.min() == 0 and y.max() == 1:
             raise ValueError("Using ziP for binary data makes no sense")
-        return libm.log(y + (y == 0) / 5.0)
+        return np.log(y + (y == 0) / 5.0)
 
     def validmu(self, mu) -> bool:
         return bool(np.all(np.isfinite(np.asarray(mu))))
@@ -6456,12 +6362,12 @@ class ziP(Family):
         gamma = np.asarray(gamma, dtype=float)
         th = self._theta
         with np.errstate(over="ignore", invalid="ignore"):
-            eta = th[0] + (self._b + libm.exp(th[1])) * gamma
-            et = libm.exp(eta)
-            p = 1.0 - libm.exp(-et)
-            lam = libm.exp(gamma)
-            ind = gamma < libm.log(np.finfo(float).eps) / 2.0
-            mu = np.where(ind, 1.0, lam / (1.0 - libm.exp(-lam)))
+            eta = th[0] + (self._b + np.exp(th[1])) * gamma
+            et = np.exp(eta)
+            p = 1.0 - np.exp(-et)
+            lam = np.exp(gamma)
+            ind = gamma < np.log(np.finfo(float).eps) / 2.0
+            mu = np.where(ind, 1.0, lam / (1.0 - np.exp(-lam)))
         return p * mu, p, mu, lam
 
     def postproc(
@@ -6478,7 +6384,7 @@ class ziP(Family):
             return float(r_sum(self.dev_resids(y, np.full(y.shape, gamma), wt)))
 
         meany = float(np.mean(y))
-        tol = float(libm.pow_op(np.finfo(float).eps, 0.25))
+        tol = float(np.finfo(float).eps ** 0.25)
         _, obj = _brent_fmin(fnull, meany / 5.0, meany * 3.0, tol)
         null_dev = obj - float(r_sum(lf))
         cuts = ",".join(f"{c:g}" for c in np.round(self.get_theta(True), 3))
@@ -6525,9 +6431,9 @@ class ziP(Family):
         if se_v is None:
             return {"fit": fv}
         with np.errstate(over="ignore", invalid="ignore"):
-            eta_p = th[0] + (self._b + libm.exp(th[1])) * gamma
-            et = libm.exp(eta_p)
-            dp_dg = libm.exp(-et) * et * (self._b + libm.exp(th[1]))
+            eta_p = th[0] + (self._b + np.exp(th[1])) * gamma
+            et = np.exp(eta_p)
+            dp_dg = np.exp(-et) * et * (self._b + np.exp(th[1]))
             dmu_dg = (lam + 1.0) * mu - mu**2
         se_fit = np.abs(dp_dg * mu + dmu_dg * p) * se_v
         return {"fit": fv, "se_fit": se_fit}
@@ -6541,15 +6447,15 @@ class ziP(Family):
         th = self._theta
         n = gamma.shape[0]
         with np.errstate(over="ignore", invalid="ignore"):
-            lam = libm.exp(gamma)
+            lam = np.exp(gamma)
             finite = np.isfinite(lam)
             mlam = max(
                 float(np.max(lam[finite])) if np.any(finite) else 0.0,
-                libm.pow_op(np.finfo(float).eps, 0.2),
+                np.finfo(float).eps ** 0.2,
             )
             lam = np.where(finite, lam, mlam)
-            eta = th[0] + (self._b + libm.exp(th[1])) * gamma
-            p = 1.0 - libm.exp(-libm.exp(eta))
+            eta = th[0] + (self._b + np.exp(th[1])) * gamma
+            p = 1.0 - np.exp(-np.exp(eta))
         y = np.zeros(n)
         present = p > rng.uniform(size=n)
         lami = lam[present]
@@ -6581,7 +6487,7 @@ class ziP(Family):
 # Newton, no deviance override, no residuals_extended (the default √ works).
 # ---------------------------------------------------------------------------
 
-_LOG2PI = float(libm.log(2.0 * np.pi))
+_LOG2PI = float(np.log(2.0 * np.pi))
 
 
 def _dnorm_log(x):
@@ -6594,20 +6500,20 @@ def _logexm1(x):
     """mgcv ``logexm1`` (misc.r:18-27): log(e^x − 1), overflow-safe. For
     x ≥ log(1/eps)+1 the −1 is negligible so log(e^x−1) ≈ x."""
     x = np.array(x, dtype=float, copy=True)
-    xt = libm.log(1.0 / np.finfo(float).eps) + 1.0
+    xt = np.log(1.0 / np.finfo(float).eps) + 1.0
     ii = x < xt
     with np.errstate(divide="ignore", invalid="ignore"):
-        x[ii] = libm.log(libm.expm1(x[ii]))
+        x[ii] = np.log(np.expm1(x[ii]))
     return x
 
 
 def _cnorm_logexp1(x):
     """mgcv ``logexp1`` (efam.r:801-807): log(e^x + 1), overflow-safe."""
     x = np.array(x, dtype=float, copy=True)
-    xt = libm.log(1.0 / np.finfo(float).eps) + 1.0
+    xt = np.log(1.0 / np.finfo(float).eps) + 1.0
     ii = x < xt
     with np.errstate(over="ignore"):
-        x[ii] = libm.log(libm.exp(x[ii]) + 1.0)
+        x[ii] = np.log(np.exp(x[ii]) + 1.0)
     return x
 
 
@@ -6623,7 +6529,7 @@ def _cnorm_dpnorm(x0, x1, log_p=True):
     p0 = log_ndtr(x0)
     p1 = log_ndtr(x1)
     dp = p0 + _logexm1(p1 - p0)
-    return dp if log_p else libm.exp(dp)
+    return dp if log_p else np.exp(dp)
 
 
 def _cnorm_ddnorm(x0, x1, a0=0.0, a1=0.0, s0=1.0, s1=1.0):
@@ -6685,23 +6591,23 @@ def _cnorm_dev_resids(y, mu, wt, theta, censor):
     y = np.asarray(y, dtype=float)
     mu = np.asarray(mu, dtype=float)
     wt = np.asarray(wt, dtype=float)
-    th = float(theta) - libm.log(wt) / 2.0
+    th = float(theta) - np.log(wt) / 2.0
     yat, iu, ii, il, ir = _cnorm_cases(y, censor)
     d = np.zeros(y.shape[0])
     if iu.size:
-        d[iu] = (y[iu] - mu[iu]) ** 2 * libm.exp(-2.0 * th[iu])
+        d[iu] = (y[iu] - mu[iu]) ** 2 * np.exp(-2.0 * th[iu])
     if ii.size:
         y1 = np.maximum(yat[ii], y[ii])
         y0 = np.minimum(yat[ii], y[ii])
-        ethi = libm.exp(-th[ii])
+        ethi = np.exp(-th[ii])
         zz = (y1 - y0) * ethi / 2.0
         d[ii] = 2.0 * _cnorm_dpnorm(-zz, zz, log_p=True) - 2.0 * _cnorm_dpnorm(
             (y0 - mu[ii]) * ethi, (y1 - mu[ii]) * ethi, log_p=True
         )
     if il.size:
-        d[il] = -2.0 * log_ndtr((y[il] - mu[il]) * libm.exp(-th[il]))
+        d[il] = -2.0 * log_ndtr((y[il] - mu[il]) * np.exp(-th[il]))
     if ir.size:
-        d[ir] = -2.0 * log_ndtr(-(y[ir] - mu[ir]) * libm.exp(-th[ir]))
+        d[ir] = -2.0 * log_ndtr(-(y[ir] - mu[ir]) * np.exp(-th[ir]))
     return d
 
 
@@ -6713,26 +6619,26 @@ def _cnorm_aic(y, mu, wt, theta, censor):
     y = np.asarray(y, dtype=float)
     mu = np.asarray(mu, dtype=float)
     wt = np.asarray(wt, dtype=float)
-    th = float(theta) - libm.log(wt) / 2.0
+    th = float(theta) - np.log(wt) / 2.0
     yat = y if censor is None else np.asarray(censor, dtype=float)
     d = np.zeros(y.shape[0])
     iu = np.where(yat == y)[0]
     if iu.size:
-        d[iu] = -2.0 * _dnorm_log((y[iu] - mu[iu]) * libm.exp(-th[iu]))
+        d[iu] = -2.0 * _dnorm_log((y[iu] - mu[iu]) * np.exp(-th[iu]))
     ii = np.where(np.isfinite(yat) & (yat != y))[0]
     if ii.size:
         y1 = np.maximum(yat[ii], y[ii])
         y0 = np.minimum(yat[ii], y[ii])
-        ethi = libm.exp(-th[ii])
+        ethi = np.exp(-th[ii])
         d[ii] = -2.0 * _cnorm_dpnorm(
             (y0 - mu[ii]) * ethi, (y1 - mu[ii]) * ethi, log_p=True
         )
     il = np.where(yat <= 0)[0]
     if il.size:
-        d[il] = -2.0 * log_ndtr((y[il] - mu[il]) * libm.exp(-th[il]))
+        d[il] = -2.0 * log_ndtr((y[il] - mu[il]) * np.exp(-th[il]))
     ir = np.where(yat == np.inf)[0]
     if ir.size:
-        d[ir] = -2.0 * log_ndtr(-(y[ir] - mu[ir]) * libm.exp(-th[ir]))
+        d[ir] = -2.0 * log_ndtr(-(y[ir] - mu[ir]) * np.exp(-th[ir]))
     return float(r_sum(d))
 
 
@@ -6742,7 +6648,7 @@ def _cnorm_ls_val(y, wt, theta, censor):
     θ-derivatives identically zero."""
     y = np.asarray(y, dtype=float)
     wt = np.asarray(wt, dtype=float)
-    th = float(theta) - libm.log(wt) / 2.0
+    th = float(theta) - np.log(wt) / 2.0
     yat, iu, ii, _il, _ir = _cnorm_cases(y, censor)
     ls = 0.0
     if iu.size:
@@ -6750,7 +6656,7 @@ def _cnorm_ls_val(y, wt, theta, censor):
     if ii.size:
         y1 = np.maximum(yat[ii], y[ii])
         y0 = np.minimum(yat[ii], y[ii])
-        zz = (y1 - y0) * libm.exp(-th[ii]) / 2.0
+        zz = (y1 - y0) * np.exp(-th[ii]) / 2.0
         ls += float(r_sum(_cnorm_dpnorm(-zz, zz, log_p=True)))
     return ls
 
@@ -6764,9 +6670,9 @@ def _cnorm_Dd(y, mu, theta, wt, censor, level=0):
     mu = np.asarray(mu, dtype=float)
     wt = np.asarray(wt, dtype=float)
     theta = float(np.asarray(theta, dtype=float).reshape(-1)[0])
-    th = theta - libm.log(wt) / 2.0
+    th = theta - np.log(wt) / 2.0
     th3 = 3.0 * th
-    eth = libm.exp(-th)
+    eth = np.exp(-th)
     e2th = eth * eth
     yat, iu, ii, il, ir = _cnorm_cases(y, censor)
 
@@ -6818,25 +6724,20 @@ def _cnorm_Dd(y, mu, theta, wt, censor, level=0):
             ldp = _cnorm_dpnorm(z0, z1, log_p=True)
             ldd, sdd = _cnorm_ddnorm(z0, z1)
             ldzdz, szdz = _cnorm_ddnorm(
-                z0,
-                z1,
-                libm.log(np.abs(z0)),
-                libm.log(np.abs(z1)),
-                np.sign(z0),
-                np.sign(z1),
+                z0, z1, np.log(np.abs(z0)), np.log(np.abs(z1)), np.sign(z0), np.sign(z1)
             )
-            Dmui = 2.0 * sdd * libm.exp(-thi + ldd - ldp)
-            Dt = 2.0 * szdz * libm.exp(ldzdz - ldp)
+            Dmui = 2.0 * sdd * np.exp(-thi + ldd - ldp)
+            Dt = 2.0 * szdz * np.exp(ldzdz - ldp)
             Dmu2i = Dmui**2 / 2.0 + e2thi * Dt
             Dmu[ii] = Dmui
             Dmu2[ii] = Dmu2i
             if level > 0:
-                ldz2, sz2 = _cnorm_ddnorm(z0, z1, libm.log(z0**2), libm.log(z1**2))
+                ldz2, sz2 = _cnorm_ddnorm(z0, z1, np.log(z0**2), np.log(z1**2))
                 ldz3, sz3 = _cnorm_ddnorm(
                     z0,
                     z1,
-                    libm.log(np.abs(libm.pow_op(z0, 3))),
-                    libm.log(np.abs(libm.pow_op(z1, 3))),
+                    np.log(np.abs(z0**3)),
+                    np.log(np.abs(z1**3)),
                     np.sign(z0),
                     np.sign(z1),
                 )
@@ -6846,9 +6747,9 @@ def _cnorm_Dd(y, mu, theta, wt, censor, level=0):
                 z03 = z02 * z0
                 Dmu3i = Dmui * (
                     3.0 * Dmu2i / 2.0 - Dmui**2 / 4.0 - e2thi
-                ) + 2.0 * sz2 * libm.exp(ldz2 - ldp - th3i)
-                Dmt = Dmui * Dt / 2.0 - Dmui + 2.0 * sz2 * libm.exp(ldz2 - ldp - thi)
-                Dtt = Dt**2 / 2.0 - Dt + 2.0 * sz3 * libm.exp(ldz3 - ldp)
+                ) + 2.0 * sz2 * np.exp(ldz2 - ldp - th3i)
+                Dmt = Dmui * Dt / 2.0 - Dmui + 2.0 * sz2 * np.exp(ldz2 - ldp - thi)
+                Dtt = Dt**2 / 2.0 - Dt + 2.0 * sz3 * np.exp(ldz3 - ldp)
                 Dmu2thi = Dmui * Dmt + e2thi * (Dtt - 2.0 * Dt)
                 Dth[ii] = Dt
                 Dmuth[ii] = Dmt
@@ -6862,35 +6763,30 @@ def _cnorm_Dd(y, mu, theta, wt, censor, level=0):
                     lda1, sa1 = _cnorm_ddnorm(
                         z0,
                         z1,
-                        libm.log(np.abs(a0)),
-                        libm.log(np.abs(a1)),
+                        np.log(np.abs(a0)),
+                        np.log(np.abs(a1)),
                         np.sign(a0),
                         np.sign(a1),
                     )
                     Dmu4[ii] = (
                         Dmu2i * (3.0 * Dmu2i / 2.0 - Dmui**2 / 4.0 - e2thi)
                         + Dmui * (3.0 * Dmu3i - Dmui * Dmu2i) / 2.0
-                        + sa1 * libm.exp(lda1 - ldp - th3i)
+                        + sa1 * np.exp(lda1 - ldp - th3i)
                     )
-                    ldz4, sz4 = _cnorm_ddnorm(
-                        z0,
-                        z1,
-                        libm.log(libm.pow_op(z0, 4)),
-                        libm.log(libm.pow_op(z1, 4)),
-                    )
+                    ldz4, sz4 = _cnorm_ddnorm(z0, z1, np.log(z0**4), np.log(z1**4))
                     Dmu3th[ii] = (
                         Dmt * (3.0 * Dmu2i / 2.0 - Dmui**2 / 4.0)
                         + Dmui * (3.0 * Dmu2thi - Dmui * Dmt) / 2.0
                         + e2thi * (2.0 * Dmui - Dmt)
-                        + (Dt - 10.0) * sz2 * libm.exp(ldz2 - ldp - th3i)
-                        + 2.0 * sz4 * libm.exp(ldz4 - ldp - th3i)
+                        + (Dt - 10.0) * sz2 * np.exp(ldz2 - ldp - th3i)
+                        + 2.0 * sz4 * np.exp(ldz4 - ldp - th3i)
                     )
                     Dth2[ii] = Dtt
                     Dmtt = (
                         (Dmt * Dt + Dmui * Dtt) / 2.0
                         - Dmt
-                        + (Dt - 6.0) * sz2 * libm.exp(ldz2 - ldp - thi)
-                        + 2.0 * sz4 * libm.exp(ldz4 - ldp - thi)
+                        + (Dt - 6.0) * sz2 * np.exp(ldz2 - ldp - thi)
+                        + 2.0 * sz4 * np.exp(ldz4 - ldp - thi)
                     )
                     Dmuth2[ii] = Dmtt
                     a1b = z13 * (z12 - 3.0)
@@ -6898,15 +6794,15 @@ def _cnorm_Dd(y, mu, theta, wt, censor, level=0):
                     lda6, sa6 = _cnorm_ddnorm(
                         z0,
                         z1,
-                        libm.log(np.abs(a0b)),
-                        libm.log(np.abs(a1b)),
+                        np.log(np.abs(a0b)),
+                        np.log(np.abs(a1b)),
                         np.sign(a0b),
                         np.sign(a1b),
                     )
                     Dttt = (
                         Dtt * (Dt - 1.0)
-                        + Dt * sz3 * libm.exp(ldz3 - ldp)
-                        + 2.0 * sa6 * libm.exp(lda6 - ldp)
+                        + Dt * sz3 * np.exp(ldz3 - ldp)
+                        + 2.0 * sa6 * np.exp(lda6 - ldp)
                     )
                     Dmu2th2[ii] = (
                         Dmt**2 + Dmui * Dmtt + e2thi * (Dttt - 4.0 * Dtt + 4.0 * Dt)
@@ -6921,8 +6817,8 @@ def _cnorm_Dd(y, mu, theta, wt, censor, level=0):
         with np.errstate(**_es):
             ldp = log_ndtr(z1)
             ldn = _dnorm_log(z1)
-            Dmui = 2.0 * libm.exp(-thi + ldn - ldp)
-            Dt = 2.0 * np.sign(z1) * libm.exp(ldn + libm.log(np.abs(z1)) - ldp)
+            Dmui = 2.0 * np.exp(-thi + ldn - ldp)
+            Dt = 2.0 * np.sign(z1) * np.exp(ldn + np.log(np.abs(z1)) - ldp)
             Dmu2i = Dmui**2 / 2.0 + e2thi * Dt
             Dmu[il] = Dmui
             Dmu2[il] = Dmu2i
@@ -6931,20 +6827,16 @@ def _cnorm_Dd(y, mu, theta, wt, censor, level=0):
                 z13 = z12 * z1
                 Dmu3i = Dmui * (
                     3.0 * Dmu2i / 2.0 - Dmui**2 / 4.0 - e2thi
-                ) + 2.0 * np.sign(z12) * libm.exp(
-                    ldn + libm.log(np.abs(z12)) - ldp - th3i
-                )
+                ) + 2.0 * np.sign(z12) * np.exp(ldn + np.log(np.abs(z12)) - ldp - th3i)
                 Dmt = (
                     Dmui * Dt / 2.0
                     - Dmui
-                    + 2.0
-                    * np.sign(z12)
-                    * libm.exp(ldn + libm.log(np.abs(z12)) - ldp - thi)
+                    + 2.0 * np.sign(z12) * np.exp(ldn + np.log(np.abs(z12)) - ldp - thi)
                 )
                 Dtt = (
                     Dt**2 / 2.0
                     - Dt
-                    + 2.0 * np.sign(z13) * libm.exp(ldn + libm.log(np.abs(z13)) - ldp)
+                    + 2.0 * np.sign(z13) * np.exp(ldn + np.log(np.abs(z13)) - ldp)
                 )
                 Dmu2thi = Dmui * Dmt + e2thi * (Dtt - 2.0 * Dt)
                 Dth[il] = Dt
@@ -6957,35 +6849,30 @@ def _cnorm_Dd(y, mu, theta, wt, censor, level=0):
                     Dmu4[il] = (
                         Dmu2i * (3.0 * Dmu2i / 2.0 - Dmui**2 / 4.0 - e2thi)
                         + Dmui * (3.0 * Dmu3i - Dmui * Dmu2i) / 2.0
-                        + np.sign(a1)
-                        * libm.exp(ldn + libm.log(np.abs(a1)) - ldp - th3i)
+                        + np.sign(a1) * np.exp(ldn + np.log(np.abs(a1)) - ldp - th3i)
                     )
                     Dmu3th[il] = (
                         Dmt * (3.0 * Dmu2i / 2.0 - Dmui**2 / 4.0)
                         + Dmui * (3.0 * Dmu2thi - Dmui * Dmt) / 2.0
                         + e2thi * (2.0 * Dmui - Dmt)
-                        + (Dt - 10.0) * libm.exp(ldn + libm.log(z12) - ldp - th3i)
-                        + 2.0 * libm.exp(ldn + libm.log(z14) - ldp - th3i)
+                        + (Dt - 10.0) * np.exp(ldn + np.log(z12) - ldp - th3i)
+                        + 2.0 * np.exp(ldn + np.log(z14) - ldp - th3i)
                     )
                     Dth2[il] = Dtt
                     Dmtt = (
                         (Dmt * Dt + Dmui * Dtt) / 2.0
                         - Dmt
-                        + (Dt - 6.0) * libm.exp(ldn + libm.log(z12) - ldp - thi)
+                        + (Dt - 6.0) * np.exp(ldn + np.log(z12) - ldp - thi)
                         + 2.0
                         * np.sign(z14)
-                        * libm.exp(ldn + libm.log(np.abs(z14)) - ldp - thi)
+                        * np.exp(ldn + np.log(np.abs(z14)) - ldp - thi)
                     )
                     Dmuth2[il] = Dmtt
                     a1b = z13 * (z12 - 3.0)
                     Dttt = (
                         Dtt * (Dt - 1.0)
-                        + Dt
-                        * np.sign(z13)
-                        * libm.exp(ldn + libm.log(np.abs(z13)) - ldp)
-                        + 2.0
-                        * np.sign(a1b)
-                        * libm.exp(ldn + libm.log(np.abs(a1b)) - ldp)
+                        + Dt * np.sign(z13) * np.exp(ldn + np.log(np.abs(z13)) - ldp)
+                        + 2.0 * np.sign(a1b) * np.exp(ldn + np.log(np.abs(a1b)) - ldp)
                     )
                     Dmu2th2[il] = (
                         Dmt**2 + Dmui * Dmtt + e2thi * (Dttt - 4.0 * Dtt + 4.0 * Dt)
@@ -7000,8 +6887,8 @@ def _cnorm_Dd(y, mu, theta, wt, censor, level=0):
         with np.errstate(**_es):
             ldp = log_ndtr(-z0)
             ldn = _dnorm_log(z0)
-            Dmui = -2.0 * libm.exp(-thi + ldn - ldp)
-            Dt = -2.0 * np.sign(z0) * libm.exp(ldn + libm.log(np.abs(z0)) - ldp)
+            Dmui = -2.0 * np.exp(-thi + ldn - ldp)
+            Dt = -2.0 * np.sign(z0) * np.exp(ldn + np.log(np.abs(z0)) - ldp)
             Dmu2i = Dmui**2 / 2.0 + e2thi * Dt
             Dmu[ir] = Dmui
             Dmu2[ir] = Dmu2i
@@ -7010,20 +6897,16 @@ def _cnorm_Dd(y, mu, theta, wt, censor, level=0):
                 z03 = z02 * z0
                 Dmu3i = Dmui * (
                     3.0 * Dmu2i / 2.0 - Dmui**2 / 4.0 - e2thi
-                ) - 2.0 * np.sign(z02) * libm.exp(
-                    ldn + libm.log(np.abs(z02)) - ldp - th3i
-                )
+                ) - 2.0 * np.sign(z02) * np.exp(ldn + np.log(np.abs(z02)) - ldp - th3i)
                 Dmt = (
                     Dmui * Dt / 2.0
                     - Dmui
-                    - 2.0
-                    * np.sign(z02)
-                    * libm.exp(ldn + libm.log(np.abs(z02)) - ldp - thi)
+                    - 2.0 * np.sign(z02) * np.exp(ldn + np.log(np.abs(z02)) - ldp - thi)
                 )
                 Dtt = (
                     Dt**2 / 2.0
                     - Dt
-                    - 2.0 * np.sign(z03) * libm.exp(ldn + libm.log(np.abs(z03)) - ldp)
+                    - 2.0 * np.sign(z03) * np.exp(ldn + np.log(np.abs(z03)) - ldp)
                 )
                 Dmu2thi = Dmui * Dmt + e2thi * (Dtt - 2.0 * Dt)
                 Dth[ir] = Dt
@@ -7036,33 +6919,28 @@ def _cnorm_Dd(y, mu, theta, wt, censor, level=0):
                     Dmu4[ir] = (
                         Dmu2i * (3.0 * Dmu2i / 2.0 - Dmui**2 / 4.0 - e2thi)
                         + Dmui * (3.0 * Dmu3i - Dmui * Dmu2i) / 2.0
-                        - np.sign(a1)
-                        * libm.exp(ldn + libm.log(np.abs(a1)) - ldp - th3i)
+                        - np.sign(a1) * np.exp(ldn + np.log(np.abs(a1)) - ldp - th3i)
                     )
                     Dmu3th[ir] = (
                         Dmt * (3.0 * Dmu2i / 2.0 - Dmui**2 / 4.0)
                         + Dmui * (3.0 * Dmu2thi - Dmui * Dmt) / 2.0
                         + e2thi * (2.0 * Dmui - Dmt)
-                        - (Dt - 10.0) * libm.exp(ldn + libm.log(z02) - ldp - th3i)
-                        - 2.0 * libm.exp(ldn + libm.log(z04) - ldp - th3i)
+                        - (Dt - 10.0) * np.exp(ldn + np.log(z02) - ldp - th3i)
+                        - 2.0 * np.exp(ldn + np.log(z04) - ldp - th3i)
                     )
                     Dth2[ir] = Dtt
                     Dmtt = (
                         (Dmt * Dt + Dmui * Dtt) / 2.0
                         - Dmt
-                        - (Dt - 6.0) * libm.exp(ldn + libm.log(z02) - ldp - thi)
-                        - 2.0 * libm.exp(ldn + libm.log(z04) - ldp - thi)
+                        - (Dt - 6.0) * np.exp(ldn + np.log(z02) - ldp - thi)
+                        - 2.0 * np.exp(ldn + np.log(z04) - ldp - thi)
                     )
                     Dmuth2[ir] = Dmtt
                     a1b = z03 * (z02 - 3.0)
                     Dttt = (
                         Dtt * (Dt - 1.0)
-                        - Dt
-                        * np.sign(z03)
-                        * libm.exp(ldn + libm.log(np.abs(z03)) - ldp)
-                        - 2.0
-                        * np.sign(a1b)
-                        * libm.exp(ldn + libm.log(np.abs(a1b)) - ldp)
+                        - Dt * np.sign(z03) * np.exp(ldn + np.log(np.abs(z03)) - ldp)
+                        - 2.0 * np.sign(a1b) * np.exp(ldn + np.log(np.abs(a1b)) - ldp)
                     )
                     Dmu2th2[ir] = (
                         Dmt**2 + Dmui * Dmtt + e2thi * (Dttt - 4.0 * Dtt + 4.0 * Dt)
@@ -7122,10 +7000,10 @@ class cnorm(Family):
         if theta is not None:
             t = float(theta)
             if t > 0:
-                ini = float(libm.log(t))
+                ini = float(np.log(t))
                 self.n_theta = 0
             else:
-                ini = float(libm.log(-t)) if t < 0 else t
+                ini = float(np.log(-t)) if t < 0 else t
         else:
             ini = 0.0
         self._theta = np.array([ini], dtype=float)
@@ -7149,7 +7027,7 @@ class cnorm(Family):
 
     def get_theta(self, trans: bool = False) -> np.ndarray:
         th = self._theta.copy()
-        return libm.exp(th) if trans else th
+        return np.exp(th) if trans else th
 
     def set_censor(self, censor) -> None:
         """Stash the censoring bound (column 1 of the ``cbind(y, yat)``
@@ -7259,6 +7137,15 @@ class cnorm(Family):
 # ---------------------------------------------------------------------------
 
 
+def _rsum(a):
+    """R's ``sum()`` over a double vector as compiled on arm64 (LDOUBLE ==
+    double there, R's src/main/arithmetic.c-style strict left-to-right
+    accumulation): numpy's pairwise ``np.sum`` rounds differently in the
+    last ulp; ``cumsum`` accumulates sequentially like R."""
+    a = np.asarray(a, dtype=float).ravel()
+    return float(np.cumsum(a)[-1]) if a.size else 0.0
+
+
 def _cpois_dpois_log(x, lam):
     """R ``dpois(x, λ, log=TRUE)`` via the nmath port (rust-accelerated;
     full dpois.c edge semantics — cpois's Dd probes x−1…x−4, so negative
@@ -7310,7 +7197,7 @@ def _dppois(y0, y1, mu, log_p=True):
         p[ii] = p1[ii]
         free[ii] = False
         ii = ~i1 & (y0 < 0) & free  # y0 prob is zero, y1 upper tail
-        p[ii] = libm.log(1.0 - libm.exp(p1[ii]))
+        p[ii] = np.log(1.0 - np.exp(p1[ii]))
         free[ii] = False
         ii = i1 & i0 & free  # both lower tail
         p[ii] = p0[ii] + _logexm1(p1[ii] - p0[ii])
@@ -7319,8 +7206,8 @@ def _dppois(y0, y1, mu, log_p=True):
         p[ii] = p1[ii] + _logexm1(p0[ii] - p1[ii])
         free[ii] = False
         ii = ~i1 & i0 & free  # p1 upper p0 lower (converse impossible)
-        p[ii] = libm.log(1.0 - libm.exp(p1[ii]) - libm.exp(p0[ii]))
-    return p if log_p else libm.exp(p)
+        p[ii] = np.log(1.0 - np.exp(p1[ii]) - np.exp(p0[ii]))
+    return p if log_p else np.exp(p)
 
 
 def _cpois_dev_resids(y, mu, censor):
@@ -7343,7 +7230,7 @@ def _cpois_dev_resids(y, mu, censor):
             y0 = np.minimum(yat[ii], y[ii])
             fy1 = np.floor(y1)
             fy0 = np.floor(y0)
-            musat = libm.exp(
+            musat = np.exp(
                 (_lgammafn_arr(fy1 + 1.0) - _lgammafn_arr(fy0 + 1.0)) / (fy1 - fy0)
             )
             d[ii] = 2.0 * (_dppois(y0, y1, musat) - _dppois(y0, y1, mu[ii]))
@@ -7383,12 +7270,12 @@ def _cpois_Dd(y, mu, censor, level=0):
         miu = mu[iu]
         with np.errstate(**_es):
             lf = _cpois_dpois_log(yiu, miu)
-            f1[iu] = libm.exp(_cpois_dpois_log(yiu - 1.0, miu) - lf)
-            f2[iu] = libm.exp(_cpois_dpois_log(yiu - 2.0, miu) - lf)
+            f1[iu] = np.exp(_cpois_dpois_log(yiu - 1.0, miu) - lf)
+            f2[iu] = np.exp(_cpois_dpois_log(yiu - 2.0, miu) - lf)
             if level > 0:
-                f3[iu] = libm.exp(_cpois_dpois_log(yiu - 3.0, miu) - lf)
+                f3[iu] = np.exp(_cpois_dpois_log(yiu - 3.0, miu) - lf)
             if level > 1:
-                f4[iu] = libm.exp(_cpois_dpois_log(yiu - 4.0, miu) - lf)
+                f4[iu] = np.exp(_cpois_dpois_log(yiu - 4.0, miu) - lf)
 
     if ii.size:  # interval censored
         y0 = np.minimum(y[ii], yat[ii])
@@ -7396,12 +7283,12 @@ def _cpois_Dd(y, mu, censor, level=0):
         mii = mu[ii]
         with np.errstate(**_es):
             lg = _dppois(y0, y1, mii)
-            f1[ii] = libm.exp(_dppois(y0 - 1.0, y1 - 1.0, mii) - lg)
-            f2[ii] = libm.exp(_dppois(y0 - 2.0, y1 - 2.0, mii) - lg)
+            f1[ii] = np.exp(_dppois(y0 - 1.0, y1 - 1.0, mii) - lg)
+            f2[ii] = np.exp(_dppois(y0 - 2.0, y1 - 2.0, mii) - lg)
             if level > 0:
-                f3[ii] = libm.exp(_dppois(y0 - 3.0, y1 - 3.0, mii) - lg)
+                f3[ii] = np.exp(_dppois(y0 - 3.0, y1 - 3.0, mii) - lg)
             if level > 1:
-                f4[ii] = libm.exp(_dppois(y0 - 4.0, y1 - 4.0, mii) - lg)
+                f4[ii] = np.exp(_dppois(y0 - 4.0, y1 - 4.0, mii) - lg)
 
     for lt in (True, False):  # do left then right censoring...
         idx = il if lt else ir
@@ -7410,12 +7297,12 @@ def _cpois_Dd(y, mu, censor, level=0):
             mil = mu[idx]
             with np.errstate(**_es):
                 lf = _cpois_ppois_log(yil, mil, lt)
-                f1[idx] = libm.exp(_cpois_ppois_log(yil - 1.0, mil, lt) - lf)
-                f2[idx] = libm.exp(_cpois_ppois_log(yil - 2.0, mil, lt) - lf)
+                f1[idx] = np.exp(_cpois_ppois_log(yil - 1.0, mil, lt) - lf)
+                f2[idx] = np.exp(_cpois_ppois_log(yil - 2.0, mil, lt) - lf)
                 if level > 0:
-                    f3[idx] = libm.exp(_cpois_ppois_log(yil - 3.0, mil, lt) - lf)
+                    f3[idx] = np.exp(_cpois_ppois_log(yil - 3.0, mil, lt) - lf)
                 if level > 1:
-                    f4[idx] = libm.exp(_cpois_ppois_log(yil - 4.0, mil, lt) - lf)
+                    f4[idx] = np.exp(_cpois_ppois_log(yil - 4.0, mil, lt) - lf)
 
     r = {"Dmu": -2.0 * (f1 - 1.0), "Dmu2": -2.0 * (f2 - _rpow_int(f1, 2))}
     r["EDmu2"] = r["Dmu2"]
@@ -7454,7 +7341,7 @@ def _cpois_aic(y, mu, censor):
     ir = np.where(yat == np.inf)[0]
     if ir.size:
         d[ir] = _cpois_ppois_log(y[ir], mu[ir], False)
-    return -2.0 * r_sum(d)
+    return -2.0 * _rsum(d)
 
 
 def _cpois_ls_val(y, censor):
@@ -7473,11 +7360,11 @@ def _cpois_ls_val(y, censor):
         fy1 = np.floor(y1)
         fy0 = np.floor(y0)
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-            mus = libm.exp(
+            mus = np.exp(
                 (_lgammafn_arr(fy1 + 1.0) - _lgammafn_arr(fy0 + 1.0)) / (fy1 - fy0)
             )
         d[ii] = _dppois(y0, y1, mus)
-    return r_sum(d)
+    return _rsum(d)
 
 
 class cpois(Family):
@@ -7624,7 +7511,7 @@ class cpois(Family):
 # ---------------------------------------------------------------------------
 
 
-_M_LN2_CLOG = float(libm.log(2.0))
+_M_LN2_CLOG = float(np.log(2.0))
 
 
 def _clog_log1pexp(x):
@@ -7635,11 +7522,11 @@ def _clog_log1pexp(x):
     result = x.copy()
     with np.errstate(over="ignore"):
         ii = x <= 37.0
-        result[ii] = libm.exp(x[ii])
+        result[ii] = np.exp(x[ii])
         ii = (-37.0 < x) & (x <= 18.0)
-        result[ii] = libm.log1p(libm.exp(x[ii]))
+        result[ii] = np.log1p(np.exp(x[ii]))
         ii = (18.0 < x) & (x <= 33.3)
-        result[ii] = x[ii] + libm.exp(-x[ii])
+        result[ii] = x[ii] + np.exp(-x[ii])
     return result
 
 
@@ -7651,9 +7538,9 @@ def _clog_log1mexp(a):
     result = np.zeros(a.shape)
     with np.errstate(divide="ignore"):
         ii = (0.0 < a) & (a <= _M_LN2_CLOG)
-        result[ii] = libm.log(-libm.expm1(-a[ii]))
+        result[ii] = np.log(-np.expm1(-a[ii]))
         ii = a > _M_LN2_CLOG
-        result[ii] = libm.log1p(-libm.exp(-a[ii]))
+        result[ii] = np.log1p(-np.exp(-a[ii]))
     return result
 
 
@@ -7667,7 +7554,7 @@ def _clog_dev_resids(y, mu, wt, theta, censor):
     yat, iu, ii, il, ir = _cnorm_cases(y, censor)
     d = np.zeros(y.shape[0])
     if iu.size:  # uncensored
-        si = libm.exp(theta) / np.sqrt(wt[iu])
+        si = np.exp(theta) / np.sqrt(wt[iu])
         mui = mu[iu]
         yi = y[iu]
         d[iu] = 2.0 * (
@@ -7676,7 +7563,7 @@ def _clog_dev_resids(y, mu, wt, theta, censor):
             + 2.0 * _clog_log1pexp(-(yi - mui) / si)
         )
     if ii.size:  # interval censored
-        si = libm.exp(theta) / np.sqrt(wt[ii])
+        si = np.exp(theta) / np.sqrt(wt[ii])
         mui = mu[ii]
         yl = np.minimum(y[ii], yat[ii])
         yr = np.maximum(y[ii], yat[ii])
@@ -7692,13 +7579,13 @@ def _clog_dev_resids(y, mu, wt, theta, censor):
         )
         d[ii] = 2.0 * (lm - line)
     if il.size:  # left censored
-        si = libm.exp(theta) / np.sqrt(wt[il])
+        si = np.exp(theta) / np.sqrt(wt[il])
         mui = mu[il]
         yr = y[il]
         line = -_clog_log1pexp(-(yr - mui) / si)
         d[il] = 2.0 * (0.0 - line)
     if ir.size:  # right censored
-        si = libm.exp(theta) / np.sqrt(wt[ir])
+        si = np.exp(theta) / np.sqrt(wt[ir])
         mui = mu[ir]
         yl = y[ir]
         line = (-(yl - mui) / si) - _clog_log1pexp(-(yl - mui) / si)
@@ -7740,11 +7627,11 @@ def _clog_Dd(y, mu, theta, wt, censor, level=0):
     _es = {"divide": "ignore", "invalid": "ignore", "over": "ignore"}
 
     if iu.size:  # uncensored
-        si = libm.exp(theta) / np.sqrt(wt[iu])
+        si = np.exp(theta) / np.sqrt(wt[iu])
         yi = y[iu]
         mui = mu[iu]
         with np.errstate(**_es):
-            alphai = 1.0 / (2.0 + libm.expm1((yi - mui) / si))
+            alphai = 1.0 / (2.0 + np.expm1((yi - mui) / si))
             Dmui = 2.0 / si * (2.0 * alphai - 1.0)
             Dmu[iu] = Dmui
             Dmu2i = 4.0 / _rpow_int(si, 2) * alphai * (1.0 - alphai)
@@ -7769,11 +7656,11 @@ def _clog_Dd(y, mu, theta, wt, censor, level=0):
     if ii.size:  # interval censored
         yl = np.minimum(y[ii], yat[ii])
         yr = np.maximum(y[ii], yat[ii])
-        si = libm.exp(theta) / np.sqrt(wt[ii])
+        si = np.exp(theta) / np.sqrt(wt[ii])
         mui = mu[ii]
         with np.errstate(**_es):
-            alphai = 1.0 / (2.0 + libm.expm1(-(yr - mui) / si))
-            betai = 1.0 / (2.0 + libm.expm1(-(yl - mui) / si))
+            alphai = 1.0 / (2.0 + np.expm1(-(yr - mui) / si))
+            betai = 1.0 / (2.0 + np.expm1(-(yl - mui) / si))
             Dmui = 2.0 / si * (1.0 - alphai - betai)
             Dmu[ii] = Dmui
             Dmu2i = (
@@ -7794,15 +7681,15 @@ def _clog_Dd(y, mu, theta, wt, censor, level=0):
                     * (
                         1.0
                         / (
-                            libm.expm1(-(yr - yl) / (2.0 * si))
-                            - libm.expm1((yr - yl) / (2.0 * si))
+                            np.expm1(-(yr - yl) / (2.0 * si))
+                            - np.expm1((yr - yl) / (2.0 * si))
                         )
                     )
                 )
                 lth = (1.0 / si) * (
-                    -(yr - yl) * (1.0 / libm.expm1((yr - yl) / si))
-                    + (yl - mui) * (1.0 / (libm.expm1((mui - yl) / si) + 2.0))
-                    - (yr - mui) * (1.0 / (libm.expm1((yr - mui) / si) + 2.0))
+                    -(yr - yl) * (1.0 / np.expm1((yr - yl) / si))
+                    + (yl - mui) * (1.0 / (np.expm1((mui - yl) / si) + 2.0))
+                    - (yr - mui) * (1.0 / (np.expm1((yr - mui) / si) + 2.0))
                 )
                 Dth[ii] = 2.0 * (lmth - lth)
                 Dmu3i = (
@@ -7834,25 +7721,25 @@ def _clog_Dd(y, mu, theta, wt, censor, level=0):
                 ) * _rpow_int(
                     1.0
                     / (
-                        libm.expm1(-(yr - yl) / (2.0 * si))
-                        + -libm.expm1((yr - yl) / (2.0 * si))
+                        np.expm1(-(yr - yl) / (2.0 * si))
+                        + -np.expm1((yr - yl) / (2.0 * si))
                     ),
                     2,
                 ) * (
                     2.0
-                    + libm.expm1(-(yr - yl) / (2.0 * si))
-                    + libm.expm1((yr - yl) / (2.0 * si))
+                    + np.expm1(-(yr - yl) / (2.0 * si))
+                    + np.expm1((yr - yl) / (2.0 * si))
                 )
                 lth2 = -lth - (1.0 / _rpow_int(si, 2)) * (
                     _rpow_int(yr - yl, 2)
-                    * (1.0 / libm.expm1((yr - yl) / si))
-                    * (1.0 / -libm.expm1(-(yr - yl) / si))
+                    * (1.0 / np.expm1((yr - yl) / si))
+                    * (1.0 / -np.expm1(-(yr - yl) / si))
                     + _rpow_int(yl - mui, 2)
-                    * (1.0 / (libm.expm1((mui - yl) / si) + 2.0))
-                    * (1.0 / (libm.expm1((yl - mui) / si) + 2.0))
+                    * (1.0 / (np.expm1((mui - yl) / si) + 2.0))
+                    * (1.0 / (np.expm1((yl - mui) / si) + 2.0))
                     + _rpow_int(yr - mui, 2)
-                    * (1.0 / (libm.expm1((yr - mui) / si) + 2.0))
-                    * (1.0 / (libm.expm1((mui - yr) / si) + 2.0))
+                    * (1.0 / (np.expm1((yr - mui) / si) + 2.0))
+                    * (1.0 / (np.expm1((mui - yr) / si) + 2.0))
                 )
                 Dth2[ii] = 2.0 * (lmth2 - lth2)
                 Dmuth2i = (
@@ -7903,11 +7790,11 @@ def _clog_Dd(y, mu, theta, wt, censor, level=0):
                 )
 
     if il.size:  # left censored
-        si = libm.exp(theta) / np.sqrt(wt[il])
+        si = np.exp(theta) / np.sqrt(wt[il])
         yr = y[il]
         mui = mu[il]
         with np.errstate(**_es):
-            alphai = 1.0 / (2.0 + libm.expm1(-(yr - mui) / si))
+            alphai = 1.0 / (2.0 + np.expm1(-(yr - mui) / si))
             Dmui = 2.0 / si * (1.0 - alphai)
             Dmu[il] = Dmui
             Dmu2i = 2.0 / _rpow_int(si, 2) * (alphai - _rpow_int(alphai, 2))
@@ -7939,11 +7826,11 @@ def _clog_Dd(y, mu, theta, wt, censor, level=0):
                 )
 
     if ir.size:  # right censored
-        si = libm.exp(theta) / np.sqrt(wt[ir])
+        si = np.exp(theta) / np.sqrt(wt[ir])
         yl = y[ir]
         mui = mu[ir]
         with np.errstate(**_es):
-            betai = 1.0 / (2.0 + libm.expm1(-(yl - mui) / si))
+            betai = 1.0 / (2.0 + np.expm1(-(yl - mui) / si))
             Dmui = -(2.0 / si) * betai
             Dmu[ir] = Dmui
             Dmu2i = 2.0 / _rpow_int(si, 2) * (betai - _rpow_int(betai, 2))
@@ -7999,15 +7886,15 @@ def _clog_aic(y, wt, theta, censor):
     y = np.asarray(y, dtype=float)
     wt = np.asarray(wt, dtype=float)
     theta = float(theta)
-    th = theta - 0.5 * libm.log(wt)
+    th = theta - 0.5 * np.log(wt)
     yat, iu, ii, il, ir = _cnorm_cases(y, censor)
     a = np.zeros(y.shape[0])
     if iu.size:
-        si = libm.exp(theta) / np.sqrt(wt[iu])
-        lm = -libm.log1p(si - 1.0) - 2.0 * _M_LN2_CLOG
+        si = np.exp(theta) / np.sqrt(wt[iu])
+        lm = -np.log1p(si - 1.0) - 2.0 * _M_LN2_CLOG
         a[iu] = -2.0 * lm + 2.0 * th[iu]
     if ii.size:
-        si = libm.exp(theta) / np.sqrt(wt[ii])
+        si = np.exp(theta) / np.sqrt(wt[ii])
         yl = np.minimum(y[ii], yat[ii])
         yr = np.maximum(y[ii], yat[ii])
         lm = (
@@ -8020,7 +7907,7 @@ def _clog_aic(y, wt, theta, censor):
         a[il] = 2.0 * th[il]
     if ir.size:
         a[ir] = 2.0 * th[ir]
-    return r_sum(a)
+    return _rsum(a)
 
 
 def _clog_ls(y, wt, theta, censor):
@@ -8036,11 +7923,11 @@ def _clog_ls(y, wt, theta, censor):
     l1 = np.zeros(n)
     l2 = np.zeros(n)
     if iu.size:
-        si = libm.exp(theta) / np.sqrt(wt[iu])
-        l0[iu] = -libm.log1p(si - 1.0) - 2.0 * _M_LN2_CLOG
+        si = np.exp(theta) / np.sqrt(wt[iu])
+        l0[iu] = -np.log1p(si - 1.0) - 2.0 * _M_LN2_CLOG
         l1[iu] = -1.0
     if ii.size:
-        si = libm.exp(theta) / np.sqrt(wt[ii])
+        si = np.exp(theta) / np.sqrt(wt[ii])
         yl = np.minimum(y[ii], yat[ii])
         yr = np.maximum(y[ii], yat[ii])
         l0[ii] = (
@@ -8053,10 +7940,7 @@ def _clog_ls(y, wt, theta, censor):
             * (1.0 / si)
             * (
                 1.0
-                / (
-                    libm.expm1(-(yr - yl) / (2.0 * si))
-                    - libm.expm1((yr - yl) / (2.0 * si))
-                )
+                / (np.expm1(-(yr - yl) / (2.0 * si)) - np.expm1((yr - yl) / (2.0 * si)))
             )
         )
         l1[ii] = lmth
@@ -8064,18 +7948,11 @@ def _clog_ls(y, wt, theta, censor):
             1.0 / _rpow_int(si, 2)
         ) * _rpow_int(
             1.0
-            / (
-                libm.expm1(-(yr - yl) / (2.0 * si))
-                + -libm.expm1((yr - yl) / (2.0 * si))
-            ),
+            / (np.expm1(-(yr - yl) / (2.0 * si)) + -np.expm1((yr - yl) / (2.0 * si))),
             2,
-        ) * (
-            2.0
-            + libm.expm1(-(yr - yl) / (2.0 * si))
-            + libm.expm1((yr - yl) / (2.0 * si))
-        )
+        ) * (2.0 + np.expm1(-(yr - yl) / (2.0 * si)) + np.expm1((yr - yl) / (2.0 * si)))
         l2[ii] = lmth2
-    return (r_sum(l0), r_sum(l1), l1, r_sum(l2))
+    return (_rsum(l0), _rsum(l1), l1, _rsum(l2))
 
 
 class clog(Family):
@@ -8112,10 +7989,10 @@ class clog(Family):
         if theta is not None and float(theta) != 0.0:
             t = float(theta)
             if t > 0:
-                ini = float(libm.log(t))
+                ini = float(np.log(t))
                 self.n_theta = 0
             else:
-                ini = float(libm.log(-t))
+                ini = float(np.log(-t))
         else:
             ini = 0.0
         self._theta = np.array([ini], dtype=float)
@@ -8139,7 +8016,7 @@ class clog(Family):
 
     def get_theta(self, trans: bool = False) -> np.ndarray:
         th = self._theta.copy()
-        return libm.exp(th) if trans else th
+        return np.exp(th) if trans else th
 
     def set_censor(self, censor) -> None:
         """Stash the censoring bound (column 1 of the ``cbind(y, yat)``
@@ -8261,7 +8138,7 @@ def _bcg_bc_z(y, la, ls_variant=False):
     z = y.copy()
     nina = ~np.isnan(y)
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        logy = np.where(nina, libm.log(y), y)
+        logy = np.where(nina, np.log(y), y)
         if abs(la) < 1e-7:
             ylly = _rpow(y, la) * logy
             yl2 = ylly * logy
@@ -8286,7 +8163,7 @@ def _bcg_bc(y, la, deriv=0):
     z1 = np.full(y.shape, np.nan)
     z2 = np.full(y.shape, np.nan)
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        logy = np.where(nina, libm.log(y), y)
+        logy = np.where(nina, np.log(y), y)
         ylly = logy * _rpow(y, la)
         if abs(la) < 1e-7:
             yl2 = ylly * logy
@@ -8337,7 +8214,7 @@ def _bcg_dpnorm(x0, x1, log_p=True):
     p0 = pnorm5_vec(x0, log_p=True)
     p1 = pnorm5_vec(x1, log_p=True)
     dp = p0 + _logexm1(p1 - p0)
-    return dp if log_p else libm.exp(dp)
+    return dp if log_p else np.exp(dp)
 
 
 def _bcg_ddnorm(x0, x1, a0=0.0, a1=0.0, s0=1.0, s1=1.0):
@@ -8398,19 +8275,17 @@ def _bcg_dev_resids(y, mu, wt, theta, censor):
     mu = np.asarray(mu, dtype=float)
     wt = np.asarray(wt, dtype=float)
     theta = np.asarray(theta, dtype=float).reshape(-1)
-    th = theta[1] - libm.log(wt) / 2.0
+    th = theta[1] - np.log(wt) / 2.0
     la = float(theta[0])
     yat, iu, ii, il, ir = _bcg_cases(y, censor)
     d = np.zeros(y.shape[0])
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
         if iu.size:
-            d[iu] = _rpow_int(_bcg_bc_z(y[iu], la) - mu[iu], 2) * libm.exp(
-                -2.0 * th[iu]
-            )
+            d[iu] = _rpow_int(_bcg_bc_z(y[iu], la) - mu[iu], 2) * np.exp(-2.0 * th[iu])
         if ii.size:
             y1 = np.maximum(yat[ii], y[ii])
             y0 = np.minimum(yat[ii], y[ii])
-            ethi = libm.exp(-th[ii])
+            ethi = np.exp(-th[ii])
             zz = (_bcg_bc_z(y1, la) - _bcg_bc_z(y0, la)) * ethi / 2.0
             d[ii] = 2.0 * _bcg_dpnorm(-zz, zz, log_p=True) - 2.0 * _bcg_dpnorm(
                 (_bcg_bc_z(y0, la) - mu[ii]) * ethi,
@@ -8419,11 +8294,11 @@ def _bcg_dev_resids(y, mu, wt, theta, censor):
             )
         if il.size:
             d[il] = -2.0 * pnorm5_vec(
-                (_bcg_bc_z(y[il], la) - mu[il]) * libm.exp(-th[il]), log_p=True
+                (_bcg_bc_z(y[il], la) - mu[il]) * np.exp(-th[il]), log_p=True
             )
         if ir.size:
             d[ir] = -2.0 * pnorm5_vec(
-                -(_bcg_bc_z(y[ir], la) - mu[ir]) * libm.exp(-th[ir]), log_p=True
+                -(_bcg_bc_z(y[ir], la) - mu[ir]) * np.exp(-th[ir]), log_p=True
             )
         sgn = np.sign(_bcg_bc_z(y, la) - mu)
     return d, sgn
@@ -8436,19 +8311,19 @@ def _bcg_aic(y, mu, wt, theta, censor):
     mu = np.asarray(mu, dtype=float)
     wt = np.asarray(wt, dtype=float)
     theta = np.asarray(theta, dtype=float).reshape(-1)
-    th = theta[1] - libm.log(wt) / 2.0
+    th = theta[1] - np.log(wt) / 2.0
     la = float(theta[0])
     yat, iu, ii, il, ir = _bcg_cases(y, censor)
     d = np.zeros(y.shape[0])
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
         if iu.size:
             d[iu] = -2.0 * dnorm5_vec(
-                (_bcg_bc_z(y[iu], la) - mu[iu]) * libm.exp(-th[iu]), give_log=True
+                (_bcg_bc_z(y[iu], la) - mu[iu]) * np.exp(-th[iu]), give_log=True
             )
         if ii.size:
             y1 = np.maximum(yat[ii], y[ii])
             y0 = np.minimum(yat[ii], y[ii])
-            ethi = libm.exp(-th[ii])
+            ethi = np.exp(-th[ii])
             d[ii] = -2.0 * _bcg_dpnorm(
                 (_bcg_bc_z(y0, la) - mu[ii]) * ethi,
                 (_bcg_bc_z(y1, la) - mu[ii]) * ethi,
@@ -8456,13 +8331,13 @@ def _bcg_aic(y, mu, wt, theta, censor):
             )
         if il.size:
             d[il] = -2.0 * pnorm5_vec(
-                (_bcg_bc_z(y[il], la) - mu[il]) * libm.exp(-th[il]), log_p=True
+                (_bcg_bc_z(y[il], la) - mu[il]) * np.exp(-th[il]), log_p=True
             )
         if ir.size:
             d[ir] = -2.0 * pnorm5_vec(
-                -(_bcg_bc_z(y[ir], la) - mu[ir]) * libm.exp(-th[ir]), log_p=True
+                -(_bcg_bc_z(y[ir], la) - mu[ir]) * np.exp(-th[ir]), log_p=True
             )
-    return r_sum(d)
+    return _rsum(d)
 
 
 def _bcg_ls(y, wt, theta, censor):
@@ -8473,13 +8348,13 @@ def _bcg_ls(y, wt, theta, censor):
     y = np.asarray(y, dtype=float)
     wt = np.asarray(wt, dtype=float)
     theta = np.asarray(theta, dtype=float).reshape(-1)
-    th = theta[1] - libm.log(wt) / 2.0
+    th = theta[1] - np.log(wt) / 2.0
     la = float(theta[0])
     yat, iu, ii, _il, _ir = _bcg_cases(y, censor)
     ls = 0.0
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
         if iu.size:
-            ls = ls + r_sum((la - 1.0) * libm.log(y[iu]) - th[iu] - _LOG2PI / 2.0)
+            ls = ls + _rsum((la - 1.0) * np.log(y[iu]) - th[iu] - _LOG2PI / 2.0)
         if ii.size:
             y1 = np.maximum(yat[ii], y[ii])
             y0 = np.minimum(yat[ii], y[ii])
@@ -8488,10 +8363,10 @@ def _bcg_ls(y, wt, theta, censor):
                     _bcg_bc_z(y1, la, ls_variant=True)
                     - _bcg_bc_z(y0, la, ls_variant=True)
                 )
-                * libm.exp(-th[ii])
+                * np.exp(-th[ii])
                 / 2.0
             )
-            ls = ls + r_sum(_bcg_dpnorm(-zz, zz, log_p=True))
+            ls = ls + _rsum(_bcg_dpnorm(-zz, zz, log_p=True))
     return ls
 
 
@@ -8506,16 +8381,16 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
     mu = np.asarray(mu, dtype=float)
     wt = np.asarray(wt, dtype=float)
     theta = np.asarray(theta, dtype=float).reshape(-1)
-    th = theta[1] - libm.log(wt) / 2.0
+    th = theta[1] - np.log(wt) / 2.0
     th2 = 2.0 * th
     th3 = 3.0 * th
     la = float(theta[0])
-    eth = libm.exp(-th)
+    eth = np.exp(-th)
     e2th = eth * eth
     yat, iu, ii, il, ir = _bcg_cases(y, censor)
 
     with np.errstate(divide="ignore"):
-        logy = libm.log(y)
+        logy = np.log(y)
 
     n = mu.shape[0]
     Dmu = np.zeros(n)
@@ -8581,51 +8456,46 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
             ldp = _bcg_dpnorm(z0, z1, log_p=True)
             ldd, sdd = _bcg_ddnorm(z0, z1)
             ldzdz, szdz = _bcg_ddnorm(
-                z0,
-                z1,
-                libm.log(np.abs(z0)),
-                libm.log(np.abs(z1)),
-                np.sign(z0),
-                np.sign(z1),
+                z0, z1, np.log(np.abs(z0)), np.log(np.abs(z1)), np.sign(z0), np.sign(z1)
             )
-            Dmui = 2.0 * sdd * libm.exp(-thi + ldd - ldp)
+            Dmui = 2.0 * sdd * np.exp(-thi + ldd - ldp)
             Dmu[ii] = Dmui
-            Dt = 2.0 * szdz * libm.exp(ldzdz - ldp)
+            Dt = 2.0 * szdz * np.exp(ldzdz - ldp)
             Dmu2i = _rpow_int(Dmui, 2) / 2.0 + e2thi * Dt
             Dmu2[ii] = Dmu2i
             if level > 0:
                 ldz2, sz2 = _bcg_ddnorm(
-                    z0, z1, libm.log(_rpow_int(z0, 2)), libm.log(_rpow_int(z1, 2))
+                    z0, z1, np.log(_rpow_int(z0, 2)), np.log(_rpow_int(z1, 2))
                 )
                 ldz3, sz3 = _bcg_ddnorm(
                     z0,
                     z1,
-                    libm.log(np.abs(_rpow_int(z0, 3))),
-                    libm.log(np.abs(_rpow_int(z1, 3))),
+                    np.log(np.abs(_rpow_int(z0, 3))),
+                    np.log(np.abs(_rpow_int(z1, 3))),
                     np.sign(z0),
                     np.sign(z1),
                 )
                 ldb, sb = _bcg_ddnorm(
                     z0,
                     z1,
-                    libm.log(np.abs(bly0)),
-                    libm.log(np.abs(bly1)),
+                    np.log(np.abs(bly0)),
+                    np.log(np.abs(bly1)),
                     np.sign(bly0),
                     np.sign(bly1),
                 )
                 ldbz, sbz = _bcg_ddnorm(
                     z0,
                     z1,
-                    libm.log(np.abs(bly0 * z0)),
-                    libm.log(np.abs(bly1 * z1)),
+                    np.log(np.abs(bly0 * z0)),
+                    np.log(np.abs(bly1 * z1)),
                     np.sign(bly0 * z0),
                     np.sign(bly1 * z1),
                 )
                 ldbz2, sbz2 = _bcg_ddnorm(
                     z0,
                     z1,
-                    libm.log(np.abs(bly0 * _rpow_int(z0, 2))),
-                    libm.log(np.abs(bly1 * _rpow_int(z1, 2))),
+                    np.log(np.abs(bly0 * _rpow_int(z0, 2))),
+                    np.log(np.abs(bly1 * _rpow_int(z1, 2))),
                     np.sign(bly0),
                     np.sign(bly1),
                 )
@@ -8636,17 +8506,17 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
                 z03 = z02 * z0
                 Dmu3i = Dmui * (
                     3.0 * Dmu2i / 2.0 - _rpow_int(Dmui, 2) / 4.0 - e2thi
-                ) + 2.0 * sz2 * libm.exp(ldz2 - ldp - th3i)
+                ) + 2.0 * sz2 * np.exp(ldz2 - ldp - th3i)
                 Dmu3[ii] = Dmu3i
-                Dl = -2.0 * sb * libm.exp(ldb - ldp - thi)
+                Dl = -2.0 * sb * np.exp(ldb - ldp - thi)
                 Dth[ii, 0] = Dl
                 Dth[ii, 1] = Dt
-                Dml = Dl * Dmui / 2.0 - 2.0 * sbz * libm.exp(ldbz - ldp - th2i)
+                Dml = Dl * Dmui / 2.0 - 2.0 * sbz * np.exp(ldbz - ldp - th2i)
                 Dmuth[ii, 0] = Dml
-                Dmt = Dmui * Dt / 2.0 - Dmui + 2.0 * sz2 * libm.exp(ldz2 - ldp - thi)
+                Dmt = Dmui * Dt / 2.0 - Dmui + 2.0 * sz2 * np.exp(ldz2 - ldp - thi)
                 Dmuth[ii, 1] = Dmt
-                Dtt = _rpow_int(Dt, 2) / 2.0 - Dt + 2.0 * sz3 * libm.exp(ldz3 - ldp)
-                Dlt = Dl * Dt / 2.0 - Dl - 2.0 * sbz2 * libm.exp(ldbz2 - ldp - thi)
+                Dtt = _rpow_int(Dt, 2) / 2.0 - Dt + 2.0 * sz3 * np.exp(ldz3 - ldp)
+                Dlt = Dl * Dt / 2.0 - Dl - 2.0 * sbz2 * np.exp(ldbz2 - ldp - thi)
                 Dmu2th[ii, 0] = Dmui * Dml + e2thi * Dlt
                 Dmu2th[ii, 1] = Dmui * Dmt + e2thi * (Dtt - 2.0 * Dt)
             if level > 1:
@@ -8660,23 +8530,23 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
                 lda1, sa1 = _bcg_ddnorm(
                     z0,
                     z1,
-                    libm.log(np.abs(a0)),
-                    libm.log(np.abs(a1)),
+                    np.log(np.abs(a0)),
+                    np.log(np.abs(a1)),
                     np.sign(a0),
                     np.sign(a1),
                 )
                 Dmu4[ii] = (
                     Dmu2i * (3.0 * Dmu2i / 2.0 - _rpow_int(Dmui, 2) / 4.0 - e2thi)
                     + Dmui * (3.0 * Dmu3i - Dmui * Dmu2i) / 2.0
-                    + sa1 * libm.exp(lda1 - ldp - th3i)
+                    + sa1 * np.exp(lda1 - ldp - th3i)
                 )
                 a1 = bly1 * z1 * (2.0 - z12)
                 a0 = bly0 * z0 * (2.0 - z02)
                 lda2, sa2 = _bcg_ddnorm(
                     z0,
                     z1,
-                    libm.log(np.abs(a0)),
-                    libm.log(np.abs(a1)),
+                    np.log(np.abs(a0)),
+                    np.log(np.abs(a1)),
                     np.sign(a0),
                     np.sign(a1),
                 )
@@ -8684,30 +8554,30 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
                     Dml * (3.0 * Dmu2i / 2.0 - _rpow_int(Dmui, 2) / 4.0)
                     + Dmui * (3.0 * Dmu2l - Dmui * Dml) / 2.0
                     - e2thi * Dml
-                    + Dl * sz2 * libm.exp(ldz2 - ldp - th3i)
-                    + 2.0 * sa2 * libm.exp(lda2 - ldp - th4i)
+                    + Dl * sz2 * np.exp(ldz2 - ldp - th3i)
+                    + 2.0 * sa2 * np.exp(lda2 - ldp - th4i)
                 )
                 ldz4, sz4 = _bcg_ddnorm(
-                    z0, z1, libm.log(_rpow_int(z0, 4)), libm.log(_rpow_int(z1, 4))
+                    z0, z1, np.log(_rpow_int(z0, 4)), np.log(_rpow_int(z1, 4))
                 )
                 Dmu3th[ii, 1] = (
                     Dmt * (3.0 * Dmu2i / 2.0 - _rpow_int(Dmui, 2) / 4.0)
                     + Dmui * (3.0 * Dmu2t - Dmui * Dmt) / 2.0
                     + e2thi * (2.0 * Dmui - Dmt)
-                    + (Dt - 10.0) * sz2 * libm.exp(ldz2 - ldp - th3i)
-                    + 2.0 * sz4 * libm.exp(ldz4 - ldp - th3i)
+                    + (Dt - 10.0) * sz2 * np.exp(ldz2 - ldp - th3i)
+                    + 2.0 * sz4 * np.exp(ldz4 - ldp - th3i)
                 )
                 a1 = _rpow_int(bly1, 2) * z1 * ethi - blly1
                 a0 = _rpow_int(bly0, 2) * z0 * ethi - blly0
                 lda3, sa3 = _bcg_ddnorm(
                     z0,
                     z1,
-                    libm.log(np.abs(a0)),
-                    libm.log(np.abs(a1)),
+                    np.log(np.abs(a0)),
+                    np.log(np.abs(a1)),
                     np.sign(a0),
                     np.sign(a1),
                 )
-                Dll = _rpow_int(Dl, 2) / 2.0 + 2.0 * sa3 * libm.exp(lda3 - ldp - thi)
+                Dll = _rpow_int(Dl, 2) / 2.0 + 2.0 * sa3 * np.exp(lda3 - ldp - thi)
                 Dth2[ii, 0] = Dll
                 Dth2[ii, 1] = Dlt
                 Dth2[ii, 2] = Dtt
@@ -8716,36 +8586,36 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
                 lda4, sa4 = _bcg_ddnorm(
                     z0,
                     z1,
-                    libm.log(np.abs(a0)),
-                    libm.log(np.abs(a1)),
+                    np.log(np.abs(a0)),
+                    np.log(np.abs(a1)),
                     np.sign(a0),
                     np.sign(a1),
                 )
                 Dmll = (
                     (Dl * Dml + Dmui * Dll) / 2.0
-                    - Dl * sbz * libm.exp(ldbz - ldp - th2i)
-                    + 2.0 * sa4 * libm.exp(lda4 - ldp - th2i)
+                    - Dl * sbz * np.exp(ldbz - ldp - th2i)
+                    + 2.0 * sa4 * np.exp(lda4 - ldp - th2i)
                 )
                 Dmuth2[ii, 0] = Dmll
                 ldbz3, sbz3 = _bcg_ddnorm(
                     z0,
                     z1,
-                    libm.log(np.abs(bly0 * z03)),
-                    libm.log(np.abs(bly1 * z13)),
+                    np.log(np.abs(bly0 * z03)),
+                    np.log(np.abs(bly1 * z13)),
                     np.sign(bly0 * z0),
                     np.sign(bly1 * z1),
                 )
                 Dmlt = (
                     (Dl * Dmt + Dmui * Dlt) / 2.0
-                    + (6.0 - Dt) * sbz * libm.exp(ldbz - ldp - th2i)
-                    - 2.0 * sbz3 * libm.exp(ldbz3 - ldp - th2i)
+                    + (6.0 - Dt) * sbz * np.exp(ldbz - ldp - th2i)
+                    - 2.0 * sbz3 * np.exp(ldbz3 - ldp - th2i)
                 )
                 Dmuth2[ii, 1] = Dmlt
                 Dmtt = (
                     (Dmt * Dt + Dmui * Dtt) / 2.0
                     - Dmt
-                    + (Dt - 6.0) * sz2 * libm.exp(ldz2 - ldp - thi)
-                    + 2.0 * sz4 * libm.exp(ldz4 - ldp - thi)
+                    + (Dt - 6.0) * sz2 * np.exp(ldz2 - ldp - thi)
+                    + 2.0 * sz4 * np.exp(ldz4 - ldp - thi)
                 )
                 Dmuth2[ii, 2] = Dmtt
                 a1 = z1 * (_rpow_int(bly1, 2) * (z12 - 2.0) * ethi - blly1 * z1)
@@ -8753,45 +8623,45 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
                 lda5, sa5 = _bcg_ddnorm(
                     z0,
                     z1,
-                    libm.log(np.abs(a0)),
-                    libm.log(np.abs(a1)),
+                    np.log(np.abs(a0)),
+                    np.log(np.abs(a1)),
                     np.sign(a0),
                     np.sign(a1),
                 )
                 Dllt = (
                     (Dl * Dlt + Dt * Dll) / 2.0
                     - Dll
-                    - Dl * sbz2 * libm.exp(ldbz2 - ldp - thi)
-                    + 2.0 * sa5 * libm.exp(lda5 - ldp - thi)
+                    - Dl * sbz2 * np.exp(ldbz2 - ldp - thi)
+                    + 2.0 * sa5 * np.exp(lda5 - ldp - thi)
                 )
                 ldbz4, sbz4 = _bcg_ddnorm(
                     z0,
                     z1,
-                    libm.log(np.abs(bly0 * z04)),
-                    libm.log(np.abs(bly1 * z14)),
+                    np.log(np.abs(bly0 * z04)),
+                    np.log(np.abs(bly1 * z14)),
                     np.sign(bly0),
                     np.sign(bly1),
                 )
                 Dltt = (
                     (Dl * Dtt + Dt * Dlt) / 2.0
                     - Dlt
-                    + (6.0 - Dt) * sbz2 * libm.exp(ldbz2 - ldp - thi)
-                    - 2.0 * sbz4 * libm.exp(ldbz4 - ldp - thi)
+                    + (6.0 - Dt) * sbz2 * np.exp(ldbz2 - ldp - thi)
+                    - 2.0 * sbz4 * np.exp(ldbz4 - ldp - thi)
                 )
                 a1 = z13 * (z12 - 3.0)
                 a0 = z03 * (z02 - 3.0)
                 lda6, sa6 = _bcg_ddnorm(
                     z0,
                     z1,
-                    libm.log(np.abs(a0)),
-                    libm.log(np.abs(a1)),
+                    np.log(np.abs(a0)),
+                    np.log(np.abs(a1)),
                     np.sign(a0),
                     np.sign(a1),
                 )
                 Dttt = (
                     Dtt * (Dt - 1.0)
-                    + Dt * sz3 * libm.exp(ldz3 - ldp)
-                    + 2.0 * sa6 * libm.exp(lda6 - ldp)
+                    + Dt * sz3 * np.exp(ldz3 - ldp)
+                    + 2.0 * sa6 * np.exp(lda6 - ldp)
                 )
                 Dmu2th2[ii, 0] = _rpow_int(Dml, 2) + Dmui * Dmll + e2thi * Dllt
                 Dmu2th2[ii, 1] = Dml * Dmt + Dmui * Dmlt + e2thi * (Dltt - 2.0 * Dlt)
@@ -8813,9 +8683,9 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
             z1 = (bz1 - mu[il]) * ethi
             ldp = pnorm5_vec(z1, log_p=True)
             ldn = dnorm5_vec(z1, give_log=True)
-            Dmui = 2.0 * libm.exp(-thi + ldn - ldp)
+            Dmui = 2.0 * np.exp(-thi + ldn - ldp)
             Dmu[il] = Dmui
-            Dt = 2.0 * np.sign(z1) * libm.exp(ldn + libm.log(np.abs(z1)) - ldp)
+            Dt = 2.0 * np.sign(z1) * np.exp(ldn + np.log(np.abs(z1)) - ldp)
             Dmu2i = _rpow_int(Dmui, 2) / 2.0 + e2thi * Dt
             Dmu2[il] = Dmu2i
             if level > 0:
@@ -8823,42 +8693,36 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
                 z13 = z12 * z1
                 Dmu3i = Dmui * (
                     3.0 * Dmu2i / 2.0 - _rpow_int(Dmui, 2) / 4.0 - e2thi
-                ) + 2.0 * np.sign(z12) * libm.exp(
-                    ldn + libm.log(np.abs(z12)) - ldp - th3i
-                )
+                ) + 2.0 * np.sign(z12) * np.exp(ldn + np.log(np.abs(z12)) - ldp - th3i)
                 Dmu3[il] = Dmu3i
                 Dl = (
                     -2.0
                     * np.sign(bly1)
-                    * libm.exp(ldn + libm.log(np.abs(bly1)) - ldp - thi)
+                    * np.exp(ldn + np.log(np.abs(bly1)) - ldp - thi)
                 )
                 Dth[il, 0] = Dl
                 Dth[il, 1] = Dt
                 a1 = bly1 * z1
-                Dml = Dl * Dmui / 2.0 - 2.0 * np.sign(a1) * libm.exp(
-                    ldn + libm.log(np.abs(a1)) - ldp - th2i
+                Dml = Dl * Dmui / 2.0 - 2.0 * np.sign(a1) * np.exp(
+                    ldn + np.log(np.abs(a1)) - ldp - th2i
                 )
                 Dmuth[il, 0] = Dml
                 Dmt = (
                     Dmui * Dt / 2.0
                     - Dmui
-                    + 2.0
-                    * np.sign(z12)
-                    * libm.exp(ldn + libm.log(np.abs(z12)) - ldp - thi)
+                    + 2.0 * np.sign(z12) * np.exp(ldn + np.log(np.abs(z12)) - ldp - thi)
                 )
                 Dmuth[il, 1] = Dmt
                 Dtt = (
                     _rpow_int(Dt, 2) / 2.0
                     - Dt
-                    + 2.0 * np.sign(z13) * libm.exp(ldn + libm.log(np.abs(z13)) - ldp)
+                    + 2.0 * np.sign(z13) * np.exp(ldn + np.log(np.abs(z13)) - ldp)
                 )
                 a1 = bly1 * z12
                 Dlt = (
                     Dl * Dt / 2.0
                     - Dl
-                    - 2.0
-                    * np.sign(a1)
-                    * libm.exp(ldn + libm.log(np.abs(a1)) - ldp - thi)
+                    - 2.0 * np.sign(a1) * np.exp(ldn + np.log(np.abs(a1)) - ldp - thi)
                 )
                 Dmu2th[il, 0] = Dmui * Dml + e2thi * Dlt
                 Dmu2th[il, 1] = Dmui * Dmt + e2thi * (Dtt - 2.0 * Dt)
@@ -8871,30 +8735,26 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
                 Dmu4[il] = (
                     Dmu2i * (3.0 * Dmu2i / 2.0 - _rpow_int(Dmui, 2) / 4.0 - e2thi)
                     + Dmui * (3.0 * Dmu3i - Dmui * Dmu2i) / 2.0
-                    + np.sign(a1) * libm.exp(ldn + libm.log(np.abs(a1)) - ldp - th3i)
+                    + np.sign(a1) * np.exp(ldn + np.log(np.abs(a1)) - ldp - th3i)
                 )
                 a1 = bly1 * z1 * (2.0 - z12)
                 Dmu3th[il, 0] = (
                     Dml * (3.0 * Dmu2i / 2.0 - _rpow_int(Dmui, 2) / 4.0)
                     + Dmui * (3.0 * Dmu2l - Dmui * Dml) / 2.0
                     - e2thi * Dml
-                    + Dl
-                    * np.sign(z12)
-                    * libm.exp(ldn + libm.log(np.abs(z12)) - ldp - th3i)
-                    + 2.0
-                    * np.sign(a1)
-                    * libm.exp(ldn + libm.log(np.abs(a1)) - ldp - th4i)
+                    + Dl * np.sign(z12) * np.exp(ldn + np.log(np.abs(z12)) - ldp - th3i)
+                    + 2.0 * np.sign(a1) * np.exp(ldn + np.log(np.abs(a1)) - ldp - th4i)
                 )
                 Dmu3th[il, 1] = (
                     Dmt * (3.0 * Dmu2i / 2.0 - _rpow_int(Dmui, 2) / 4.0)
                     + Dmui * (3.0 * Dmu2t - Dmui * Dmt) / 2.0
                     + e2thi * (2.0 * Dmui - Dmt)
-                    + (Dt - 10.0) * libm.exp(ldn + libm.log(z12) - ldp - th3i)
-                    + 2.0 * libm.exp(ldn + libm.log(z14) - ldp - th3i)
+                    + (Dt - 10.0) * np.exp(ldn + np.log(z12) - ldp - th3i)
+                    + 2.0 * np.exp(ldn + np.log(z14) - ldp - th3i)
                 )
                 a1 = _rpow_int(bly1, 2) * z1 * ethi - blly1
-                Dll = _rpow_int(Dl, 2) / 2.0 + 2.0 * np.sign(a1) * libm.exp(
-                    ldn + libm.log(np.abs(a1)) - ldp - thi
+                Dll = _rpow_int(Dl, 2) / 2.0 + 2.0 * np.sign(a1) * np.exp(
+                    ldn + np.log(np.abs(a1)) - ldp - thi
                 )
                 Dth2[il, 0] = Dll
                 Dth2[il, 1] = Dlt
@@ -8903,12 +8763,8 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
                 a1 = bly1 * z1
                 Dmll = (
                     (Dl * Dml + Dmui * Dll) / 2.0
-                    - Dl
-                    * np.sign(a1)
-                    * libm.exp(ldn + libm.log(np.abs(a1)) - ldp - th2i)
-                    + 2.0
-                    * np.sign(a2)
-                    * libm.exp(ldn + libm.log(np.abs(a2)) - ldp - th2i)
+                    - Dl * np.sign(a1) * np.exp(ldn + np.log(np.abs(a1)) - ldp - th2i)
+                    + 2.0 * np.sign(a2) * np.exp(ldn + np.log(np.abs(a2)) - ldp - th2i)
                 )
                 Dmuth2[il, 0] = Dmll
                 a2 = bly1 * z13
@@ -8916,19 +8772,15 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
                     (Dl * Dmt + Dmui * Dlt) / 2.0
                     + (6.0 - Dt)
                     * np.sign(a1)
-                    * libm.exp(ldn + libm.log(np.abs(a1)) - ldp - th2i)
-                    - 2.0
-                    * np.sign(a2)
-                    * libm.exp(ldn + libm.log(np.abs(a2)) - ldp - th2i)
+                    * np.exp(ldn + np.log(np.abs(a1)) - ldp - th2i)
+                    - 2.0 * np.sign(a2) * np.exp(ldn + np.log(np.abs(a2)) - ldp - th2i)
                 )
                 Dmuth2[il, 1] = Dmlt
                 Dmtt = (
                     (Dmt * Dt + Dmui * Dtt) / 2.0
                     - Dmt
-                    + (Dt - 6.0) * libm.exp(ldn + libm.log(z12) - ldp - thi)
-                    + 2.0
-                    * np.sign(z14)
-                    * libm.exp(ldn + libm.log(np.abs(z14)) - ldp - thi)
+                    + (Dt - 6.0) * np.exp(ldn + np.log(z12) - ldp - thi)
+                    + 2.0 * np.sign(z14) * np.exp(ldn + np.log(np.abs(z14)) - ldp - thi)
                 )
                 Dmuth2[il, 2] = Dmtt
                 a2 = z1 * (_rpow_int(bly1, 2) * (z12 - 2.0) * ethi - blly1 * z1)
@@ -8936,12 +8788,8 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
                 Dllt = (
                     (Dl * Dlt + Dt * Dll) / 2.0
                     - Dll
-                    - Dl
-                    * np.sign(a1)
-                    * libm.exp(ldn + libm.log(np.abs(a1)) - ldp - thi)
-                    + 2.0
-                    * np.sign(a2)
-                    * libm.exp(ldn + libm.log(np.abs(a2)) - ldp - thi)
+                    - Dl * np.sign(a1) * np.exp(ldn + np.log(np.abs(a1)) - ldp - thi)
+                    + 2.0 * np.sign(a2) * np.exp(ldn + np.log(np.abs(a2)) - ldp - thi)
                 )
                 a1 = bly1 * z12
                 a2 = bly1 * z14
@@ -8950,16 +8798,14 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
                     - Dlt
                     + (6.0 - Dt)
                     * np.sign(a1)
-                    * libm.exp(ldn + libm.log(np.abs(a1)) - ldp - thi)
-                    - 2.0
-                    * np.sign(a2)
-                    * libm.exp(ldn + libm.log(np.abs(a2)) - ldp - thi)
+                    * np.exp(ldn + np.log(np.abs(a1)) - ldp - thi)
+                    - 2.0 * np.sign(a2) * np.exp(ldn + np.log(np.abs(a2)) - ldp - thi)
                 )
                 a1 = z13 * (z12 - 3.0)
                 Dttt = (
                     Dtt * (Dt - 1.0)
-                    + Dt * np.sign(z13) * libm.exp(ldn + libm.log(np.abs(z13)) - ldp)
-                    + 2.0 * np.sign(a1) * libm.exp(ldn + libm.log(np.abs(a1)) - ldp)
+                    + Dt * np.sign(z13) * np.exp(ldn + np.log(np.abs(z13)) - ldp)
+                    + 2.0 * np.sign(a1) * np.exp(ldn + np.log(np.abs(a1)) - ldp)
                 )
                 Dmu2th2[il, 0] = _rpow_int(Dml, 2) + Dmui * Dmll + e2thi * Dllt
                 Dmu2th2[il, 1] = Dml * Dmt + Dmui * Dmlt + e2thi * (Dltt - 2.0 * Dlt)
@@ -8981,9 +8827,9 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
             z0 = (bz0 - mu[ir]) * ethi
             ldp = pnorm5_vec(-z0, log_p=True)
             ldn = dnorm5_vec(z0, give_log=True)
-            Dmui = -2.0 * libm.exp(-thi + ldn - ldp)
+            Dmui = -2.0 * np.exp(-thi + ldn - ldp)
             Dmu[ir] = Dmui
-            Dt = -2.0 * np.sign(z0) * libm.exp(ldn + libm.log(np.abs(z0)) - ldp)
+            Dt = -2.0 * np.sign(z0) * np.exp(ldn + np.log(np.abs(z0)) - ldp)
             Dmu2i = _rpow_int(Dmui, 2) / 2.0 + e2thi * Dt
             Dmu2[ir] = Dmu2i
             if level > 0:
@@ -8991,42 +8837,34 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
                 z03 = z02 * z0
                 Dmu3i = Dmui * (
                     3.0 * Dmu2i / 2.0 - _rpow_int(Dmui, 2) / 4.0 - e2thi
-                ) - 2.0 * np.sign(z02) * libm.exp(
-                    ldn + libm.log(np.abs(z02)) - ldp - th3i
-                )
+                ) - 2.0 * np.sign(z02) * np.exp(ldn + np.log(np.abs(z02)) - ldp - th3i)
                 Dmu3[ir] = Dmu3i
                 Dl = (
-                    2.0
-                    * np.sign(bly0)
-                    * libm.exp(ldn + libm.log(np.abs(bly0)) - ldp - thi)
+                    2.0 * np.sign(bly0) * np.exp(ldn + np.log(np.abs(bly0)) - ldp - thi)
                 )
                 Dth[ir, 0] = Dl
                 Dth[ir, 1] = Dt
                 a1 = bly0 * z0
-                Dml = Dl * Dmui / 2.0 + 2.0 * np.sign(a1) * libm.exp(
-                    ldn + libm.log(np.abs(a1)) - ldp - th2i
+                Dml = Dl * Dmui / 2.0 + 2.0 * np.sign(a1) * np.exp(
+                    ldn + np.log(np.abs(a1)) - ldp - th2i
                 )
                 Dmuth[ir, 0] = Dml
                 Dmt = (
                     Dmui * Dt / 2.0
                     - Dmui
-                    - 2.0
-                    * np.sign(z02)
-                    * libm.exp(ldn + libm.log(np.abs(z02)) - ldp - thi)
+                    - 2.0 * np.sign(z02) * np.exp(ldn + np.log(np.abs(z02)) - ldp - thi)
                 )
                 Dmuth[ir, 1] = Dmt
                 Dtt = (
                     _rpow_int(Dt, 2) / 2.0
                     - Dt
-                    - 2.0 * np.sign(z03) * libm.exp(ldn + libm.log(np.abs(z03)) - ldp)
+                    - 2.0 * np.sign(z03) * np.exp(ldn + np.log(np.abs(z03)) - ldp)
                 )
                 a1 = bly0 * z02
                 Dlt = (
                     Dl * Dt / 2.0
                     - Dl
-                    + 2.0
-                    * np.sign(a1)
-                    * libm.exp(ldn + libm.log(np.abs(a1)) - ldp - thi)
+                    + 2.0 * np.sign(a1) * np.exp(ldn + np.log(np.abs(a1)) - ldp - thi)
                 )
                 Dmu2th[ir, 0] = Dmui * Dml + e2thi * Dlt
                 Dmu2th[ir, 1] = Dmui * Dmt + e2thi * (Dtt - 2.0 * Dt)
@@ -9039,30 +8877,26 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
                 Dmu4[ir] = (
                     Dmu2i * (3.0 * Dmu2i / 2.0 - _rpow_int(Dmui, 2) / 4.0 - e2thi)
                     + Dmui * (3.0 * Dmu3i - Dmui * Dmu2i) / 2.0
-                    - np.sign(a1) * libm.exp(ldn + libm.log(np.abs(a1)) - ldp - th3i)
+                    - np.sign(a1) * np.exp(ldn + np.log(np.abs(a1)) - ldp - th3i)
                 )
                 a1 = bly0 * z0 * (2.0 - z02)
                 Dmu3th[ir, 0] = (
                     Dml * (3.0 * Dmu2i / 2.0 - _rpow_int(Dmui, 2) / 4.0)
                     + Dmui * (3.0 * Dmu2l - Dmui * Dml) / 2.0
                     - e2thi * Dml
-                    - Dl
-                    * np.sign(z02)
-                    * libm.exp(ldn + libm.log(np.abs(z02)) - ldp - th3i)
-                    - 2.0
-                    * np.sign(a1)
-                    * libm.exp(ldn + libm.log(np.abs(a1)) - ldp - th4i)
+                    - Dl * np.sign(z02) * np.exp(ldn + np.log(np.abs(z02)) - ldp - th3i)
+                    - 2.0 * np.sign(a1) * np.exp(ldn + np.log(np.abs(a1)) - ldp - th4i)
                 )
                 Dmu3th[ir, 1] = (
                     Dmt * (3.0 * Dmu2i / 2.0 - _rpow_int(Dmui, 2) / 4.0)
                     + Dmui * (3.0 * Dmu2t - Dmui * Dmt) / 2.0
                     + e2thi * (2.0 * Dmui - Dmt)
-                    - (Dt - 10.0) * libm.exp(ldn + libm.log(z02) - ldp - th3i)
-                    - 2.0 * libm.exp(ldn + libm.log(z04) - ldp - th3i)
+                    - (Dt - 10.0) * np.exp(ldn + np.log(z02) - ldp - th3i)
+                    - 2.0 * np.exp(ldn + np.log(z04) - ldp - th3i)
                 )
                 a1 = _rpow_int(bly0, 2) * z0 * ethi - blly0
-                Dll = _rpow_int(Dl, 2) / 2.0 - 2.0 * np.sign(a1) * libm.exp(
-                    ldn + libm.log(np.abs(a1)) - ldp - thi
+                Dll = _rpow_int(Dl, 2) / 2.0 - 2.0 * np.sign(a1) * np.exp(
+                    ldn + np.log(np.abs(a1)) - ldp - thi
                 )
                 Dth2[ir, 0] = Dll
                 Dth2[ir, 1] = Dlt
@@ -9071,12 +8905,8 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
                 a1 = bly0 * z0
                 Dmll = (
                     (Dl * Dml + Dmui * Dll) / 2.0
-                    + Dl
-                    * np.sign(a1)
-                    * libm.exp(ldn + libm.log(np.abs(a1)) - ldp - th2i)
-                    - 2.0
-                    * np.sign(a2)
-                    * libm.exp(ldn + libm.log(np.abs(a2)) - ldp - th2i)
+                    + Dl * np.sign(a1) * np.exp(ldn + np.log(np.abs(a1)) - ldp - th2i)
+                    - 2.0 * np.sign(a2) * np.exp(ldn + np.log(np.abs(a2)) - ldp - th2i)
                 )
                 Dmuth2[ir, 0] = Dmll
                 a2 = bly0 * z03
@@ -9084,17 +8914,15 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
                     (Dl * Dmt + Dmui * Dlt) / 2.0
                     - (6.0 - Dt)
                     * np.sign(a1)
-                    * libm.exp(ldn + libm.log(np.abs(a1)) - ldp - th2i)
-                    + 2.0
-                    * np.sign(a2)
-                    * libm.exp(ldn + libm.log(np.abs(a2)) - ldp - th2i)
+                    * np.exp(ldn + np.log(np.abs(a1)) - ldp - th2i)
+                    + 2.0 * np.sign(a2) * np.exp(ldn + np.log(np.abs(a2)) - ldp - th2i)
                 )
                 Dmuth2[ir, 1] = Dmlt
                 Dmtt = (
                     (Dmt * Dt + Dmui * Dtt) / 2.0
                     - Dmt
-                    - (Dt - 6.0) * libm.exp(ldn + libm.log(z02) - ldp - thi)
-                    - 2.0 * libm.exp(ldn + libm.log(z04) - ldp - thi)
+                    - (Dt - 6.0) * np.exp(ldn + np.log(z02) - ldp - thi)
+                    - 2.0 * np.exp(ldn + np.log(z04) - ldp - thi)
                 )
                 Dmuth2[ir, 2] = Dmtt
                 a2 = z0 * (_rpow_int(bly0, 2) * (z02 - 2.0) * ethi - blly0 * z0)
@@ -9102,12 +8930,8 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
                 Dllt = (
                     (Dl * Dlt + Dt * Dll) / 2.0
                     - Dll
-                    + Dl
-                    * np.sign(a1)
-                    * libm.exp(ldn + libm.log(np.abs(a1)) - ldp - thi)
-                    - 2.0
-                    * np.sign(a2)
-                    * libm.exp(ldn + libm.log(np.abs(a2)) - ldp - thi)
+                    + Dl * np.sign(a1) * np.exp(ldn + np.log(np.abs(a1)) - ldp - thi)
+                    - 2.0 * np.sign(a2) * np.exp(ldn + np.log(np.abs(a2)) - ldp - thi)
                 )
                 a2 = bly0 * z04
                 Dltt = (
@@ -9115,16 +8939,14 @@ def _bcg_Dd(y, mu, theta, wt, censor, level=0):
                     - Dlt
                     - (6.0 - Dt)
                     * np.sign(a1)
-                    * libm.exp(ldn + libm.log(np.abs(a1)) - ldp - thi)
-                    + 2.0
-                    * np.sign(a2)
-                    * libm.exp(ldn + libm.log(np.abs(a2)) - ldp - thi)
+                    * np.exp(ldn + np.log(np.abs(a1)) - ldp - thi)
+                    + 2.0 * np.sign(a2) * np.exp(ldn + np.log(np.abs(a2)) - ldp - thi)
                 )
                 a1 = z03 * (z02 - 3.0)
                 Dttt = (
                     Dtt * (Dt - 1.0)
-                    - Dt * np.sign(z03) * libm.exp(ldn + libm.log(np.abs(z03)) - ldp)
-                    - 2.0 * np.sign(a1) * libm.exp(ldn + libm.log(np.abs(a1)) - ldp)
+                    - Dt * np.sign(z03) * np.exp(ldn + np.log(np.abs(z03)) - ldp)
+                    - 2.0 * np.sign(a1) * np.exp(ldn + np.log(np.abs(a1)) - ldp)
                 )
                 Dmu2th2[ir, 0] = _rpow_int(Dml, 2) + Dmui * Dmll + e2thi * Dllt
                 Dmu2th2[ir, 1] = Dml * Dmt + Dmui * Dmlt + e2thi * (Dltt - 2.0 * Dlt)
@@ -9194,7 +9016,7 @@ class bcg(Family):
                 ini = t.copy()
             else:
                 with np.errstate(invalid="ignore", divide="ignore"):
-                    ini = np.concatenate([t[:1], libm.log(t)])
+                    ini = np.concatenate([t[:1], np.log(t)])
                 self.n_theta = 0
         else:
             ini = np.array([1.0, 0.0])
@@ -9215,7 +9037,7 @@ class bcg(Family):
     def get_theta(self, trans: bool = False) -> np.ndarray:
         th = self._theta.copy()
         if trans:
-            th[1] = libm.exp(th[1])
+            th[1] = np.exp(th[1])
         return th
 
     def set_censor(self, censor) -> None:
@@ -9343,10 +9165,10 @@ def _gfam_exp_ls(fam, y, w, scale):
         good = w > 0
         nobs = float(np.sum(good))
         with np.errstate(divide="ignore"):
-            lw = libm.log(w[good])
+            lw = np.log(w[good])
         return np.array(
             [
-                -nobs * math.log(2.0 * math.pi * scale) / 2.0 + r_sum(lw) / 2.0,
+                -nobs * math.log(2.0 * math.pi * scale) / 2.0 + _rsum(lw) / 2.0,
                 -nobs / (2.0 * scale),
                 nobs / (2.0 * scale * scale),
             ]
@@ -9354,39 +9176,39 @@ def _gfam_exp_ls(fam, y, w, scale):
     if name == "poisson":
         with np.errstate(divide="ignore", invalid="ignore"):
             logp = _nmath._disp("dpois", _nmath.dpois, [y, y], (True,))
-        return np.array([r_sum(logp * w), 0.0, 0.0])
+        return np.array([_rsum(logp * w), 0.0, 0.0])
     if name == "binomial":
         m = w
         good = m > 0
         weight = np.where(good, w / np.where(good, m, 1.0), 0.0)
         with np.errstate(divide="ignore", invalid="ignore"):
             logp = _dbinom_raw_disp(np.rint(m * y), np.rint(m), y, 1.0 - y, True)
-        return np.array([-(-2.0 * r_sum(weight * logp)) / 2.0, 0.0, 0.0])
+        return np.array([-(-2.0 * _rsum(weight * logp)) / 2.0, 0.0, 0.0])
     if name == "Gamma":
         good = w > 0
         y = y[good]
         w = w[good]
         sw = scale / w
         isw = 1.0 / sw
-        lsw = libm.log(sw)
+        lsw = np.log(sw)
         k1 = -_lgammafn_arr(isw) - lsw / sw - isw
-        ls0 = r_sum(k1 - libm.log(y))
+        ls0 = _rsum(k1 - np.log(y))
         k2 = (_nmath.psigamma_vec(isw, 0) + lsw) / (sw * sw)
-        d1 = r_sum(k2 / w)
+        d1 = _rsum(k2 / w)
         k3 = (
             -_nmath.psigamma_vec(isw, 1) / sw
             + (1.0 - 2.0 * lsw - 2.0 * _nmath.psigamma_vec(isw, 0))
         ) / _rpow_int(sw, 3)
-        d2 = r_sum(k3 / _rpow_int(w, 2))
+        d2 = _rsum(k3 / _rpow_int(w, 2))
         return np.array([ls0, d1, d2])
     if name in ("quasi", "quasipoisson", "quasibinomial"):
         good = w > 0
         nobs = float(np.sum(good))
         with np.errstate(divide="ignore"):
-            lw = libm.log(w[good])
+            lw = np.log(w[good])
         return np.array(
             [
-                -nobs * math.log(scale) / 2.0 + r_sum(lw) / 2.0,
+                -nobs * math.log(scale) / 2.0 + _rsum(lw) / 2.0,
                 -nobs / (2.0 * scale),
                 nobs / (2.0 * scale * scale),
             ]
@@ -9395,11 +9217,11 @@ def _gfam_exp_ls(fam, y, w, scale):
         good = w > 0
         nobs = float(np.sum(good))
         with np.errstate(divide="ignore"):
-            lw = libm.log(w[good])
+            lw = np.log(w[good])
         return np.array(
             [
-                -r_sum(libm.log(2.0 * math.pi * scale * _rpow_int(y[good], 3))) / 2.0
-                + r_sum(lw) / 2.0,
+                -_rsum(np.log(2.0 * math.pi * scale * _rpow_int(y[good], 3))) / 2.0
+                + _rsum(lw) / 2.0,
                 -nobs / (2.0 * scale),
                 nobs / (2.0 * scale * scale),
             ]
@@ -9907,10 +9729,10 @@ class gfam(Family):
                 else:
                     idx = [k for k in (i0 + 1, i0) if k >= 1]
                     th = theta[np.asarray(idx, dtype=int) - 1]
-                dev_i = r_sum(f.dev_resids(y[ii], mu[ii], wt[ii], th))
+                dev_i = _rsum(f.dev_resids(y[ii], mu[ii], wt[ii], th))
                 aic += float(f.aic(y[ii], mu[ii], dev_i, wt[ii], n1[ii], theta=th))
             else:
-                dev_i = r_sum(f.dev_resids(y[ii], mu[ii], wt[ii]))
+                dev_i = _rsum(f.dev_resids(y[ii], mu[ii], wt[ii]))
                 aic += float(f.aic(y[ii], mu[ii], dev_i, wt[ii], n1[ii]))
         return aic
 
@@ -9978,23 +9800,23 @@ class gfam(Family):
                 nulldev += float(pp["null_deviance"])
                 names.append(pp.get("family_name", f.name))
                 if pp.get("deviance") is None:
-                    dev += r_sum(f.dev_resids(y[ii], fitted[ii], pw[ii]))
+                    dev += _rsum(f.dev_resids(y[ii], fitted[ii], pw[ii]))
                 else:
                     dev_mod = True
                     dev += float(pp["deviance"])
             else:
                 names.append(f.name)
-                dev += r_sum(f.dev_resids(y[ii], fitted[ii], pw[ii]))
+                dev += _rsum(f.dev_resids(y[ii], fitted[ii], pw[ii]))
                 # gfam.r:450 calls the GROUPED linkinv on the subsetted
                 # offset in the no-intercept case (an R quirk — the
                 # grouped slot indexes with full-length fi); the member
                 # linkinv is what that line can only have meant.
                 wtdmu = (
-                    float(r_sum(pw[ii] * y[ii]) / r_sum(pw[ii]))
+                    float(_rsum(pw[ii] * y[ii]) / _rsum(pw[ii]))
                     if intercept
                     else f.link.linkinv(off[ii])
                 )
-                nulldev += r_sum(
+                nulldev += _rsum(
                     f.dev_resids(
                         y[ii],
                         np.full(ii.size, wtdmu) if np.isscalar(wtdmu) else wtdmu,
@@ -10176,7 +9998,7 @@ class gfam(Family):
                 etam[ii] = f.link.link(mum[ii])
         null_coef = r_qr_coef(r_qr(np.asarray(X, dtype=float)), etam)
         null_coef[np.isnan(null_coef)] = 0.0
-        null_scale = float(r_sum(self.dev_resids(y, mum, wt)) / X.shape[0])
+        null_scale = float(_rsum(self.dev_resids(y, mum, wt)) / X.shape[0])
         return null_coef, null_scale
 
     def __repr__(self):
@@ -10265,7 +10087,7 @@ def trind_generator(
                     )
                     / 6
                     + (
-                        i1 * (libm.pow_op(K, 3) + 3 * K**2 + 2 * K)
+                        i1 * (K**3 + 3 * K**2 + 2 * K)
                         + i1i2 * ((K + 1) * (2 * i - 3) - (3 * K**2 + 6 * K + 2) - i1i2)
                     )
                     / 6
@@ -10907,13 +10729,13 @@ class LogbLink(Link):
         self.b = float(b)
 
     def link(self, mu):
-        return libm.log(1.0 / np.asarray(mu, dtype=float) - self.b)
+        return np.log(1.0 / np.asarray(mu, dtype=float) - self.b)
 
     def linkinv(self, eta):
-        return 1.0 / (libm.exp(np.asarray(eta, dtype=float)) + self.b)
+        return 1.0 / (np.exp(np.asarray(eta, dtype=float)) + self.b)
 
     def mu_eta(self, eta):
-        ee = libm.exp(np.asarray(eta, dtype=float))
+        ee = np.exp(np.asarray(eta, dtype=float))
         return -ee / (ee + self.b) ** 2
 
     def _mub(self, mu):
@@ -11208,7 +11030,7 @@ class gaulss(GeneralFamily):
         ymu = y - mu
         ymu2 = ymu * ymu
         tau2 = tau * tau
-        l0 = -0.5 * ymu2 * tau2 - 0.5 * libm.log(2.0 * np.pi) + libm.log(tau)
+        l0 = -0.5 * ymu2 * tau2 - 0.5 * np.log(2.0 * np.pi) + np.log(tau)
         ret: dict = {"l": r_sum(wt * l0), "l0": l0}
         if deriv == 0:
             return ret
@@ -11289,7 +11111,7 @@ class gaulss(GeneralFamily):
 
         b1 = _reg(jj[0], yt1)
         start[jj[0]] = b1
-        lres1 = libm.log(np.abs(y - self.links[0].linkinv(_lp_eta(X[:, jj[0]], b1))))
+        lres1 = np.log(np.abs(y - self.links[0].linkinv(_lp_eta(X[:, jj[0]], b1))))
         if offset is not None and len(offset) > 1 and offset[1] is not None:
             lres1 = lres1 - offset[1]
         start[jj[1]] = _reg(jj[1], lres1)
@@ -11325,7 +11147,7 @@ class gaulss(GeneralFamily):
             yt1 = yt1 - offset[0]
         start[jj[0]] = _solve_lp(0, yt1)
         eta1 = _Xbd(design, start, lt=lpid[0])
-        lres1 = libm.log(np.abs(y - self.links[0].linkinv(eta1)))
+        lres1 = np.log(np.abs(y - self.links[0].linkinv(eta1)))
         if offset is not None and len(offset) > 1 and offset[1] is not None:
             lres1 = lres1 - offset[1]
         start[jj[1]] = _solve_lp(1, lres1)
@@ -11427,7 +11249,7 @@ class twlss(GeneralFamily):
     def _p_of_theta(self, theta):
         """p(θ) with the ±θ-stable branches (gamlss.r:2528-2532)."""
         theta = np.asarray(theta, dtype=float)
-        eth = libm.exp(-np.abs(theta))
+        eth = np.exp(-np.abs(theta))
         return np.where(
             theta > 0,
             (self.b + self.a * eth) / (1.0 + eth),
@@ -11546,7 +11368,7 @@ class twlss(GeneralFamily):
         b1 = _reg(jj[0], yt1)
         start[jj[0]] = b1
         mu1 = self.links[0].linkinv(_lp_eta(X[:, jj[0]], b1))
-        lres1 = libm.log(np.abs((y - mu1) / _rpow(mu1, 1.5)))
+        lres1 = np.log(np.abs((y - mu1) / _rpow(mu1, 1.5)))
         start[jj[2]] = _reg(jj[2], lres1)
         return start
 
@@ -11563,9 +11385,9 @@ class twlss(GeneralFamily):
         fitted = np.asarray(fitted, dtype=float)
         mu0, p0, _phi0 = _tw_null_fit(y)
         y1 = y + (y == 0.0)
-        th0 = (libm.pow_op(y1, (1.0 - p0)) - libm.pow_op(mu0, (1.0 - p0))) / (1.0 - p0)
-        ka0 = (libm.pow_op(y, (2.0 - p0)) - libm.pow_op(mu0, (2.0 - p0))) / (2.0 - p0)
-        nd = r_sum(np.maximum(2.0 * (y * th0 - ka0) * pw / libm.exp(fitted[:, 2]), 0.0))
+        th0 = (y1 ** (1.0 - p0) - mu0 ** (1.0 - p0)) / (1.0 - p0)
+        ka0 = (y ** (2.0 - p0) - mu0 ** (2.0 - p0)) / (2.0 - p0)
+        nd = r_sum(np.maximum(2.0 * (y * th0 - ka0) * pw / np.exp(fitted[:, 2]), 0.0))
         return {"null_deviance": float(nd)}
 
     def residuals(
@@ -11584,9 +11406,9 @@ class twlss(GeneralFamily):
         fitted = np.asarray(fitted, dtype=float)
         mu = fitted[:, 0]
         p = self._p_of_theta(fitted[:, 1])
-        phi = libm.exp(fitted[:, 2])
+        phi = np.exp(fitted[:, 2])
         if type == "pearson":
-            return (y - mu) / np.sqrt(phi * libm.pow_op(mu, p))
+            return (y - mu) / np.sqrt(phi * mu**p)
         if type == "response":
             return y - mu
         pw = (
@@ -11595,8 +11417,8 @@ class twlss(GeneralFamily):
             else np.asarray(prior_weights, dtype=float)
         )
         y1 = y + (y == 0.0)
-        th = (libm.pow_op(y1, (1.0 - p)) - libm.pow_op(mu, (1.0 - p))) / (1.0 - p)
-        ka = (libm.pow_op(y, (2.0 - p)) - libm.pow_op(mu, (2.0 - p))) / (2.0 - p)
+        th = (y1 ** (1.0 - p) - mu ** (1.0 - p)) / (1.0 - p)
+        ka = (y ** (2.0 - p) - mu ** (2.0 - p)) / (2.0 - p)
         return np.sign(y - mu) * np.sqrt(
             np.maximum(2.0 * (y * th - ka) * pw / phi, 0.0)
         )
@@ -11618,30 +11440,30 @@ class LogebLink(Link):
         self.b = float(b)
 
     def link(self, mu):
-        return libm.log(libm.exp(np.asarray(mu, dtype=float)) - self.b)
+        return np.log(np.exp(np.asarray(mu, dtype=float)) - self.b)
 
     def linkinv(self, eta):
-        return libm.log(libm.exp(np.asarray(eta, dtype=float)) + self.b)
+        return np.log(np.exp(np.asarray(eta, dtype=float)) + self.b)
 
     def mu_eta(self, eta):
-        ee = libm.exp(np.asarray(eta, dtype=float))
+        ee = np.exp(np.asarray(eta, dtype=float))
         return ee / (ee + self.b)
 
     def d2link(self, mu):
-        em = libm.exp(np.asarray(mu, dtype=float))
+        em = np.exp(np.asarray(mu, dtype=float))
         fr = em / (em - self.b)
         return fr * (1.0 - fr)
 
     def d3link(self, mu):
-        em = libm.exp(np.asarray(mu, dtype=float))
+        em = np.exp(np.asarray(mu, dtype=float))
         fr = em / (em - self.b)
         oo = fr * (1.0 - fr)
         return oo - 2.0 * oo * fr
 
     def d4link(self, mu):
-        em = libm.exp(np.asarray(mu, dtype=float))
+        em = np.exp(np.asarray(mu, dtype=float))
         b = self.b
-        return -b * em * (b**2 + 4.0 * b * em + em**2) / libm.pow_op((em - b), 4)
+        return -b * em * (b**2 + 4.0 * b * em + em**2) / (em - b) ** 4
 
 
 class shash(GeneralFamily):
@@ -11789,7 +11611,7 @@ class shash(GeneralFamily):
 
         b1 = _reg(jj[0], y)
         start[jj[0]] = b1
-        lres1 = libm.log(np.abs(y - self.links[0].linkinv(_lp_eta(X[:, jj[0]], b1))))
+        lres1 = np.log(np.abs(y - self.links[0].linkinv(_lp_eta(X[:, jj[0]], b1))))
         start[jj[1]] = _reg(jj[1], lres1)
         for k in (2, 3):
             target = np.full(X.shape[0], float(self.links[k].link(np.array(0.0))))
@@ -11814,14 +11636,14 @@ class shash(GeneralFamily):
         y = np.asarray(y, dtype=float)
         fitted = np.asarray(fitted, dtype=float)
         mu, tau, eps, phi = (fitted[:, 0], fitted[:, 1], fitted[:, 2], fitted[:, 3])
-        sig = libm.exp(tau)
-        delta = libm.exp(phi)
+        sig = np.exp(tau)
+        delta = np.exp(phi)
         rsd = (
             y
             - mu
             - sig
             * delta
-            * libm.exp(0.25)
+            * np.exp(0.25)
             * (
                 kv((1.0 / delta + 1.0) / 2.0, 0.25)
                 + kv((1.0 / delta - 1.0) / 2.0, 0.25)
@@ -11832,13 +11654,13 @@ class shash(GeneralFamily):
             return rsd
         sgn = np.sign(rsd)
         z = (y - mu) / (sig * delta)
-        dTasMe = delta * libm.arcsinh(z) - eps
+        dTasMe = delta * np.arcsinh(z) - eps
         ll = (
             -tau
-            - 0.5 * libm.log(2.0 * np.pi)
-            + libm.log(libm.cosh(dTasMe))
-            - 0.5 * libm.log1p(z**2)
-            - 0.5 * libm.sinh(dTasMe) ** 2
+            - 0.5 * np.log(2.0 * np.pi)
+            + np.log(np.cosh(dTasMe))
+            - 0.5 * np.log1p(z**2)
+            - 0.5 * np.sinh(dTasMe) ** 2
         )
         return np.sqrt(np.maximum(0.0, 2.0 * (0.0 - ll))) * sgn
 
@@ -11851,13 +11673,13 @@ class shash(GeneralFamily):
 
         mu = np.asarray(mu, dtype=float)
         mu_e = mu[:, 0]
-        sig_e = libm.exp(mu[:, 1])
+        sig_e = np.exp(mu[:, 1])
         eps_e = mu[:, 2]
-        del_e = libm.exp(mu[:, 3])
+        del_e = np.exp(mu[:, 3])
         n = mu_e.shape[0]
         u = np.array([_qnorm5(float(v)) for v in rng.uniform(size=n)])
-        return mu_e + (del_e * sig_e) * libm.sinh(
-            (1.0 / del_e) * libm.arcsinh(u) + eps_e / del_e
+        return mu_e + (del_e * sig_e) * np.sinh(
+            (1.0 / del_e) * np.arcsinh(u) + eps_e / del_e
         )
 
     def qf(self, p, mu, wt, scale):
@@ -11865,11 +11687,11 @@ class shash(GeneralFamily):
         mu = np.asarray(mu, dtype=float)
         p = np.asarray(p, dtype=float)
         mu_e = mu[:, 0]
-        sig_e = libm.exp(mu[:, 1])
+        sig_e = np.exp(mu[:, 1])
         eps_e = mu[:, 2]
-        del_e = libm.exp(mu[:, 3])
-        return mu_e + (del_e * sig_e) * libm.sinh(
-            (1.0 / del_e) * libm.arcsinh(_nmath.qnorm5_vec(p)) + eps_e / del_e
+        del_e = np.exp(mu[:, 3])
+        return mu_e + (del_e * sig_e) * np.sinh(
+            (1.0 / del_e) * np.arcsinh(_nmath.qnorm5_vec(p)) + eps_e / del_e
         )
 
     def cdf(self, q, mu, wt, scale, logp: bool = False):
@@ -11878,12 +11700,10 @@ class shash(GeneralFamily):
         mu = np.asarray(mu, dtype=float)
         q = np.asarray(q, dtype=float)
         mu_e = mu[:, 0]
-        sig_e = libm.exp(mu[:, 1])
+        sig_e = np.exp(mu[:, 1])
         eps_e = mu[:, 2]
-        del_e = libm.exp(mu[:, 3])
-        s = libm.sinh(
-            (libm.arcsinh((q - mu_e) / (del_e * sig_e)) - eps_e / del_e) * del_e
-        )
+        del_e = np.exp(mu[:, 3])
+        s = np.sinh((np.arcsinh((q - mu_e) / (del_e * sig_e)) - eps_e / del_e) * del_e)
         return _nmath.pnorm5_vec(s, log_p=True) if logp else _nmath.pnorm5_vec(s)
 
     def __repr__(self):
@@ -11923,18 +11743,18 @@ class BoundedLogLink(Link):
         mub = mu - self.b
         eta = mub.copy()
         ii = mub < eps
-        eta[ii] = libm.log(eps) + self.b
-        jj = mub > -libm.log(eps)
+        eta[ii] = np.log(eps) + self.b
+        jj = mub > -np.log(eps)
         eta[jj] = mub[jj] + self.b
         kk = ~jj & ~ii
-        eta[kk] = libm.log(libm.expm1(mub[kk])) + self.b
+        eta[kk] = np.log(np.expm1(mub[kk])) + self.b
         return eta
 
     def linkinv(self, eta):
         eta = np.asarray(eta, dtype=float)
         mu = eta.copy()
-        ii = eta - self.b < -libm.log(np.finfo(float).eps)
-        mu[ii] = self.b + libm.log1p(libm.exp(eta[ii] - self.b))
+        ii = eta - self.b < -np.log(np.finfo(float).eps)
+        mu[ii] = self.b + np.log1p(np.exp(eta[ii] - self.b))
         return mu
 
     def mu_eta(self, eta):
@@ -11944,26 +11764,22 @@ class BoundedLogLink(Link):
     def d2link(self, mu):
         mu = np.asarray(mu, dtype=float)
         mub = mu - self.b
-        mub = libm.exp(-mub * np.sign(mub))
+        mub = np.exp(-mub * np.sign(mub))
         return -mub / (mub - 1.0) ** 2
 
     def d3link(self, mu):
         mu = np.asarray(mu, dtype=float)
         mub = mu - self.b
         sm = -np.sign(mub)
-        mub = libm.exp(mub * sm)
-        return sm * (mub + mub**2) / libm.pow_op((mub - 1.0), 3)
+        mub = np.exp(mub * sm)
+        return sm * (mub + mub**2) / (mub - 1.0) ** 3
 
     def d4link(self, mu):
         mu = np.asarray(mu, dtype=float)
         mub = mu - self.b
         sm = -np.sign(mub)
-        mub = libm.exp(mub * sm)
-        return (
-            sm
-            * (mub + 4.0 * mub**2 + libm.pow_op(mub, 3))
-            / libm.pow_op((mub - 1.0), 4)
-        )
+        mub = np.exp(mub * sm)
+        return sm * (mub + 4.0 * mub**2 + mub**3) / (mub - 1.0) ** 4
 
 
 class gammals(GeneralFamily):
@@ -12050,9 +11866,9 @@ class gammals(GeneralFamily):
         mu = self.links[0].linkinv(eta)  # log mean
         th = self.links[1].linkinv(etat)  # log sigma
 
-        eth = libm.exp(-th)
-        logy = libm.log(y)
-        ethmu = libm.exp(-th - mu)
+        eth = np.exp(-th)
+        logy = np.log(y)
+        ethmu = np.exp(-th - mu)
         ethmuy = ethmu * y
         etlymt = eth * (logy - mu - th)
 
@@ -12170,13 +11986,13 @@ class gammals(GeneralFamily):
         def _reg(cols, target):
             return _init_reg(X[:, cols], E[:, cols], target, use_unscaled)
 
-        yt1 = libm.log(y + float(np.max(y)) * libm.pow_op(np.finfo(float).eps, 0.75))
+        yt1 = np.log(y + float(np.max(y)) * np.finfo(float).eps ** 0.75)
         if offset is not None and offset[0] is not None:
             yt1 = yt1 - offset[0]
         b1 = _reg(jj[0], yt1)
         start[jj[0]] = b1
         lres1 = self.links[1].link(
-            libm.log(np.abs(y - self.links[0].linkinv(_lp_eta(X[:, jj[0]], b1))))
+            np.log(np.abs(y - self.links[0].linkinv(_lp_eta(X[:, jj[0]], b1))))
         )
         if offset is not None and len(offset) > 1 and offset[1] is not None:
             lres1 = lres1 - offset[1]
@@ -12199,7 +12015,7 @@ class gammals(GeneralFamily):
         ones_n = np.ones(y.shape[0])
 
         start = np.zeros(p)
-        yt1 = libm.log(y + float(np.max(y)) * libm.pow_op(np.finfo(float).eps, 0.75))
+        yt1 = np.log(y + float(np.max(y)) * np.finfo(float).eps ** 0.75)
         if offset is not None and offset[0] is not None:
             yt1 = yt1 - offset[0]
         startji = _DiscreteLPSolve(design, lpid[0], E[:, jj[0]], ones_n).solve_target(
@@ -12208,7 +12024,7 @@ class gammals(GeneralFamily):
         startji[~np.isfinite(startji)] = 0.0
         start[jj[0]] = startji
         eta1 = _Xbd(design, start, lt=lpid[0])
-        lres1 = self.links[1].link(libm.log(np.abs(y - self.links[0].linkinv(eta1))))
+        lres1 = self.links[1].link(np.log(np.abs(y - self.links[0].linkinv(eta1))))
         if offset is not None and len(offset) > 1 and offset[1] is not None:
             lres1 = lres1 - offset[1]
         start[jj[1]] = _DiscreteLPSolve(
@@ -12226,10 +12042,10 @@ class gammals(GeneralFamily):
         fitted = np.asarray(fitted, dtype=float)
         my = float(np.mean(y))
         nd = 2.0 * float(
-            r_sum(((y - my) / my - libm.log(y / my)) * libm.exp(-fitted[:, 1]))
+            r_sum(((y - my) / my - np.log(y / my)) * np.exp(-fitted[:, 1]))
         )
         new_fitted = fitted.copy()
-        new_fitted[:, 0] = libm.exp(fitted[:, 0])
+        new_fitted[:, 0] = np.exp(fitted[:, 0])
         return {"null_deviance": nd, "fitted": new_fitted}
 
     def rd(self, rng, mu, wt, scale):
@@ -12238,7 +12054,7 @@ class gammals(GeneralFamily):
         (mean, log σ); the mean column is already exponentiated by
         :meth:`postproc`."""
         mu = np.asarray(mu, dtype=float)
-        phi = libm.exp(mu[:, 1])
+        phi = np.exp(mu[:, 1])
         return rng.gamma(1.0 / phi, mu[:, 0] * phi)
 
     def residuals(self, y, fitted, type: str = "deviance") -> np.ndarray:
@@ -12257,8 +12073,8 @@ class gammals(GeneralFamily):
         if type == "response":
             return y - mu
         if type == "pearson":
-            return (y - mu) / (libm.exp(rho * 0.5) * mu)
-        rsd = 2.0 * ((y - mu) / mu - libm.log(y / mu)) * libm.exp(-rho)
+            return (y - mu) / (np.exp(rho * 0.5) * mu)
+        rsd = 2.0 * ((y - mu) / mu - np.log(y / mu)) * np.exp(-rho)
         return np.sqrt(np.maximum(0.0, rsd)) * np.sign(y - mu)
 
     def predict(
@@ -12296,7 +12112,7 @@ class gammals(GeneralFamily):
         else:
             eta = np.asarray(eta, dtype=float)
             se = False
-        gamma = np.column_stack([libm.exp(eta[:, 0]), self.links[1].linkinv(eta[:, 1])])
+        gamma = np.column_stack([np.exp(eta[:, 0]), self.links[1].linkinv(eta[:, 1])])
         if se:
             vp = np.column_stack(
                 [
@@ -12398,9 +12214,9 @@ class gumbls(GeneralFamily):
         mu = self.links[0].linkinv(eta)  # Gumbel location
         beta = self.links[1].linkinv(etab)  # log scale
 
-        eb = libm.exp(-beta)
+        eb = np.exp(-beta)
         z = (y - mu) * eb
-        ez = libm.exp(-z)
+        ez = np.exp(-z)
         wt = np.ones(y.shape[0]) if wt is None else np.asarray(wt, dtype=float).ravel()
         l0 = -beta - z - ez
         ret: dict = {"l": r_sum(wt * l0), "l0": l0}
@@ -12430,7 +12246,7 @@ class gumbls(GeneralFamily):
             zmbb = -eb
             l3 = np.column_stack(
                 [
-                    lzzz * libm.pow_op(zm, 3),
+                    lzzz * zm**3,
                     lzzz * zm**2 * zb + 2.0 * lzz * zm * zmb,
                     (
                         lzzz * zb**2 * zm
@@ -12438,7 +12254,7 @@ class gumbls(GeneralFamily):
                         + lzz * zbb * zm
                         + lz * zmbb
                     ),
-                    lzzz * libm.pow_op(zb, 3) + 3.0 * lzz * zb * zbb + lz * zbbb,
+                    lzzz * zb**3 + 3.0 * lzz * zb * zbb + lz * zbbb,
                 ]
             )
             g3 = np.column_stack([self.links[0].d3link(mu), self.links[1].d3link(beta)])
@@ -12448,8 +12264,8 @@ class gumbls(GeneralFamily):
             zmbbb = eb
             l4 = np.column_stack(
                 [
-                    lzzzz * libm.pow_op(zm, 4),
-                    lzzzz * libm.pow_op(zm, 3) * zb + 3.0 * lzzz * zm**2 * zmb,
+                    lzzzz * zm**4,
+                    lzzzz * zm**3 * zb + 3.0 * lzzz * zm**2 * zmb,
                     (
                         lzzzz * zm**2 * zb**2
                         + 4.0 * lzzz * zm * zb * zmb
@@ -12458,7 +12274,7 @@ class gumbls(GeneralFamily):
                         + 2.0 * lzz * zm * zmbb
                     ),
                     (
-                        lzzzz * libm.pow_op(zb, 3) * zm
+                        lzzzz * zb**3 * zm
                         + 3.0 * lzzz * zb**2 * zmb
                         + 3.0 * lzzz * zm * zb * zbb
                         + 3.0 * lzz * zmb * zbb
@@ -12467,7 +12283,7 @@ class gumbls(GeneralFamily):
                         + lz * zmbbb
                     ),
                     (
-                        lzzzz * libm.pow_op(zb, 4)
+                        lzzzz * zb**4
                         + 6.0 * lzzz * zb**2 * zbb
                         + 3.0 * lzz * zbb**2
                         + 4.0 * lzz * zb * zbbb
@@ -12528,9 +12344,7 @@ class gumbls(GeneralFamily):
             yt1 = yt1 - offset[0]
         start[jj[0]] = _reg(jj[0], yt1)
         lres1 = self.links[1].link(
-            libm.log(
-                (y - self.links[0].linkinv(_lp_eta(X[:, jj[0]], start[jj[0]]))) ** 2
-            )
+            np.log((y - self.links[0].linkinv(_lp_eta(X[:, jj[0]], start[jj[0]]))) ** 2)
             / 2.0
             - 0.25
         )
@@ -12540,7 +12354,7 @@ class gumbls(GeneralFamily):
         eta2 = _lp_eta(X[:, jj[1]], start[jj[1]])
         if offset is not None and len(offset) > 1 and offset[1] is not None:
             eta2 = eta2 + offset[1]
-        yt1 = yt1 - 0.57721 * libm.exp(self.links[1].linkinv(eta2))
+        yt1 = yt1 - 0.57721 * np.exp(self.links[1].linkinv(eta2))
         start[jj[0]] = _reg(jj[0], yt1)
         return start
 
@@ -12573,7 +12387,7 @@ class gumbls(GeneralFamily):
         start[jj[0]] = startji
         eta1 = _Xbd(design, start, lt=lpid[0])
         lres1 = self.links[1].link(
-            libm.log((y - self.links[0].linkinv(eta1)) ** 2) / 2.0 - 0.25
+            np.log((y - self.links[0].linkinv(eta1)) ** 2) / 2.0 - 0.25
         )
         if offset is not None and len(offset) > 1 and offset[1] is not None:
             lres1 = lres1 - offset[1]
@@ -12583,7 +12397,7 @@ class gumbls(GeneralFamily):
         eta2 = _Xbd(design, start, lt=lpid[1])
         if offset is not None and len(offset) > 1 and offset[1] is not None:
             eta2 = eta2 + offset[1]
-        yt1 = yt1 - 0.57721 * libm.exp(self.links[1].linkinv(eta2))
+        yt1 = yt1 - 0.57721 * np.exp(self.links[1].linkinv(eta2))
         startji = lp1.solve_target(yt1)
         startji[~np.isfinite(startji)] = 0.0
         start[jj[0]] = startji
@@ -12597,7 +12411,7 @@ class gumbls(GeneralFamily):
         is left undefined (NA)."""
         fitted = np.asarray(fitted, dtype=float)
         new_fitted = fitted.copy()
-        new_fitted[:, 0] = fitted[:, 0] + libm.exp(fitted[:, 1]) * _EULER
+        new_fitted[:, 0] = fitted[:, 0] + np.exp(fitted[:, 1]) * _EULER
         return {"fitted": new_fitted}
 
     def rd(self, rng, mu, wt, scale):
@@ -12606,8 +12420,8 @@ class gumbls(GeneralFamily):
         ``mu[:,0]`` is the mean (post-:meth:`postproc`)."""
         mu = np.asarray(mu, dtype=float)
         u = rng.uniform(size=mu.shape[0])
-        beta = libm.exp(mu[:, 1])
-        return mu[:, 0] - beta * (_EULER + libm.log(-libm.log(u)))
+        beta = np.exp(mu[:, 1])
+        return mu[:, 0] - beta * (_EULER + np.log(-np.log(u)))
 
     def residuals(self, y, fitted, type: str = "deviance") -> np.ndarray:
         """gumbls residuals (gamlss.r:3043-3061). ``fitted`` is the
@@ -12621,14 +12435,14 @@ class gumbls(GeneralFamily):
         y = np.asarray(y, dtype=float)
         fitted = np.asarray(fitted, dtype=float)
         mean = fitted[:, 0]
-        beta = libm.exp(fitted[:, 1])
+        beta = np.exp(fitted[:, 1])
         mu = mean - beta * _EULER
         if type == "response":
             return y - mean
         if type == "pearson":
             return (y - mean) / (np.pi * beta / np.sqrt(6.0))
         z = (y - mu) / beta
-        rsd = 2.0 * (z + libm.exp(-z) - 1.0)
+        rsd = 2.0 * (z + np.exp(-z) - 1.0)
         return np.sqrt(np.maximum(0.0, rsd)) * np.sign(y - mu)
 
     def predict(
@@ -12695,7 +12509,7 @@ class ShiftedLogitLink(Link):
 
     @staticmethod
     def _clamp_eta(eta):
-        thr = -libm.log(np.finfo(float).eps)
+        thr = -np.log(np.finfo(float).eps)
         return np.clip(np.asarray(eta, dtype=float), -thr, thr)
 
     def link(self, mu):
@@ -12703,11 +12517,11 @@ class ShiftedLogitLink(Link):
 
     def linkinv(self, eta):
         e = self._clamp_eta(eta)
-        return 1.5 * (libm.exp(e) / (1.0 + libm.exp(e))) - 1.0
+        return 1.5 * (np.exp(e) / (1.0 + np.exp(e))) - 1.0
 
     def mu_eta(self, eta):
         e = self._clamp_eta(eta)
-        return libm.exp(e) / (1.0 + libm.exp(e)) ** 2 * 1.5
+        return np.exp(e) / (1.0 + np.exp(e)) ** 2 * 1.5
 
     def d2link(self, mu):
         m = (np.asarray(mu, dtype=float) + 1.0) / 1.5
@@ -12715,15 +12529,11 @@ class ShiftedLogitLink(Link):
 
     def d3link(self, mu):
         m = (np.asarray(mu, dtype=float) + 1.0) / 1.5
-        return (
-            2.0 / libm.pow_op((1.0 - m), 3) + 2.0 / libm.pow_op(m, 3)
-        ) / libm.pow_op(1.5, 3)
+        return (2.0 / (1.0 - m) ** 3 + 2.0 / m**3) / 1.5**3
 
     def d4link(self, mu):
         m = (np.asarray(mu, dtype=float) + 1.0) / 1.5
-        return (
-            6.0 / libm.pow_op((1.0 - m), 4) - 6.0 / libm.pow_op(m, 4)
-        ) / libm.pow_op(1.5, 4)
+        return (6.0 / (1.0 - m) ** 4 - 6.0 / m**4) / 1.5**4
 
 
 def _gevlss_derivs(y, mu, rho, xi, deriv):
@@ -12737,34 +12547,32 @@ def _gevlss_derivs(y, mu, rho, xi, deriv):
     """
     n = y.shape[0]
     ymu = y - mu
-    aa0 = xi * ymu * libm.exp(-rho)
-    log_aa1 = libm.log1p(aa0)
+    aa0 = xi * ymu * np.exp(-rho)
+    log_aa1 = np.log1p(aa0)
     aa1 = aa0 + 1.0
     aa2 = 1.0 / xi
-    l0 = -aa2 * (1.0 + xi) * log_aa1 - libm.pow_op(aa1, (-aa2)) - rho
+    l0 = -aa2 * (1.0 + xi) * log_aa1 - aa1 ** (-aa2) - rho
     if deriv == 0:
         return l0, None, None, None, None
 
-    er = libm.exp(rho)
+    er = np.exp(rho)
     l1 = np.zeros((n, 3))
     bb1 = 1.0 / er
     bb2 = bb1 * xi * ymu + 1.0
-    l1[:, 0] = bb1 * (xi + 1.0) / bb2 - bb1 * libm.pow_op(bb2, ((-1.0 / xi) - 1.0))
+    l1[:, 0] = bb1 * (xi + 1.0) / bb2 - bb1 * bb2 ** ((-1.0 / xi) - 1.0)
     cc2 = ymu
     cc0 = bb1 * xi * cc2
-    log_cc3 = libm.log1p(cc0)
+    log_cc3 = np.log1p(cc0)
     cc3 = cc0 + 1.0
     l1[:, 1] = (
-        -bb1 * cc2 * libm.pow_op(cc3, ((-1.0 / xi) - 1.0))
-        + bb1 * (xi + 1.0) * cc2 / cc3
-        - 1.0
+        -bb1 * cc2 * cc3 ** ((-1.0 / xi) - 1.0) + bb1 * (xi + 1.0) * cc2 / cc3 - 1.0
     )
     dd3 = xi + 1.0
     dd6 = 1.0 / cc3
     dd7 = log_cc3
     dd8 = 1.0 / xi**2
     l1[:, 2] = (
-        -(dd8 * dd7 - bb1 * aa2 * cc2 * dd6) / libm.pow_op(cc3, aa2)
+        -(dd8 * dd7 - bb1 * aa2 * cc2 * dd6) / cc3**aa2
         + dd8 * dd3 * dd7
         - aa2 * dd7
         - bb1 * aa2 * dd3 * cc2 * dd6
@@ -12774,42 +12582,38 @@ def _gevlss_derivs(y, mu, rho, xi, deriv):
     ee1 = 1.0 / er**2
     ee3 = -1.0 / xi
     l2[:, 0] = (
-        ee1 * (ee3 - 1.0) * xi * libm.pow_op(aa1, (ee3 - 2.0))
-        + ee1 * xi * (xi + 1.0) / aa1**2
+        ee1 * (ee3 - 1.0) * xi * aa1 ** (ee3 - 2.0) + ee1 * xi * (xi + 1.0) / aa1**2
     )
     ff7 = ee3 - 1.0
     l2[:, 1] = (
-        bb1 * libm.pow_op(cc3, ff7)
-        + ee1 * ff7 * xi * cc2 * libm.pow_op(cc3, (ee3 - 2.0))
+        bb1 * cc3**ff7
+        + ee1 * ff7 * xi * cc2 * cc3 ** (ee3 - 2.0)
         - bb1 * dd3 / cc3
         + ee1 * xi * dd3 * cc2 / cc3**2
     )
     gg7 = -aa2
     l2[:, 2] = (
-        -bb1 * libm.pow_op(cc3, (gg7 - 1.0)) * (log_cc3 / xi**2 - bb1 * aa2 * cc2 * dd6)
-        + ee1 * cc2 * libm.pow_op(cc3, (gg7 - 2.0))
+        -bb1 * cc3 ** (gg7 - 1.0) * (log_cc3 / xi**2 - bb1 * aa2 * cc2 * dd6)
+        + ee1 * cc2 * cc3 ** (gg7 - 2.0)
         + bb1 * dd6
         - ee1 * (xi + 1.0) * cc2 / cc3**2
     )
     hh4 = cc2**2
     l2[:, 3] = (
-        bb1 * cc2 * libm.pow_op(cc3, ff7)
-        + ee1 * ff7 * xi * hh4 * libm.pow_op(cc3, (ee3 - 2.0))
+        bb1 * cc2 * cc3**ff7
+        + ee1 * ff7 * xi * hh4 * cc3 ** (ee3 - 2.0)
         - bb1 * dd3 * cc2 / cc3
         + ee1 * xi * dd3 * hh4 / cc3**2
     )
     l2[:, 4] = (
-        -bb1
-        * cc2
-        * libm.pow_op(cc3, (gg7 - 1.0))
-        * (log_cc3 / xi**2 - bb1 * aa2 * cc2 * dd6)
-        + ee1 * hh4 * libm.pow_op(cc3, (gg7 - 2.0))
+        -bb1 * cc2 * cc3 ** (gg7 - 1.0) * (log_cc3 / xi**2 - bb1 * aa2 * cc2 * dd6)
+        + ee1 * hh4 * cc3 ** (gg7 - 2.0)
         + bb1 * cc2 * dd6
         - ee1 * (xi + 1.0) * hh4 / cc3**2
     )
     jj08 = 1.0 / cc3**2
-    jj12 = 1.0 / libm.pow_op(xi, 3)
-    jj13 = 1.0 / libm.pow_op(cc3, aa2)
+    jj12 = 1.0 / xi**3
+    jj13 = 1.0 / cc3**aa2
     l2[:, 5] = (
         -jj13 * (dd8 * dd7 - bb1 * aa2 * cc2 * dd6) ** 2
         - jj13
@@ -12824,22 +12628,22 @@ def _gevlss_derivs(y, mu, rho, xi, deriv):
     l3 = l4 = None
     if deriv > 1:
         l3 = np.zeros((n, 10))
-        kk1 = 1.0 / libm.pow_op(er, 3)
+        kk1 = 1.0 / er**3
         kk2 = xi**2
-        l3[:, 0] = 2.0 * kk1 * kk2 * (xi + 1.0) / libm.pow_op(aa1, 3) - kk1 * (
-            ee3 - 2.0
-        ) * (ee3 - 1.0) * kk2 * libm.pow_op(aa1, (ee3 - 3.0))
+        l3[:, 0] = 2.0 * kk1 * kk2 * (xi + 1.0) / aa1**3 - kk1 * (ee3 - 2.0) * (
+            ee3 - 1.0
+        ) * kk2 * aa1 ** (ee3 - 3.0)
         ll5 = xi * cc2 / er + 1.0
         ll8 = ee3 - 2.0
         l3[:, 1] = (
-            -2.0 * ee1 * ff7 * xi * libm.pow_op(ll5, ll8)
-            - kk1 * ll8 * ff7 * kk2 * cc2 * libm.pow_op(ll5, (ee3 - 3.0))
+            -2.0 * ee1 * ff7 * xi * ll5**ll8
+            - kk1 * ll8 * ff7 * kk2 * cc2 * ll5 ** (ee3 - 3.0)
             - 2.0 * ee1 * xi * dd3 / ll5**2
-            + 2.0 * kk1 * kk2 * dd3 * cc2 / libm.pow_op(ll5, 3)
+            + 2.0 * kk1 * kk2 * dd3 * cc2 / ll5**3
         )
-        mm10 = libm.pow_op(cc3, (gg7 - 3.0))
+        mm10 = cc3 ** (gg7 - 3.0)
         mm11 = gg7 - 2.0
-        mm12 = libm.pow_op(cc3, mm11)
+        mm12 = cc3**mm11
         l3[:, 2] = (
             ee1 * (gg7 - 1.0) * xi * mm12 * (log_cc3 / xi**2 - bb1 * aa2 * cc2 / cc3)
             - ee1 * mm12
@@ -12847,30 +12651,30 @@ def _gevlss_derivs(y, mu, rho, xi, deriv):
             + kk1 * cc2 * mm10
             + ee1 * dd3 * jj08
             + ee1 * xi * jj08
-            - 2.0 * kk1 * xi * dd3 * cc2 / libm.pow_op(cc3, 3)
+            - 2.0 * kk1 * xi * dd3 * cc2 / cc3**3
         )
         l3[:, 3] = (
-            -bb1 * libm.pow_op(cc3, ff7)
-            - 3.0 * ee1 * ff7 * xi * cc2 * libm.pow_op(cc3, ll8)
-            - kk1 * ll8 * ff7 * kk2 * hh4 * libm.pow_op(cc3, (ee3 - 3.0))
+            -bb1 * cc3**ff7
+            - 3.0 * ee1 * ff7 * xi * cc2 * cc3**ll8
+            - kk1 * ll8 * ff7 * kk2 * hh4 * cc3 ** (ee3 - 3.0)
             + bb1 * dd3 / cc3
             - 3.0 * ee1 * xi * dd3 * cc2 / cc3**2
-            + 2.0 * kk1 * kk2 * dd3 * hh4 / libm.pow_op(cc3, 3)
+            + 2.0 * kk1 * kk2 * dd3 * hh4 / cc3**3
         )
         oo10 = gg7 - 1.0
         oo13 = log_cc3 / xi**2
         l3[:, 4] = (
-            bb1 * libm.pow_op(cc3, oo10) * (bb1 * oo10 * cc2 * dd6 + oo13)
+            bb1 * cc3**oo10 * (bb1 * oo10 * cc2 * dd6 + oo13)
             + ee1 * oo10 * xi * cc2 * mm12 * (bb1 * mm11 * cc2 * dd6 + oo13)
             + ee1 * aa2 * cc2 * mm12
             + ee1 * oo10 * cc2 * mm12
             - bb1 * dd6
             + 2.0 * ee1 * dd3 * cc2 * jj08
             + ee1 * xi * cc2 * jj08
-            - 2.0 * xi * dd3 * cc2**2 / (libm.pow_op(er, 3) * libm.pow_op(cc3, 3))
+            - 2.0 * xi * dd3 * cc2**2 / (er**3 * cc3**3)
         )
         pp07 = (-1.0 / xi) - 1.0
-        pp08 = libm.pow_op(cc3, pp07)
+        pp08 = cc3**pp07
         l3[:, 5] = (
             -bb1 * pp08 * (bb1 * pp07 * cc2 * dd6 + dd8 * dd7) ** 2
             - bb1
@@ -12878,23 +12682,23 @@ def _gevlss_derivs(y, mu, rho, xi, deriv):
             * (
                 -ee1 * pp07 * hh4 * jj08
                 + 2.0 * bb1 * dd8 * cc2 * dd6
-                - 2.0 * dd7 / libm.pow_op(xi, 3)
+                - 2.0 * dd7 / xi**3
             )
             - 2.0 * ee1 * cc2 * jj08
-            + 2.0 * (xi + 1.0) * hh4 / (libm.pow_op(er, 3) * libm.pow_op(cc3, 3))
+            + 2.0 * (xi + 1.0) * hh4 / (er**3 * cc3**3)
         )
-        qq05 = libm.pow_op(cc2, 3)
+        qq05 = cc2**3
         l3[:, 6] = (
-            -bb1 * cc2 * libm.pow_op(cc3, ff7)
-            - 3.0 * ee1 * ff7 * xi * hh4 * libm.pow_op(cc3, ll8)
-            - kk1 * ll8 * ff7 * kk2 * qq05 * libm.pow_op(cc3, (ee3 - 3.0))
+            -bb1 * cc2 * cc3**ff7
+            - 3.0 * ee1 * ff7 * xi * hh4 * cc3**ll8
+            - kk1 * ll8 * ff7 * kk2 * qq05 * cc3 ** (ee3 - 3.0)
             + bb1 * dd3 * cc2 / cc3
             - 3.0 * ee1 * xi * dd3 * hh4 / cc3**2
-            + 2.0 * kk1 * kk2 * dd3 * qq05 / libm.pow_op(cc3, 3)
+            + 2.0 * kk1 * kk2 * dd3 * qq05 / cc3**3
         )
         rr17 = log_cc3 / xi**2 - bb1 * aa2 * cc2 * dd6
         l3[:, 7] = (
-            bb1 * cc2 * libm.pow_op(cc3, oo10) * rr17
+            bb1 * cc2 * cc3**oo10 * rr17
             + ee1 * oo10 * xi * hh4 * mm12 * rr17
             - 2.0 * ee1 * hh4 * mm12
             - kk1 * mm11 * xi * qq05 * mm10
@@ -12902,7 +12706,7 @@ def _gevlss_derivs(y, mu, rho, xi, deriv):
             - bb1 * cc2 * dd6
             + 2.0 * ee1 * dd3 * hh4 * jj08
             + ee1 * xi * hh4 * jj08
-            - 2.0 * kk1 * xi * dd3 * qq05 / libm.pow_op(cc3, 3)
+            - 2.0 * kk1 * xi * dd3 * qq05 / cc3**3
         )
         l3[:, 8] = (
             -bb1 * cc2 * pp08 * (bb1 * pp07 * cc2 * dd6 + dd8 * dd7) ** 2
@@ -12912,19 +12716,16 @@ def _gevlss_derivs(y, mu, rho, xi, deriv):
             * (
                 -ee1 * pp07 * hh4 * jj08
                 + 2.0 * bb1 * dd8 * cc2 * dd6
-                - 2.0 * dd7 / libm.pow_op(xi, 3)
+                - 2.0 * dd7 / xi**3
             )
             - 2.0 * ee1 * hh4 * jj08
-            + 2.0
-            * (xi + 1.0)
-            * libm.pow_op(cc2, 3)
-            / (libm.pow_op(er, 3) * libm.pow_op(cc3, 3))
+            + 2.0 * (xi + 1.0) * cc2**3 / (er**3 * cc3**3)
         )
-        tt08 = 1.0 / libm.pow_op(cc3, 3)
-        tt16 = 1.0 / libm.pow_op(xi, 4)
+        tt08 = 1.0 / cc3**3
+        tt16 = 1.0 / xi**4
         tt18 = dd8 * dd7 - bb1 * aa2 * cc2 * dd6
         l3[:, 9] = (
-            -jj13 * libm.pow_op(tt18, 3)
+            -jj13 * tt18**3
             - 3.0
             * jj13
             * (ee1 * aa2 * hh4 * jj08 + 2.0 * bb1 * dd8 * cc2 * dd6 - 2.0 * jj12 * dd7)
@@ -12947,21 +12748,22 @@ def _gevlss_derivs(y, mu, rho, xi, deriv):
 
     if deriv > 3:
         l4 = np.zeros((n, 15))
-        uu1 = 1.0 / libm.pow_op(er, 4)
-        uu2 = libm.pow_op(xi, 3)
-        l4[:, 0] = uu1 * (ee3 - 3.0) * (ee3 - 2.0) * (ee3 - 1.0) * uu2 * libm.pow_op(
-            aa1, (ee3 - 4.0)
-        ) + 6.0 * uu1 * uu2 * (xi + 1.0) / libm.pow_op(aa1, 4)
+        uu1 = 1.0 / er**4
+        uu2 = xi**3
+        l4[:, 0] = (
+            uu1 * (ee3 - 3.0) * (ee3 - 2.0) * (ee3 - 1.0) * uu2 * aa1 ** (ee3 - 4.0)
+            + 6.0 * uu1 * uu2 * (xi + 1.0) / aa1**4
+        )
         vv09 = ee3 - 3.0
         l4[:, 1] = (
-            3.0 * kk1 * ll8 * ff7 * kk2 * libm.pow_op(ll5, vv09)
-            + uu1 * vv09 * ll8 * ff7 * uu2 * cc2 * libm.pow_op(ll5, (ee3 - 4.0))
-            - 6.0 * kk1 * kk2 * dd3 / libm.pow_op(ll5, 3)
-            + 6.0 * uu1 * uu2 * dd3 * cc2 / libm.pow_op(ll5, 4)
+            3.0 * kk1 * ll8 * ff7 * kk2 * ll5**vv09
+            + uu1 * vv09 * ll8 * ff7 * uu2 * cc2 * ll5 ** (ee3 - 4.0)
+            - 6.0 * kk1 * kk2 * dd3 / ll5**3
+            + 6.0 * uu1 * uu2 * dd3 * cc2 / ll5**4
         )
         ww11 = gg7 - 3.0
-        ww12 = libm.pow_op(cc3, (gg7 - 4.0))
-        ww15 = libm.pow_op(cc3, ww11)
+        ww12 = cc3 ** (gg7 - 4.0)
+        ww15 = cc3**ww11
         l4[:, 2] = (
             -kk1 * mm11 * oo10 * kk2 * ww15 * (log_cc3 / kk2 - bb1 * aa2 * cc2 / cc3)
             + 2.0 * kk1 * mm11 * xi * ww15
@@ -12971,15 +12773,15 @@ def _gevlss_derivs(y, mu, rho, xi, deriv):
             - uu1 * ww11 * xi * cc2 * ww12
             + 2.0 * kk1 * kk2 * tt08
             + 4.0 * kk1 * xi * dd3 * tt08
-            - 6.0 * uu1 * kk2 * dd3 * cc2 / libm.pow_op(cc3, 4)
+            - 6.0 * uu1 * kk2 * dd3 * cc2 / cc3**4
         )
         l4[:, 3] = (
-            4.0 * ee1 * ff7 * xi * libm.pow_op(ll5, ll8)
-            + 5.0 * kk1 * ll8 * ff7 * kk2 * cc2 * libm.pow_op(ll5, vv09)
-            + uu1 * vv09 * ll8 * ff7 * uu2 * hh4 * libm.pow_op(ll5, (ee3 - 4.0))
+            4.0 * ee1 * ff7 * xi * ll5**ll8
+            + 5.0 * kk1 * ll8 * ff7 * kk2 * cc2 * ll5**vv09
+            + uu1 * vv09 * ll8 * ff7 * uu2 * hh4 * ll5 ** (ee3 - 4.0)
             + 4.0 * ee1 * xi * dd3 / ll5**2
-            - 10.0 * kk1 * kk2 * dd3 * cc2 / libm.pow_op(ll5, 3)
-            + 6.0 * uu1 * uu2 * dd3 * hh4 / libm.pow_op(ll5, 4)
+            - 10.0 * kk1 * kk2 * dd3 * cc2 / ll5**3
+            + 6.0 * uu1 * uu2 * dd3 * hh4 / ll5**4
         )
         yy18 = log_cc3 / kk2
         l4[:, 4] = (
@@ -12994,7 +12796,7 @@ def _gevlss_derivs(y, mu, rho, xi, deriv):
             - 2.0 * ee1 * xi * jj08
             + 2.0 * kk1 * kk2 * cc2 * tt08
             + 8.0 * kk1 * xi * dd3 * cc2 * tt08
-            - 6.0 * kk2 * dd3 * cc2**2 / (libm.pow_op(er, 4) * libm.pow_op(cc3, 4))
+            - 6.0 * kk2 * dd3 * cc2**2 / (er**4 * cc3**4)
         )
         l4[:, 5] = (
             ee1 * oo10 * xi * mm12 * tt18**2
@@ -13005,31 +12807,27 @@ def _gevlss_derivs(y, mu, rho, xi, deriv):
             * oo10
             * xi
             * mm12
-            * (
-                ee1 * aa2 * hh4 * jj08
-                + 2.0 * bb1 * dd8 * cc2 * dd6
-                - 2.0 * dd7 / libm.pow_op(xi, 3)
-            )
+            * (ee1 * aa2 * hh4 * jj08 + 2.0 * bb1 * dd8 * cc2 * dd6 - 2.0 * dd7 / xi**3)
             + 4.0 * kk1 * cc2 * ww15
             + 2.0 * uu1 * ww11 * xi * hh4 * ww12
             - 4.0 * uu1 * hh4 * ww12
             + 2.0 * ee1 * jj08
             - 4.0 * kk1 * dd3 * cc2 * tt08
             - 4.0 * kk1 * xi * cc2 * tt08
-            + 6.0 * uu1 * xi * dd3 * hh4 / libm.pow_op(cc3, 4)
+            + 6.0 * uu1 * xi * dd3 * hh4 / cc3**4
         )
         l4[:, 6] = (
-            bb1 * libm.pow_op(cc3, ff7)
-            + 7.0 * ee1 * ff7 * xi * cc2 * libm.pow_op(cc3, ll8)
-            + 6.0 * kk1 * ll8 * ff7 * kk2 * hh4 * libm.pow_op(cc3, vv09)
-            + uu1 * vv09 * ll8 * ff7 * uu2 * qq05 * libm.pow_op(cc3, (ee3 - 4.0))
+            bb1 * cc3**ff7
+            + 7.0 * ee1 * ff7 * xi * cc2 * cc3**ll8
+            + 6.0 * kk1 * ll8 * ff7 * kk2 * hh4 * cc3**vv09
+            + uu1 * vv09 * ll8 * ff7 * uu2 * qq05 * cc3 ** (ee3 - 4.0)
             - bb1 * dd3 / cc3
             + 7.0 * ee1 * xi * dd3 * cc2 / cc3**2
-            - 12.0 * kk1 * kk2 * dd3 * hh4 / libm.pow_op(cc3, 3)
-            + 6.0 * uu1 * uu2 * dd3 * qq05 / libm.pow_op(cc3, 4)
+            - 12.0 * kk1 * kk2 * dd3 * hh4 / cc3**3
+            + 6.0 * uu1 * uu2 * dd3 * qq05 / cc3**4
         )
         l4[:, 7] = (
-            -bb1 * libm.pow_op(cc3, oo10) * (bb1 * oo10 * cc2 * dd6 + yy18)
+            -bb1 * cc3**oo10 * (bb1 * oo10 * cc2 * dd6 + yy18)
             - 3.0 * ee1 * oo10 * xi * cc2 * mm12 * (bb1 * mm11 * cc2 * dd6 + yy18)
             - kk1 * mm11 * oo10 * kk2 * hh4 * ww15 * (bb1 * ww11 * cc2 * dd6 + yy18)
             - 3.0 * ee1 * aa2 * cc2 * mm12
@@ -13042,15 +12840,11 @@ def _gevlss_derivs(y, mu, rho, xi, deriv):
             - 3.0 * ee1 * xi * cc2 * jj08
             + 2.0 * kk1 * kk2 * hh4 * tt08
             + 10.0 * kk1 * xi * dd3 * hh4 * tt08
-            - 6.0
-            * kk2
-            * dd3
-            * libm.pow_op(cc2, 3)
-            / (libm.pow_op(er, 4) * libm.pow_op(cc3, 4))
+            - 6.0 * kk2 * dd3 * cc2**3 / (er**4 * cc3**4)
         )
         ad17 = 2.0 * bb1 * dd8 * cc2 * dd6
-        ad19 = -2.0 * dd7 / libm.pow_op(xi, 3)
-        ad20 = libm.pow_op(cc3, oo10)
+        ad19 = -2.0 * dd7 / xi**3
+        ad20 = cc3**oo10
         ad21 = dd8 * dd7
         ad22 = ad21 + bb1 * mm11 * cc2 * dd6
         l4[:, 8] = (
@@ -13063,15 +12857,11 @@ def _gevlss_derivs(y, mu, rho, xi, deriv):
             + 4.0 * ee1 * cc2 * jj08
             - 6.0 * kk1 * dd3 * hh4 * tt08
             - 4.0 * kk1 * xi * hh4 * tt08
-            + 6.0
-            * xi
-            * dd3
-            * libm.pow_op(cc2, 3)
-            / (libm.pow_op(er, 4) * libm.pow_op(cc3, 4))
+            + 6.0 * xi * dd3 * cc2**3 / (er**4 * cc3**4)
         )
         ae16 = dd8 * dd7 + bb1 * pp07 * cc2 * dd6
         l4[:, 9] = (
-            -bb1 * pp08 * libm.pow_op(ae16, 3)
+            -bb1 * pp08 * ae16**3
             - 3.0
             * bb1
             * pp08
@@ -13087,25 +12877,25 @@ def _gevlss_derivs(y, mu, rho, xi, deriv):
                 2.0 * kk1 * pp07 * qq05 * tt08
                 - 3.0 * ee1 * dd8 * hh4 * jj08
                 - 6.0 * bb1 * jj12 * cc2 * dd6
-                + 6.0 * dd7 / libm.pow_op(xi, 4)
+                + 6.0 * dd7 / xi**4
             )
             + 6.0 * kk1 * hh4 * tt08
-            - 6.0 * (xi + 1.0) * qq05 / (libm.pow_op(er, 4) * libm.pow_op(cc3, 4))
+            - 6.0 * (xi + 1.0) * qq05 / (er**4 * cc3**4)
         )
-        af05 = libm.pow_op(cc2, 4)
+        af05 = cc2**4
         l4[:, 10] = (
-            bb1 * cc2 * libm.pow_op(cc3, ff7)
-            + 7.0 * ee1 * ff7 * xi * hh4 * libm.pow_op(cc3, ll8)
-            + 6.0 * kk1 * ll8 * ff7 * kk2 * qq05 * libm.pow_op(cc3, vv09)
-            + uu1 * vv09 * ll8 * ff7 * uu2 * af05 * libm.pow_op(cc3, (ee3 - 4.0))
+            bb1 * cc2 * cc3**ff7
+            + 7.0 * ee1 * ff7 * xi * hh4 * cc3**ll8
+            + 6.0 * kk1 * ll8 * ff7 * kk2 * qq05 * cc3**vv09
+            + uu1 * vv09 * ll8 * ff7 * uu2 * af05 * cc3 ** (ee3 - 4.0)
             - bb1 * dd3 * cc2 / cc3
             + 7.0 * ee1 * xi * dd3 * hh4 / cc3**2
-            - 12.0 * kk1 * kk2 * dd3 * qq05 / libm.pow_op(cc3, 3)
-            + 6.0 * uu1 * uu2 * dd3 * af05 / libm.pow_op(cc3, 4)
+            - 12.0 * kk1 * kk2 * dd3 * qq05 / cc3**3
+            + 6.0 * uu1 * uu2 * dd3 * af05 / cc3**4
         )
         ag23 = log_cc3 / kk2 - bb1 * aa2 * cc2 * dd6
         l4[:, 11] = (
-            -bb1 * cc2 * libm.pow_op(cc3, oo10) * ag23
+            -bb1 * cc2 * cc3**oo10 * ag23
             - 3.0 * ee1 * oo10 * xi * hh4 * mm12 * ag23
             - kk1 * mm11 * oo10 * kk2 * qq05 * ww15 * ag23
             + 4.0 * ee1 * hh4 * mm12
@@ -13119,13 +12909,9 @@ def _gevlss_derivs(y, mu, rho, xi, deriv):
             - 3.0 * ee1 * xi * hh4 * jj08
             + 2.0 * kk1 * kk2 * qq05 * tt08
             + 10.0 * kk1 * xi * dd3 * qq05 * tt08
-            - 6.0 * uu1 * kk2 * dd3 * af05 / libm.pow_op(cc3, 4)
+            - 6.0 * uu1 * kk2 * dd3 * af05 / cc3**4
         )
-        ah24 = (
-            -2.0 * dd7 / libm.pow_op(xi, 3)
-            + 2.0 * bb1 * dd8 * cc2 * dd6
-            + ee1 * aa2 * hh4 * jj08
-        )
+        ah24 = -2.0 * dd7 / xi**3 + 2.0 * bb1 * dd8 * cc2 * dd6 + ee1 * aa2 * hh4 * jj08
         ah27 = tt18**2
         l4[:, 12] = (
             bb1 * cc2 * ad20 * ah27
@@ -13141,10 +12927,10 @@ def _gevlss_derivs(y, mu, rho, xi, deriv):
             + 4.0 * ee1 * hh4 * jj08
             - 6.0 * kk1 * dd3 * qq05 * tt08
             - 4.0 * kk1 * xi * qq05 * tt08
-            + 6.0 * uu1 * xi * dd3 * af05 / libm.pow_op(cc3, 4)
+            + 6.0 * uu1 * xi * dd3 * af05 / cc3**4
         )
         l4[:, 13] = (
-            -bb1 * cc2 * pp08 * libm.pow_op(ae16, 3)
+            -bb1 * cc2 * pp08 * ae16**3
             - 3.0
             * bb1
             * cc2
@@ -13162,19 +12948,16 @@ def _gevlss_derivs(y, mu, rho, xi, deriv):
                 2.0 * kk1 * pp07 * qq05 * tt08
                 - 3.0 * ee1 * dd8 * hh4 * jj08
                 - 6.0 * bb1 * jj12 * cc2 * dd6
-                + 6.0 * dd7 / libm.pow_op(xi, 4)
+                + 6.0 * dd7 / xi**4
             )
             + 6.0 * kk1 * qq05 * tt08
-            - 6.0
-            * (xi + 1.0)
-            * libm.pow_op(cc2, 4)
-            / (libm.pow_op(er, 4) * libm.pow_op(cc3, 4))
+            - 6.0 * (xi + 1.0) * cc2**4 / (er**4 * cc3**4)
         )
-        aj08 = 1.0 / libm.pow_op(cc3, 4)
-        aj20 = 1.0 / libm.pow_op(xi, 5)
+        aj08 = 1.0 / cc3**4
+        aj20 = 1.0 / xi**5
         aj23 = -2.0 * jj12 * dd7 + 2.0 * bb1 * dd8 * cc2 * dd6 + ee1 * aa2 * hh4 * jj08
         l4[:, 14] = (
-            -jj13 * libm.pow_op(tt18, 4)
+            -jj13 * tt18**4
             - 6.0 * jj13 * aj23 * tt18**2
             - 3.0 * jj13 * aj23**2
             - 4.0
@@ -13404,7 +13187,7 @@ class gevlss(GeneralFamily):
         else:
             yt1 = self.links[0].link(np.abs(y) + float(np.max(y)) * 1e-7)
         start[jj[0]] = _reg(jj[0], yt1)
-        lres1 = libm.log(
+        lres1 = np.log(
             np.abs(y - self.links[0].linkinv(_lp_eta(X[:, jj[0]], start[jj[0]])))
         )
         start[jj[1]] = _reg(jj[1], lres1)
@@ -13473,7 +13256,7 @@ class gevlss(GeneralFamily):
             _DiscreteLPSolve(design, lpid[0], E[:, jj[0]], ones_n), yt1
         )
         lres1 = _Xbd(design, start, lt=lpid[0])
-        lres1 = libm.log(np.abs(y - self.links[0].linkinv(lres1)))
+        lres1 = np.log(np.abs(y - self.links[0].linkinv(lres1)))
         start[jj[1]] = _guarded(
             _DiscreteLPSolve(design, lpid[1], E[:, jj[1]], ones_n), lres1
         )
@@ -13519,10 +13302,10 @@ class gevlss(GeneralFamily):
         mu = np.asarray(mu, dtype=float)
         z = rng.uniform(size=mu.shape[0])
         loc = mu[:, 0]
-        sigma = libm.exp(mu[:, 1])
+        sigma = np.exp(mu[:, 1])
         xi = mu[:, 2].copy()
         xi[np.abs(xi) < 1e-8] = 1e-8
-        return loc + (libm.pow_op((-libm.log(z)), (-xi)) - 1.0) * sigma / xi
+        return loc + ((-np.log(z)) ** (-xi) - 1.0) * sigma / xi
 
     def residuals(self, y, fitted, type: str = "deviance") -> np.ndarray:
         """gevlss residuals (gamlss.r:1981-2000). ``fitted`` is the
@@ -13538,7 +13321,7 @@ class gevlss(GeneralFamily):
         mu = fitted[:, 0]
         rho = fitted[:, 1]
         xi = fitted[:, 2].copy()
-        fv = mu + libm.exp(rho) * (_gamma_fn(1.0 - xi) - 1.0) / xi
+        fv = mu + np.exp(rho) * (_gamma_fn(1.0 - xi) - 1.0) / xi
         eps = 1e-7
         xi[(xi >= 0) & (xi < eps)] = eps
         xi[(xi < 0) & (xi > -eps)] = -eps
@@ -13546,7 +13329,7 @@ class gevlss(GeneralFamily):
             return y - fv
         if type == "pearson":
             sd = (
-                libm.exp(rho)
+                np.exp(rho)
                 / xi
                 * np.sqrt(
                     np.maximum(
@@ -13555,11 +13338,11 @@ class gevlss(GeneralFamily):
                 )
             )
             return (y - fv) / sd
-        ymr = (y - mu) * libm.exp(-rho) * xi
+        ymr = (y - mu) * np.exp(-rho) * xi
         rsd = (
-            (xi + 1.0) / xi * libm.log(1.0 + ymr)
-            + libm.pow_op((1.0 + ymr), (-1.0 / xi))
-            + (1.0 + xi) * libm.log(1.0 + xi)
+            (xi + 1.0) / xi * np.log(1.0 + ymr)
+            + (1.0 + ymr) ** (-1.0 / xi)
+            + (1.0 + xi) * np.log(1.0 + xi)
             - (1.0 + xi)
         )
         return np.sqrt(np.maximum(0.0, rsd)) * np.sign(y - fv)
@@ -13627,7 +13410,7 @@ def _coxlpl(eta, X, d, time, deriv, d1b=None, d2b=None, D=None, eigen=None):
         lpl, g, H = _rs_cox_lpl0(eta, X, d, r, int(nt))
         if deriv == 0:
             return {"l": float(lpl), "lb": g, "lbb": H}
-        gamma = libm.exp(eta)
+        gamma = np.exp(eta)
         if deriv <= 2:  # + ∂H/∂ρ matrices (original basis)
             d1gamma = np.ascontiguousarray((X @ d1b) * gamma[:, None])
             lpl, g, H, d1H = _rs_cox_lpl_d1(eta, X, d, r, int(nt), d1gamma)
@@ -13657,7 +13440,7 @@ def _coxlpl(eta, X, d, time, deriv, d1b=None, d2b=None, D=None, eigen=None):
         )
         trHid2H = np.sum(np.asarray(d2H) * dvec[:, None], 0)
         return {"l": float(lpl), "lb": g, "lbb": H, "trHid2H": trHid2H}
-    gamma = libm.exp(eta)
+    gamma = np.exp(eta)
     last = np.searchsorted(r, np.arange(nt), side="right") - 1
     gamma_p = np.cumsum(gamma)[last]
     ev = np.asarray(d, int) == 1
@@ -13666,7 +13449,7 @@ def _coxlpl(eta, X, d, time, deriv, d1b=None, d2b=None, D=None, eigen=None):
     eta_sum = np.zeros(nt)
     np.add.at(eta_sum, r[ev], eta[ev])
 
-    lpl = float(np.sum(eta_sum - dr * libm.log(gamma_p)))
+    lpl = float(np.sum(eta_sum - dr * np.log(gamma_p)))
     if deriv < 0:  # C coxlpl: deriv<0 returns lp only, no b_p/A_p/g/H
         return {"l": lpl}
     b_p = np.cumsum(gamma[:, None] * X, 0)[last]
@@ -13795,7 +13578,7 @@ def _coxpp(eta, X, d, time):
     X = X[order]
     time = time[order]
     d = d[order]
-    gamma = libm.exp(eta)
+    gamma = np.exp(eta)
     tr_neg = np.unique(-time)
     nt = tr_neg.size
     tr = -tr_neg
@@ -13841,8 +13624,8 @@ def _coxpred(Xnew, tnew, beta, off, Vb, a, h, q, tr):
         hi = h[ir]
         eta = float(Xnew[i] @ beta)
         v = a[ir] - Xnew[i] * hi
-        exp_eta = libm.exp(eta + off[i])
-        s[i] = libm.exp(-hi * exp_eta)
+        exp_eta = np.exp(eta + off[i])
+        s[i] = np.exp(-hi * exp_eta)
         vVv = float(v @ Vb @ v)
         se[i] = exp_eta * s[i] * np.sqrt(max(q[ir] + vVv, 0.0))
     return s, se
@@ -13972,13 +13755,11 @@ class cox_ph(GeneralFamily):
         hz = _coxpp(eta, Xc, d, y)
         self._cox_data = hz
         hz0 = _coxpp(np.zeros_like(eta), np.zeros((y.size, 0)), d, y)
-        s0 = libm.exp(-hz0["h"][hz0["r"]])
+        s0 = np.exp(-hz0["h"][hz0["r"]])
         s0 = np.minimum(s0, 1.0 - 2.0 * eps)
-        s_model = libm.exp(-hz["h"][hz["r"]] * libm.exp(eta))  # survivor
+        s_model = np.exp(-hz["h"][hz["r"]] * np.exp(eta))  # survivor
         w = np.asarray(prior_weights, float)
-        null_dev = 2.0 * float(
-            r_sum(np.abs(w + libm.log(s0) + w * libm.log(-libm.log(s0))))
-        )
+        null_dev = 2.0 * float(r_sum(np.abs(w + np.log(s0) + w * np.log(-np.log(s0)))))
         return {"fitted": s_model, "null_deviance": null_dev}
 
     def residuals(self, y, fitted, type: str = "deviance", prior_weights=None):
@@ -13992,13 +13773,13 @@ class cox_ph(GeneralFamily):
                 f"{type!r} (score/schoenfeld need Vp and are model-level)"
             )
         w = np.asarray(prior_weights, float)
-        log_s = libm.log(np.asarray(fitted, float))
+        log_s = np.log(np.asarray(fitted, float))
         res = w + log_s  # martingale residuals
         if type == "martingale":
             return res
         log_s = np.minimum(log_s, -1e-50)
         return np.sign(res) * np.sqrt(
-            np.maximum(-2.0 * (res + w * libm.log(-log_s)), 0.0)
+            np.maximum(-2.0 * (res + w * np.log(-log_s)), 0.0)
         )
 
     def predict(self, *, se, y, X, beta, off, Vb, lpi, eta=None):
@@ -14054,12 +13835,12 @@ def _l1ee(x):
     eps = np.finfo(float).eps
     xmax = np.finfo(float).max
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        ex = libm.exp(x)
-        l = libm.log(1.0 - libm.exp(-ex))
-        ind = x < libm.log(eps) / 3.0
+        ex = np.exp(x)
+        l = np.log(1.0 - np.exp(-ex))
+        ind = x < np.log(eps) / 3.0
         exi = ex[ind]
-        l[ind] = libm.log(exi - exi**2 / 2.0 + libm.pow_op(exi, 3) / 6.0)
-        ind = x < -libm.log(xmax)
+        l[ind] = np.log(exi - exi**2 / 2.0 + exi**3 / 6.0)
+        ind = x < -np.log(xmax)
         l[ind] = x[ind]
     return l
 
@@ -14070,14 +13851,14 @@ def _lee1(x):
     eps = np.finfo(float).eps
     xmax = np.finfo(float).max
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        ex = libm.exp(x)
-        l = libm.log(libm.exp(ex) - 1.0)
-        ind = x < libm.log(eps) / 3.0
+        ex = np.exp(x)
+        l = np.log(np.exp(ex) - 1.0)
+        ind = x < np.log(eps) / 3.0
         exi = ex[ind]
-        l[ind] = libm.log(exi + exi**2 / 2.0 + libm.pow_op(exi, 3) / 6.0)
-        ind = x < -libm.log(xmax)
+        l[ind] = np.log(exi + exi**2 / 2.0 + exi**3 / 6.0)
+        ind = x < -np.log(xmax)
         l[ind] = x[ind]
-        ind = x > libm.log(libm.log(xmax))
+        ind = x > np.log(np.log(xmax))
         l[ind] = ex[ind]
     return l
 
@@ -14090,41 +13871,41 @@ def _ldg(g, deriv=4):
     g = np.asarray(g, dtype=float)
     eps = np.finfo(float).eps
     xmax = np.finfo(float).max
-    lo = libm.log(eps) / 3.0
+    lo = np.log(eps) / 3.0
 
     def alpha(gg):
         a = gg.copy()
         m = gg > lo
-        eg = libm.exp(gg)
-        a[m] = eg[m] / (1.0 - libm.exp(-eg[m]))
+        eg = np.exp(gg)
+        a[m] = eg[m] / (1.0 - np.exp(-eg[m]))
         nm = ~m
         a[nm] = 1.0 + eg[nm] / 2.0 + eg[nm] ** 2 / 12.0
         return a
 
     with np.errstate(over="ignore", invalid="ignore"):
         ind = g < lo
-        ghi = libm.log(libm.log(xmax)) + 1.0
+        ghi = np.log(np.log(xmax)) + 1.0
         ii = g > ghi
         a = alpha(g)
-        eg = libm.exp(g)
+        eg = np.exp(g)
         l2 = a * (a - eg - 1.0)
         egi = eg[ind]
         b = egi * (1.0 + egi / 6.0) / 2.0
         l2[ind] = a[ind] * (b - egi)
-        l2[ii] = -libm.exp(g[ii])
+        l2[ii] = -np.exp(g[ii])
         l3 = l4 = None
         if deriv > 1:
             l3 = a * (a * (-2.0 * a + 3.0 * (eg + 1.0)) - 3.0 * eg - eg**2 - 1.0)
             l3[ind] = a[ind] * (-b - 2.0 * b**2 + 3.0 * b * egi - egi**2)
-            l3[ii] = -libm.exp(g[ii])
+            l3[ii] = -np.exp(g[ii])
         if deriv > 2:
             l4 = a * (
-                6.0 * libm.pow_op(a, 3)
+                6.0 * a**3
                 - 12.0 * (eg + 1.0) * a**2
                 + 4.0 * eg * a
                 + 7.0 * (eg + 1.0) ** 2 * a
                 - (4.0 + 3.0 * eg) * eg
-                - libm.pow_op((eg + 1.0), 3)
+                - (eg + 1.0) ** 3
             )
             l4[ind] = a[ind] * (
                 6.0 * b * (3.0 + 3.0 * b + b**2)
@@ -14135,14 +13916,14 @@ def _ldg(g, deriv=4):
                 - (4.0 + 3.0 * egi) * egi
                 - egi * (3.0 + 3.0 * egi + egi**2)
             )
-            l4[ii] = -libm.exp(g[ii])
+            l4[ii] = -np.exp(g[ii])
         l1 = -a
         # final overflow guard: above log(xmax)/5 every order saturates to
         # -exp of that threshold (mgcv gamlss.r:1544-1548).
-        ghi2 = libm.log(xmax) / 5.0
+        ghi2 = np.log(xmax) / 5.0
         ii2 = g > ghi2
         if np.any(ii2):
-            clamp = -libm.exp(ghi2)
+            clamp = -np.exp(ghi2)
             l1[ii2] = clamp
             l2[ii2] = clamp
             if l3 is not None:
@@ -14158,16 +13939,16 @@ def _lde(eta, deriv=4):
     eta = np.asarray(eta, dtype=float)
     eps = np.finfo(float).eps
     xmax = np.finfo(float).max
-    lo = libm.log(eps) / 3.0
-    lxmax = libm.log(xmax)
+    lo = np.log(eps) / 3.0
+    lxmax = np.log(xmax)
     with np.errstate(over="ignore", invalid="ignore"):
         ind = eta < lo
         ii = eta > lxmax
-        et = libm.exp(eta)
+        et = np.exp(eta)
         l1 = et.copy()
         eti = et[ind]
         nm = ~ind
-        l1[nm] = et[nm] / (libm.exp(et[nm]) - 1.0)
+        l1[nm] = et[nm] / (np.exp(et[nm]) - 1.0)
         b = -eti * (1.0 + eti / 6.0) / 2.0
         l1[ind] = 1.0 + b
         l1[ii] = 0.0
@@ -14187,15 +13968,15 @@ def _lde(eta, deriv=4):
             l4 = l1 * (
                 (3.0 * et - 4.0) * et
                 + 4.0 * et * l1
-                + libm.pow_op((1.0 - et), 3)
+                + (1.0 - et) ** 3
                 - 7.0 * (1.0 - et) ** 2 * l1
                 + 12.0 * (1.0 - et) * l1**2
-                - 6.0 * libm.pow_op(l1, 3)
+                - 6.0 * l1**3
             )
             l4[ii3] = 0.0
             l4[ind] = l1[ind] * (
                 4.0 * l1[ind] * eti
-                - libm.pow_op(eti, 3)
+                - eti**3
                 - b
                 - 7.0 * b * eti**2
                 - eti**2
@@ -14203,7 +13984,7 @@ def _lde(eta, deriv=4):
                 - 10.0 * b * eti
                 - 12.0 * eti * b**2
                 - 6.0 * b**2
-                - 6.0 * libm.pow_op(b, 3)
+                - 6.0 * b**3
             )
     return l1, l2, l3, l4
 
@@ -14225,7 +14006,7 @@ def _zipll(y, g, eta, deriv=0):
     nz = ~zind
     yp = y[nz]
     with np.errstate(over="ignore", invalid="ignore"):
-        et = libm.exp(eta)
+        et = np.exp(eta)
         l = et.copy()
         l[zind] = -et[zind]
         l[nz] = _l1ee(eta[nz]) + yp * g[nz] - _lee1(g[nz]) - _r_lgamma(yp + 1.0)
@@ -14245,7 +14026,7 @@ def _zipll(y, g, eta, deriv=0):
     # Expected Hessian (mgcv El2, gamlss.r:1620-1621): E[l_gg] = p·lg2,
     # E[l_ee] = −(1−p)·e^eta + p·le2 (cols gg, ge≡0, ee). p = 1 − e^{−e^eta}.
     with np.errstate(over="ignore", invalid="ignore"):
-        p = 1.0 - libm.exp(-et)
+        p = 1.0 - np.exp(-et)
         El2 = np.zeros((n, 3))
         El2[:, 0] = p * lg[1]
         El2[:, 2] = -(1.0 - p) * et + p * le[1]
@@ -14304,7 +14085,7 @@ def _ziplss_ls(y):
     ind = (y > 1) & (y < 18)
     g[ind] = _ZIPLSS_GLO[y[ind].astype(int) - 2]
     ind2 = y > 1
-    l[ind2] = _zipll(y[ind2], libm.log(g[ind2]), np.full(int(ind2.sum()), 1e10))["l"]
+    l[ind2] = _zipll(y[ind2], np.log(g[ind2]), np.full(int(ind2.sum()), 1e10))["l"]
     return l
 
 
@@ -14443,7 +14224,7 @@ class ziplss(GeneralFamily):
         pres = _lp_eta(X[:, jj[1]], b2)
         w = np.ones(n)
         w[(y == 0) & (pres < 0.5)] = 0.1
-        yt2 = self.links[0].link(libm.log(np.abs(y) + (y == 0) * 0.2)) * w
+        yt2 = self.links[0].link(np.log(np.abs(y) + (y == 0) * 0.2)) * w
         x1 = w[:, None] * X[:, jj[0]]
         start[jj[0]] = _reg(x1, jj[0], yt2)
         return start
@@ -14462,21 +14243,21 @@ class ziplss(GeneralFamily):
         eps_h = np.sqrt(np.finfo(float).eps)
 
         def fp(pp):
-            l1p = libm.log(1.0 - pp) if pp > eps_h else -pp - pp * pp / 2.0
-            return l1p * nz + libm.log(pp) * npos
+            l1p = np.log(1.0 - pp) if pp > eps_h else -pp - pp * pp / 2.0
+            return l1p * nz + np.log(pp) * npos
 
         ypos = y[y > 0]
 
         def flam(lam):
             return float(
                 r_sum(
-                    ypos * libm.log(lam)
-                    - libm.log(libm.exp(lam) - 1.0)
+                    ypos * np.log(lam)
+                    - np.log(np.exp(lam) - 1.0)
                     - _r_lgamma(ypos + 1.0)
                 )
             )
 
-        tol = libm.pow_op(np.finfo(float).eps, 0.25)  # R optimize() default
+        tol = np.finfo(float).eps ** 0.25  # R optimize() default
         _, neg1 = _brent_fmin(lambda v: -fp(v), 1e-60, 1.0 - 1e-10, tol)
         my = float(np.mean(ypos))
         _, neg2 = _brent_fmin(lambda v: -flam(v), my / 2.0, my * 2.0, tol)
@@ -14498,11 +14279,11 @@ class ziplss(GeneralFamily):
         y = np.asarray(y, dtype=float)
         fitted = np.asarray(fitted, dtype=float)
         with np.errstate(over="ignore", invalid="ignore"):
-            p = 1.0 - libm.exp(-libm.exp(fitted[:, 1]))
-            lam = libm.exp(fitted[:, 0])
+            p = 1.0 - np.exp(-np.exp(fitted[:, 1]))
+            lam = np.exp(fitted[:, 0])
             ind = lam > np.sqrt(np.finfo(float).eps)
             ey = p.copy()
-            ey[ind] = p[ind] * lam[ind] / (1.0 - libm.exp(-lam[ind]))
+            ey[ind] = p[ind] * lam[ind] / (1.0 - np.exp(-lam[ind]))
         rsd = y - ey
         if type == "response":
             return rsd
@@ -14521,15 +14302,15 @@ class ziplss(GeneralFamily):
         gamma = mu[:, 0]
         eta = mu[:, 1]
         n = gamma.shape[0]
-        lam = libm.exp(gamma)
-        p = 1.0 - libm.exp(-libm.exp(eta))
+        lam = np.exp(gamma)
+        p = 1.0 - np.exp(-np.exp(eta))
         y = np.zeros(n)
         ind = p > rng.uniform(0.0, 1.0, n)
         m = int(np.sum(ind))
         if m:
-            lo = libm.exp(-lam[ind])  # dpois(0, lambda)
+            lo = np.exp(-lam[ind])  # dpois(0, lambda)
             u = rng.uniform(lo, 1.0, m)
-            one_eps = 1.0 - libm.pow_op(np.finfo(float).eps, 0.75)
+            one_eps = 1.0 - np.finfo(float).eps ** 0.75
             u[u > one_eps] = one_eps
             y[ind] = _poisson.ppf(u, lam[ind])
         return y
@@ -14581,13 +14362,13 @@ class ziplss(GeneralFamily):
             gamma = eta[:, 0]
             eta_p = eta[:, 1]
         with np.errstate(over="ignore", invalid="ignore"):
-            et = libm.exp(eta_p)
-            p = 1.0 - libm.exp(-et)
-            lam = libm.exp(gamma)
+            et = np.exp(eta_p)
+            p = 1.0 - np.exp(-et)
+            lam = np.exp(gamma)
             mu = np.where(
-                gamma < libm.log(np.finfo(float).eps) / 2.0,
+                gamma < np.log(np.finfo(float).eps) / 2.0,
                 1.0,
-                lam / (1.0 - libm.exp(-lam)),
+                lam / (1.0 - np.exp(-lam)),
             )
             ey = p * mu
         if not se:
@@ -14595,7 +14376,7 @@ class ziplss(GeneralFamily):
         with np.errstate(over="ignore", invalid="ignore"):
             df_de = (
                 np.where(
-                    eta_p < libm.log(np.finfo(float).max) / 2.0, libm.exp(-et) * et, 0.0
+                    eta_p < np.log(np.finfo(float).max) / 2.0, np.exp(-et) * et, 0.0
                 )
                 * mu
             )
@@ -14622,9 +14403,9 @@ def _multinom_derivs(y, eta, tri, deriv):
     y = np.round(np.asarray(y, dtype=float)).astype(int)
     eta = np.asarray(eta, dtype=float)
     n, K = eta.shape
-    ee = libm.exp(eta)  # (n, K) = exp of the real LPs
+    ee = np.exp(eta)  # (n, K) = exp of the real LPs
     beta = 1.0 + ee.sum(axis=1)  # normalizer 1 + Σ exp(η_j)
-    alpha = libm.log(beta)
+    alpha = np.log(beta)
     eta_full = np.column_stack([np.ones(n), eta])
     l0 = eta_full[np.arange(n), y] - alpha
     out = {"l0": l0, "l": r_sum(l0)}
@@ -14659,7 +14440,7 @@ def _multinom_derivs(y, eta, tri, deriv):
                         l3[:, col] = (
                             l2[:, i2[i, i]]
                             + 2.0 * ee[:, i] ** 2 / b2
-                            - 2.0 * libm.pow_op(ee[:, i], 3) / b3
+                            - 2.0 * ee[:, i] ** 3 / b3
                         )
                     elif i != j and j != k and i != k:
                         l3[:, col] = -2.0 * eijk / b3
@@ -14685,8 +14466,8 @@ def _multinom_derivs(y, eta, tri, deriv):
                             l4[:, col] = (
                                 l3[:, i3[i, i, i]]
                                 + 4.0 * ee[:, i] ** 2 / b2
-                                - 10.0 * libm.pow_op(ee[:, i], 3) / b3
-                                + 6.0 * libm.pow_op(ee[:, i], 4) / b4
+                                - 10.0 * ee[:, i] ** 3 / b3
+                                + 6.0 * ee[:, i] ** 4 / b4
                             )
                         elif nun == 4:
                             l4[:, col] = 6.0 * eijkl / b4
@@ -14878,7 +14659,7 @@ class multinom(GeneralFamily):
         ntot = float(nj.sum())
         A = np.diag(ntot / nj[1:]) - np.ones((K, K))
         gamma = np.concatenate([[1.0], np.linalg.solve(A, np.ones(K))])
-        gamma = libm.log(gamma / r_sum(gamma))
+        gamma = np.log(gamma / r_sum(gamma))
         return {"null_deviance": -2.0 * float(r_sum(gamma[y]))}
 
     def residuals(self, y, fitted, type: str = "deviance") -> np.ndarray:
@@ -14895,7 +14676,7 @@ class multinom(GeneralFamily):
         pc = np.argmax(p, axis=1)
         sgn = np.where(pc == y, 1.0, -1.0)
         py = p[np.arange(n), y]
-        return sgn * np.sqrt(-2.0 * libm.log(np.maximum(np.finfo(float).eps, py)))
+        return sgn * np.sqrt(-2.0 * np.log(np.maximum(np.finfo(float).eps, py)))
 
     def rd(self, rng, mu, wt, scale):
         """multinom rd (gamlss.r:1348-1354): sample a category by inverse
@@ -14903,7 +14684,7 @@ class multinom(GeneralFamily):
         ``mu`` is the (n, K) η matrix."""
         mu = np.asarray(mu, dtype=float)
         n = mu.shape[0]
-        p = libm.exp(np.column_stack([np.zeros(n), mu]))
+        p = np.exp(np.column_stack([np.zeros(n), mu]))
         p = p / p.sum(axis=1, keepdims=True)
         cp = np.cumsum(p, axis=1)
         u = rng.uniform(0.0, 1.0, n)
@@ -14954,7 +14735,7 @@ class multinom(GeneralFamily):
             eta = np.asarray(eta, dtype=float)
             se = False
         n, K = eta.shape
-        gamma = np.column_stack([np.ones(n), libm.exp(eta)])
+        gamma = np.column_stack([np.ones(n), np.exp(eta)])
         bb = gamma.sum(axis=1)
         gamma = gamma / bb[:, None]
         if not se:
@@ -14998,7 +14779,7 @@ def _mvn_ll(y, X, coef, lpi, m, *, deriv=0, d1b=None, fh=None) -> dict:
     ldetR = 0.0
     k = 0
     for i in range(m):
-        dth[k] = libm.exp(theta[k])
+        dth[k] = np.exp(theta[k])
         R[i, i] = dth[k]
         ldetR += theta[k]
         rri[k] = rci[k] = i
@@ -15225,7 +15006,7 @@ class mvn(GeneralFamily):
                     )
             um = magic(y[:, kdim], X[:, cols], np.full(len(sub), -1.0), sub)
             ibeta[cols] = um["b"]
-            ibeta[ncoef + kdiag] = -0.5 * libm.log(um["scale"])
+            ibeta[ncoef + kdiag] = -0.5 * np.log(um["scale"])
             kdiag += m - kdim  # next diagonal θ slot (mvam.r:124)
         self._ibeta = ibeta
 
@@ -15268,7 +15049,7 @@ class mvn(GeneralFamily):
         k = 0
         for i in range(m):
             for j in range(i, m):
-                R[i, j] = libm.exp(theta[k]) if i == j else theta[k]
+                R[i, j] = np.exp(theta[k]) if i == j else theta[k]
                 k += 1
         return R
 
@@ -15310,7 +15091,7 @@ class mvn(GeneralFamily):
             resid = y[:, kdim] - _lp_eta(X[:, jj[kdim]], bk)
             df = max(len(jj[kdim]), 1)
             scale = max(float(resid @ resid) / max(len(resid) - df, 1), 1e-8)
-            start[ncoef + kdiag] = -0.5 * libm.log(scale)
+            start[ncoef + kdiag] = -0.5 * np.log(scale)
             kdiag += m - kdim  # advance to next diagonal θ slot
         return start
 

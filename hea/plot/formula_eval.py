@@ -18,7 +18,6 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
-from .. import _libm as libm
 from ..formula import (
     BinOp,
     Call,
@@ -73,15 +72,15 @@ DEFAULT_ENV: dict = {
     "coef": _coef,
     "predict": lambda m: _fitted(m),
     "factor": _factor,
-    "log": libm.log,
-    "log2": libm.log2,
-    "log10": libm.log10,
-    "exp": libm.exp,
+    "log": np.log,
+    "log2": np.log2,
+    "log10": np.log10,
+    "exp": np.exp,
     "sqrt": np.sqrt,
     "abs": np.abs,
-    "sin": libm.sin,
-    "cos": libm.cos,
-    "tan": libm.tan,
+    "sin": np.sin,
+    "cos": np.cos,
+    "tan": np.tan,
     "head": lambda x, n: np.asarray(x)[: int(n)],
     "tail": lambda x, n: np.asarray(x)[-int(n) :],
     "sort": np.sort,
@@ -133,7 +132,7 @@ def eval_node(node, data: pl.DataFrame | None, env: dict):
         if op == "/":
             return L / R
         if op == "^":
-            return libm.pow_op(L, R)
+            return L**R
         raise ValueError(f"unsupported binary op {op!r} in expression")
 
     if isinstance(node, UnaryOp):

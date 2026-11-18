@@ -25,7 +25,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ... import _libm as libm
 from .scale import _NAME_MISSING
 
 
@@ -72,10 +71,10 @@ class Log10Trans(Trans):
     def transform(self, x):
         arr = np.asarray(x, dtype=float)
         with np.errstate(divide="ignore", invalid="ignore"):
-            return np.where(arr > 0, libm.log10(arr), np.nan)
+            return np.where(arr > 0, np.log10(arr), np.nan)
 
     def inverse(self, x):
-        return libm.pow_op(10.0, np.asarray(x, dtype=float))
+        return 10.0 ** np.asarray(x, dtype=float)
 
     def matplotlib_scale(self):
         return ("log", {"base": 10})
@@ -91,10 +90,10 @@ class Log2Trans(Trans):
     def transform(self, x):
         arr = np.asarray(x, dtype=float)
         with np.errstate(divide="ignore", invalid="ignore"):
-            return np.where(arr > 0, libm.log2(arr), np.nan)
+            return np.where(arr > 0, np.log2(arr), np.nan)
 
     def inverse(self, x):
-        return libm.pow_op(2.0, np.asarray(x, dtype=float))
+        return 2.0 ** np.asarray(x, dtype=float)
 
     def matplotlib_scale(self):
         return ("log", {"base": 2})
@@ -150,7 +149,7 @@ class SqrtTrans(Trans):
         ]
         if not raw_breaks:
             return None
-        positions = [libm.pow_op(b, 0.5) for b in raw_breaks]
+        positions = [b**0.5 for b in raw_breaks]
         labels = format_breaks(raw_breaks)
         return positions, labels
 
@@ -171,26 +170,26 @@ def _log_breaks(lo: float, hi: float, *, base: float) -> tuple:
     """Generate ``(positions, labels)`` for a log-base axis spanning
     transformed range ``[lo, hi]``.
     """
-    raw_lo = libm.pow_op(base, lo)
-    raw_hi = libm.pow_op(base, hi)
-    log_b = libm.log(base)
-    k_lo = int(np.floor(libm.log(raw_lo) / log_b))
-    k_hi = int(np.ceil(libm.log(raw_hi) / log_b))
+    raw_lo = base**lo
+    raw_hi = base**hi
+    log_b = np.log(base)
+    k_lo = int(np.floor(np.log(raw_lo) / log_b))
+    k_hi = int(np.ceil(np.log(raw_hi) / log_b))
     decades = k_hi - k_lo
     if decades <= 3:
         candidates = []
         for k in range(k_lo, k_hi + 1):
             for m in (1, 2, 5):
-                v = m * (libm.pow_op(base, k))
+                v = m * (base**k)
                 if raw_lo - 1e-12 <= v <= raw_hi * (1 + 1e-12):
                     candidates.append(v)
     else:
         candidates = [
-            libm.pow_op(base, k)
+            base**k
             for k in range(k_lo, k_hi + 1)
-            if raw_lo - 1e-12 <= libm.pow_op(base, k) <= raw_hi * (1 + 1e-12)
+            if raw_lo - 1e-12 <= base**k <= raw_hi * (1 + 1e-12)
         ]
-    positions = [libm.log(v) / log_b for v in candidates]
+    positions = [np.log(v) / log_b for v in candidates]
     labels = [_format_log_tick(v) for v in candidates]
     return positions, labels
 
@@ -203,7 +202,7 @@ def _format_log_tick(value: float) -> str:
         return ""
     abs_v = abs(value)
     if abs_v >= 10000 or (0 < abs_v < 0.01):
-        exp = round(libm.log10(abs_v))
+        exp = round(np.log10(abs_v))
         return f"$10^{{{exp}}}$"
     if abs_v >= 1:
         return f"{round(value)}"

@@ -19,7 +19,6 @@ import math
 
 import numpy as np
 
-from .. import _libm as libm
 from .._dispatch import rs_fn
 from .._rlinalg import (
     mgcv_svd_full,
@@ -224,7 +223,7 @@ def _magic_c_py(
         for i in range(m):
             rSms = float(np.trace(Si[i])) / (q * cS[i])
             def_sp[i] = Xms / rSms
-    sp0 = libm.log(def_sp) if autoinit else libm.log(sp0)
+    sp0 = np.log(def_sp) if autoinit else np.log(sp0)
 
     def map_sp(s0):
         if L_exists:
@@ -261,7 +260,7 @@ def _magic_c_py(
         xx = 1e-4 * (1 + abs(f.score))
         grad = lt_grad(g1)
         flat = np.abs(grad) < xx
-        sp0[flat] = libm.log(def_sp[flat])
+        sp0[flat] = np.log(def_sp[flat])
         sp = map_sp(sp0)
         if np.any(flat):
             f, scale = _fit_magic(P, sp, scale)
@@ -318,7 +317,7 @@ def _magic_c_py(
                 if d_score > tol * (1 + min_score):
                     converged = False
                 xx = math.sqrt(float(grad @ grad))
-                if xx > libm.pow_op(tol, (1 / 3.0)) * (1 + abs(min_score)):
+                if xx > tol ** (1 / 3.0) * (1 + abs(min_score)):
                     converged = False
                 if try_ == max_half:
                     converged = True
@@ -365,7 +364,7 @@ def _magic_c_py(
     Rout = np.zeros((q, q))
     Rout[:, pivot] = R
     info = (rank, not step_fail, not use_sd, it, fit_call)
-    return b, libm.exp(sp0), f.score, scale, info, msg, rV, Rout
+    return b, np.exp(sp0), f.score, scale, info, msg, rV, Rout
 
 
 def _magic_c(
@@ -466,11 +465,7 @@ def magic(
     ``iter``, ``score_calls``, ``rms_grad``)."""
     from .gam import _initial_sp, _lm_on_L, _mroot
 
-    ctrl = {
-        "tol": 1e-6,
-        "step_half": 25,
-        "rank_tol": libm.pow_op(float(np.finfo(float).eps), 0.5),
-    }
+    ctrl = {"tol": 1e-6, "step_half": 25, "rank_tol": float(np.finfo(float).eps) ** 0.5}
     if control:
         ctrl.update({k: v for k, v in control.items() if v is not None})
     y = np.asarray(y, dtype=float).ravel()
@@ -495,7 +490,7 @@ def magic(
         if lsp0 is None:
             lsp0 = np.zeros(L.shape[0])
         if L.shape[1]:
-            def_sp = libm.exp(_lm_on_L(libm.log(def_sp), L, lsp0))
+            def_sp = np.exp(_lm_on_L(np.log(def_sp), L, lsp0))
 
     S = []
     for i, slot in enumerate(slots):
@@ -593,7 +588,7 @@ def magic(
         extra_rss,
         n_score,
     )
-    sp_full = libm.exp(r_matprod(L_full, libm.log(sp_out).reshape(-1, 1))[:, 0])
+    sp_full = np.exp(r_matprod(L_full, np.log(sp_out).reshape(-1, 1))[:, 0])
     rank_out = int(info[0])
     res = {
         "b": np.asarray(b, dtype=float),

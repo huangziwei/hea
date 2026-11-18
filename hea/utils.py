@@ -16,8 +16,6 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
-from . import _libm as libm
-
 __all__ = [
     "format_df",
     "format_pval",
@@ -140,7 +138,7 @@ def _is_fixed(fv: float) -> bool:
     """Whether ``fv`` formats as fixed (vs. scientific) in R's ``format()``."""
     if fv == 0 or not np.isfinite(fv):
         return True
-    return int(np.floor(libm.log10(abs(fv)))) >= _FIXED_LOWER
+    return int(np.floor(np.log10(abs(fv)))) >= _FIXED_LOWER
 
 
 def _signif_column_decimals(values, digits: int) -> int:
@@ -158,7 +156,7 @@ def _signif_column_decimals(values, digits: int) -> int:
     if not fixed_nonzero:
         return 0
     smallest = min(fixed_nonzero)
-    return max(0, digits - 1 - int(np.floor(libm.log10(smallest))))
+    return max(0, digits - 1 - int(np.floor(np.log10(smallest))))
 
 
 def _format_with_decimals(values, decimals: int, digits: int) -> list[str]:
@@ -180,7 +178,7 @@ def _format_with_decimals(values, decimals: int, digits: int) -> list[str]:
         if not np.isfinite(fv):
             out.append("Inf" if fv > 0 else "-Inf")
             continue
-        rounds_to_zero = fv != 0 and abs(fv) < 0.5 * libm.pow_op(10, (-decimals))
+        rounds_to_zero = fv != 0 and abs(fv) < 0.5 * 10 ** (-decimals)
         if not _is_fixed(fv) or rounds_to_zero:
             out.append(format(fv, sci_fmt))
         else:
@@ -224,7 +222,7 @@ def format_signif_jointly(columns, digits: int = 4) -> list[list[str]]:
     if not pool:
         decimals = 1
     else:
-        decimals = max(1, digits - 1 - int(np.floor(libm.log10(min(pool)))))
+        decimals = max(1, digits - 1 - int(np.floor(np.log10(min(pool)))))
     decimals = min(decimals, 15)
     return [_format_with_decimals(col, decimals, digits) for col in columns]
 

@@ -25,7 +25,6 @@ import math
 
 import numpy as np
 
-from . import _libm as libm
 from ._dispatch import rs_fn
 from ._rfma import _rfma, _rfma_dot
 
@@ -70,10 +69,10 @@ def r_matprod(x: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 
 # Blue's scaling constants for doubles (LAPACK la_constants.f90).
-_TSML = libm.pow_op(2.0, -511)
-_TBIG = libm.pow_op(2.0, 486)
-_SSML = libm.pow_op(2.0, 537)
-_SBIG = libm.pow_op(2.0, -538)
+_TSML = 2.0**-511
+_TBIG = 2.0**486
+_SSML = 2.0**537
+_SBIG = 2.0**-538
 
 
 def _dlassq(x: np.ndarray, scale: float, sumsq: float) -> tuple[float, float]:

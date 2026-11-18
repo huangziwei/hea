@@ -26,7 +26,6 @@ import sys
 
 import numpy as np
 
-from .. import _libm as libm
 from .._dispatch import rs_fn
 from ._shared import _rfma, _rfma_vec
 from .rng import _QN_A, _QN_B, _QN_C, _QN_D, _QN_E, _QN_F, _qn_horner
@@ -285,7 +284,7 @@ def dnorm5_vec(x, mu=0.0, sigma=1.0, give_log=False):
         return out
     out = np.full(x.shape, np.nan, dtype=float)
     small = z < 5.0
-    out[small] = _M_1_SQRT_2PI * libm.exp(-0.5 * z[small] * z[small]) / sigma
+    out[small] = _M_1_SQRT_2PI * np.exp(-0.5 * z[small] * z[small]) / sigma
     big = (~small) & (z <= _DNORM_BIG) & np.isfinite(z)
     if big.any():
         xb = z[big]
@@ -294,7 +293,7 @@ def dnorm5_vec(x, mu=0.0, sigma=1.0, give_log=False):
         out[big] = (
             _M_1_SQRT_2PI
             / sigma
-            * (libm.exp(-0.5 * x1 * x1) * libm.exp(_rfma_vec(-0.5, x2, -x1) * x2))
+            * (np.exp(-0.5 * x1 * x1) * np.exp(_rfma_vec(-0.5, x2, -x1) * x2))
         )
     out = np.where((~small) & (z > _DNORM_BIG) & np.isfinite(z), 0.0, out)
     out = np.where(np.isinf(z), rd0, out)
@@ -544,7 +543,7 @@ def qnorm5_vec(p, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
     tail = ~central
     qt = q[tail]
     civ = (0.5 - pr[tail] + 0.5) if lower_tail else pr[tail]  # R_DT_CIv (log_p=F)
-    lp = libm.log(np.where(qt > 0.0, civ, p_[tail]))
+    lp = np.log(np.where(qt > 0.0, civ, p_[tail]))
     r = np.sqrt(-lp)
     valt = np.full(qt.shape, np.nan, dtype=float)  # r>27 lanes stay nan
     near = r <= 5.0
@@ -605,7 +604,7 @@ def pnorm5_vec(x, mu=0.0, sigma=1.0, lower_tail=True, log_p=False):
     def _do_del(xv, temp):
         xsq = np.ldexp(np.trunc(np.ldexp(xv, 4)), -4)
         del_ = (xv - xsq) * (xv + xsq)
-        c = libm.exp(-xsq * np.ldexp(xsq, -1)) * libm.exp(-np.ldexp(del_, -1)) * temp
+        c = np.exp(-xsq * np.ldexp(xsq, -1)) * np.exp(-np.ldexp(del_, -1)) * temp
         return c, 1.0 - c
 
     def _sel(xv, c, cc):
@@ -731,7 +730,7 @@ def _stirlerr(n):
     mm2_mask = le_235 & ~table_mask & (n <= 5.25) & (n >= 1.0)
     if np.any(mm2_mask):
         nm = n[mm2_mask]
-        l_n = libm.log(nm)
+        l_n = np.log(nm)
         lg = np.array([_c_lgamma(float(v)) for v in nm])
         out[mm2_mask] = _rfma_vec(nm, 1.0 - l_n, lg) + (l_n - _M_LN_2PI) * 0.5
 
@@ -739,9 +738,7 @@ def _stirlerr(n):
     if np.any(lt1_mask):
         nm = n[lt1_mask]
         out[lt1_mask] = (
-            _rfma_vec(-(nm + 0.5), libm.log(nm), _lgamma1p_vec(nm))
-            + nm
-            - _M_LN_SQRT_2PI
+            _rfma_vec(-(nm + 0.5), np.log(nm), _lgamma1p_vec(nm)) + nm - _M_LN_SQRT_2PI
         )
 
     series_mask = le_235 & ~table_mask & ~mm2_mask & ~lt1_mask
@@ -1026,8 +1023,8 @@ def _bd0(x, np_):
         with np.errstate(invalid="ignore"):
             lg_x_n = np.where(
                 np.isfinite(xnp),
-                libm.log(np.where(np.isfinite(xnp), xnp, 1.0)),
-                libm.log(xf) - libm.log(nf),
+                np.log(np.where(np.isfinite(xnp), xnp, 1.0)),
+                np.log(xf) - np.log(nf),
             )
         out[far] = np.where(
             xf > nf, _rfma_vec(xf, lg_x_n - 1.0, nf), _rfma_vec(xf, lg_x_n, nf) - xf
@@ -1250,7 +1247,7 @@ def _r_pow_di(x, n):
         return x
     if n != 0:
         if not math.isfinite(x):
-            return libm.pow_op(x, float(n))
+            return x ** float(n)
         is_neg = n < 0
         if is_neg:
             n = -n
@@ -1531,7 +1528,7 @@ def _lgammafn_arr(x):
     return out
 
 
-_PG_SCALEFACTOR = libm.pow_op(2.0, 256)  # (2^32)^8
+_PG_SCALEFACTOR = 2.0**256  # (2^32)^8
 _M_CUTOFF = _M_LN2 * 1024 / _DBL_EPSILON  # = 3.196577e18
 _DBL_MIN = 2.2250738585072014e-308
 
@@ -1962,7 +1959,7 @@ def _pow1p(x, y):
         xp1 = xr + 1.0
         x_ = xp1 - 1.0
         naive = (x_ == xr) | (np.abs(xr) > 0.5) | np.isnan(xr)
-        res = np.where(naive, libm.power(xp1, yr), libm.exp(yr * libm.log1p(xr)))
+        res = np.where(naive, np.power(xp1, yr), np.exp(yr * np.log1p(xr)))
         out[rest] = res
     nan_y = np.isnan(y)
     if nan_y.any():
@@ -2004,7 +2001,7 @@ def _dpois_raw(x, lambda_, give_log: bool = True):
         out[sub] = np.where(
             ~np.isfinite(xn),
             NEG_INF,
-            _rfma_vec(xn, libm.log(ln), -ln) - _lgammafn_arr(xn + 1.0),
+            _rfma_vec(xn, np.log(ln), -ln) - _lgammafn_arr(xn + 1.0),
         )
 
     m_yl = m_yh = m_r = m_Lrg = None
@@ -2015,7 +2012,7 @@ def _dpois_raw(x, lambda_, give_log: bool = True):
         yl_total = yl + _stirlerr(xm)
         Lrg = xm >= _X_LRG
         r = np.where(Lrg, _M_SQRT_2PI * np.sqrt(xm), _M_2PI * xm)
-        log_correction = np.where(Lrg, libm.log(r), 0.5 * libm.log(r))
+        log_correction = np.where(Lrg, np.log(r), 0.5 * np.log(r))
         out[main] = -yl_total - yh - log_correction
         m_yl, m_yh, m_r, m_Lrg = yl_total, yh, r, Lrg
 
@@ -2023,10 +2020,10 @@ def _dpois_raw(x, lambda_, give_log: bool = True):
         # Edges map to R_D_exp / R_D__0/__1, i.e. exp(log-value); only the
         # saddlepoint lanes need R's exact  exp(-yl)*exp(-yh)/sqrt(r)  form
         # (dpois.c:68), which differs from exp(log-result) at the last ulp.
-        out = libm.exp(out)
+        out = np.exp(out)
         if m_yl is not None:
             out[main] = (
-                libm.exp(-m_yl) * libm.exp(-m_yh) / np.where(m_Lrg, m_r, np.sqrt(m_r))
+                np.exp(-m_yl) * np.exp(-m_yh) / np.where(m_Lrg, m_r, np.sqrt(m_r))
             )
     return float(out[0]) if scalar else out
 
@@ -2074,9 +2071,9 @@ def _dbinom_raw(x, n, p, q, give_log: bool = True):
         val = np.empty_like(n0)
         val[n_is_0] = 0.0
         if np.any(big_p):
-            val[big_p] = n0[big_p] * libm.log(q0[big_p])
+            val[big_p] = n0[big_p] * np.log(q0[big_p])
         if np.any(big_q):
-            val[big_q] = n0[big_q] * libm.log1p(-p0[big_q])
+            val[big_q] = n0[big_q] * np.log1p(-p0[big_q])
         out[edge_x0] = val
     if np.any(edge_xn):
         n0 = n[edge_xn]
@@ -2085,9 +2082,9 @@ def _dbinom_raw(x, n, p, q, give_log: bool = True):
         big_p = p0 > q0
         val = np.empty_like(n0)
         if np.any(big_p):
-            val[big_p] = n0[big_p] * libm.log1p(-q0[big_p])
+            val[big_p] = n0[big_p] * np.log1p(-q0[big_p])
         if np.any(~big_p):
-            val[~big_p] = n0[~big_p] * libm.log(p0[~big_p])
+            val[~big_p] = n0[~big_p] * np.log(p0[~big_p])
         out[edge_xn] = val
     if np.any(edge_oob):
         out[edge_oob] = NEG_INF
@@ -2104,21 +2101,21 @@ def _dbinom_raw(x, n, p, q, give_log: bool = True):
             - _bd0(xm, nm * pm)
             - _bd0(nm - xm, nm * qm)
         )
-        lf = _M_LN_2PI + libm.log(xm) + libm.log1p(-xm / nm)
+        lf = _M_LN_2PI + np.log(xm) + np.log1p(-xm / nm)
         out[main] = _rfma_vec(-0.5, lf, lc)
 
     if not give_log:
         # main + {p,q}==0 + oob edges are R_D_exp(log-value); only the x==0 /
         # x==n edges use R's pow/pow1p (dbinom.c:79-91) for full accuracy.
-        out = np.asarray(libm.exp(out))  # keep 0-d scalar case as an ndarray
+        out = np.asarray(np.exp(out))  # keep 0-d scalar case as an ndarray
         if np.any(edge_x0):
             n0, p0, q0 = n[edge_x0], p[edge_x0], q[edge_x0]
             out[edge_x0] = np.where(
-                n0 == 0.0, 1.0, np.where(p0 > q0, libm.power(q0, n0), _pow1p(-p0, n0))
+                n0 == 0.0, 1.0, np.where(p0 > q0, np.power(q0, n0), _pow1p(-p0, n0))
             )
         if np.any(edge_xn):
             n0, p0, q0 = n[edge_xn], p[edge_xn], q[edge_xn]
-            out[edge_xn] = np.where(p0 > q0, _pow1p(-q0, n0), libm.power(p0, n0))
+            out[edge_xn] = np.where(p0 > q0, _pow1p(-q0, n0), np.power(p0, n0))
     return float(out.reshape(())) if scalar else out
 
 
@@ -5409,7 +5406,7 @@ def dgamma_vec(x, shape, scale, give_log=False):
             sh < 1,
             _INF,
             np.where(
-                sh > 1, rd0, (-libm.log(scale[xz])) if give_log else 1.0 / scale[xz]
+                sh > 1, rd0, (-np.log(scale[xz])) if give_log else 1.0 / scale[xz]
             ),
         )
     pos = ok & (x > 0)
@@ -5422,15 +5419,15 @@ def dgamma_vec(x, shape, scale, give_log=False):
             sx = sh / xm
             out[lt1] = pr + np.where(
                 np.isfinite(sx),
-                libm.log(np.where(np.isfinite(sx), sx, 1.0)),
-                libm.log(sh) - libm.log(xm),
+                np.log(np.where(np.isfinite(sx), sx, 1.0)),
+                np.log(sh) - np.log(xm),
             )
         else:
             out[lt1] = pr * sh / xm
     if ge1.any():
         sh, xm, sc = shape[ge1], x[ge1], scale[ge1]
         pr = _dpois_raw(sh - 1.0, xm / sc, give_log)
-        out[ge1] = (pr - libm.log(sc)) if give_log else pr / sc
+        out[ge1] = (pr - np.log(sc)) if give_log else pr / sc
     return out
 
 
@@ -5439,7 +5436,7 @@ _PY_VEC["dgamma"] = dgamma_vec
 
 def _R_Log1_Exp_vec(x):
     x = np.asarray(x, dtype=float)
-    return np.where(x > -_M_LN2, libm.log(-libm.expm1(x)), libm.log1p(-libm.exp(x)))
+    return np.where(x > -_M_LN2, np.log(-np.expm1(x)), np.log1p(-np.exp(x)))
 
 
 def _logcf_vec(x, i, d, eps):
@@ -5488,7 +5485,7 @@ def _log1pmx_vec(x):
     x = np.asarray(x, dtype=float)
     out = np.empty(x.shape)
     far = (x > 1) | (x < -0.79149064)
-    out[far] = libm.log1p(x[far]) - x[far]
+    out[far] = np.log1p(x[far]) - x[far]
     near = ~far
     if near.any():
         xr = x[near]
@@ -5547,12 +5544,12 @@ def _dpois_wrap_vec(x_plus_1, lam, give_log):
     cut = rest & (lam > np.abs(x_plus_1 - 1) * _M_CUTOFF)
     if cut.any():
         v = -lam[cut] - _lgammafn_arr(x_plus_1[cut])
-        out[cut] = v if give_log else libm.exp(v)
+        out[cut] = v if give_log else np.exp(v)
     last = rest & ~cut
     if last.any():
         dd = _dpois_raw(x_plus_1[last], lam[last], give_log)
         xl = x_plus_1[last] / lam[last]
-        out[last] = (dd + libm.log(xl)) if give_log else dd * xl
+        out[last] = (dd + np.log(xl)) if give_log else dd * xl
     return out
 
 
@@ -5571,28 +5568,28 @@ def _pgamma_smallx_vec(x, alph, lower_tail, log_p):
         sm = np.where(active, sm + term, sm)
         active = active & (np.abs(term) > _DBL_EPSILON * np.abs(sm))
     if lower_tail:
-        f1 = libm.log1p(sm) if log_p else 1 + sm
+        f1 = np.log1p(sm) if log_p else 1 + sm
         f2 = np.empty(x.shape)
         a_gt1 = alph > 1
         if a_gt1.any():
             t = _dpois_raw(alph[a_gt1], x[a_gt1], log_p)
-            f2[a_gt1] = (t + x[a_gt1]) if log_p else (t * libm.exp(x[a_gt1]))
+            f2[a_gt1] = (t + x[a_gt1]) if log_p else (t * np.exp(x[a_gt1]))
         rest = ~a_gt1
         if rest.any():
             if log_p:
                 f2[rest] = _rfma_vec(
-                    alph[rest], libm.log(x[rest]), -_lgamma1p_vec(alph[rest])
+                    alph[rest], np.log(x[rest]), -_lgamma1p_vec(alph[rest])
                 )
             else:
-                f2[rest] = libm.power(x[rest], alph[rest]) / libm.exp(
+                f2[rest] = np.power(x[rest], alph[rest]) / np.exp(
                     _lgamma1p_vec(alph[rest])
                 )
         return (f1 + f2) if log_p else (f1 * f2)
-    lf2 = _rfma_vec(alph, libm.log(x), -_lgamma1p_vec(alph))
+    lf2 = _rfma_vec(alph, np.log(x), -_lgamma1p_vec(alph))
     if log_p:
-        return _R_Log1_Exp_vec(libm.log1p(sm) + lf2)
+        return _R_Log1_Exp_vec(np.log1p(sm) + lf2)
     f1m1 = sm
-    f2m1 = libm.expm1(lf2)
+    f2m1 = np.expm1(lf2)
     return -_rfma_vec(f1m1, f2m1, f1m1 + f2m1)
 
 
@@ -5609,7 +5606,7 @@ def _pd_upper_series_vec(x, y, log_p):
         term = np.where(active, term * (x / y), term)
         sm = np.where(active, sm + term, sm)
         active = active & (term > sm * _DBL_EPSILON)
-    return libm.log(sm) if log_p else sm
+    return np.log(sm) if log_p else sm
 
 
 def _pd_lower_cf_vec(y, d):
@@ -5721,7 +5718,7 @@ def _dpnorm_vec(x, lower_tail, lp):
     rest = ~series
     if rest.any():
         dd = dnorm5_vec(x[rest], 0.0, 1.0, False)
-        out[rest] = dd / libm.exp(lp[rest])
+        out[rest] = dd / np.exp(lp[rest])
     return out
 
 
@@ -5754,7 +5751,7 @@ def _ppois_asymp_vec(x, lam, lower_tail, log_p):
     np_ = pnorm5_vec(s2pt, 0.0, 1.0, not lower_tail, log_p)
     if log_p:
         n_d_over_p = _dpnorm_vec(s2pt, not lower_tail, np_)
-        return np_ + libm.log1p(f * n_d_over_p)
+        return np_ + np.log1p(f * n_d_over_p)
     nd = dnorm5_vec(s2pt, 0.0, 1.0, False)
     return _rfma_vec(f, nd, np_)
 
@@ -5797,12 +5794,12 @@ def pgamma_raw_vec(x, alph, lower_tail, log_p):
             nc = ~cond
             if nc.any():
                 fcf = _pd_lower_cf_vec(aa[nc], xa[nc] - (aa[nc] - 1)) * xa[nc] / aa[nc]
-                sub[nc] = libm.log(fcf) if log_p else fcf
+                sub[nc] = np.log(fcf) if log_p else fcf
             sm[a_lt1] = sub
         a_ge1 = ~a_lt1
         if a_ge1.any():
             s = _pd_lower_series_vec(xs[a_ge1], al[a_ge1] - 1)
-            sm[a_ge1] = libm.log1p(s) if log_p else 1 + s
+            sm[a_ge1] = np.log1p(s) if log_p else 1 + s
         if not lower_tail:
             out[b_lower] = (sm + dd) if log_p else sm * dd
         else:
@@ -5816,7 +5813,7 @@ def pgamma_raw_vec(x, alph, lower_tail, log_p):
     if not log_p:
         small_res = rest & (out < _DBL_MIN / _DBL_EPSILON)
         if small_res.any():
-            out[small_res] = libm.exp(
+            out[small_res] = np.exp(
                 pgamma_raw_vec(x[small_res], alph[small_res], lower_tail, True)
             )
     return out
@@ -5957,8 +5954,8 @@ def gammafn_vec(x):
                     ye = ym[els]
                     half = (2 * ye) == np.trunc(2 * ye)
                     corr = np.where(half, _stirlerr(ye), _lgammacor_vec(ye))
-                    vv[els] = libm.exp(
-                        _rfma_vec(ye - 0.5, libm.log(ye), -ye) + _M_LN_SQRT_2PI + corr
+                    vv[els] = np.exp(
+                        _rfma_vec(ye - 0.5, np.log(ye), -ye) + _M_LN_SQRT_2PI + corr
                     )
                 v[main] = vv
             res[gt10] = v
@@ -5985,16 +5982,16 @@ def lbeta_vec(a, b):
         if b1.any():
             pv, qv = pp[b1], qq[b1]
             corr = _lgammacor_vec(pv) + _lgammacor_vec(qv) - _lgammacor_vec(pv + qv)
-            s = _rfma_vec(libm.log(qv), -0.5, _M_LN_SQRT_2PI) + corr
-            s = _rfma_vec(pv - 0.5, libm.log(pv / (pv + qv)), s)
-            r[b1] = _rfma_vec(qv, libm.log1p(-pv / (pv + qv)), s)
+            s = _rfma_vec(np.log(qv), -0.5, _M_LN_SQRT_2PI) + corr
+            s = _rfma_vec(pv - 0.5, np.log(pv / (pv + qv)), s)
+            r[b1] = _rfma_vec(qv, np.log1p(-pv / (pv + qv)), s)
         b2 = (~b1) & (qq >= 10)
         if b2.any():
             pv, qv = pp[b2], qq[b2]
             corr = _lgammacor_vec(qv) - _lgammacor_vec(pv + qv)
             s = _lgammafn_arr(pv) + corr + pv
-            s = _rfma_vec(-pv, libm.log(pv + qv), s)
-            r[b2] = _rfma_vec(qv - 0.5, libm.log1p(-pv / (pv + qv)), s)
+            s = _rfma_vec(-pv, np.log(pv + qv), s)
+            r[b2] = _rfma_vec(qv - 0.5, np.log1p(-pv / (pv + qv)), s)
         b3 = (~b1) & (~b2) & (pp < 1e-306)
         if b3.any():
             pv, qv = pp[b3], qq[b3]
@@ -6003,7 +6000,7 @@ def lbeta_vec(a, b):
         b4 = (~b1) & (~b2) & (pp >= 1e-306)
         if b4.any():
             pv, qv = pp[b4], qq[b4]
-            r[b4] = libm.log(gammafn_vec(pv) * (gammafn_vec(qv) / gammafn_vec(pv + qv)))
+            r[b4] = np.log(gammafn_vec(pv) * (gammafn_vec(qv) / gammafn_vec(pv + qv)))
         out[m] = r
     return out
 
@@ -6041,16 +6038,16 @@ def dbeta_vec(x, a, b, give_log=False):
         with np.errstate(divide="ignore", invalid="ignore"):
             if small.any():
                 lval[small] = (
-                    (am[small] - 1) * libm.log(xm[small])
-                    + (bm[small] - 1) * libm.log1p(-xm[small])
+                    (am[small] - 1) * np.log(xm[small])
+                    + (bm[small] - 1) * np.log1p(-xm[small])
                     - lbeta_vec(am[small], bm[small])
                 )
             big = ~small
             if big.any():
-                lval[big] = libm.log(am[big] + bm[big] - 1) + _dbinom_raw(
+                lval[big] = np.log(am[big] + bm[big] - 1) + _dbinom_raw(
                     am[big] - 1, am[big] + bm[big] - 2, xm[big], 1 - xm[big], True
                 )
-            val = lval if give_log else libm.exp(lval)
+            val = lval if give_log else np.exp(lval)
         x0, x1 = xm == 0, xm == 1
         val = np.where(x0 & (am > 1), rd0, val)
         val = np.where(x0 & (am < 1), _INF, val)
@@ -6771,7 +6768,7 @@ def _pnchisq_raw(x, f, theta, errmax, reltol, itrmax, lower_tail, log_p):
         lam = _LD(0.5 * theta)
         sum_ = _LD(0.0)
         sum2 = _LD(0.0)
-        pr = libm.exp(-lam)
+        pr = np.exp(-lam)
         i = 0
         while i < 110:
             sum2 += pr
@@ -6781,7 +6778,7 @@ def _pnchisq_raw(x, f, theta, errmax, reltol, itrmax, lower_tail, log_p):
             i += 1
             pr *= lam / i
         ans = sum_ / sum2
-        return float(libm.log(ans)) if log_p else float(ans)
+        return float(np.log(ans)) if log_p else float(ans)
 
     lam = 0.5 * theta
     lamSml = -lam < _PNCH_DBL_MIN_EXP
@@ -6791,7 +6788,7 @@ def _pnchisq_raw(x, f, theta, errmax, reltol, itrmax, lower_tail, log_p):
         lu = _LD(-lam)
         l_lam = math.log(lam)
     else:
-        u = libm.exp(_LD(-lam))
+        u = np.exp(_LD(-lam))
         lu = _LD(-1.0)
     v = u
     x2 = 0.5 * x
@@ -6814,7 +6811,7 @@ def _pnchisq_raw(x, f, theta, errmax, reltol, itrmax, lower_tail, log_p):
         term = 0.0
         t = _LD(0.0)
     else:
-        t = libm.exp(lt)
+        t = np.exp(lt)
         term = float(v * t)
         ans = _LD(term)
 
@@ -6829,7 +6826,7 @@ def _pnchisq_raw(x, f, theta, errmax, reltol, itrmax, lower_tail, log_p):
         if lamSml:
             lu += l_lam - math.log(n)
             if lu >= _PNCH_DBL_MIN_EXP:
-                u = libm.exp(lu)
+                u = np.exp(lu)
                 v = u
                 lamSml = False
         else:
@@ -6838,7 +6835,7 @@ def _pnchisq_raw(x, f, theta, errmax, reltol, itrmax, lower_tail, log_p):
         if tSml:
             lt += l_x - math.log(f_2n)
             if lt >= _PNCH_DBL_MIN_EXP:
-                t = libm.exp(lt)
+                t = np.exp(lt)
                 tSml = False
         else:
             t *= x / f_2n
@@ -7238,10 +7235,10 @@ def _pnbeta_raw(x, o_x, a, b, ncp):
 def _pnbeta2(x, o_x, a, b, ncp, lower_tail, log_p):
     ans = _pnbeta_raw(x, o_x, a, b, ncp)
     if lower_tail:
-        return float(libm.log(ans)) if log_p else float(ans)
+        return float(np.log(ans)) if log_p else float(ans)
     if ans > 1.0:
         ans = _LD(1.0)
-    return float(libm.log1p(-ans)) if log_p else float(1.0 - ans)
+    return float(np.log1p(-ans)) if log_p else float(1.0 - ans)
 
 
 def pnbeta(x, a, b, ncp, lower_tail=True, log_p=False):
@@ -7299,7 +7296,7 @@ def dnbeta(x, a, b, ncp, give_log=False):
         sum_ += term
         if not (term > sum_ * eps):
             break
-    v = float(p_k + libm.log(sum_))
+    v = float(p_k + np.log(sum_))
     return v if give_log else math.exp(v)  # R_D_exp
 
 
@@ -7623,7 +7620,7 @@ def uniroot(f, lower, upper, tol=None, maxiter=1000):
     ``[lower, upper]`` (requires a sign change). ``tol`` defaults to R's
     ``.Machine$double.eps^0.25``."""
     if tol is None:
-        tol = libm.pow_op(_DBL_EPSILON, 0.25)
+        tol = _DBL_EPSILON**0.25
     fl = f(lower)
     fu = f(upper)
     return _zeroin2(lower, upper, fl, fu, f, tol, maxiter)

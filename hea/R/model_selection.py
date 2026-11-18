@@ -22,7 +22,6 @@ import itertools
 import numpy as np
 import polars as pl
 
-from .. import _libm as libm
 from ..formula import deparse
 from ..models.gam import gam
 from ..models.glm import glm
@@ -425,7 +424,7 @@ def _add1_glm(m: glm, upper_terms, *, common_data, test: str | None, k: float):
     def _delta_loglik(dev_aug: float) -> float:
         """``loglik_aug - loglik_cur`` in R's drop1/add1 sign convention."""
         if fam.name == "gaussian":
-            return n * float(libm.log(dev_full / dev_aug))
+            return n * float(np.log(dev_full / dev_aug))
         return (dev_full - dev_aug) / disp_cur
 
     cur_labels = [t.label for t in cur_terms]
@@ -707,7 +706,7 @@ def _extract_aic_lm(rss: float, df_residuals: int, n: int, k: float) -> float:
     p = n - df_residuals
     if rss <= 0:
         return float("-inf")
-    return n * float(libm.log(rss / n)) + k * p
+    return n * float(np.log(rss / n)) + k * p
 
 
 def _drop1_lm(m: lm, *, test: str | None, k: float):
@@ -833,7 +832,7 @@ def _drop1_glm(m: glm, *, test: str | None, k: float):
     def _delta_loglik(dev_drop: float) -> float:
         """R's drop1.glm "loglik diff" between the dropped and full fit."""
         if fam.name == "gaussian":
-            return n * float(libm.log(dev_drop / dev_full))
+            return n * float(np.log(dev_drop / dev_full))
         return (dev_drop - dev_full) / disp_full
 
     for j in scope:
