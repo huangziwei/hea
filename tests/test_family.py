@@ -21,6 +21,7 @@ File sections:
 
 from __future__ import annotations
 
+import math
 import warnings
 from pathlib import Path
 
@@ -906,17 +907,34 @@ def test_tweedie_ls_zero_weights_dropped():
 def test_tw_ls_theta_derivative_oracle_p15():
     """tw()$ls's θ-derivative (``lsth1[1]``) equals mgcv's
     ``sum(ldTweedie(y, y, rho = log(phi), theta)[, "th"])`` at the default
-    (a, b) = (1.01, 1.99)."""
+    (a, b) = (1.01, 1.99); exact to rtol 1e-14 only under PINNED_ARITHMETIC
+    (see the p = 1.7 oracle below)."""
+    from conftest import PINNED_ARITHMETIC
+
     f = tw()
     lsth1 = f.ls_extended(_TW_DEV_Y, np.ones(5), scale=1.0)["lsth1"]
-    np.testing.assert_allclose(lsth1[0], -0.1740833687231026, rtol=1e-14)
+    np.testing.assert_allclose(
+        lsth1[0],
+        -0.1740833687231026,
+        rtol=1e-14 if PINNED_ARITHMETIC else 1e-12,
+    )
 
 
 def test_tw_ls_theta_derivative_oracle_p17():
+    """The θ-derivative oracle at p = 1.7, scale 2. It cancels heavily, so
+    the C library's last bits in the series' ``lgamma`` and ``exp`` move it
+    past rtol 1e-14 under another C library, R's own value with it: exact
+    only under PINNED_ARITHMETIC."""
+    from conftest import PINNED_ARITHMETIC
+
     f = tw()
-    f.set_theta(np.log((1.7 - 1.01) / (1.99 - 1.7)))
+    f.set_theta(math.log((1.7 - 1.01) / (1.99 - 1.7)))
     lsth1 = f.ls_extended(_TW_DEV_Y, np.ones(5), scale=2.0)["lsth1"]
-    np.testing.assert_allclose(lsth1[0], -0.0302015497694411161, rtol=1e-14)
+    np.testing.assert_allclose(
+        lsth1[0],
+        -0.0302015497694411161,
+        rtol=1e-14 if PINNED_ARITHMETIC else 1e-12,
+    )
 
 
 def test_tw_default_theta_zero_gives_p_15():

@@ -4173,7 +4173,7 @@ class tw(Tweedie):
                 self.b,
             )
             Ls = wv[:, None] * ld
-            LS = np.array([_rsum(Ls[:, j]) for j in range(6)])
+            LS = np.array([r_sum(Ls[:, j]) for j in range(6)])
             lsth2 = np.array([[LS[4], LS[5]], [LS[5], LS[2]]])
             return {
                 "ls": float(LS[0]),
@@ -4960,14 +4960,14 @@ class nb(Family):
             + _nmath._lgammafn(Th)
             - _lgammafn_arr(Th + y)
         )
-        ls0 = -float(_rsum(term * w))
+        ls0 = -float(r_sum(term * w))
         yth = y + Th
         lyth = libm.log(yth)
         psi0_yth = _nmath.psigamma_vec(yth, 0.0)
         psi0_th = _nmath.psigamma5(Th, 0.0)
         term1 = Th * (lyth - psi0_yth + psi0_th - th0)
         LSTH = (-term1 * w)[:, None]
-        lsth = float(_rsum(LSTH.ravel()))
+        lsth = float(r_sum(LSTH.ravel()))
         psi1_yth = _polygamma(1, yth)
         psi1_th = _polygamma(1, Th)
         term2 = Th * (
@@ -4980,7 +4980,7 @@ class nb(Family):
             - th0
             - 1.0
         )
-        lsth2 = -float(_rsum(term2 * w))
+        lsth2 = -float(r_sum(term2 * w))
         res = {
             "ls": ls0,
             "lsth1": np.array([lsth]),
@@ -7259,15 +7259,6 @@ class cnorm(Family):
 # ---------------------------------------------------------------------------
 
 
-def _rsum(a):
-    """R's ``sum()`` over a double vector as compiled on arm64 (LDOUBLE ==
-    double there, R's src/main/arithmetic.c-style strict left-to-right
-    accumulation): numpy's pairwise ``np.sum`` rounds differently in the
-    last ulp; ``cumsum`` accumulates sequentially like R."""
-    a = np.asarray(a, dtype=float).ravel()
-    return float(np.cumsum(a)[-1]) if a.size else 0.0
-
-
 def _cpois_dpois_log(x, lam):
     """R ``dpois(x, λ, log=TRUE)`` via the nmath port (rust-accelerated;
     full dpois.c edge semantics — cpois's Dd probes x−1…x−4, so negative
@@ -7463,7 +7454,7 @@ def _cpois_aic(y, mu, censor):
     ir = np.where(yat == np.inf)[0]
     if ir.size:
         d[ir] = _cpois_ppois_log(y[ir], mu[ir], False)
-    return -2.0 * _rsum(d)
+    return -2.0 * r_sum(d)
 
 
 def _cpois_ls_val(y, censor):
@@ -7486,7 +7477,7 @@ def _cpois_ls_val(y, censor):
                 (_lgammafn_arr(fy1 + 1.0) - _lgammafn_arr(fy0 + 1.0)) / (fy1 - fy0)
             )
         d[ii] = _dppois(y0, y1, mus)
-    return _rsum(d)
+    return r_sum(d)
 
 
 class cpois(Family):
@@ -8029,7 +8020,7 @@ def _clog_aic(y, wt, theta, censor):
         a[il] = 2.0 * th[il]
     if ir.size:
         a[ir] = 2.0 * th[ir]
-    return _rsum(a)
+    return r_sum(a)
 
 
 def _clog_ls(y, wt, theta, censor):
@@ -8084,7 +8075,7 @@ def _clog_ls(y, wt, theta, censor):
             + libm.expm1((yr - yl) / (2.0 * si))
         )
         l2[ii] = lmth2
-    return (_rsum(l0), _rsum(l1), l1, _rsum(l2))
+    return (r_sum(l0), r_sum(l1), l1, r_sum(l2))
 
 
 class clog(Family):
@@ -8471,7 +8462,7 @@ def _bcg_aic(y, mu, wt, theta, censor):
             d[ir] = -2.0 * pnorm5_vec(
                 -(_bcg_bc_z(y[ir], la) - mu[ir]) * libm.exp(-th[ir]), log_p=True
             )
-    return _rsum(d)
+    return r_sum(d)
 
 
 def _bcg_ls(y, wt, theta, censor):
@@ -8488,7 +8479,7 @@ def _bcg_ls(y, wt, theta, censor):
     ls = 0.0
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
         if iu.size:
-            ls = ls + _rsum((la - 1.0) * libm.log(y[iu]) - th[iu] - _LOG2PI / 2.0)
+            ls = ls + r_sum((la - 1.0) * libm.log(y[iu]) - th[iu] - _LOG2PI / 2.0)
         if ii.size:
             y1 = np.maximum(yat[ii], y[ii])
             y0 = np.minimum(yat[ii], y[ii])
@@ -8500,7 +8491,7 @@ def _bcg_ls(y, wt, theta, censor):
                 * libm.exp(-th[ii])
                 / 2.0
             )
-            ls = ls + _rsum(_bcg_dpnorm(-zz, zz, log_p=True))
+            ls = ls + r_sum(_bcg_dpnorm(-zz, zz, log_p=True))
     return ls
 
 
@@ -9355,7 +9346,7 @@ def _gfam_exp_ls(fam, y, w, scale):
             lw = libm.log(w[good])
         return np.array(
             [
-                -nobs * math.log(2.0 * math.pi * scale) / 2.0 + _rsum(lw) / 2.0,
+                -nobs * math.log(2.0 * math.pi * scale) / 2.0 + r_sum(lw) / 2.0,
                 -nobs / (2.0 * scale),
                 nobs / (2.0 * scale * scale),
             ]
@@ -9363,14 +9354,14 @@ def _gfam_exp_ls(fam, y, w, scale):
     if name == "poisson":
         with np.errstate(divide="ignore", invalid="ignore"):
             logp = _nmath._disp("dpois", _nmath.dpois, [y, y], (True,))
-        return np.array([_rsum(logp * w), 0.0, 0.0])
+        return np.array([r_sum(logp * w), 0.0, 0.0])
     if name == "binomial":
         m = w
         good = m > 0
         weight = np.where(good, w / np.where(good, m, 1.0), 0.0)
         with np.errstate(divide="ignore", invalid="ignore"):
             logp = _dbinom_raw_disp(np.rint(m * y), np.rint(m), y, 1.0 - y, True)
-        return np.array([-(-2.0 * _rsum(weight * logp)) / 2.0, 0.0, 0.0])
+        return np.array([-(-2.0 * r_sum(weight * logp)) / 2.0, 0.0, 0.0])
     if name == "Gamma":
         good = w > 0
         y = y[good]
@@ -9379,14 +9370,14 @@ def _gfam_exp_ls(fam, y, w, scale):
         isw = 1.0 / sw
         lsw = libm.log(sw)
         k1 = -_lgammafn_arr(isw) - lsw / sw - isw
-        ls0 = _rsum(k1 - libm.log(y))
+        ls0 = r_sum(k1 - libm.log(y))
         k2 = (_nmath.psigamma_vec(isw, 0) + lsw) / (sw * sw)
-        d1 = _rsum(k2 / w)
+        d1 = r_sum(k2 / w)
         k3 = (
             -_nmath.psigamma_vec(isw, 1) / sw
             + (1.0 - 2.0 * lsw - 2.0 * _nmath.psigamma_vec(isw, 0))
         ) / _rpow_int(sw, 3)
-        d2 = _rsum(k3 / _rpow_int(w, 2))
+        d2 = r_sum(k3 / _rpow_int(w, 2))
         return np.array([ls0, d1, d2])
     if name in ("quasi", "quasipoisson", "quasibinomial"):
         good = w > 0
@@ -9395,7 +9386,7 @@ def _gfam_exp_ls(fam, y, w, scale):
             lw = libm.log(w[good])
         return np.array(
             [
-                -nobs * math.log(scale) / 2.0 + _rsum(lw) / 2.0,
+                -nobs * math.log(scale) / 2.0 + r_sum(lw) / 2.0,
                 -nobs / (2.0 * scale),
                 nobs / (2.0 * scale * scale),
             ]
@@ -9407,8 +9398,8 @@ def _gfam_exp_ls(fam, y, w, scale):
             lw = libm.log(w[good])
         return np.array(
             [
-                -_rsum(libm.log(2.0 * math.pi * scale * _rpow_int(y[good], 3))) / 2.0
-                + _rsum(lw) / 2.0,
+                -r_sum(libm.log(2.0 * math.pi * scale * _rpow_int(y[good], 3))) / 2.0
+                + r_sum(lw) / 2.0,
                 -nobs / (2.0 * scale),
                 nobs / (2.0 * scale * scale),
             ]
@@ -9916,10 +9907,10 @@ class gfam(Family):
                 else:
                     idx = [k for k in (i0 + 1, i0) if k >= 1]
                     th = theta[np.asarray(idx, dtype=int) - 1]
-                dev_i = _rsum(f.dev_resids(y[ii], mu[ii], wt[ii], th))
+                dev_i = r_sum(f.dev_resids(y[ii], mu[ii], wt[ii], th))
                 aic += float(f.aic(y[ii], mu[ii], dev_i, wt[ii], n1[ii], theta=th))
             else:
-                dev_i = _rsum(f.dev_resids(y[ii], mu[ii], wt[ii]))
+                dev_i = r_sum(f.dev_resids(y[ii], mu[ii], wt[ii]))
                 aic += float(f.aic(y[ii], mu[ii], dev_i, wt[ii], n1[ii]))
         return aic
 
@@ -9987,23 +9978,23 @@ class gfam(Family):
                 nulldev += float(pp["null_deviance"])
                 names.append(pp.get("family_name", f.name))
                 if pp.get("deviance") is None:
-                    dev += _rsum(f.dev_resids(y[ii], fitted[ii], pw[ii]))
+                    dev += r_sum(f.dev_resids(y[ii], fitted[ii], pw[ii]))
                 else:
                     dev_mod = True
                     dev += float(pp["deviance"])
             else:
                 names.append(f.name)
-                dev += _rsum(f.dev_resids(y[ii], fitted[ii], pw[ii]))
+                dev += r_sum(f.dev_resids(y[ii], fitted[ii], pw[ii]))
                 # gfam.r:450 calls the GROUPED linkinv on the subsetted
                 # offset in the no-intercept case (an R quirk — the
                 # grouped slot indexes with full-length fi); the member
                 # linkinv is what that line can only have meant.
                 wtdmu = (
-                    float(_rsum(pw[ii] * y[ii]) / _rsum(pw[ii]))
+                    float(r_sum(pw[ii] * y[ii]) / r_sum(pw[ii]))
                     if intercept
                     else f.link.linkinv(off[ii])
                 )
-                nulldev += _rsum(
+                nulldev += r_sum(
                     f.dev_resids(
                         y[ii],
                         np.full(ii.size, wtdmu) if np.isscalar(wtdmu) else wtdmu,
@@ -10185,7 +10176,7 @@ class gfam(Family):
                 etam[ii] = f.link.link(mum[ii])
         null_coef = r_qr_coef(r_qr(np.asarray(X, dtype=float)), etam)
         null_coef[np.isnan(null_coef)] = 0.0
-        null_scale = float(_rsum(self.dev_resids(y, mum, wt)) / X.shape[0])
+        null_scale = float(r_sum(self.dev_resids(y, mum, wt)) / X.shape[0])
         return null_coef, null_scale
 
     def __repr__(self):

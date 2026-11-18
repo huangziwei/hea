@@ -15,8 +15,9 @@ def test_formula_arithmetic_is_r_arithmetic():
     """Formula arithmetic is R's: the response's ``y/3`` is an IEEE division
     (polars would round it through the reciprocal), ``^`` is ``R_pow``
     (libm ``pow``, also at 0.5 where numpy takes ``sqrt``), and ``log(x, 10)``
-    and ``log(x, 2)`` are ``log10`` and ``log2`` as R's ``logbase`` makes
-    them, not the ratio of logs."""
+    and ``log(x, 2)`` are the C library's ``log10`` and ``log2`` as R's
+    ``logbase`` makes them, not the ratio of logs (and not numpy's, which on
+    x86-64 are its own kernels)."""
     rng = np.random.default_rng(3)
     x = rng.uniform(0.1, 20.0, 400)
     y = rng.normal(0.0, 3.0, 400)
@@ -24,8 +25,8 @@ def test_formula_arithmetic_is_r_arithmetic():
     d = prepare_design("y/3 ~ log(x, 10) + log(x, 2) + I(x^0.5) + I(x^1.7)", df)
     np.testing.assert_array_equal(d.y.to_numpy(), y / 3)
     X = d.X.to_numpy()
-    np.testing.assert_array_equal(X[:, 1], np.log10(x))
-    np.testing.assert_array_equal(X[:, 2], np.log2(x))
+    np.testing.assert_array_equal(X[:, 1], [math.log10(v) for v in x])
+    np.testing.assert_array_equal(X[:, 2], [math.log2(v) for v in x])
     np.testing.assert_array_equal(X[:, 3], [math.pow(v, 0.5) for v in x])
     np.testing.assert_array_equal(X[:, 4], [math.pow(v, 1.7) for v in x])
     d2 = prepare_design("I(y^0.5 + x) ~ x", df.with_columns(pl.col("y").abs()))
