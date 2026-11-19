@@ -1,7 +1,9 @@
 """mgcv's ``gdi1`` and ``pls_fit1`` (gdi.c) against mgcv itself:
-``_rs.gdi1_c`` and ``_rs.pls_fit1_c`` on the arguments gam.fit3 passed to
+``gdi1_c`` and ``pls_fit1_c`` on the arguments gam.fit3 passed to
 ``.C(C_gdi1, ...)`` and ``.C(C_pls_fit1, ...)`` in mgcv's own fits, compared
-with every array those calls changed. The fixtures in ``tests/fixtures/gdi1``
+with every array those calls changed. Both implementations run: the
+extension's (when it is built) and the Python twin in
+:mod:`hea.models._gdi`. The fixtures in ``tests/fixtures/gdi1``
 and ``tests/fixtures/pls_fit1`` are written by
 ``tests/scripts/make_gdi1_fixtures.R``: the first, middle and last call of
 each fit, over REML, ML and GCV/UBRE, Fisher scoring and full
@@ -24,24 +26,31 @@ import pytest
 from conftest import FIXTURE_ROOT, PINNED_ARITHMETIC, load_hex_fixture
 
 from hea._dispatch import HAVE_RS, rs_fn
+from hea.models import _gdi
 
 _GDI1 = FIXTURE_ROOT / "gdi1"
 _CASES = sorted(p.name for p in _GDI1.glob("*.txt.gz"))
 _PLS = FIXTURE_ROOT / "pls_fit1"
 _PLS_CASES = sorted(p.name for p in _PLS.glob("*.txt.gz"))
 
-pytestmark = pytest.mark.skipif(not HAVE_RS, reason="the gdi1 port is compiled")
+# the extension's port, and the Python twin
+IMPLS = [
+    pytest.param(
+        "rs", marks=pytest.mark.skipif(not HAVE_RS, reason="the extension is absent")
+    ),
+    "py",
+]
 
 
 def _flat(v) -> list[float]:
     return np.ravel(np.asarray(v, dtype=float), order="F").tolist()
 
 
-def _call(name: str, root=_GDI1, fn="gdi1_c"):
+def _call(name: str, root=_GDI1, fn="gdi1_c", impl="rs"):
     fx = load_hex_fixture(root / name)
     args = {k[2:]: _flat(v) for k, v in fx.items() if k.startswith("a_")}
     want = {k[2:]: np.ravel(v, order="F") for k, v in fx.items() if k.startswith("o_")}
-    got = rs_fn(fn)(args)
+    got = (rs_fn(fn) if impl == "rs" else getattr(_gdi, fn))(args)
     return args, want, {k: np.asarray(v, dtype=float) for k, v in got.items()}
 
 
@@ -102,21 +111,23 @@ def test_fixtures_cover_every_branch():
     assert want <= seen, want - seen
 
 
+@pytest.mark.parametrize("impl", IMPLS)
 @pytest.mark.parametrize("name", _CASES)
-def test_gdi1_matches_mgcv(name):
+def test_gdi1_matches_mgcv(name, impl):
     """Every array ``gdi1`` changed is mgcv's (``K`` in ``X``, the
     coefficients and their derivatives, the deviance, Pearson and ``tr(A)``
     derivatives, the REML or ML penalty in ``rank.tol`` with ``beta' S beta``
     in ``conv.tol``, ``rV``, the rank, and ``E`` and ``rS`` as it leaves
     them); every array it left alone comes back unchanged."""
-    args, want, got = _call(name)
+    args, want, got = _call(name, impl=impl)
     assert int(got["rank.est"][0]) == int(want.get("rank.est", args["rank.est"])[0])
     _check(args, want, got)
 
 
+@pytest.mark.parametrize("impl", IMPLS)
 @pytest.mark.parametrize("name", _PLS_CASES)
-def test_pls_fit1_matches_mgcv(name):
+def test_pls_fit1_matches_mgcv(name, impl):
     """The PIRLS steps of the same fits: the coefficients (in ``y``), the
     linear predictor, the penalty and ``E`` with its unidentifiable columns
     dropped are mgcv's; what the call left alone comes back unchanged."""
-    _check(*_call(name, _PLS, "pls_fit1_c"), off_pin=1e-12)
+    _check(*_call(name, _PLS, "pls_fit1_c", impl), off_pin=1e-12)

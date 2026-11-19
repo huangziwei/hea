@@ -8,7 +8,7 @@ use crate::lapack::chol::{dpotrf_u, dpotri_u, dpstrf_u};
 use crate::lapack::gesdd::{dgesdd, dgesdd_lwork};
 use crate::lapack::lu::dgesv;
 use crate::lapack::ormtr::{dormqr_l, dormqr_l_lwork};
-use crate::lapack::qr::{dgeqp3_free, dgeqp3_lwork};
+use crate::lapack::qr::{dgeqp3, dgeqp3_free, dgeqp3_lwork};
 use crate::lapack::stedc::{dstedc, dstedc_lwork};
 use crate::lapack::syevr::{dsyevr_all_lower, dsyevr_lwork};
 use crate::ralign::RVec;
@@ -301,6 +301,65 @@ fn r_dgeqp3<'py>(
     ))
 }
 
+/// LAPACK `dgeqp3` as defined, with the workspace its query returns: a
+/// column whose `jpvt` entry is non-zero on entry is fixed (moved to the
+/// front, factored unpivoted), the rest pivoted by norm - mgcv's `mgcv_qr`,
+/// whose callers may leave earlier pivots in `jpvt`. `at` holds the columns
+/// of `x` as its rows. Returns `(qrt, tau, jpvt)` as [`r_dgeqp3`].
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn r_dgeqp3_jpvt<'py>(
+    py: Python<'py>,
+    at: PyReadonlyArray2<'py, f64>,
+    jpvt_in: PyReadonlyArray1<'py, i32>,
+) -> PyResult<(
+    Bound<'py, PyArray2<f64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<i32>>,
+)> {
+    let av = at.as_array();
+    let (n, m) = (av.shape()[0], av.shape()[1]);
+    if jpvt_in.as_array().len() != n {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "r_dgeqp3_jpvt: jpvt needs one entry per column",
+        ));
+    }
+    let ld = m.max(1);
+    let mut x = col_major(&av, m, ld);
+    let k = m.min(n);
+    let mut tau = vec![0.0f64; k.max(1)];
+    let mut jpvt = vec![0i32; n.max(1)];
+    jpvt[..n].copy_from_slice(&jpvt_in.as_array().to_vec());
+    let lwork = dgeqp3_lwork(m as i32, n as i32);
+    let mut work = vec![0.0f64; lwork.max(1) as usize];
+    py.allow_threads(|| {
+        // SAFETY: `x` is `m`-by-`n` at leading dimension `ld`, `tau` holds
+        // `min(m, n)`, `jpvt` `n`, and `work` the `lwork` doubles DGEQP3's
+        // query returns; none of them alias.
+        unsafe {
+            dgeqp3(
+                m as i32,
+                n as i32,
+                x.as_mut_ptr(),
+                ld as i32,
+                jpvt.as_mut_ptr(),
+                tau.as_mut_ptr(),
+                work.as_mut_ptr(),
+                lwork,
+            )
+        }
+    });
+    x.truncate(ld * n);
+    tau.truncate(k);
+    jpvt.truncate(n);
+    let qrt = Array2::from_shape_vec((n, ld), x).unwrap();
+    Ok((
+        qrt.into_pyarray(py),
+        tau.into_pyarray(py),
+        jpvt.into_pyarray(py),
+    ))
+}
+
 /// LAPACK `dormqr('L', 'T' or 'N', ...)` with the workspace its query
 /// returns, base R's `qr_qy_real` for `qr.qty` (`trans`) and `qr.qy` of a
 /// LAPACK QR: `C := Q' C` or `C := Q C` for the `Q` whose first
@@ -528,6 +587,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(r_dstedc, m)?)?;
     m.add_function(wrap_pyfunction!(r_dsyevr, m)?)?;
     m.add_function(wrap_pyfunction!(r_dgeqp3, m)?)?;
+    m.add_function(wrap_pyfunction!(r_dgeqp3_jpvt, m)?)?;
     m.add_function(wrap_pyfunction!(r_dpstrf, m)?)?;
     m.add_function(wrap_pyfunction!(r_dpotrf, m)?)?;
     m.add_function(wrap_pyfunction!(r_dpotri, m)?)?;

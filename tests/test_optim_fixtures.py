@@ -3,7 +3,8 @@
 With three or more stored corrections the ``2 col``-term dot products reach
 five terms, which R hands to its BLAS. Under the arithmetic the fixtures were
 written with (``PINNED_ARITHMETIC``) hea evaluates the objective at R's
-points, to the bit; elsewhere it reaches R's optimum.
+points, to the bit; elsewhere it reaches R's optimum. Both the extension's
+L-BFGS-B and the Python copy in :mod:`hea.R.lbfgsb` run.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import numpy as np
 import pytest
 from conftest import FIXTURE_ROOT, PINNED_ARITHMETIC, load_hex_fixture
 
+from hea._dispatch import HAVE_RS
 from hea.R.optimize import optim
 
 _DIR = FIXTURE_ROOT / "lbfgsb"
@@ -79,10 +81,22 @@ _CASES = {
 }
 
 
+@pytest.mark.parametrize(
+    "impl",
+    [
+        pytest.param(
+            "rs",
+            marks=pytest.mark.skipif(not HAVE_RS, reason="the extension is absent"),
+        ),
+        "py",
+    ],
+)
 @pytest.mark.parametrize("case", sorted(_CASES))
-def test_lbfgsb_follows_r(case):
+def test_lbfgsb_follows_r(case, impl, monkeypatch):
     """The points L-BFGS-B evaluates the objective at, and the optimum it
     reports, are R's."""
+    if impl == "py":
+        monkeypatch.setattr("hea.R.optimize._rs_lbfgsb", None)
     make, x0, lmm, box = _CASES[case]
     fn0, gr = make()
     xs: list[np.ndarray] = []

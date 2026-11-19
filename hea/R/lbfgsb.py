@@ -1522,18 +1522,22 @@ def setulb(n, m, x, lo, u, nbd, f, g, factr, pgtol, task, iprint, state):
     returns ``(f, task)``."""
     if task.startswith("START"):
         state.clear()
-        state["ws"] = np.zeros((n, m))
-        state["wy"] = np.zeros((n, m))
-        state["sy"] = np.zeros((m, m))
-        state["ss"] = np.zeros((m, m))
-        state["wt"] = np.zeros((m, m))
-        state["wn"] = np.zeros((2 * m, 2 * m))
-        state["snd"] = np.zeros((2 * m, 2 * m))
-        state["z"] = np.zeros(n)
-        state["r"] = np.zeros(n)
-        state["d"] = np.zeros(n)
-        state["t"] = np.zeros(n)
-        state["wa"] = np.zeros(8 * m)
+        # R's lbfgsb() hands setulb one S_alloc block, which starts on a
+        # 16-byte boundary, and setulb carves the parts out of it at lws = 1,
+        # lwy = lws + m n, ... (lbfgsb.c:335-346), each column-major;
+        # Accelerate's ddot rounds by where its second operand starts
+        parts = (
+            ("ws", (n, m)), ("wy", (n, m)), ("sy", (m, m)), ("ss", (m, m)),
+            ("wt", (m, m)), ("wn", (2 * m, 2 * m)), ("snd", (2 * m, 2 * m)),
+            ("z", (n,)), ("r", (n,)), ("d", (n,)), ("t", (n,)), ("wa", (8 * m,)),
+        )  # fmt: skip
+        total = sum(math.prod(shape) for _, shape in parts)
+        raw = np.zeros(total + 2)
+        at = (16 - raw.ctypes.data % 16) % 16 // 8
+        for name, shape in parts:
+            size = math.prod(shape)
+            state[name] = raw[at : at + size].reshape(shape, order="F")
+            at += size
         state["indx"] = np.zeros(n, dtype=np.int64)
         state["iwhere"] = np.zeros(n, dtype=np.int64)
         state["indx2"] = np.zeros(n, dtype=np.int64)

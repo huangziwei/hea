@@ -23,6 +23,8 @@ from conftest import FIXTURE_ROOT, PINNED_ARITHMETIC
 
 from hea._dispatch import rs_fn
 from hea._rlinalg import (
+    r_dgeqp3,
+    r_dormqr_left,
     r_eigen_sym,
     r_qr,
     r_qr_coef,
@@ -152,6 +154,49 @@ def test_qr_lapack_matches_r():
     full = np.vstack([R, np.zeros((10, 140))])
     _close(r_qr_qy_lapack(q, full), X[:, q["pivot"] - 1], 140.0)
     _close(r_qr_qy_lapack(q, qty), Y, 150.0)
+
+
+def _dgeqp3_fixed(path: str, monkeypatch) -> tuple:
+    if path == "rs" and rs_fn("r_dgeqp3_jpvt") is None:
+        pytest.skip("the dgeqp3 port lives in hea._rs")
+    if path == "py":
+        monkeypatch.setattr("hea._rlinalg._r_dgeqp3_jpvt_rs", None)
+        monkeypatch.setattr("hea._rlinalg._r_dormqr_rs", None)
+    X = _unif_mat(RGenerator(43), 30, 8)
+    X[:, 4] *= 10.0
+    # non-zero entries fix columns 0, 2, 3, 5 and 6, as gdiPK's second QR
+    # passes the first one's 0-based pivots
+    jp = np.array([3, 0, 1, 7, 0, 5, 2, 0])
+    return X, jp, r_dgeqp3(X, jp)
+
+
+@pytest.mark.parametrize("path", ["rs", "py"])
+def test_dgeqp3_fixed_columns(path: str, monkeypatch):
+    """LAPACK's dgeqp3 with columns fixed through ``JPVT``, through the
+    extension's port of R's and through the driver over SciPy's LAPACK it
+    falls back to: the fixed columns move to the front in their order, the
+    free ones follow by norm (the scaled column first), and ``Q R`` is the
+    permuted matrix, ``Q`` applied by ``r_dormqr_left``."""
+    X, _, (qr, tau, jpvt) = _dgeqp3_fixed(path, monkeypatch)
+    perm = (jpvt - 1).tolist()
+    assert perm[:5] == [0, 2, 3, 5, 6]
+    assert perm[5] == 4
+    assert sorted(perm) == list(range(8))
+    R = np.vstack([np.triu(qr[:8]), np.zeros((22, 8))])
+    _close(r_dormqr_left(qr, tau, R, False), X[:, jpvt - 1], 10.0)
+    _close(r_dormqr_left(qr, tau, X[:, jpvt - 1], True), R, 10.0)
+
+
+def test_dgeqp3_fixed_columns_paths_agree(monkeypatch):
+    """The extension's dgeqp3 and the SciPy driver pick the same
+    permutation and the same factor."""
+    if rs_fn("r_dgeqp3_jpvt") is None:
+        pytest.skip("the dgeqp3 port lives in hea._rs")
+    _, _, (qr_rs, tau_rs, jp_rs) = _dgeqp3_fixed("rs", monkeypatch)
+    _, _, (qr_py, tau_py, jp_py) = _dgeqp3_fixed("py", monkeypatch)
+    np.testing.assert_array_equal(jp_rs, jp_py)
+    _close(qr_py, qr_rs, 10.0)
+    _close(tau_py, tau_rs)
 
 
 def test_qr_linpack_matches_r():

@@ -9057,19 +9057,15 @@ class gam:
     def _fit3_eligible(self, sp, method) -> bool:
         """Whether the fit goes through the gam.fit3 port
         (``hea.models._fit3``): an ordinary exponential family, the newton
-        optimizer (or no free smoothing parameter), the compiled gdi1, and
-        not the Gaussian GCV fit ``am.fit`` makes. Known before the design's
-        rank is checked: such a fit keeps every column, as mgcv's does, and
-        gdi1's rank detection zeroes what is not identifiable."""
-        from ._fit3 import _gdi1
-        from ._fit4 import _gdi2
-
+        optimizer (or no free smoothing parameter), and not the Gaussian GCV
+        fit ``am.fit`` makes. Known before the design's rank is checked: such
+        a fit keeps every column, as mgcv's does, and gdi1's rank detection
+        zeroes what is not identifiable."""
         if self._family_mgcv_extended:
             # gam.fit4, which gam.fit3 hands an extended family to
             # (gam.fit3.r:106), under newton, nlm, optim or efs
             return not (
-                _gdi2 is None
-                or sp is not None
+                sp is not None
                 or getattr(self.family, "is_general", False)
                 or method not in ("REML", "ML")
                 or not (
@@ -9079,8 +9075,7 @@ class gam:
                 )
             )
         return not (
-            _gdi1 is None
-            or (sp is not None and self._fixed_lsp0 is None)
+            (sp is not None and self._fixed_lsp0 is None)
             or self.family.n_theta > 0
             or not (
                 tuple(self.optimizer)[:1] == ("efs",)

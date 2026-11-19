@@ -4285,7 +4285,6 @@ def _assert_bam_report(m, case: str, exact: bool, tol: float, tol_sp: float):
         np.testing.assert_allclose(g, w, rtol=0, atol=t * scale, err_msg=key)
 
 
-@_needs_rs
 @pytest.mark.parametrize("case", _BAM_REPORT_CASES)
 def test_bam_report_matches_mgcv(case):
     """bam reports what mgcv's does, for every non-discrete method: Gaussian
@@ -4302,16 +4301,17 @@ def test_bam_report_matches_mgcv(case):
     )
 
 
-@_needs_rs
 @pytest.mark.parametrize(
     "case", [c for c in _BAM_REPORT_CASES if not c.endswith(("fREML", "GCV.Cp"))]
 )
 def test_bam_report_python_refit(case, monkeypatch):
-    """Without the gam.fit3 port, bam's compressed refits run on hea's own
-    outer Newton, and the report it assembles from them (the score's
+    """Where the compressed refit does not go through the gam.fit3 port
+    (``_fit3_args_compressed`` declines it, as for a design that keeps a
+    subset of its columns), bam's compressed refits run on hea's own outer
+    Newton, and the report it assembles from them (the score's
     log-likelihood swap, the AR1 terms, a known scale, the working
     problem's scale estimate and outer Hessian) is still mgcv's."""
-    monkeypatch.setattr("hea.models._fit3._gdi1", None)
+    monkeypatch.setattr(hea.models.bam, "_fit3_args_compressed", lambda self, m: None)
     m = _bam_report_fit(case)
     assert m._g3 is None
     _assert_bam_report(m, case, False, _OFF_BAM, _OFF_BAM_SP)

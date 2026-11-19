@@ -17,10 +17,12 @@ import numpy as np
 from .._dispatch import rs_fn
 from .._rlinalg import r_matprod, r_matprod_safe
 from .._rsum import r_rowsums, r_sum
+from . import _gdi
 from ._fit3 import _f, _mv, _quad, _rows
 
-_pls_fit1 = rs_fn("pls_fit1_c")
-_gdi2 = rs_fn("gdi2_c")
+# the extension's ports, or their Python twins without it
+_pls_fit1 = rs_fn("pls_fit1_c") or _gdi.pls_fit1_c
+_gdi2 = rs_fn("gdi2_c") or _gdi.gdi2_c
 _EPS = float(np.finfo(float).eps)
 
 
@@ -137,8 +139,6 @@ def gam_fit4(
     and the rest."""
     from .gam import _gam_reparam
 
-    if _pls_fit1 is None or _gdi2 is None:
-        raise RuntimeError("gam_fit4 needs the compiled pls_fit1 and gdi2")
     if score_type not in ("REML", "ML", "EFS"):
         raise NotImplementedError(f"gam.fit4's {score_type} score is not ported")
     efs = score_type == "EFS"

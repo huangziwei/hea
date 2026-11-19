@@ -22,7 +22,6 @@ import numpy as np
 import pytest
 from conftest import FIXTURE_ROOT, PINNED_ARITHMETIC, load_hex_fixture
 
-from hea._dispatch import HAVE_RS
 from hea.family import Binomial, Gamma, Gaussian, Poisson
 
 _FIT3 = FIXTURE_ROOT / "gam_fit3"
@@ -34,7 +33,6 @@ _FAMILY = {
     "Gamma": Gamma,
 }
 
-pytestmark = pytest.mark.skipif(not HAVE_RS, reason="gam_fit3 uses the compiled gdi1")
 
 # off the pinned arithmetic: the fitted values of a whole fit, relative
 _OFF_MU = 1e-10

@@ -19,12 +19,8 @@ import numpy as np
 import pytest
 from conftest import FIXTURE_ROOT, PINNED_ARITHMETIC, load_hex_fixture
 
-from hea._dispatch import HAVE_RS
-
 _FIT4 = FIXTURE_ROOT / "gam_fit4"
 _CASES = sorted(p.name for p in _FIT4.glob("*_[12].txt.gz"))
-
-pytestmark = pytest.mark.skipif(not HAVE_RS, reason="gam_fit4 uses the compiled gdi2")
 
 
 def _family(case: str):

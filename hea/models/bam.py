@@ -121,6 +121,7 @@ from ..formula import (
 )
 from ..R import distributions as _dist
 from ..R.rng import RMersenneTwister
+from . import _xwxd as _xwxd_py
 from ._magic import magic, magic_post_proc
 from .gam import (
     _add_null_space_penalties,
@@ -4859,11 +4860,8 @@ class bam(gam):
         sum of squares outside ``R``'s span and ``n.true`` the data's n;
         the null coefficients are get.null.coef's on that problem. ``None``
         leaves the route to bam's own outer Newton."""
-        from ._fit3 import _gdi1
-
         if (
-            _gdi1 is None
-            or not self._slots
+            not self._slots
             or getattr(self, "_UrS", None) is None
             or self._keep_cols is not None
             or getattr(self, "_bam_qr", None) is None
@@ -8800,14 +8798,12 @@ def _ztb_hh(v: np.ndarray, b0: np.ndarray) -> np.ndarray:
 def _xwxd0_mgcv(
     design: DiscreteDesign, w: np.ndarray, ar_weights: np.ndarray | None
 ) -> np.ndarray | None:
-    """``X'WX`` by mgcv's ``XWXd0`` as compiled (the Rust port), on the
+    """``X'WX`` by mgcv's ``XWXd0`` as compiled (the extension's port, or
+    its Python twin :func:`hea.models._xwxd.xwxd0` without it), on the
     design laid out as mgcv lays ``G$Xd``/``G$kd``/``G$ks`` out (cached on
     the design, which the PIRLS iterations share). ``None`` when the design
-    carries something that kernel does not take - a constraint still held
-    as a dense post-hoc map (``absorb``/``keep_cols``) - or the extension is
-    absent."""
-    if _xwxd0_rs is None:
-        return None
+    carries something that kernel does not take: a constraint still held as
+    a dense post-hoc map (``absorb``/``keep_cols``)."""
     if design._mgcv_cache is None:
         design._mgcv_cache = _mgcv_layout(design)
     lay = design._mgcv_cache
@@ -8818,7 +8814,8 @@ def _xwxd0_mgcv(
         if ar_weights is None
         else np.ascontiguousarray(ar_weights, dtype=float)
     )
-    out, ptot = _xwxd0_rs(
+    xwxd0 = _xwxd0_rs if _xwxd0_rs is not None else _xwxd_py.xwxd0
+    out, ptot = xwxd0(
         lay["x"],
         np.ascontiguousarray(w, dtype=float),
         lay["k"],
@@ -8845,11 +8842,10 @@ def _xwxd1_mgcv(
     rt: Sequence[int] | None,
 ) -> np.ndarray | None:
     """The ``X'WX`` blocks of the left terms ``lt`` against the right terms
-    ``rt`` by mgcv's ``XWXd1`` as compiled (the Rust port), as
-    ``XWXd(..., lt, rt)`` calls it: one side given selects it for both and
-    the result is symmetric. ``None`` as for :func:`_xwxd0_mgcv`."""
-    if _xwxd1_rs is None:
-        return None
+    ``rt`` by mgcv's ``XWXd1`` as compiled (the extension's port, or its
+    Python twin :func:`hea.models._xwxd.xwxd1`), as ``XWXd(..., lt, rt)``
+    calls it: one side given selects it for both and the result is
+    symmetric. ``None`` as for :func:`_xwxd0_mgcv`."""
     if design._mgcv_cache is None:
         design._mgcv_cache = _mgcv_layout(design)
     lay = design._mgcv_cache
@@ -8860,7 +8856,8 @@ def _xwxd1_mgcv(
         if ar_weights is None
         else np.ascontiguousarray(ar_weights, dtype=float)
     )
-    out, ptot, ctot = _xwxd1_rs(
+    xwxd1 = _xwxd1_rs if _xwxd1_rs is not None else _xwxd_py.xwxd1
+    out, ptot, ctot = xwxd1(
         lay["x"],
         np.ascontiguousarray(w, dtype=float),
         lay["k"],

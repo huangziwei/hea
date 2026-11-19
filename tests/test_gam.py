@@ -47,7 +47,6 @@ import pytest
 from conftest import FIXTURE_ROOT, PINNED_ARITHMETIC, load_dataset
 from conftest import assert_fp_equiv as _assert_fp_equiv
 
-from hea._dispatch import HAVE_RS
 from hea.family import Gamma, Poisson, Tweedie, tw
 from hea.models import gam, glm
 
@@ -687,8 +686,6 @@ def test_check_no_smooth_path(capsys):
     assert "Model required no smoothing parameter selection" in out
     assert "Model rank =  3 / 3" in out
     assert "Basis dimension" not in out
-    if not HAVE_RS:
-        return  # the fallback profiles the scale without newton
     m = gam("Volume ~ Height + Girth", d, method="REML")
     m.check(plots=False)
     out = capsys.readouterr().out
@@ -796,9 +793,8 @@ def test_check_outer_info_is_populated_after_fit():
     # its GCV fit (am.fit) has no outer optimization
     d2 = load_dataset("R", "trees")
     assert gam("Volume ~ Height + Girth", d2)._outer_info is None
-    if HAVE_RS:  # the fallback profiles the scale without newton
-        m2 = gam("Volume ~ Height + Girth", d2, method="REML")
-        assert m2._outer_info is not None and m2._outer_info["iter"] == 4
+    m2 = gam("Volume ~ Height + Girth", d2, method="REML")
+    assert m2._outer_info is not None and m2._outer_info["iter"] == 4
 
 
 def test_gam_offset_in_formula_matches_glm():
@@ -1965,9 +1961,8 @@ def test_rank_deficient_design_detected_and_warned():
     with pytest.warns(UserWarning, match="rank deficient"):
         m = gam("y ~ x1 + x2 + s(z)", df, method="REML")
     assert m.rank == 11
-    # the gam.fit3 port keeps all 12 columns, as mgcv does; without the
-    # compiled gdi1 the fallback fits on the reduced design
-    assert m.p == (12 if HAVE_RS else 11)
+    # the gam.fit3 port keeps all 12 columns, as mgcv does
+    assert m.p == 12
     b1 = float(np.asarray(m.bhat["x1"])[0])
     b2 = float(np.asarray(m.bhat["x2"])[0])
     assert (b1 == 0.0) != (b2 == 0.0)
@@ -3604,11 +3599,9 @@ def test_binomial_factor_response_matches_mgcv():
 
 
 def test_outer_hessian_matches_mgcv_reml2():
-    """The outer Newton Hessian vs mgcv's analytic REML2. With the gam.fit3
-    port it is mgcv's own, in mgcv's order (theta, log sp, log scale) and
-    V_R units; without the compiled gdi2 the fallback's layout is (log sp,
-    log scale, theta), with finite-difference theta rows (central
-    differences of the analytic gradient, h=1e-4, ~1e-7)."""
+    """The outer Newton Hessian vs mgcv's analytic REML2: gam.fit3's port
+    (the extension's gdi2 or its Python twin) gives mgcv's own, in mgcv's
+    order (theta, log sp, log scale) and V_R units."""
     from hea.family import tw
 
     df = _mixed_sp_fixture()
@@ -3621,14 +3614,7 @@ def test_outer_hessian_matches_mgcv_reml2():
             [-33.078371913, -1.964717610290, 143.804523249],
         ]
     )
-    if HAVE_RS:
-        np.testing.assert_allclose(H, R_hess, rtol=1e-9, atol=0)
-        return
-    perm = [2, 0, 1]
-    Hm = H[np.ix_(perm, perm)]
-    np.testing.assert_allclose(Hm[0, :], R_hess[0, :], rtol=0, atol=5e-6)
-    np.testing.assert_allclose(Hm[:, 0], R_hess[:, 0], rtol=0, atol=5e-6)
-    np.testing.assert_allclose(Hm[1:, 1:], R_hess[1:, 1:], rtol=0, atol=1e-7)
+    np.testing.assert_allclose(H, R_hess, rtol=1e-9, atol=0)
 
 
 def test_quasi_power_link_matches_r():
@@ -5458,9 +5444,7 @@ def test_efsudr_nb_matches_mgcv():
     # score.hist 360.6389944 357.3592854 356.8369431 356.8301811
     # 356.8301594, and the family's Theta 2.514834601: the theta of a
     # rejected step-extension trial, left in the family as mgcv's gam.fit4
-    # leaves it (the fit itself is the accepted one's). Without the
-    # compiled gdi2 the fallback keeps the accepted fit's theta,
-    # 2.514613816.
+    # leaves it (the fit itself is the accepted one's).
     from hea.family import nb
     from hea.R.rng import RGenerator
 
@@ -5488,7 +5472,7 @@ def test_efsudr_nb_matches_mgcv():
     )
     np.testing.assert_allclose(
         float(np.exp(m.family.get_theta()[0])),
-        2.514834601 if HAVE_RS else 2.514613816,
+        2.514834601,
         rtol=1e-9,
     )
 

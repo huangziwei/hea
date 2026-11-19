@@ -17,21 +17,17 @@ darwin/arm64 — where it was probed empirically via ``ctypes`` against
 
 * ``_ddot`` — Accelerate is plain sequential accumulation for n ≤ 3 and
   the pair tree ``(s0+s2) + (s1+s3)`` at n = 4 (verified bit-exact over
-  adversarial mixed-magnitude probes, alignment-independent). For n ≥ 5
-  Accelerate switches to a kernel whose reduction is NOT any sum tree
-  over the rounded products (exhaustive 17M-tree search), nor an
-  FMA-fold lane family, nor a compensated/correctly-rounded dot — it is
-  behind several dyld-shared-cache dispatch hops and was left
-  unidentified. Here n ≥ 5 falls back to sequential order, so on
-  darwin/arm64 trajectory bit-parity with R holds wherever every dot
-  has length ≤ 4: all of R's ``nlm``/uncmin (its solves stay n-sized;
-  verified 72/72 bit-exact against R's compiled ``optif9`` for n ≤ 4)
-  and L-BFGS-B with ≤ 2 parameters (verified 48/48 against R's
-  compiled ``lbfgsb`` driver); L-BFGS-B with 3-4 parameters hits
-  length-5..7 dots inside ``dtrsl`` on the ``2·col`` system and drifts
-  ~1 ulp per such call. On reference-BLAS platforms (Linux CI) the
-  sequential order is exact at every length, so no such boundary
-  exists there.
+  adversarial mixed-magnitude probes, alignment-independent). From five
+  terms on its kernel rounds by its own reduction and by where its second
+  operand starts, so where the BLAS is Accelerate
+  (``hea._dispatch.ACCELERATE``) the call goes to Accelerate's ``ddot_``
+  itself when both operands are contiguous, as the columns of R's
+  column-major arrays are; a strided operand keeps the sequential loop,
+  as the extension's ``incx != 1`` path does. The callers lay their
+  arrays out as R does (column-major, the L-BFGS-B workspace in one block
+  carved at ``setulb``'s offsets) so that each operand starts where R's
+  does. On reference-BLAS platforms (Linux CI) the sequential order is
+  exact at every length.
 * ``_daxpy`` — Accelerate fuses ``y + a*x`` per element (probed: fma
   matches, plain does not); mirrored via ``_rfma`` (fused on arm64,
   plain on x86-64, matching R-as-built per arch).
@@ -56,25 +52,67 @@ dimension submatrix calls).
 
 from __future__ import annotations
 
+import ctypes
 import math
 import platform
 import sys
 
+import numpy as np
+
+from .._dispatch import ACCELERATE
 from ._shared import _rfma
 
 _ACCEL_PAIR4 = sys.platform == "darwin" and platform.machine() == "arm64"
 
 
+def _accelerate_ddot():
+    """Accelerate's Fortran ``ddot_``, the routine R's ``ddot`` reaches on
+    darwin, when the extension's BLAS is Accelerate; ``None`` otherwise."""
+    if not ACCELERATE:
+        return None
+    lib = ctypes.CDLL("/System/Library/Frameworks/Accelerate.framework/Accelerate")
+    fn = lib.ddot_
+    fn.restype = ctypes.c_double
+    pi = ctypes.POINTER(ctypes.c_int)
+    fn.argtypes = [pi, ctypes.c_void_p, pi, ctypes.c_void_p, pi]
+    return fn
+
+
+_ACCEL_DDOT = _accelerate_ddot()
+
+
 def _ddot(n, dx, dy, ox=0, oy=0):
     """R-linked ``ddot`` over ``n`` entries of ``dx[ox:]``/``dy[oy:]``:
-    sequential everywhere, except the probed Accelerate pair tree at
-    n = 4 on darwin/arm64 (see module docstring)."""
+    sequential, except Accelerate's pair tree at n = 4 on darwin/arm64 and,
+    where the BLAS is Accelerate, Accelerate's own call from five contiguous
+    terms on (see module docstring)."""
     if n == 4 and _ACCEL_PAIR4:
         s0 = float(dx[ox]) * float(dy[oy])
         s1 = float(dx[ox + 1]) * float(dy[oy + 1])
         s2 = float(dx[ox + 2]) * float(dy[oy + 2])
         s3 = float(dx[ox + 3]) * float(dy[oy + 3])
         return (s0 + s2) + (s1 + s3)
+    if n >= 5 and _ACCEL_DDOT is not None:
+        x = dx[ox : ox + n]
+        y = dy[oy : oy + n]
+        if (
+            isinstance(x, np.ndarray)
+            and isinstance(y, np.ndarray)
+            and x.dtype == np.float64
+            and y.dtype == np.float64
+            and x.strides == (8,)
+            and y.strides == (8,)
+        ):
+            nn, one = ctypes.c_int(n), ctypes.c_int(1)
+            return float(
+                _ACCEL_DDOT(
+                    ctypes.byref(nn),
+                    x.ctypes.data,
+                    ctypes.byref(one),
+                    y.ctypes.data,
+                    ctypes.byref(one),
+                )
+            )
     dtemp = 0.0
     for i in range(n):
         dtemp += float(dx[ox + i]) * float(dy[oy + i])

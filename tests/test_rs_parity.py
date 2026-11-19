@@ -1653,7 +1653,9 @@ def test_optif9_rs_python_parity():
         return f_val, f_grad
 
     rng = np.random.default_rng(42)
-    for n in (2, 3, 4):
+    # from five parameters on the dots reach five terms, which go to the
+    # platform BLAS on darwin
+    for n in (2, 3, 4, 5, 6):
         for rep in range(3):
             x0 = rng.standard_normal(n) * (1.0 + rep)
             ts = np.abs(rng.standard_normal(n)) + 0.1
@@ -1713,14 +1715,12 @@ def test_optif9_rs_python_parity():
 
 
 def test_lbfgsb_rs_python_parity():
-    """The extension's L-BFGS-B and the Python fallback take the same path.
-    Built on Accelerate, the extension calls R's own ddot from five terms on
-    (the 2 col dots once col >= 3), which the fallback sums in order, so
-    there the comparison stops at two parameters."""
+    """The extension's L-BFGS-B and the Python fallback take the same path,
+    the dots of five terms and more (the ``2 col`` dots once ``col >= 3``,
+    the ``n``-long ones from five parameters) included."""
     import math
 
     from hea.R.lbfgsb import lbfgsb as py_lbfgsb
-    from hea.sparse import build_info
 
     def f_val(x):
         v = 0.0
@@ -1738,12 +1738,9 @@ def test_lbfgsb_rs_python_parity():
         return g
 
     rng = np.random.default_rng(7)
-    accel = build_info()["backend"] == "accelerate"
-    for n in (2, 3, 4):
+    for n in (2, 3, 4, 6):
         for rep in range(3):
             x0 = rng.standard_normal(n) * (1 + rep)
-            if accel and n > 2:
-                continue
             for lo, up, nbd in (
                 ([-math.inf] * n, [math.inf] * n, [0] * n),
                 (list(x0 - 0.7), list(x0 + 0.9), [2] * n),

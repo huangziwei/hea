@@ -1,6 +1,7 @@
-"""mgcv's C ``gdi2`` (gdi.c:1953) against mgcv itself, through the Rust port
-``hea._rs.gdi2_c``: each recorded ``.C(C_gdi2, ...)`` call of gam.fit4 is
-replayed and every array it changed compared. The fixtures in
+"""mgcv's C ``gdi2`` (gdi.c:1953) against mgcv itself, through the
+extension's port ``hea._rs.gdi2_c`` (when it is built) and the Python twin
+``hea.models._gdi.gdi2_c``: each recorded ``.C(C_gdi2, ...)`` call of
+gam.fit4 is replayed and every array it changed compared. The fixtures in
 ``tests/fixtures/gdi2`` are written by ``tests/scripts/make_gdi2_fixtures.R``
 from fits of nb (REML and ML, estimated and fixed theta), tw, scat (negative
 weights), betar, ocat and ziP, and nb with zero prior weights (gdi2's
@@ -15,23 +16,20 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from conftest import FIXTURE_ROOT, load_hex_fixture
-from test_gdi import _call, _check
-
-from hea._dispatch import HAVE_RS
+from test_gdi import IMPLS, _call, _check
 
 _GDI2 = FIXTURE_ROOT / "gdi2"
 _CASES = sorted(p.name for p in _GDI2.glob("*.txt.gz"))
 
-pytestmark = pytest.mark.skipif(not HAVE_RS, reason="the gdi2 port is compiled")
 
-
+@pytest.mark.parametrize("impl", IMPLS)
 @pytest.mark.parametrize("name", _CASES)
-def test_gdi2_matches_mgcv(name):
+def test_gdi2_matches_mgcv(name, impl):
     """Coefficients and their derivatives, the deviance's, penalty's and
     log determinant's derivatives, ``rV``, ``K`` (in ``X``), the weights'
     derivatives and the rank are mgcv's; arrays mgcv's call left alone are
     left alone."""
-    args, want, got = _call(name, root=_GDI2, fn="gdi2_c")
+    args, want, got = _call(name, root=_GDI2, fn="gdi2_c", impl=impl)
     _check(args, want, got)
 
 

@@ -30,6 +30,7 @@ from ._rfma import _rfma, _rfma_dot
 
 _r_dsyevr_rs = rs_fn("r_dsyevr")
 _r_dgeqp3_rs = rs_fn("r_dgeqp3")
+_r_dgeqp3_jpvt_rs = rs_fn("r_dgeqp3_jpvt")
 _r_dormqr_rs = rs_fn("r_dormqr_l")
 _r_dgesv_rs = rs_fn("r_dgesv")
 _r_dpstrf_rs = rs_fn("r_dpstrf")
@@ -525,6 +526,91 @@ def r_qr_lapack(x: np.ndarray) -> dict:
         "qraux": np.asarray(tau),
         "pivot": np.asarray(jpvt, dtype=np.int64),
     }
+
+
+def r_dgeqp3(a: np.ndarray, jpvt=None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """LAPACK ``dgeqp3`` on the ``m``-by-``n`` ``a`` as defined, with the
+    workspace its query returns: a column whose ``jpvt`` entry is non-zero
+    on entry is fixed - moved to the front in its order and factored
+    unpivoted (``dgeqrf``, the other columns updated by ``dormqr('L',
+    'T')``) - and the rest are pivoted by norm. Returns ``(qr, tau, jpvt)``:
+    the factored ``m``-by-``n`` matrix, the ``min(m, n)`` reflector scalars
+    and the 1-based column permutation. R's LAPACK through the extension;
+    without it the same driver over SciPy's LAPACK."""
+    a = np.asarray(a, dtype=float)
+    m, n = a.shape
+    jp = (
+        np.zeros(n, dtype=np.int32)
+        if jpvt is None
+        else np.asarray(jpvt).astype(np.int32)
+    )
+    if _r_dgeqp3_jpvt_rs is not None:
+        qrt, tau, jpo = _r_dgeqp3_jpvt_rs(
+            np.ascontiguousarray(a.T), np.ascontiguousarray(jp)
+        )
+        qr = np.asarray(qrt)[:, :m].T.copy(order="F")
+        return qr, np.asarray(tau), np.asarray(jpo, dtype=np.int64)
+    from scipy.linalg.lapack import dgeqp3, dgeqrf, dormqr
+
+    A = np.array(a, order="F", copy=True)
+    jout = np.zeros(n, dtype=np.int64)
+    # move the fixed columns up front, in their order
+    nfxd = 0
+    for j in range(n):
+        if jp[j] != 0:
+            if j != nfxd:
+                A[:, [j, nfxd]] = A[:, [nfxd, j]]
+                jout[j] = jout[nfxd]
+                jout[nfxd] = j + 1
+            else:
+                jout[j] = j + 1
+            nfxd += 1
+        else:
+            jout[j] = j + 1
+    minmn = min(m, n)
+    tau = np.zeros(minmn)
+    if nfxd > 0:
+        na = min(m, nfxd)
+        qr, tq, _work, _info = dgeqrf(np.asfortranarray(A[:, :na]))
+        A[:, :na] = qr
+        tau[:na] = tq
+        if na < n:
+            lw = int(dormqr("L", "T", A[:, :na], tau[:na], A[:, na:], -1)[1][0])
+            A[:, na:] = dormqr("L", "T", A[:, :na], tau[:na], A[:, na:], max(lw, 1))[0]
+    if nfxd < minmn:
+        sub, jsub, tsub, _work, _info = dgeqp3(np.asfortranarray(A[nfxd:, nfxd:]))
+        perm = np.asarray(jsub, dtype=np.int64) - 1
+        A[:nfxd, nfxd:] = A[:nfxd, nfxd:][:, perm]
+        A[nfxd:, nfxd:] = sub
+        jout[nfxd:] = jout[nfxd:][perm]
+        tau[nfxd:minmn] = np.asarray(tsub)[: minmn - nfxd]
+    return A, tau, jout
+
+
+def r_dormqr_left(a: np.ndarray, tau, b: np.ndarray, trans: bool) -> np.ndarray:
+    """LAPACK ``dormqr('L', 'T' or 'N', ...)`` with the workspace its query
+    returns: ``Q' B`` (``trans``) or ``Q B`` for the ``m``-by-``c`` ``b`` and
+    the ``Q`` of the ``len(tau)`` reflectors in the columns of the
+    ``m``-row ``a``. R's LAPACK through the extension, else SciPy's."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    tau = np.asarray(tau, dtype=float)
+    k = tau.size
+    if _r_dormqr_rs is not None:
+        ct = _r_dormqr_rs(
+            np.ascontiguousarray(a[:, :k].T),
+            np.ascontiguousarray(tau),
+            np.ascontiguousarray(b.T),
+            bool(trans),
+        )
+        return np.asarray(ct).T.copy(order="F")
+    from scipy.linalg.lapack import dormqr
+
+    t = "T" if trans else "N"
+    A = np.asfortranarray(a[:, :k])
+    B = np.asfortranarray(b)
+    lw = int(dormqr("L", t, A, tau, B, -1)[1][0])
+    return np.asarray(dormqr("L", t, A, tau, B, max(lw, 1))[0])
 
 
 def r_qr_qy_lapack(q: dict, y, transpose: bool = False) -> np.ndarray:

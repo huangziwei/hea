@@ -17,9 +17,11 @@ import numpy as np
 from .._dispatch import rs_fn
 from .._rlinalg import r_matprod, r_matprod_safe
 from .._rsum import r_mean, r_sum
+from . import _gdi
 
-_pls_fit1 = rs_fn("pls_fit1_c")
-_gdi1 = rs_fn("gdi1_c")
+# the extension's ports, or their Python twins without it
+_pls_fit1 = rs_fn("pls_fit1_c") or _gdi.pls_fit1_c
+_gdi1 = rs_fn("gdi1_c") or _gdi.gdi1_c
 _EPS = float(np.finfo(float).eps)
 
 
@@ -101,8 +103,6 @@ def gam_fit3(
     deviance) so it is computed once."""
     from .gam import _gam_reparam
 
-    if _pls_fit1 is None or _gdi1 is None:
-        raise RuntimeError("gam_fit3 needs the compiled pls_fit1 and gdi1")
     link = family.link
     warn: list[str] = []
     fisher = bool(family.is_canonical)
