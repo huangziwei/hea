@@ -5,7 +5,8 @@
 //! `DLAQP2`.
 
 use super::blas::{dgemm, dgemv, dnrm2, dswap, idamax};
-use super::ormtr::dlarf1f_left;
+use super::gesdd::dgeqrf;
+use super::ormtr::{dlarf1f_left, dormqr_l};
 use super::sytrd::dlarfg;
 use super::{fma, EPS};
 
@@ -311,12 +312,86 @@ pub(crate) unsafe fn dgeqp3_free(
     work: *mut f64,
     lwork: i32,
 ) {
-    let minmn = m.min(n);
     // Move initial columns up front (none are fixed).
     for j in 1..=n {
         v!(jpvt, j) = j;
     }
-    let nfxd = 0;
+    dgeqp3_free_cols(m, n, a, lda, jpvt, tau, work, lwork, 0);
+}
+
+/// `DGEQP3` as LAPACK defines it: a column whose `jpvt` entry is non-zero on
+/// entry is fixed, moved to the front and factored unpivoted (`DGEQRF`, the
+/// rest updated by `DORMQR('L', 'T')`); the remaining free columns are
+/// pivoted by norm as in [`dgeqp3_free`]. `jpvt` receives the 1-based
+/// column permutation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn dgeqp3(
+    m: i32,
+    n: i32,
+    a: *mut f64,
+    lda: i32,
+    jpvt: *mut i32,
+    tau: *mut f64,
+    work: *mut f64,
+    lwork: i32,
+) {
+    // Move initial columns up front.
+    let mut nfxd = 1;
+    for j in 1..=n {
+        if v!(jpvt, j) != 0 {
+            if j != nfxd {
+                dswap(m, pm!(a, lda, 1, j), 1, pm!(a, lda, 1, nfxd), 1);
+                v!(jpvt, j) = v!(jpvt, nfxd);
+                v!(jpvt, nfxd) = j;
+            } else {
+                v!(jpvt, j) = j;
+            }
+            nfxd += 1;
+        } else {
+            v!(jpvt, j) = j;
+        }
+    }
+    nfxd -= 1;
+
+    // Factorize fixed columns: the QR of the fixed columns, the remaining
+    // columns updated.
+    if nfxd > 0 {
+        let na = m.min(nfxd);
+        dgeqrf(m, na, a, lda, tau, work, lwork);
+        if na < n {
+            dormqr_l(
+                b'T',
+                m,
+                n - na,
+                na,
+                a,
+                lda,
+                tau,
+                pm!(a, lda, 1, na + 1),
+                lda,
+                work,
+                lwork,
+            );
+        }
+    }
+    dgeqp3_free_cols(m, n, a, lda, jpvt, tau, work, lwork, nfxd);
+}
+
+/// `DGEQP3`'s factorization of the free columns `nfxd + 1 .. n`, the first
+/// `nfxd` already factored.
+#[allow(clippy::too_many_arguments)]
+unsafe fn dgeqp3_free_cols(
+    m: i32,
+    n: i32,
+    a: *mut f64,
+    lda: i32,
+    jpvt: *mut i32,
+    tau: *mut f64,
+    work: *mut f64,
+    lwork: i32,
+    nfxd: i32,
+) {
+    let minmn = m.min(n);
 
     // Factorize free columns
     if nfxd < minmn {

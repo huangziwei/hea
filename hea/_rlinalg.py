@@ -38,8 +38,39 @@ _r_dpotri_rs = rs_fn("r_dpotri")
 _r_dgesdd_rs = rs_fn("r_dgesdd")
 
 
-def r_matprod(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """``x %*% y`` for 2-D double arrays, R's ``matprod``."""
+def r_may_have_nan_or_inf(a: np.ndarray) -> bool:
+    """R's ``mayHaveNaNOrInf`` (array.c:643) on ``a``'s column-major data:
+    an odd first element not finite, or the sum of any later pair (``x[i] +
+    x[i+1]`` from ``i = n & 1``, in steps of two) not finite, so two huge
+    finite values whose sum overflows count too. A pair can overflow only
+    once an entry reaches 2^1023."""
+    a = np.asarray(a, dtype=float)
+    if not np.isfinite(a).all():
+        return True
+    if a.size < 2 or float(np.abs(a).max()) < 2.0**1023:
+        return False
+    v = a.ravel(order="F")
+    i0 = v.size & 1
+    with np.errstate(over="ignore"):
+        s = v[i0::2] + v[i0 + 1 :: 2]
+    return not bool(np.isfinite(s).all())
+
+
+def r_matprod_safe(a: np.ndarray) -> bool:
+    """Whether every arrangement of ``a``'s entries - ``a`` itself, a subset
+    of its rows, its transpose - passes :func:`r_may_have_nan_or_inf`: all
+    finite and none at or above 2^1023, so no pair can overflow."""
+    a = np.asarray(a, dtype=float)
+    if a.size == 0:
+        return True
+    return bool(np.isfinite(a).all()) and float(np.abs(a).max()) < 2.0**1023
+
+
+def r_matprod(x: np.ndarray, y: np.ndarray, *, x_finite: bool = False) -> np.ndarray:
+    """``x %*% y`` for 2-D double arrays, R's ``matprod``: the BLAS unless
+    ``mayHaveNaNOrInf`` flags either operand, then the plain loop.
+    ``x_finite`` says the caller already knows that test passes for ``x``,
+    sparing the scan of a large ``x`` multiplied repeatedly."""
     from scipy.linalg.blas import dgemm, dgemv
 
     x = np.asarray(x, dtype=float)
@@ -50,7 +81,7 @@ def r_matprod(x: np.ndarray, y: np.ndarray) -> np.ndarray:
         raise ValueError("non-conformable arguments")
     if nrx == 0 or ncx == 0 or nry == 0 or ncy == 0:
         return np.zeros((nrx, ncy))
-    if not (np.isfinite(x).all() and np.isfinite(y).all()):
+    if (not x_finite and r_may_have_nan_or_inf(x)) or r_may_have_nan_or_inf(y):
         z = np.empty((nrx, ncy))
         for i in range(nrx):
             for k in range(ncy):
@@ -238,11 +269,11 @@ def r_norm(x: np.ndarray, type: str = "O") -> float:
         sums = a.ravel(order="F")
     else:
         raise ValueError(f"norm type {type!r} is not ported")
-    value = 0.0
-    for v in sums:
-        if value < v or math.isnan(v):
-            value = float(v)
-    return value
+    # dlange's ``IF (VALUE.LT.TEMP .OR. DISNAN(TEMP)) VALUE = TEMP`` from 0:
+    # NaN once any sum is NaN, else the largest
+    if np.isnan(sums).any():
+        return float("nan")
+    return max(0.0, float(sums.max()))
 
 
 def r_eigen_sym(A: np.ndarray, only_values: bool = False):

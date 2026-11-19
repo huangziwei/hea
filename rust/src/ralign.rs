@@ -4,6 +4,7 @@
 //! rounds by the alignment of its second operand, so ports that hand R
 //! vectors to the BLAS place their copies the same way.
 
+#[derive(Default)]
 pub(crate) struct RVec {
     buf: Vec<f64>,
     off: usize,
@@ -22,7 +23,8 @@ impl RVec {
         Self::at(len, 0)
     }
 
-    fn at(len: usize, want: usize) -> Self {
+    /// `len` zeros `want` (0 or 8) bytes past a 16-byte boundary.
+    pub(crate) fn at(len: usize, want: usize) -> Self {
         let buf = vec![0.0f64; len + 2];
         let addr = buf.as_ptr() as usize;
         let off = ((want + 16 - addr % 16) % 16) / 8;
@@ -42,5 +44,29 @@ impl RVec {
 
     pub(crate) fn as_mut_slice(&mut self) -> &mut [f64] {
         &mut self.buf[self.off..self.off + self.len]
+    }
+}
+
+/// A copy at the same address mod 16 as the original, standing in for the
+/// R memory the original stands for.
+impl Clone for RVec {
+    fn clone(&self) -> Self {
+        let want = (self.as_slice().as_ptr() as usize) % 16;
+        let mut v = RVec::at(self.len, want);
+        v.as_mut_slice().copy_from_slice(self.as_slice());
+        v
+    }
+}
+
+impl std::ops::Deref for RVec {
+    type Target = [f64];
+    fn deref(&self) -> &[f64] {
+        self.as_slice()
+    }
+}
+
+impl std::ops::DerefMut for RVec {
+    fn deref_mut(&mut self) -> &mut [f64] {
+        self.as_mut_slice()
     }
 }

@@ -47,6 +47,7 @@ import pytest
 from conftest import FIXTURE_ROOT, PINNED_ARITHMETIC, load_dataset
 from conftest import assert_fp_equiv as _assert_fp_equiv
 
+from hea._dispatch import HAVE_RS
 from hea.family import Gamma, Poisson, Tweedie, tw
 from hea.models import gam, glm
 
@@ -674,14 +675,26 @@ def test_check_prints_convergence_block(capsys):
 
 
 def test_check_no_smooth_path(capsys):
-    """When the model has no smooths, the convergence block reports
-    `Model required no smoothing parameter selection` (mgcv text) and
-    the k-check table is omitted."""
+    """A model without smooths: by GCV (``am.fit``, magic) the convergence
+    block reports `Model required no smoothing parameter selection`; by
+    REML mgcv's newton still optimizes the log scale, and the block is
+    newton's (mgcv 1.9-4: 4 iterations, score 85.66347, scale 15.06862,
+    Hessian eigenvalue 14). The k-check table is omitted either way."""
     d = load_dataset("R", "trees")
-    m = gam("Volume ~ Height + Girth", d, method="REML")
+    m = gam("Volume ~ Height + Girth", d)
     m.check(plots=False)
     out = capsys.readouterr().out
     assert "Model required no smoothing parameter selection" in out
+    assert "Model rank =  3 / 3" in out
+    assert "Basis dimension" not in out
+    if not HAVE_RS:
+        return  # the fallback profiles the scale without newton
+    m = gam("Volume ~ Height + Girth", d, method="REML")
+    m.check(plots=False)
+    out = capsys.readouterr().out
+    assert "full convergence after 4 iterations." in out
+    assert "(score 85.66347 & scale 15.06862)." in out
+    assert "eigenvalue range [14,14]." in out
     assert "Basis dimension" not in out
 
 
@@ -779,9 +792,13 @@ def test_check_outer_info_is_populated_after_fit():
     ev = np.linalg.eigvalsh(0.5 * (info["hess"] + info["hess"].T))
     assert ev.min() > 0
 
+    # without smooths mgcv's REML newton still runs over the log scale;
+    # its GCV fit (am.fit) has no outer optimization
     d2 = load_dataset("R", "trees")
-    m2 = gam("Volume ~ Height + Girth", d2, method="REML")
-    assert m2._outer_info is None
+    assert gam("Volume ~ Height + Girth", d2)._outer_info is None
+    if HAVE_RS:  # the fallback profiles the scale without newton
+        m2 = gam("Volume ~ Height + Girth", d2, method="REML")
+        assert m2._outer_info is not None and m2._outer_info["iter"] == 4
 
 
 def test_gam_offset_in_formula_matches_glm():
@@ -1935,10 +1952,9 @@ def test_teststat_mixture_pvalue_poisson_matches_mgcv():
 
 
 def test_rank_deficient_design_detected_and_warned():
-    """Exactly collinear parametric columns: mgcv detects rank 11/12 and
-    *drops* a coefficient (pls_fit1, gdi.c:1740-1775) — zero-filled coef,
-    SE 0, t NaN — and hea now does the same (the internal fit runs on the
-    reduced design; reporting re-inflates)."""
+    """Exactly collinear parametric columns: mgcv keeps all 12 columns and
+    its rank detection (pls_fit1 and gdi1, gdi.c:1740-1775) finds rank 11
+    and zeroes one coefficient — SE 0, t NaN — as hea's fit does."""
     rng = np.random.default_rng(0)
     n = 100
     x1 = rng.uniform(0, 1, n)
@@ -1949,8 +1965,9 @@ def test_rank_deficient_design_detected_and_warned():
     with pytest.warns(UserWarning, match="rank deficient"):
         m = gam("y ~ x1 + x2 + s(z)", df, method="REML")
     assert m.rank == 11
-    assert m.p == 11  # internal (reduced) parameter count
-    assert m._p_orig == 12  # original — what check()/summary report
+    # the gam.fit3 port keeps all 12 columns, as mgcv does; without the
+    # compiled gdi1 the fallback fits on the reduced design
+    assert m.p == (12 if HAVE_RS else 11)
     b1 = float(np.asarray(m.bhat["x1"])[0])
     b2 = float(np.asarray(m.bhat["x2"])[0])
     assert (b1 == 0.0) != (b2 == 0.0)
@@ -2652,7 +2669,8 @@ def test_edge_correct_general_family_matches_mgcv():
         control={"edge_correct": True},
     )
     np.testing.assert_allclose(m2.REML_criterion / 2, 216.8833933834, rtol=0, atol=1e-5)
-    np.testing.assert_allclose(m2._lsp1_ec, np.log(m2.sp), rtol=0, atol=0)
+    # the reported sp is the edge-corrected one: exp(lsp1), to its last bit
+    np.testing.assert_allclose(np.exp(m2._lsp1_ec), m2.sp, rtol=1e-15, atol=0)
     np.testing.assert_allclose(
         np.diag(m2.Vc)[[0, 1, 2, 9, 11, 19]],
         [
@@ -3385,7 +3403,10 @@ def test_mixed_sp_gaussian_matches_mgcv():
     np.testing.assert_allclose(m.REML_criterion / 2, 152.1896738580, rtol=0, atol=1e-6)
     np.testing.assert_allclose(m.sp, [0.1401341495], rtol=1e-4)
     np.testing.assert_allclose(m.full_sp, [2.0, 0.1401341495], rtol=1e-4)
-    assert m.full_sp[0] == 2.0
+    # a fixed sp is reported as exp(log(sp)), its last bit the C library's
+    np.testing.assert_allclose(
+        m.full_sp[0], 2.0, rtol=0 if PINNED_ARITHMETIC else 1e-15, atol=0
+    )
     np.testing.assert_allclose(float(np.sum(m.edf)), 6.8610338694, rtol=0, atol=1e-4)
     np.testing.assert_allclose(m.sigma_squared, 0.3220580505, rtol=0, atol=1e-8)
     np.testing.assert_allclose(np.asarray(m.coef)[0], 0.2246565999, rtol=0, atol=1e-8)
@@ -3450,7 +3471,10 @@ def test_mixed_sp_tw_and_poisson_match_mgcv():
     p = gam("ycnt ~ s(x, sp=0.5) + s(z)", df, family=Poisson(), method="REML")
     np.testing.assert_allclose(p.REML_criterion / 2, 261.6789254290, rtol=0, atol=1e-6)
     np.testing.assert_allclose(p.sp, [36789.51172], rtol=1e-3)
-    np.testing.assert_allclose(p.full_sp[0], 0.5, rtol=0, atol=0)
+    # reported as exp(log(sp)), its last bit the C library's
+    np.testing.assert_allclose(
+        p.full_sp[0], 0.5, rtol=0 if PINNED_ARITHMETIC else 1e-15, atol=0
+    )
     np.testing.assert_allclose(float(np.sum(p.edf)), 5.1465787370, rtol=0, atol=1e-4)
 
 
@@ -3580,19 +3604,16 @@ def test_binomial_factor_response_matches_mgcv():
 
 
 def test_outer_hessian_matches_mgcv_reml2():
-    """The outer Newton Hessian vs mgcv's analytic REML2: hea's analytic
-    (ρ, log φ) block agrees to ~1e-10 and the FD θ-rows (central
-    differences of the analytic gradient, h=1e-4) to ~1e-7 — the FD
-    truncation band. Layouts: hea (ρ, logφ, θ) ≡ mgcv (θ, ρ, logφ),
-    both V_R units.
-    """
+    """The outer Newton Hessian vs mgcv's analytic REML2. With the gam.fit3
+    port it is mgcv's own, in mgcv's order (theta, log sp, log scale) and
+    V_R units; without the compiled gdi2 the fallback's layout is (log sp,
+    log scale, theta), with finite-difference theta rows (central
+    differences of the analytic gradient, h=1e-4, ~1e-7)."""
     from hea.family import tw
 
     df = _mixed_sp_fixture()
     m = gam("ytw2 ~ s(x)", df, family=tw(), method="REML")
     H = np.asarray(m._outer_info["hess"])
-    perm = [2, 0, 1]  # hea (ρ,logφ,θ) → mgcv (θ,ρ,logφ)
-    Hm = H[np.ix_(perm, perm)]
     R_hess = np.array(
         [
             [31.949749924, 0.011231728742, -33.078371913],
@@ -3600,6 +3621,11 @@ def test_outer_hessian_matches_mgcv_reml2():
             [-33.078371913, -1.964717610290, 143.804523249],
         ]
     )
+    if HAVE_RS:
+        np.testing.assert_allclose(H, R_hess, rtol=1e-9, atol=0)
+        return
+    perm = [2, 0, 1]
+    Hm = H[np.ix_(perm, perm)]
     np.testing.assert_allclose(Hm[0, :], R_hess[0, :], rtol=0, atol=5e-6)
     np.testing.assert_allclose(Hm[:, 0], R_hess[:, 0], rtol=0, atol=5e-6)
     np.testing.assert_allclose(Hm[1:, 1:], R_hess[1:, 1:], rtol=0, atol=1e-7)
@@ -5430,10 +5456,11 @@ def test_efsudr_nb_matches_mgcv():
     # gam(y~s(x), family=nb(), method="REML", optimizer="efs") →
     # sp 0.1130010588, Σedf 5.430232799, REML 356.8301594, 5 iters,
     # score.hist 360.6389944 357.3592854 356.8369431 356.8301811
-    # 356.8301594. (mgcv's summary Theta 2.5148 comes from a REJECTED
-    # step-extension trial's θ leaked into the family env; the returned
-    # object — sp/edf/REML/Vp — is the accepted fit's, whose θ hea
-    # keeps: exp(θ̂) 2.5146138.)
+    # 356.8301594, and the family's Theta 2.514834601: the theta of a
+    # rejected step-extension trial, left in the family as mgcv's gam.fit4
+    # leaves it (the fit itself is the accepted one's). Without the
+    # compiled gdi2 the fallback keeps the accepted fit's theta,
+    # 2.514613816.
     from hea.family import nb
     from hea.R.rng import RGenerator
 
@@ -5460,7 +5487,9 @@ def test_efsudr_nb_matches_mgcv():
         rtol=1e-8,
     )
     np.testing.assert_allclose(
-        float(np.exp(m.family.get_theta()[0])), 2.514613816, rtol=1e-6
+        float(np.exp(m.family.get_theta()[0])),
+        2.514834601 if HAVE_RS else 2.514613816,
+        rtol=1e-9,
     )
 
 
@@ -9967,7 +9996,10 @@ def test_clog_through_gam_matches_mgcv():
     assert m_f.REML_criterion / 2 == pytest.approx(289.556661799, rel=1e-10)
     assert m_f.deviance == pytest.approx(212.387856373, rel=1e-9)
     assert m_f.AIC == pytest.approx(51.1549557883, rel=1e-9)
-    np.testing.assert_allclose(m_f.family.get_theta(True), [0.6], rtol=0)
+    # theta is held on the log scale: exp(log(0.6)), its last bit the C library's
+    np.testing.assert_allclose(
+        m_f.family.get_theta(True), [0.6], rtol=0 if PINNED_ARITHMETIC else 1e-15
+    )
 
 
 def test_clog_uncensored_matches_mgcv():

@@ -8,6 +8,7 @@ _internal_glmer_wrk_iter, _pwrss_update) against ``lme4::glmer``.
 
 from __future__ import annotations
 
+import math
 import warnings
 
 import numpy as np
@@ -65,7 +66,10 @@ def test_poisson_log_at_saturated_eta():
     np.testing.assert_allclose(r.mu, y)
     np.testing.assert_allclose(r.sqrt_r_wt, np.sqrt(1.0 / y))
     np.testing.assert_allclose(r.sqrt_x_wt, np.sqrt(y))
-    np.testing.assert_allclose(r.wt_res, np.zeros(5), atol=1e-15)
+    # exp(log(y)) gives back y only to within about (1 + log y) ulps of y, on
+    # any libm, so the working residual (y - mu)/sqrt(y) vanishes to that
+    bound = 4 * np.finfo(float).eps * (1.0 + np.log(y)) * np.sqrt(y)
+    assert np.all(np.abs(r.wt_res) <= bound), r.wt_res
     assert r.wrss == pytest.approx(0.0, abs=1e-15)
 
     np.testing.assert_allclose(r.deviance_residuals(), np.zeros(5), atol=1e-12)
@@ -2203,10 +2207,12 @@ def test_deriv12_bound_shrinks_step_matches_lme4():
 
 
 def test_deriv12_1d_matches_lme4():
-    """1D objective — Hessian is a 1×1 matrix, no off-diagonal loop."""
+    """1D objective — Hessian is a 1×1 matrix, no off-diagonal loop. The
+    objective's ``exp`` is the C library's, as in lme4's R evaluation: the
+    second difference divides last-bit differences in it by h²."""
 
     def py_fn(x):
-        return float(np.exp(0.3 * x[0]) - 2.0 * x[0])
+        return float(math.exp(0.3 * x[0]) - 2.0 * x[0])
 
     x0 = np.array([1.5])
     g_py, H_py = _deriv12(py_fn, x0)

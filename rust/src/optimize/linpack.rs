@@ -18,6 +18,12 @@ pub fn ddot(
         let s3 = dx[ox + 3 * incx] * dy[oy + 3 * incy];
         return (s0 + s2) + (s1 + s3);
     }
+    // from five terms on Accelerate's ddot rounds by its own reduction and
+    // by where its second operand starts, so the call is Accelerate's own
+    #[cfg(accelerate)]
+    if n >= 5 && incx == 1 && incy == 1 {
+        return crate::sparse::blas::dot(&dx[ox..ox + n], &dy[oy..oy + n]);
+    }
     let mut dtemp = 0.0;
     for i in 0..n {
         dtemp += dx[ox + i * incx] * dy[oy + i * incy];
@@ -122,18 +128,7 @@ pub fn dtrsl(
             b[bi(n - 1)] /= t[t0 + (n - 1) + (n - 1) * lda];
             for jj in 2..=n {
                 let j = n - jj + 1;
-                let mut dt = 0.0;
-                if ACCEL_PAIR4 && jj - 1 == 4 {
-                    let s0 = t[t0 + j + (j - 1) * lda] * b[bi(j)];
-                    let s1 = t[t0 + j + 1 + (j - 1) * lda] * b[bi(j + 1)];
-                    let s2 = t[t0 + j + 2 + (j - 1) * lda] * b[bi(j + 2)];
-                    let s3 = t[t0 + j + 3 + (j - 1) * lda] * b[bi(j + 3)];
-                    dt = (s0 + s2) + (s1 + s3);
-                } else {
-                    for i in 0..(jj - 1) {
-                        dt += t[t0 + (j + i) + (j - 1) * lda] * b[bi(j + i)];
-                    }
-                }
+                let dt = ddot(jj - 1, t, t0 + j + (j - 1) * lda, 1, b, bi(j), incb);
                 b[bi(j - 1)] -= dt;
                 b[bi(j - 1)] /= t[t0 + (j - 1) + (j - 1) * lda];
             }
@@ -141,18 +136,7 @@ pub fn dtrsl(
         _ => {
             b[bi(0)] /= t[t0];
             for j in 2..=n {
-                let mut dt = 0.0;
-                if ACCEL_PAIR4 && j - 1 == 4 {
-                    let s0 = t[t0 + (j - 1) * lda] * b[bi(0)];
-                    let s1 = t[t0 + 1 + (j - 1) * lda] * b[bi(1)];
-                    let s2 = t[t0 + 2 + (j - 1) * lda] * b[bi(2)];
-                    let s3 = t[t0 + 3 + (j - 1) * lda] * b[bi(3)];
-                    dt = (s0 + s2) + (s1 + s3);
-                } else {
-                    for i in 0..(j - 1) {
-                        dt += t[t0 + i + (j - 1) * lda] * b[bi(i)];
-                    }
-                }
+                let dt = ddot(j - 1, t, t0 + (j - 1) * lda, 1, b, bi(0), incb);
                 b[bi(j - 1)] -= dt;
                 b[bi(j - 1)] /= t[t0 + (j - 1) + (j - 1) * lda];
             }
@@ -162,18 +146,7 @@ pub fn dtrsl(
 }
 
 pub fn ddot_same(n: usize, buf: &[f64], ox: usize, oy: usize) -> f64 {
-    if ACCEL_PAIR4 && n == 4 {
-        let s0 = buf[ox] * buf[oy];
-        let s1 = buf[ox + 1] * buf[oy + 1];
-        let s2 = buf[ox + 2] * buf[oy + 2];
-        let s3 = buf[ox + 3] * buf[oy + 3];
-        return (s0 + s2) + (s1 + s3);
-    }
-    let mut dtemp = 0.0;
-    for i in 0..n {
-        dtemp += buf[ox + i] * buf[oy + i];
-    }
-    dtemp
+    ddot(n, buf, ox, 1, buf, oy, 1)
 }
 
 pub fn dtrsl_same(buf: &mut [f64], t0: usize, lda: usize, n: usize, ob: usize, job: i32) -> i32 {
@@ -223,18 +196,7 @@ pub fn dtrsl_same(buf: &mut [f64], t0: usize, lda: usize, n: usize, ob: usize, j
             buf[ob + n - 1] /= buf[t0 + (n - 1) + (n - 1) * lda];
             for jj in 2..=n {
                 let j = n - jj + 1;
-                let mut dt = 0.0;
-                if ACCEL_PAIR4 && jj - 1 == 4 {
-                    let s0 = buf[t0 + j + (j - 1) * lda] * buf[ob + j];
-                    let s1 = buf[t0 + j + 1 + (j - 1) * lda] * buf[ob + j + 1];
-                    let s2 = buf[t0 + j + 2 + (j - 1) * lda] * buf[ob + j + 2];
-                    let s3 = buf[t0 + j + 3 + (j - 1) * lda] * buf[ob + j + 3];
-                    dt = (s0 + s2) + (s1 + s3);
-                } else {
-                    for i in 0..(jj - 1) {
-                        dt += buf[t0 + (j + i) + (j - 1) * lda] * buf[ob + j + i];
-                    }
-                }
+                let dt = ddot(jj - 1, buf, t0 + j + (j - 1) * lda, 1, buf, ob + j, 1);
                 buf[ob + j - 1] -= dt;
                 buf[ob + j - 1] /= buf[t0 + (j - 1) + (j - 1) * lda];
             }
@@ -242,18 +204,7 @@ pub fn dtrsl_same(buf: &mut [f64], t0: usize, lda: usize, n: usize, ob: usize, j
         _ => {
             buf[ob] /= buf[t0];
             for j in 2..=n {
-                let mut dt = 0.0;
-                if ACCEL_PAIR4 && j - 1 == 4 {
-                    let s0 = buf[t0 + (j - 1) * lda] * buf[ob];
-                    let s1 = buf[t0 + 1 + (j - 1) * lda] * buf[ob + 1];
-                    let s2 = buf[t0 + 2 + (j - 1) * lda] * buf[ob + 2];
-                    let s3 = buf[t0 + 3 + (j - 1) * lda] * buf[ob + 3];
-                    dt = (s0 + s2) + (s1 + s3);
-                } else {
-                    for i in 0..(j - 1) {
-                        dt += buf[t0 + i + (j - 1) * lda] * buf[ob + i];
-                    }
-                }
+                let dt = ddot(j - 1, buf, t0 + (j - 1) * lda, 1, buf, ob, 1);
                 buf[ob + j - 1] -= dt;
                 buf[ob + j - 1] /= buf[t0 + (j - 1) + (j - 1) * lda];
             }
@@ -267,18 +218,7 @@ pub fn dpofa(a: &mut [f64], a0: usize, lda: usize, n: usize) -> i32 {
     for j in 1..=n {
         let mut s = 0.0;
         for k in 1..=(j - 1) {
-            let mut dt = 0.0;
-            if ACCEL_PAIR4 && k - 1 == 4 {
-                let s0 = a[a0 + (k - 1) * lda] * a[a0 + (j - 1) * lda];
-                let s1 = a[a0 + 1 + (k - 1) * lda] * a[a0 + 1 + (j - 1) * lda];
-                let s2 = a[a0 + 2 + (k - 1) * lda] * a[a0 + 2 + (j - 1) * lda];
-                let s3 = a[a0 + 3 + (k - 1) * lda] * a[a0 + 3 + (j - 1) * lda];
-                dt = (s0 + s2) + (s1 + s3);
-            } else {
-                for i in 0..(k - 1) {
-                    dt += a[a0 + i + (k - 1) * lda] * a[a0 + i + (j - 1) * lda];
-                }
-            }
+            let dt = ddot(k - 1, a, a0 + (k - 1) * lda, 1, a, a0 + (j - 1) * lda, 1);
             let mut t = a[a0 + (k - 1) + (j - 1) * lda] - dt;
             t /= a[a0 + (k - 1) + (k - 1) * lda];
             a[a0 + (k - 1) + (j - 1) * lda] = t;

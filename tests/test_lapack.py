@@ -101,8 +101,15 @@ def test_eigen_symmetric_matches_r(name: str):
     np.testing.assert_allclose(V.T @ V, np.eye(n), rtol=0, atol=1e-12)
 
 
+@pytest.mark.parametrize("path", ["rs", "py"])
 @pytest.mark.parametrize(("seed", "n", "k"), [(5, 120, 10), (6, 300, 20)])
-def test_slanczos_matches_mgcv(seed: int, n: int, k: int):
+def test_slanczos_matches_mgcv(seed: int, n: int, k: int, path: str, monkeypatch):
+    """mgcv's Rlanczos, through the extension's port and through the Python
+    loop it falls back to."""
+    if path == "rs" and rs_fn("tp_rlanczos") is None:
+        pytest.skip("the Rlanczos port lives in hea._rs")
+    if path == "py":
+        monkeypatch.setattr("hea.formula._tp_rlanczos_rs", None)
     A = _unif_sym(seed, n)
     vals_r = _read(f"slanczos_{n}_{k}_values.bin")
     vecs_r = _read(f"slanczos_{n}_{k}_vectors.bin", (n, k))
@@ -267,3 +274,39 @@ def test_svd_matches_r(seed: int, n: int, p: int):
         _close(recon, X, float(d[0]))
         _close(sv["u"].T @ sv["u"], np.eye(uc))
         _close(sv["v"].T @ sv["v"], np.eye(vc))
+
+
+@pytest.mark.parametrize(
+    ("a", "flag"),
+    [
+        ([1.0, 2.0, 3.0], False),
+        ([1e308, 1e308], True),
+        ([0.0, 1e308, 1e308], True),
+        ([1e308, 0.0, 1e308], False),
+        ([np.nan], True),
+        ([[1e308, 1.0], [1e308, 1.0]], True),
+        ([[1e308, 1e308], [1.0, 1.0]], False),
+    ],
+)
+def test_matprod_nan_screen_is_rs(a, flag):
+    """R's ``%*%`` hands the BLAS only operands its ``mayHaveNaNOrInf``
+    (array.c:643) passes: an odd first element, then each pair's sum, taken
+    in column-major order, must be finite - so two huge finite entries whose
+    sum overflows send the product to the plain loop too."""
+    from hea._rlinalg import r_may_have_nan_or_inf
+
+    assert r_may_have_nan_or_inf(np.array(a)) is flag
+
+
+def test_matprod_safe_covers_every_arrangement():
+    """A matrix whose own pairs pass R's screen can still fail it transposed
+    or subset; ``r_matprod_safe`` answers for every arrangement, so a caller
+    may skip the scans of ``t(x)`` and ``x[good, ]`` too."""
+    from hea._rlinalg import r_matprod_safe, r_may_have_nan_or_inf
+
+    a = np.array([[1e308, 1e308], [1.0, 1.0]])
+    assert not r_may_have_nan_or_inf(a)
+    assert r_may_have_nan_or_inf(np.asfortranarray(a.T))
+    assert not r_matprod_safe(a)
+    assert r_matprod_safe(np.array([[1.0, -2.0], [3.0, 4.0]]))
+    assert not r_matprod_safe(np.array([[1.0, np.inf]]))

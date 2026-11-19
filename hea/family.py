@@ -61,7 +61,7 @@ from ._rlinalg import (
     r_qr_R,
 )
 from ._rpow import _r_pow_scalar, _rpow, _rpow_int
-from ._rsum import r_colsums, r_mean, r_sum
+from ._rsum import r_colsums, r_mean, r_sum, r_var
 from .R import nmath as _nmath
 from .R.nmath import (
     _dbinom_raw,
@@ -302,10 +302,14 @@ class InverseLink(Link):
         return 2.0 / _rpow_int(np.asarray(mu, dtype=float), 3)
 
     def d3link(self, mu):
-        return -6.0 / _rpow_int(np.asarray(mu, dtype=float), 4)
+        mu = np.asarray(mu, dtype=float)
+        mu = mu * mu
+        return -6.0 / (mu * mu)
 
     def d4link(self, mu):
-        return 24.0 / _rpow(np.asarray(mu, dtype=float), 5.0)
+        mu = np.asarray(mu, dtype=float)
+        mu2 = mu * mu
+        return 24.0 / (mu2 * mu2 * mu)
 
     # inverse link: g'=-1/μ², g''=2/μ³, g'''=-6/μ⁴, g''''=24/μ⁵ →
     # g2g = g''/g'² = (2/μ³)·μ⁴ = 2μ;  g3g = g'''/g'³ = (-6/μ⁴)·(-μ⁶) = 6μ²;
@@ -340,13 +344,13 @@ class SqrtLink(Link):
         return 2.0 * np.asarray(eta, dtype=float)
 
     def d2link(self, mu):
-        return -0.25 * np.asarray(mu, dtype=float) ** -1.5
+        return -0.25 * _rpow(np.asarray(mu, dtype=float), -1.5)
 
     def d3link(self, mu):
-        return 0.375 * np.asarray(mu, dtype=float) ** -2.5
+        return 0.375 * _rpow(np.asarray(mu, dtype=float), -2.5)
 
     def d4link(self, mu):
-        return -0.9375 * np.asarray(mu, dtype=float) ** -3.5
+        return -0.9375 * _rpow(np.asarray(mu, dtype=float), -3.5)
 
     # fix.family.link's extended-family ratios (gam.fit3.r:2243-2247):
     # g' = ½μ^-½ ⇒ g2g = g″/g′² = -μ^-½, g3g = g‴/g′³ = 3/μ,
@@ -354,15 +358,15 @@ class SqrtLink(Link):
     # zero counts) give R's silent ±Inf — numpy would warn.
     def g2g(self, mu):
         with np.errstate(divide="ignore"):
-            return -(np.asarray(mu, dtype=float) ** -0.5)
+            return -_rpow(np.asarray(mu, dtype=float), -0.5)
 
     def g3g(self, mu):
         with np.errstate(divide="ignore"):
-            return 3.0 / np.asarray(mu, dtype=float)
+            return 3.0 * _rpow(np.asarray(mu, dtype=float), -1.0)
 
     def g4g(self, mu):
         with np.errstate(divide="ignore"):
-            return -15.0 * np.asarray(mu, dtype=float) ** -1.5
+            return -15.0 * _rpow(np.asarray(mu, dtype=float), -1.5)
 
     def valideta(self, eta):
         eta = np.asarray(eta)
@@ -519,6 +523,13 @@ def _dnorm(x):
     return _nmath.dnorm5_vec(np.asarray(x, dtype=float))
 
 
+def _qcauchy(p):
+    """R's ``qcauchy(p)``, the cauchit link."""
+    return _nmath._disp(
+        "qcauchy", _nmath.qcauchy, [np.asarray(p, dtype=float), 0.0, 1.0], (True, False)
+    )
+
+
 class ProbitLink(Link):
     """``g(μ) = Φ⁻¹(μ)`` — probit binomial link."""
 
@@ -539,30 +550,30 @@ class ProbitLink(Link):
     def d2link(self, mu):
         eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
         d = np.maximum(_dnorm(eta), np.finfo(float).eps)
-        return eta / d**2
+        return eta / _rpow_int(d, 2)
 
     def d3link(self, mu):
         eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
         d = np.maximum(_dnorm(eta), np.finfo(float).eps)
-        return (1.0 + 2.0 * eta * eta) / d**3
+        return (1.0 + 2.0 * _rpow_int(eta, 2)) / _rpow_int(d, 3)
 
     def d4link(self, mu):
         eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
         d = np.maximum(_dnorm(eta), np.finfo(float).eps)
-        return (7.0 * eta + 6.0 * eta**3) / d**4
+        return (7.0 * eta + 6.0 * _rpow_int(eta, 3)) / _rpow_int(d, 4)
 
     def d23link(self, mu):
         eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
         d = np.maximum(_dnorm(eta), np.finfo(float).eps)
-        return eta / d**2, (1.0 + 2.0 * eta * eta) / d**3
+        return eta / _rpow_int(d, 2), (1.0 + 2.0 * _rpow_int(eta, 2)) / _rpow_int(d, 3)
 
     def d234link(self, mu):
         eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
         d = np.maximum(_dnorm(eta), np.finfo(float).eps)
         return (
-            eta / d**2,
-            (1.0 + 2.0 * eta * eta) / d**3,
-            (7.0 * eta + 6.0 * eta**3) / d**4,
+            eta / _rpow_int(d, 2),
+            (1.0 + 2.0 * _rpow_int(eta, 2)) / _rpow_int(d, 3),
+            (7.0 * eta + 6.0 * _rpow_int(eta, 3)) / _rpow_int(d, 4),
         )
 
     # extended-family ratios (gam.fit3.r:2249-2266): with η=Φ⁻¹(μ) and
@@ -572,11 +583,11 @@ class ProbitLink(Link):
 
     def g3g(self, mu):
         eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
-        return 1.0 + 2.0 * eta * eta
+        return 1.0 + 2.0 * _rpow_int(eta, 2)
 
     def g4g(self, mu):
         eta = _nmath.qnorm5_vec(np.asarray(mu, dtype=float))
-        return 7.0 * eta + 6.0 * eta**3
+        return 7.0 * eta + 6.0 * _rpow_int(eta, 3)
 
 
 class CauchitLink(Link):
@@ -589,49 +600,51 @@ class CauchitLink(Link):
     name = "cauchit"
 
     def link(self, mu):
-        mu = np.asarray(mu, dtype=float)
-        return np.tan(np.pi * (mu - 0.5))
+        return _qcauchy(mu)
 
     def linkinv(self, eta):
-        eps = np.finfo(float).eps
-        thresh = -np.tan(np.pi * (eps - 0.5))
-        eta_c = np.clip(np.asarray(eta, dtype=float), -thresh, thresh)
-        return 0.5 + np.arctan(eta_c) / np.pi
+        thresh = -_qcauchy(np.finfo(float).eps)
+        eta_c = np.minimum(np.maximum(np.asarray(eta, dtype=float), -thresh), thresh)
+        return _nmath._disp("pcauchy", _nmath.pcauchy, [eta_c, 0.0, 1.0], (True, False))
 
     def mu_eta(self, eta):
-        eps = np.finfo(float).eps
-        eta = np.asarray(eta, dtype=float)
-        return np.maximum(1.0 / (np.pi * (1.0 + eta * eta)), eps)
+        d = _nmath._disp(
+            "dcauchy",
+            _nmath.dcauchy,
+            [np.asarray(eta, dtype=float), 0.0, 1.0],
+            (False,),
+        )
+        return np.maximum(d, np.finfo(float).eps)
 
     def d2link(self, mu):
-        eta = np.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
-        return 2.0 * np.pi**2 * eta * (1.0 + eta * eta)
+        eta = _qcauchy(mu)
+        return 2.0 * np.pi * np.pi * eta * (1.0 + eta * eta)
 
     def d3link(self, mu):
-        eta = np.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
+        eta = _qcauchy(mu)
         eta2 = eta * eta
-        return 2.0 * np.pi**3 * (1.0 + 3.0 * eta2) * (1.0 + eta2)
+        return 2.0 * np.pi * np.pi * np.pi * (1.0 + 3.0 * eta2) * (1.0 + eta2)
 
     def d4link(self, mu):
-        eta = np.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
+        eta = _qcauchy(mu)
         eta2 = eta * eta
-        return 2.0 * np.pi**4 * (8.0 * eta + 12.0 * eta2 * eta) * (1.0 + eta2)
+        pi4 = np.pi * np.pi * np.pi * np.pi
+        return 2.0 * pi4 * (8.0 * eta + 12.0 * eta2 * eta) * (1.0 + eta2)
 
-    # extended-family ratios (gam.fit3.r:2272-2291): η=qcauchy(μ),
-    # g'=1/f(η) with f the Cauchy density — the g″/g'ᵏ ratios in η.
+    # extended-family ratios (gam.fit3.r:2272-2291), eta = qcauchy(mu)
     def g2g(self, mu):
-        eta = np.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
+        eta = _qcauchy(mu)
         return eta / (1.0 + eta * eta)
 
     def g3g(self, mu):
-        eta = np.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
+        eta = _qcauchy(mu)
         eta2 = eta * eta
-        return (1.0 + 3.0 * eta2) / (1.0 + eta2) ** 2
+        return (1.0 + 3.0 * eta2) / _rpow_int(1.0 + eta2, 2)
 
     def g4g(self, mu):
-        eta = np.tan(np.pi * (np.asarray(mu, dtype=float) - 0.5))
+        eta = _qcauchy(mu)
         eta2 = eta * eta
-        return ((8.0 + 12.0 * eta2) / (1.0 + eta2) ** 2) * (eta / (1.0 + eta2))
+        return ((8.0 + 12.0 * eta2) / _rpow_int(1.0 + eta2, 2)) * (eta / (1.0 + eta2))
 
 
 class CloglogLink(Link):
@@ -640,7 +653,7 @@ class CloglogLink(Link):
     name = "cloglog"
 
     def link(self, mu):
-        return np.log(-np.log1p(-np.asarray(mu, dtype=float)))
+        return np.log(-np.log(1.0 - np.asarray(mu, dtype=float)))
 
     def linkinv(self, eta):
         eps = np.finfo(float).eps
@@ -660,13 +673,17 @@ class CloglogLink(Link):
     def d3link(self, mu):
         mu = np.asarray(mu, dtype=float)
         l1m = np.log1p(-mu)
-        return (-2.0 - 3.0 * l1m - 2.0 * l1m**2) / (1.0 - mu) ** 3 / l1m**3
+        mu3 = _rpow_int(1.0 - mu, 3)
+        return (-2.0 - 3.0 * l1m - 2.0 * _rpow_int(l1m, 2)) / mu3 / _rpow_int(l1m, 3)
 
     def d4link(self, mu):
         mu = np.asarray(mu, dtype=float)
         l1m = np.log1p(-mu)
+        mu4 = _rpow_int(1.0 - mu, 4)
         return (
-            (-12.0 - 11.0 * l1m - 6.0 * l1m**2 - 6.0 / l1m) / (1.0 - mu) ** 4 / l1m**3
+            (-12.0 - 11.0 * l1m - 6.0 * _rpow_int(l1m, 2) - 6.0 / l1m)
+            / mu4
+            / _rpow_int(l1m, 3)
         )
 
     # extended-family ratios (gam.fit3.r:2293-2303), l1m = log1p(−μ):
@@ -699,16 +716,16 @@ class InverseSquareLink(Link):
 
     def mu_eta(self, eta):
         with np.errstate(invalid="ignore"):
-            return -0.5 * np.asarray(eta, dtype=float) ** -1.5
+            return -1.0 / (2.0 * _rpow(np.asarray(eta, dtype=float), 1.5))
 
     def d2link(self, mu):
-        return 6.0 * np.asarray(mu, dtype=float) ** -4
+        return 6.0 * _rpow(np.asarray(mu, dtype=float), -4.0)
 
     def d3link(self, mu):
-        return -24.0 * np.asarray(mu, dtype=float) ** -5
+        return -24.0 * _rpow(np.asarray(mu, dtype=float), -5.0)
 
     def d4link(self, mu):
-        return 120.0 * np.asarray(mu, dtype=float) ** -6
+        return 120.0 * _rpow(np.asarray(mu, dtype=float), -6.0)
 
     def valideta(self, eta):
         eta = np.asarray(eta)
@@ -1096,7 +1113,7 @@ class Family:
                 d["Deta3"] = (
                     r["Dmu3"] * ig13
                     - 3.0 * r["Dmu2"] * g2g * ig12
-                    + r["Dmu"] * (3.0 * g2g * g2g - g3g) * ig1
+                    + r["Dmu"] * (3.0 * (g2g * g2g) - g3g) * ig1
                 )
                 EDmu3 = r.get("EDmu3")
                 if EDmu3 is not None:
@@ -1118,8 +1135,10 @@ class Family:
                 d["Deta4"] = (
                     ig14 * r["Dmu4"]
                     - 6.0 * r["Dmu3"] * ig13 * g2g
-                    + r["Dmu2"] * (15.0 * g2g * g2g - 4.0 * g3g) * ig12
-                    - r["Dmu"] * (15.0 * g2g**3 - 10.0 * g2g * g3g + g4g) * ig1
+                    + r["Dmu2"] * (15.0 * (g2g * g2g) - 4.0 * g3g) * ig12
+                    - r["Dmu"]
+                    * (15.0 * _rpow_int(g2g, 3) - 10.0 * g2g * g3g + g4g)
+                    * ig1
                 )
                 d["Detath2"] = _cb(r["Dmuth2"], ig1) if has_th2 else None
                 d["Deta2th2"] = (
@@ -1133,7 +1152,7 @@ class Family:
                         - _cb(
                             _cb(3.0 * np.asarray(r["Dmu2th"], dtype=float), g2g), ig12
                         )
-                        + _cb(_cb(r["Dmuth"], 3.0 * g2g * g2g - g3g), ig1)
+                        + _cb(_cb(r["Dmuth"], 3.0 * (g2g * g2g) - g3g), ig1)
                     )
                     if has_th2
                     else None
@@ -1245,6 +1264,13 @@ class Family:
         """
         raise NotImplementedError
 
+    def ls_phi(self, y, wt, scale, n=None):
+        """mgcv's ``family$ls`` (fix.family.ls, gam.fit3.r:2497): the
+        saturated log-likelihood and its first and second derivatives with
+        respect to φ itself, as gam.fit3 combines them. For a family whose
+        scale derivatives are zero these are :meth:`ls`'s."""
+        return self.ls(y, wt, scale) if n is None else self.ls(y, wt, scale, n=n)
+
     def __repr__(self) -> str:
         return f"{self.name}(link={self.link.name})"
 
@@ -1316,6 +1342,13 @@ class Gaussian(Family):
         )
         return np.array([ls0, -0.5 * nobs, 0.0], dtype=float)
 
+    def ls_phi(self, y, wt, scale, n=None):
+        nobs = int(np.sum(np.asarray(wt, dtype=float) > 0))
+        ls0 = self.ls(y, wt, scale)[0]
+        return np.array(
+            [ls0, -nobs / (2.0 * scale), nobs / (2.0 * scale * scale)], dtype=float
+        )
+
 
 class Gamma(Family):
     """``y ~ Gamma(shape=1/φ, scale=μ·φ)``; mean μ, variance φ·μ²."""
@@ -1368,7 +1401,7 @@ class Gamma(Family):
             )
         return -2.0 * r_sum(logp * wt) + 2.0
 
-    def ls(self, y, wt, scale):
+    def ls_phi(self, y, wt, scale, n=None):
         y = np.asarray(y, dtype=float)
         wt = np.asarray(wt, dtype=float)
         good = wt > 0
@@ -1386,7 +1419,11 @@ class Gamma(Family):
         k2 = ((u_dg + lsw) / (usw * usw))[inv]
         d1_phi = r_sum(k2 / w)
         k3 = ((-u_tg / usw + (1.0 - 2.0 * lsw - 2.0 * u_dg)) / _rpow(usw, 3.0))[inv]
-        d2_phi = r_sum(k3 / (w * w))  # mgcv's d²/dφ²
+        d2_phi = r_sum(k3 / (w * w))
+        return np.array([ls0, d1_phi, d2_phi], dtype=float)
+
+    def ls(self, y, wt, scale):
+        ls0, d1_phi, d2_phi = self.ls_phi(y, wt, scale)
         d1 = scale * d1_phi
         d2 = scale * d1_phi + scale * scale * d2_phi
         return np.array([ls0, d1, d2], dtype=float)
@@ -1646,6 +1683,13 @@ class InverseGaussian(Family):
         )
         return np.array([ls0, -0.5 * nobs, 0.0], dtype=float)
 
+    def ls_phi(self, y, wt, scale, n=None):
+        nobs = int(np.sum(np.asarray(wt, dtype=float) > 0))
+        ls0 = self.ls(y, wt, scale)[0]
+        return np.array(
+            [ls0, -nobs / (2.0 * scale), nobs / (2.0 * scale * scale)], dtype=float
+        )
+
     def rd(self, rng, mu, wt, scale):
         mu = np.asarray(mu, dtype=float)
         n = mu.shape[0]
@@ -1771,6 +1815,13 @@ class Quasi(Family):
         nobs = int(np.sum(good))
         ls0 = -nobs * math.log(scale) / 2.0 + r_sum(np.log(wt[good])) / 2.0
         return np.array([ls0, -0.5 * nobs, 0.0], dtype=float)
+
+    def ls_phi(self, y, wt, scale, n=None):
+        nobs = int(np.sum(np.asarray(wt, dtype=float) > 0))
+        ls0 = self.ls(y, wt, scale)[0]
+        return np.array(
+            [ls0, -nobs / (2.0 * scale), nobs / (2.0 * scale * scale)], dtype=float
+        )
 
     def __repr__(self) -> str:
         return f"quasi(link={self.link.name}, variance={self.variance_name!r})"
@@ -3832,16 +3883,20 @@ class Tweedie(Family):
         log_f = self._log_density(y, mu, phi)
         return -2.0 * r_sum(log_f * wt) + 2.0
 
-    def ls(self, y, wt, scale):
-        """Saturated log-likelihood and its first two derivatives in log φ:
-        mgcv ``Tweedie()$ls`` is ``colSums(w*ldTweedie(y, y, p, phi=scale))``,
-        whose φ-derivatives are returned as ``(ls, φ·ls_φ, φ²·ls_φφ +
-        φ·ls_φ)``. The prior weight multiplies the log density at the
-        unmodified φ."""
+    def ls_phi(self, y, wt, scale, n=None):
+        """mgcv ``Tweedie()$ls``: ``colSums(w*ldTweedie(y, y, p,
+        phi=scale))``, of which gam.fit3 reads the saturated log-likelihood
+        and its first two derivatives in φ. The prior weight multiplies the
+        log density at the unmodified φ."""
         y = np.asarray(y, dtype=float)
         wt = np.asarray(wt, dtype=float)
         ld = _ld_tweedie_pphi(y, y, self.p, float(scale))
-        LS = r_colsums(wt[:, None] * ld[:, :3])
+        return r_colsums(wt[:, None] * ld[:, :3])
+
+    def ls(self, y, wt, scale):
+        """:meth:`ls_phi` with the derivatives taken in log φ: ``(ls, φ·ls_φ,
+        φ²·ls_φφ + φ·ls_φ)``."""
+        LS = self.ls_phi(y, wt, scale)
         sc = float(scale)
         return np.array([LS[0], LS[1] * sc, LS[2] * (sc * sc) + LS[1] * sc])
 
@@ -4394,7 +4449,7 @@ class Scat(Family):
         nu2nu = nu2 / nu
         nu12 = (nu + 1.0) / 2.0
         term0 = (
-            _r_lgamma(nu12) - _r_lgamma(nu / 2.0) - np.log(sig * np.sqrt(np.pi * nu))
+            _r_lgamma(nu12) - _r_lgamma(nu / 2.0) - np.log(sig * _rpow(np.pi * nu, 0.5))
         )
         ls0 = float(r_sum(term0 * w))
         col0 = (
@@ -4403,13 +4458,13 @@ class Scat(Family):
             - 0.5 * nu2nu
         )
         LSTH = np.column_stack([w * col0, -1.0 * w])
-        lsth = LSTH.sum(axis=0)
+        lsth = r_colsums(LSTH)
         d11 = (
-            nu2 * nu2 * polygamma(1, nu12) / 4.0
+            nu2 * nu2 * _polygamma(1, nu12) / 4.0
             + nu2 * _r_digamma(nu12) / 2.0
-            - nu2 * nu2 * polygamma(1, nu / 2.0) / 4.0
+            - nu2 * nu2 * _polygamma(1, nu / 2.0) / 4.0
             - nu2 * _r_digamma(nu / 2.0) / 2.0
-            + 0.5 * nu2nu * nu2nu
+            + 0.5 * (nu2nu * nu2nu)
             - 0.5 * nu2nu
         )
         lsth2 = np.zeros((2, 2), dtype=float)
@@ -4538,7 +4593,7 @@ class Scat(Family):
                     + 3.0 * f1 / sig2a
                     + 18.0 * ff1 * f1
                     - 4.0 * f1ymf1 / sig2a
-                    - 12.0 * nu1ym * f1**4
+                    - 12.0 * nu1ym * _rpow_int(f1, 4)
                 )
                 * nu2nu
             )
@@ -4591,7 +4646,7 @@ class Scat(Family):
                     - 8.0 * nu2nu * f1ym**2
                     + 26.0 * fymf1ym * nu2nu / nu
                     - 4.0 * nu1nu * f1ym**2
-                    - 12.0 * nu1nu * nu2nu * f1ym**3
+                    - 12.0 * nu1nu * nu2nu * _rpow_int(f1ym, 3)
                 )
                 / nusig2a
             )
@@ -4636,7 +4691,7 @@ class Scat(Family):
         # When all θ are user-fixed (n_theta = 0), no override.
         if self.n_theta > 0:
             y = np.asarray(y, dtype=float)
-            sd_y = float(np.std(y, ddof=1)) if y.size > 1 else 1.0
+            sd_y = math.sqrt(r_var(y)) if y.size > 1 else 1.0
             sd_y = max(sd_y, 1e-10)  # guard against constant y
             return {"Theta": np.array([1.5, np.log(0.8 * sd_y)], dtype=float)}
         return None
@@ -6105,7 +6160,7 @@ def _zip_Dd(y, mu, theta, wt, b, level: int = 0) -> dict:
                 + 3.0 * l3[:, 1] * pL
                 + 3.0 * l3[:, 2] * pL**2
                 + 3.0 * l2[:, 1] * pll
-                + l3[:, 3] * pL**3
+                + l3[:, 3] * _rpow_int(pL, 3)
                 + 3.0 * l2[:, 2] * pL * pll
                 + l1[:, 1] * plll
             )
@@ -6174,7 +6229,7 @@ def _zip_Dd(y, mu, theta, wt, b, level: int = 0) -> dict:
                 + c3[2] * (6.0 * plth * pL + 3.0 * pth * pll)
                 + 3.0 * c2g * pllth
                 + c4[3] * pth * pL**2
-                + c4[4] * pth * pL**3
+                + c4[4] * pth * _rpow_int(pL, 3)
                 + 3.0 * c3[3] * (pL**2 * plth + pth * pL * pll)
                 + c2e * (3.0 * plth * pll + 3.0 * pL * pllth + pth * plll)
                 + c1 * plllth
@@ -6188,10 +6243,10 @@ def _zip_Dd(y, mu, theta, wt, b, level: int = 0) -> dict:
                 + 4.0 * l4[:, 1] * pL
                 + 6.0 * l4[:, 2] * pL**2
                 + 6.0 * l3[:, 1] * pll
-                + 4.0 * l4[:, 3] * pL**3
+                + 4.0 * l4[:, 3] * _rpow_int(pL, 3)
                 + 12.0 * l3[:, 2] * pL * pll
                 + 4.0 * l2[:, 1] * plll
-                + l4[:, 4] * pL**4
+                + l4[:, 4] * _rpow_int(pL, 4)
                 + 6.0 * l3[:, 3] * pL**2 * pll
                 + l2[:, 2] * (4.0 * pL * plll + 3.0 * pll**2)
                 + l1[:, 1] * pllll
@@ -13900,12 +13955,12 @@ def _ldg(g, deriv=4):
             l3[ii] = -np.exp(g[ii])
         if deriv > 2:
             l4 = a * (
-                6.0 * a**3
+                6.0 * _rpow_int(a, 3)
                 - 12.0 * (eg + 1.0) * a**2
                 + 4.0 * eg * a
                 + 7.0 * (eg + 1.0) ** 2 * a
                 - (4.0 + 3.0 * eg) * eg
-                - (eg + 1.0) ** 3
+                - _rpow_int(eg + 1.0, 3)
             )
             l4[ind] = a[ind] * (
                 6.0 * b * (3.0 + 3.0 * b + b**2)
@@ -13968,15 +14023,15 @@ def _lde(eta, deriv=4):
             l4 = l1 * (
                 (3.0 * et - 4.0) * et
                 + 4.0 * et * l1
-                + (1.0 - et) ** 3
+                + _rpow_int(1.0 - et, 3)
                 - 7.0 * (1.0 - et) ** 2 * l1
                 + 12.0 * (1.0 - et) * l1**2
-                - 6.0 * l1**3
+                - 6.0 * _rpow_int(l1, 3)
             )
             l4[ii3] = 0.0
             l4[ind] = l1[ind] * (
                 4.0 * l1[ind] * eti
-                - eti**3
+                - _rpow_int(eti, 3)
                 - b
                 - 7.0 * b * eti**2
                 - eti**2
@@ -13984,7 +14039,7 @@ def _lde(eta, deriv=4):
                 - 10.0 * b * eti
                 - 12.0 * eti * b**2
                 - 6.0 * b**2
-                - 6.0 * b**3
+                - 6.0 * _rpow_int(b, 3)
             )
     return l1, l2, l3, l4
 

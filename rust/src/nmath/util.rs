@@ -115,6 +115,26 @@ pub fn rfma_vec<'py>(
     Ok(out.into_pyarray(py))
 }
 
+/// Column sums of `x` (n by p), each column accumulated over its rows in
+/// order from 0.0 with plain double additions: R's `LDOUBLE s = 0.0; for (k)
+/// s += x[k];` where `long double` is `double`.
+#[pyo3::pyfunction]
+pub fn sum_cols_inorder<'py>(
+    py: pyo3::Python<'py>,
+    x: numpy::PyReadonlyArray2<'py, f64>,
+) -> pyo3::Bound<'py, numpy::PyArray1<f64>> {
+    use numpy::IntoPyArray;
+    let a = x.as_array();
+    let p = a.shape()[1];
+    let mut s = vec![0.0f64; p];
+    for row in a.rows() {
+        for (sj, v) in s.iter_mut().zip(row.iter()) {
+            *sj += *v;
+        }
+    }
+    s.into_pyarray(py)
+}
+
 /// `s = 0; for (i) s += x[i]*y[i];` -- the in-order dot product of a plain
 /// C loop, each step contracted like R's build (`rfma`).
 #[pyo3::pyfunction]

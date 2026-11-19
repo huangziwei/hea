@@ -313,7 +313,15 @@ fn dgeqrf_lwork(m: i32, n: i32) -> i32 {
 
 /// `DGEQRF`: QR of the `m`-by-`n` matrix `a` with `lwork` doubles of
 /// workspace, in panels of `NB` columns while more than `NX` remain.
-unsafe fn dgeqrf(m: i32, n: i32, a: *mut f64, lda: i32, tau: *mut f64, work: *mut f64, lwork: i32) {
+pub(crate) unsafe fn dgeqrf(
+    m: i32,
+    n: i32,
+    a: *mut f64,
+    lda: i32,
+    tau: *mut f64,
+    work: *mut f64,
+    lwork: i32,
+) {
     let k = m.min(n);
     if k == 0 {
         return;

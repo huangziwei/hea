@@ -32,7 +32,12 @@ import sys
 
 import numpy as np
 import pytest
-from conftest import have_rscript, r_scalar_values, run_rs_r_oracle
+from conftest import (
+    PINNED_ARITHMETIC,
+    have_rscript,
+    r_scalar_values,
+    run_rs_r_oracle,
+)
 
 rs = pytest.importorskip("hea._rs")
 
@@ -835,9 +840,11 @@ _FMA_CASES = [c for c in CASES if c[0].startswith("fma_")]
 def test_fma_cases_python_matches_rs(case):
     """Pure-Python nmath scalars ≡ rust 0-ulp at the FMA-materialization
     points. Both sides share the per-arch ``_rfma``/``rfma`` contraction and
-    platform-libm (``__sinpi``/``lgamma``) decisions, so unlike the live-R
-    gate this holds bit-for-bit on every platform; it pins the Python twins
-    of every contraction site the ``fma_*`` R cases pin for rust."""
+    platform-libm (``__sinpi``/``lgamma``) decisions; the Python side's
+    elementwise math is numpy's, the C library's under PINNED_ARITHMETIC,
+    so there it holds bit for bit and elsewhere to rtol 1e-12. It pins the
+    Python twins of every contraction site the ``fma_*`` R cases pin for
+    rust."""
     from hea.R import nmath as nm
 
     py_fn = {
@@ -860,6 +867,12 @@ def test_fma_cases_python_matches_rs(case):
         [py_fn[fn](*(float(v) for v in args), *flags) for args in zip(*arrays)]
     )
     assert got_py.shape == got_rs.shape
+    if not PINNED_ARITHMETIC:
+        # the Python twins compute with numpy's float64 math, which off the
+        # pinned arithmetic rounds by the CPU's own kernels (AVX2 / AVX-512
+        # on x86-64) where the rust ones call the C library
+        np.testing.assert_allclose(got_py, got_rs, rtol=1e-12, atol=0)
+        return
     for g, e in zip(got_py, got_rs):
         if np.isnan(e):
             assert np.isnan(g)
@@ -1700,9 +1713,14 @@ def test_optif9_rs_python_parity():
 
 
 def test_lbfgsb_rs_python_parity():
+    """The extension's L-BFGS-B and the Python fallback take the same path.
+    Built on Accelerate, the extension calls R's own ddot from five terms on
+    (the 2 col dots once col >= 3), which the fallback sums in order, so
+    there the comparison stops at two parameters."""
     import math
 
     from hea.R.lbfgsb import lbfgsb as py_lbfgsb
+    from hea.sparse import build_info
 
     def f_val(x):
         v = 0.0
@@ -1720,9 +1738,12 @@ def test_lbfgsb_rs_python_parity():
         return g
 
     rng = np.random.default_rng(7)
+    accel = build_info()["backend"] == "accelerate"
     for n in (2, 3, 4):
         for rep in range(3):
             x0 = rng.standard_normal(n) * (1 + rep)
+            if accel and n > 2:
+                continue
             for lo, up, nbd in (
                 ([-math.inf] * n, [math.inf] * n, [0] * n),
                 (list(x0 - 0.7), list(x0 + 0.9), [2] * n),

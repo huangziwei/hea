@@ -25,6 +25,8 @@ mod discrete;
 mod family;
 mod fexact;
 #[cfg(vendor_blas)]
+mod gdi;
+#[cfg(vendor_blas)]
 mod lapack;
 #[cfg(vendor_blas)]
 mod lapack_py;
@@ -32,6 +34,8 @@ mod linalg;
 mod loess;
 #[cfg(vendor_blas)]
 mod magic;
+#[cfg(vendor_blas)]
+mod mgcv_c;
 mod nmath;
 mod optimize;
 mod par;
@@ -57,6 +61,8 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     sparse::register(m)?;
     #[cfg(vendor_blas)]
     lapack_py::register(m)?;
+    #[cfg(vendor_blas)]
+    gdi::register(m)?;
     #[cfg(vendor_blas)]
     magic::register(m)?;
     #[cfg(vendor_blas)]

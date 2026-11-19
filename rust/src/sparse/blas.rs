@@ -229,6 +229,36 @@ extern "C" {
         x: *mut c_double,
         incx: *const c_int,
     );
+    #[cfg_attr(not(accelerate), link_name = "scipy_dsymv_")]
+    fn dsymv_(
+        uplo: *const c_char,
+        n: *const c_int,
+        alpha: *const c_double,
+        a: *const c_double,
+        lda: *const c_int,
+        x: *const c_double,
+        incx: *const c_int,
+        beta: *const c_double,
+        y: *mut c_double,
+        incy: *const c_int,
+    );
+    #[cfg_attr(not(accelerate), link_name = "scipy_ddot_")]
+    fn ddot_(
+        n: *const c_int,
+        x: *const c_double,
+        incx: *const c_int,
+        y: *const c_double,
+        incy: *const c_int,
+    ) -> c_double;
+    #[cfg_attr(not(accelerate), link_name = "scipy_daxpy_")]
+    fn daxpy_(
+        n: *const c_int,
+        alpha: *const c_double,
+        x: *const c_double,
+        incx: *const c_int,
+        y: *mut c_double,
+        incy: *const c_int,
+    );
     #[cfg_attr(not(accelerate), link_name = "scipy_dgemv_")]
     fn dgemv_(
         trans: *const c_char,
@@ -510,6 +540,56 @@ pub fn gemv_t(m: usize, n: usize, a: &[f64], lda: usize, x: &[f64], y: &mut [f64
 
 /// `y = A'x` as `dgemv('T', m, n, 1.0, a, lda, x, 1, 0.0, y, 1)`, the call
 /// mgcv's tprs.c makes per row to map a radial/polynomial row through `UZ`.
+/// `y = A x` for the symmetric `n`-by-`n` `A` (column-major at `lda`) read
+/// from its upper triangle: BLAS `dsymv('U', n, 1, A, lda, x, 1, 0, y, 1)`.
+pub fn symv_u_set(n: usize, a: &[f64], lda: usize, x: &[f64], y: &mut [f64]) {
+    if n == 0 {
+        return;
+    }
+    let (ni, ldai, inc) = (n as c_int, lda.max(1) as c_int, 1 as c_int);
+    let (one, zero) = (1.0f64, 0.0f64);
+    /* SAFETY: `a` holds `n` columns at `lda`, `x` and `y` are `n` long, checked
+     * by the caller; `y` is the only `&mut`. */
+    unsafe {
+        dsymv_(
+            &ch(b'U'),
+            &ni,
+            &one,
+            a.as_ptr(),
+            &ldai,
+            x.as_ptr(),
+            &inc,
+            &zero,
+            y.as_mut_ptr(),
+            &inc,
+        );
+    }
+}
+
+/// BLAS `ddot(n, x, 1, y, 1)`.
+pub fn dot(x: &[f64], y: &[f64]) -> f64 {
+    let n = x.len().min(y.len());
+    if n == 0 {
+        return 0.0;
+    }
+    let (ni, inc) = (n as c_int, 1 as c_int);
+    /* SAFETY: both slices hold at least `n` entries. */
+    unsafe { ddot_(&ni, x.as_ptr(), &inc, y.as_ptr(), &inc) }
+}
+
+/// BLAS `daxpy(n, alpha, x, 1, y, 1)`: `y += alpha x`.
+pub fn axpy(alpha: f64, x: &[f64], y: &mut [f64]) {
+    let n = x.len().min(y.len());
+    if n == 0 {
+        return;
+    }
+    let (ni, inc) = (n as c_int, 1 as c_int);
+    /* SAFETY: both slices hold at least `n` entries; `y` is the only `&mut`. */
+    unsafe {
+        daxpy_(&ni, &alpha, x.as_ptr(), &inc, y.as_mut_ptr(), &inc);
+    }
+}
+
 pub fn gemv_t_set(m: usize, n: usize, a: &[f64], lda: usize, x: &[f64], y: &mut [f64]) {
     if n == 0 {
         return;

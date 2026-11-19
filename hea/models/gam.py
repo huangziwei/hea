@@ -52,6 +52,7 @@ from .._rlinalg import (
     r_chol,
     r_crossprod,
     r_matprod,
+    r_matprod_safe,
     r_norm,
     r_qr,
     r_qr_coef,
@@ -64,7 +65,7 @@ from .._rlinalg import (
     r_tcrossprod,
 )
 from .._rpow import _rpow
-from .._rsum import r_all_equal, r_colsums, r_mean, r_rowsums, r_sum, r_var
+from .._rsum import r_all_equal, r_colsums, r_mean, r_mean_int, r_rowsums, r_sum, r_var
 from ..family import (
     Binomial,
     Family,
@@ -950,6 +951,52 @@ def _penalty_root_of(
     return (V[:, keep] * np.sqrt(wv[keep])).T
 
 
+def _fit3_no_sps(g3, rho, family) -> dict:
+    """gam.outer's fit when nothing is optimized (``gam2objective`` at
+    ``L %*% lsp + lsp0``, gam.fit3.r:2166): one deriv-0 gam.fit3 call at the
+    fixed log smoothing parameters, from the user's start, with
+    ``control$epsilon`` as given."""
+    from ._fit3 import gam_fit3 as _fit3_port
+
+    sname = g3["sname"]
+    fit = _fit3_port(
+        g3["X"],
+        g3["y"],
+        np.asarray(rho, dtype=float),
+        g3["Eb"],
+        g3["UrS"],
+        family=family,
+        weights=g3["weights"],
+        start=g3["start"],
+        etastart=g3["etastart"],
+        mustart=g3["mustart"],
+        offset=g3["offset"],
+        U1=g3["U1"],
+        Mp=g3["Mp"],
+        epsilon=g3["epsilon"],
+        maxit=g3["maxit"],
+        scale_est=g3["scale_est"],
+        deriv=0,
+        gamma=g3["gamma"],
+        scale=g3["scale"],
+        score_type=g3["score_type"],
+        null_coef=g3["null_coef"],
+        n_true=g3["n_true"],
+        binom_n=g3["binom_n"],
+        x_finite=g3["x_finite"],
+        cache=g3["cache"],
+    )
+    fit["score"] = float(fit[sname])
+    return fit
+
+
+def _np_dev(family, y, mu, wt) -> float:
+    """``sum(dev.resids(y, mu, wt))`` by numpy's sum; a mean outside the
+    family's range gives NaN, which the caller's step halving handles."""
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return float(np.sum(family.dev_resids(y, mu, wt)))
+
+
 def _gam_fit3(
     x,
     y,
@@ -1148,7 +1195,7 @@ def _gam_fit3(
             break
         eta_new = X @ start  # β-only η
         mu_new = link.linkinv(eta_new + off)
-        dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
+        dev_new = _np_dev(family, y, mu_new, wt)
         pen_new = float(start @ Sλ @ start)
 
         # "inner loop 1" (gam.fit3.r:372-396): non-finite deviance →
@@ -1163,7 +1210,7 @@ def _gam_fit3(
                 start = 0.5 * (start + beta_old)
                 eta_new = 0.5 * (eta_new + eta_old)
                 mu_new = link.linkinv(eta_new + off)
-                dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
+                dev_new = _np_dev(family, y, mu_new, wt)
             boundary = True
             pen_new = float(start @ Sλ @ start)
 
@@ -1181,7 +1228,7 @@ def _gam_fit3(
                 mu_new = link.linkinv(eta_new + off)
             boundary = True
             pen_new = float(start @ Sλ @ start)
-            dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
+            dev_new = _np_dev(family, y, mu_new, wt)
 
         pdev_new = dev_new + pen_new
 
@@ -1205,7 +1252,7 @@ def _gam_fit3(
                 mu_new = link.linkinv(eta_new + off)
                 if not (link.valideta(eta_new + off) and family.validmu(mu_new)):
                     continue
-                dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
+                dev_new = _np_dev(family, y, mu_new, wt)
                 pen_new = float(start @ Sλ @ start)
                 pdev_cand = dev_new + pen_new
                 pdev_new = pdev_cand if np.isfinite(pdev_cand) else np.inf
@@ -4311,7 +4358,7 @@ def _gam_fit4(
             break
         eta_new = X @ start
         mu_new = link.linkinv(eta_new + off)
-        dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
+        dev_new = _np_dev(family, y, mu_new, wt)
         pen_new = float(start @ Sλ @ start)
 
         # inner loop 1 (gam.fit4.r:433-458): non-finite deviance.
@@ -4325,7 +4372,7 @@ def _gam_fit4(
                 start = 0.5 * (start + beta_old)
                 eta_new = 0.5 * (eta_new + eta_old)
                 mu_new = link.linkinv(eta_new + off)
-                dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
+                dev_new = _np_dev(family, y, mu_new, wt)
             pen_new = float(start @ Sλ @ start)
 
         # inner loop 2 (gam.fit4.r:461-477): invalid η/μ.
@@ -4339,7 +4386,7 @@ def _gam_fit4(
                 start = 0.5 * (start + beta_old)
                 eta_new = 0.5 * (eta_new + eta_old)
                 mu_new = link.linkinv(eta_new + off)
-            dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
+            dev_new = _np_dev(family, y, mu_new, wt)
             pen_new = float(start @ Sλ @ start)
 
         pdev_new = dev_new + pen_new
@@ -4360,7 +4407,7 @@ def _gam_fit4(
                 mu_new = link.linkinv(eta_new + off)
                 if not (link.valideta(eta_new + off) and family.validmu(mu_new)):
                     continue
-                dev_new = float(np.sum(family.dev_resids(y, mu_new, wt)))
+                dev_new = _np_dev(family, y, mu_new, wt)
                 pen_new = float(start @ Sλ @ start)
                 pdev_cand = dev_new + pen_new
                 pdev_new = pdev_cand if np.isfinite(pdev_cand) else np.inf
@@ -4522,6 +4569,7 @@ def newton(
     fisher_view_fn,
     rho_full_fn,
     T_working_fn,
+    g3=None,
 ):
     """Unified analytical Newton on V_R(ρ, log φ[, θ_fam]) or V_g/V_u(ρ)
     — mgcv's gam.outer, extended with a family-θ slot for ``tw()``.
@@ -4576,10 +4624,10 @@ def newton(
       estimate post-fit, not optimized; family θ has no GCV path).
     """
     edge_theta1 = None
-    if criterion not in ("REML", "GCV", "REML5", "GACV", "PREML"):
+    if criterion not in ("REML", "GCV", "REML5", "GACV", "PREML", "REML3"):
         raise ValueError(
-            "criterion must be 'REML', 'GCV', 'REML5', 'GACV' or "
-            f"'PREML', got {criterion!r}"
+            "criterion must be 'REML', 'GCV', 'REML5', 'GACV', 'PREML' or "
+            f"'REML3', got {criterion!r}"
         )
     if criterion in ("GCV", "GACV", "PREML") and include_log_phi:
         raise ValueError(f"{criterion} path does not include log φ in outer θ.")
@@ -4715,6 +4763,132 @@ def newton(
 
         def _hess(rho, log_phi, fit):
             return _to_working_hess(np.asarray(fit["REML2"], dtype=float))
+    elif criterion == "REML3":
+        # ordinary families through the gam.fit3 port: the score and its
+        # derivatives come with each fit, named as newton names them (REML
+        # for (P-)REML/(P-)ML, else the score type, gam.fit3.r:1312-1313);
+        # an accepted fit's coefficients and fitted values start the next
+        # (gam.fit3.r:1366-1368, 1503-1505, 1551-1553).
+        from ._fit3 import gam_fit3 as _fit3_port
+
+        sname3 = g3["sname"]
+        eps3 = min(float(g3["epsilon"]), conv_tol / 100.0)
+        # bam's compressed refits are Gaussian whatever the response family
+        # (bam.r:932)
+        fam3 = g3.get("family")
+        if fam3 is None:
+            fam3 = family
+        # an extended family's estimated parameters lead (estimate.gam,
+        # mgcv.r:2040-2057): t = [theta, working log sp, log scale], and L
+        # gains an identity block for theta
+        fit4 = bool(g3.get("fit4"))
+        nth3 = int(g3.get("nth", 0)) if fit4 else 0
+        T3 = T_work
+        if fit4 and nth3 and T_work is not None:
+            T3 = np.zeros((T_work.shape[0] + nth3, T_work.shape[1] + nth3))
+            T3[:nth3, :nth3] = np.eye(nth3)
+            T3[nth3:, nth3:] = T_work
+
+        def _to_w3(g):
+            # t(L) %*% grad (gam.fit3.r:1371)
+            if T3 is None:
+                return g
+            return r_matprod(np.ascontiguousarray(T3.T), g.reshape(-1, 1))[:, 0]
+
+        def _to_w3_hess(H):
+            # t(L) %*% hess %*% L (gam.fit3.r:1372)
+            if T3 is None:
+                return H
+            return r_matprod(r_matprod(np.ascontiguousarray(T3.T), H), T3)
+
+        def _fit3_at(t, d):
+            if fit4:
+                from ._fit4 import gam_fit4 as _fit4_port
+
+                sp_t = np.concatenate(
+                    [
+                        np.asarray(t[:nth3], dtype=float),
+                        np.asarray(rho_full_fn(t[nth3 : nth3 + n_work]), dtype=float),
+                    ]
+                )
+                if include_log_phi:
+                    sp_t = np.append(sp_t, t[-1])
+                return _fit4_port(
+                    g3["X"],
+                    g3["y"],
+                    sp_t,
+                    g3["Eb"],
+                    g3["UrS"],
+                    family=family,
+                    weights=g3["weights"],
+                    start=g3["start"],
+                    etastart=g3["etastart"],
+                    mustart=g3["mustart"],
+                    offset=g3["offset"],
+                    U1=g3["U1"],
+                    Mp=g3["Mp"],
+                    epsilon=eps3,
+                    maxit=g3["maxit"],
+                    deriv=d,
+                    gamma=g3["gamma"],
+                    scale=g3["scale"],
+                    score_type=g3["score_type"],
+                    null_coef=g3["null_coef"],
+                    use_wz=g3["use_wz"],
+                )
+            rho_t, lp_t = _split(t)
+            sp_t = np.asarray(rho_t, dtype=float)
+            if include_log_phi:
+                sp_t = np.append(sp_t, lp_t)
+            return _fit3_port(
+                g3["X"],
+                g3["y"],
+                sp_t,
+                g3["Eb"],
+                g3["UrS"],
+                family=fam3,
+                weights=g3["weights"],
+                start=g3["start"],
+                etastart=g3["etastart"],
+                mustart=g3["mustart"],
+                offset=g3["offset"],
+                U1=g3["U1"],
+                Mp=g3["Mp"],
+                epsilon=eps3,
+                maxit=g3["maxit"],
+                scale_est=g3["scale_est"],
+                deriv=d,
+                gamma=g3["gamma"],
+                scale=g3["scale"],
+                score_type=g3["score_type"],
+                null_coef=g3["null_coef"],
+                pearson_extra=g3.get("pearson_extra", 0.0),
+                dev_extra=g3.get("dev_extra", 0.0),
+                n_true=g3["n_true"],
+                binom_n=g3["binom_n"],
+                x_finite=g3["x_finite"],
+                cache=g3["cache"],
+            )
+
+        def _eval(t, deriv=2):
+            try:
+                fit_t = _fit3_at(t, deriv)
+            except Exception as err:  # noqa: BLE001
+                g3["error"] = err
+                return float("inf"), None
+            fit_t["theta"] = np.asarray(t, dtype=float).copy()
+            return float(fit_t[sname3]), fit_t
+
+        def _grad(rho, log_phi, fit):
+            if fit.get(sname3 + "2") is None:
+                fit.update(_fit3_at(fit["theta"], 2))
+            g3["fit"] = fit
+            g3["start"] = fit["coefficients"]
+            g3["mustart"] = fit["fitted.values"]
+            return _to_w3(np.asarray(fit[sname3 + "1"], dtype=float))
+
+        def _hess(rho, log_phi, fit):
+            return _to_w3_hess(np.asarray(fit[sname3 + "2"], dtype=float))
     elif criterion == "GACV":
         # GACV (gam.fit3.r:751): a GCV sibling for scale-unknown standard
         # families. ρ-only; analytic gradient + Hessian.
@@ -4728,7 +4902,9 @@ def newton(
     else:  # GCV
         _eval, _grad, _hess = _mk_score_closures("GCV")
 
-    is_reml = criterion in ("REML", "REML5", "PREML")
+    is_reml = criterion in ("REML", "REML5", "PREML") or (
+        criterion == "REML3" and g3["sname"] == "REML"
+    )
 
     def _score_scale(fit_, val):
         # mgcv's score.scale: |scale.est| + |score| (GCV/UBRE) or
@@ -4736,7 +4912,9 @@ def newton(
         # estimator — Pearson with the Fletcher (2012) correction
         # (gam.fit3.r:596-603, mgcv's default scale.est); for
         # known-scale families it is 1.
-        if family.scale_known:
+        if criterion == "REML3":
+            scale_est = float(fit_["scale.est"])
+        elif family.scale_known:
             scale_est = 1.0
         else:
             scale_est = _fit3_scale_est(
@@ -5055,6 +5233,8 @@ def newton(
         # fit — and the caller's k=2 refit — starts from the
         # converged coefficients like mgcv's.
         start_ec = g5["start"] if g5 is not None else None
+        if criterion == "REML3":
+            start_ec3 = (g3["start"], g3["mustart"])
         if flat.size:
             step_dir = (np.asarray(theta0, dtype=float) > theta) * 2.0 - 1.0
             f1 = f_prev
@@ -5066,6 +5246,8 @@ def newton(
                     theta1[i] = theta1[i] + step_dir[i]
                     if g5 is not None:
                         g5["start"] = start_ec
+                    if criterion == "REML3":
+                        g3["start"], g3["mustart"] = start_ec3
                     f1_new, _fit1 = _eval(theta1, deriv=0)
                     if not np.isfinite(f1_new):
                         theta1[i] = theta1[i] - step_dir[i]
@@ -5075,6 +5257,18 @@ def newton(
         if g5 is not None:
             g5["start"] = start_ec
         edge_theta1 = theta1
+        if criterion == "REML3":
+            # the deriv-2 fit at the walked-back point, from the converged
+            # start (gam.fit3.r:1686-1700); its Hessian and derivatives ride
+            # on outer.info's hess as attributes in mgcv
+            g3["start"], g3["mustart"] = start_ec3
+            b1 = _fit3_at(theta1, 2)
+            outer_info["edge"] = {
+                "hess1": _to_w3_hess(np.asarray(b1[sname3 + "2"], dtype=float)),
+                "db.drho1": b1["db.drho"],
+                "dw.drho1": b1["dw.drho"],
+                "lsp1": theta1.copy(),
+            }
     outer_fit = fit
     return {
         "theta": theta,
@@ -5439,6 +5633,7 @@ def gam_outer_nlm_optim(
     score_fn,
     rho_full_fn,
     T_working_fn,
+    g3=None,
 ):
     """mgcv ``gam.outer``'s nlm/optim branch (mgcv.r:1692-1717) with the
     three gam.fit3 objective wrappers it drives — ``gam2objective``
@@ -5480,14 +5675,114 @@ def gam_outer_nlm_optim(
     n_extra = (1 if include_log_phi else 0) + n_theta_fam
     T_work = T_working_fn(n_extra)
 
+    fit4 = g3 is not None and bool(g3.get("fit4"))
+
     def _to_lsp(t):
+        if fit4:  # already mgcv's [theta | log sp | log scale]
+            return np.asarray(t, dtype=float)
         base = n_work + (1 if include_log_phi else 0)
         return np.concatenate([t[base : base + n_theta_fam], t[:base]])
 
     def _to_working(lsp):
+        if fit4:
+            return np.asarray(lsp, dtype=float)
         return np.concatenate([lsp[n_theta_fam:], lsp[:n_theta_fam]])
 
-    def _eval(lsp, deriv):
+    def _eval3(lsp, deriv, start):
+        # the objectives on the gam.fit3 port: gam.fit3 at
+        # L %*% lsp + lsp0 from the user's start (gam2derivative passes
+        # none), control$epsilon as given, the gradient mapped by t(L)
+        from ._fit3 import gam_fit3 as _fit3_port
+
+        if fit4:
+            # an extended family: gam.fit4 at [theta, L lsp + lsp0, log
+            # scale], L carrying an identity block for theta (mgcv.r:
+            # 2048-2056)
+            from ._fit4 import gam_fit4 as _fit4_port
+
+            nth = int(g3.get("nth", 0))
+            la = np.asarray(lsp, dtype=float)
+            sp_t = np.concatenate(
+                [la[:nth], np.asarray(rho_full_fn(la[nth : nth + n_work]), dtype=float)]
+            )
+            if include_log_phi:
+                sp_t = np.append(sp_t, la[-1])
+            fit_t = _fit4_port(
+                g3["X"],
+                g3["y"],
+                sp_t,
+                g3["Eb"],
+                g3["UrS"],
+                family=family,
+                weights=g3["weights"],
+                start=g3["start"] if start else None,
+                etastart=g3["etastart"],
+                mustart=g3["mustart"],
+                offset=g3["offset"],
+                U1=g3["U1"],
+                Mp=g3["Mp"],
+                epsilon=g3["epsilon"],
+                maxit=g3["maxit"],
+                deriv=deriv,
+                gamma=g3["gamma"],
+                scale=g3["scale"],
+                score_type=g3["score_type"],
+                null_coef=g3["null_coef"],
+                use_wz=g3["use_wz"],
+            )
+            out = {"score": float(fit_t[g3["sname"]])}
+            if deriv:
+                g = np.asarray(fit_t[g3["sname"] + "1"], dtype=float)
+                if T_work is not None:
+                    T3 = np.zeros((T_work.shape[0] + nth, T_work.shape[1] + nth))
+                    T3[:nth, :nth] = np.eye(nth)
+                    T3[nth:, nth:] = T_work
+                    g = r_matprod(np.ascontiguousarray(T3.T), g.reshape(-1, 1))[:, 0]
+                out["grad"] = g
+            return fit_t, out
+
+        t = _to_working(np.asarray(lsp, dtype=float))
+        sp_t = np.asarray(rho_full_fn(t[:n_work]), dtype=float)
+        if include_log_phi:
+            sp_t = np.append(sp_t, t[n_work])
+        fit_t = _fit3_port(
+            g3["X"],
+            g3["y"],
+            sp_t,
+            g3["Eb"],
+            g3["UrS"],
+            family=family,
+            weights=g3["weights"],
+            start=g3["start"] if start else None,
+            etastart=g3["etastart"],
+            mustart=g3["mustart"],
+            offset=g3["offset"],
+            U1=g3["U1"],
+            Mp=g3["Mp"],
+            epsilon=g3["epsilon"],
+            maxit=g3["maxit"],
+            scale_est=g3["scale_est"],
+            deriv=deriv,
+            gamma=g3["gamma"],
+            scale=g3["scale"],
+            score_type=g3["score_type"],
+            null_coef=g3["null_coef"],
+            n_true=g3["n_true"],
+            binom_n=g3["binom_n"],
+            x_finite=g3["x_finite"],
+            cache=g3["cache"],
+        )
+        out = {"score": float(fit_t[g3["sname"]])}
+        if deriv:
+            g = np.asarray(fit_t[g3["sname"] + "1"], dtype=float)
+            if T_work is not None:
+                g = r_matprod(np.ascontiguousarray(T_work.T), g.reshape(-1, 1))[:, 0]
+            out["grad"] = g
+        return fit_t, out
+
+    def _eval(lsp, deriv, start=True):
+        if g3 is not None:
+            return _eval3(lsp, deriv, start)
         t = _to_working(np.asarray(lsp, dtype=float))
         rho_t = rho_full_fn(t[:n_work])
         lp_t = float(t[n_work]) if include_log_phi else float(np.log(scale_fixed_value))
@@ -5515,7 +5810,7 @@ def gam_outer_nlm_optim(
         return float(out["score"])
 
     def gam2derivative(lsp):
-        _, out = _eval(lsp, 1)
+        _, out = _eval(lsp, 1, start=False)
         return _to_lsp(np.asarray(out["grad"], dtype=float))
 
     def gam4objective(lsp):
@@ -5557,6 +5852,8 @@ def gam_outer_nlm_optim(
         lsp = np.asarray(b["par"], dtype=float)
     # final model fit, with warnings (mgcv.r:1711)
     score = gam2objective(lsp)
+    if g3 is not None:
+        fit_cell[0]["score"] = score
     return {
         "theta": _to_working(lsp),
         "fit": fit_cell[0],
@@ -6111,8 +6408,17 @@ class _G:
         pearson_scale_criterion,
         control,
         fixed_lsp0=None,
+        null_mean=None,
+        g3=None,
     ):
         self.n = n
+        # gam.fit3's fixed arguments when newton evaluates the score by the
+        # gam.fit3 port (criterion REML3)
+        self.g3 = g3
+        self.use_fit3 = g3 is not None
+        # mean(y) as get.null.coef takes it (integer responses keep R's
+        # integer mean)
+        self.null_mean = r_mean(y_arr) if null_mean is None else null_mean
         self.n_sp = n_sp
         self.n_work = n_work
         self.Mp = Mp
@@ -6438,9 +6744,45 @@ def estimate_gam(
             "used_nlm_optim": False,
             "tw_info": None,
         }
+
+    def _fit3_nothing_free(rho_hat):
+        # no free smoothing parameter: lsp is empty (mgcv.r:1998). An
+        # estimated (RE)ML scale is still optimized by newton, alone
+        # (mgcv.r:2025-2038); otherwise gam.outer's "no.sps" fit is one
+        # deriv-0 gam.fit3 call (gam2objective, gam.fit3.r:2166).
+        log_phi = None
+        if (not G.scale_known_fit) and method in ("REML", "ML"):
+            mu_null0 = np.full(n, G.null_mean)
+            null_scale = r_sum(family.dev_resids(G.y_arr, mu_null0, G.wt)) / n
+            theta_hat = gam_outer(
+                np.array([np.log(null_scale / 10)]),
+                optimizer="newton",
+                criterion="REML3",
+                control=G.control,
+                include_log_phi=True,
+                newton_fn=outer_newton,
+            )
+            log_phi = float(theta_hat[0])
+            fit = get_outer_fit()
+            if fit is None:
+                raise G.g3.get("error") or RuntimeError("gam.fit3 failed")
+        else:
+            fit = _fit3_no_sps(G.g3, rho_hat, family)
+        return {
+            "fit": fit,
+            "rho_hat": rho_hat,
+            "sp": np.zeros(0),
+            "log_phi_hat": log_phi,
+            "used_magic": False,
+            "used_nlm_optim": False,
+            "tw_info": None,
+        }
+
     if n_sp == 0:
         sp_out = np.zeros(0)
         rho_hat = np.zeros(0)
+        if G.use_fit3:
+            return _fit3_nothing_free(rho_hat)
         fit = fit_given_rho(rho_hat)
     elif sp is not None:
         sp_arr = np.asarray(sp, dtype=float)
@@ -6456,6 +6798,8 @@ def estimate_gam(
         # every parameter fixed: none is estimated, so mgcv's ``sp`` is
         # empty and the values live in ``full.sp`` (gam.outer, mgcv.r:1714)
         sp_out = np.zeros(0)
+        if G.use_fit3:
+            return _fit3_nothing_free(rho_hat)
         fit = fit_given_rho(rho_hat)
         # Unknown-scale (RE)ML at fixed sp: set log φ̂ to the criterion
         # minimizer over log φ at this ρ (gam.fit3.r:121-123 appends log scale;
@@ -6501,7 +6845,7 @@ def estimate_gam(
         # fscale gam.outer hands nlm/optim (mgcv.r:2062, 1698, 1708).
         # mum = mean(y) unweighted (mgcv.r:1863) but the dev.resids
         # carry the prior weights (mgcv.r:1868).
-        mu_null0 = np.full(n, r_mean(G.y_arr))
+        mu_null0 = np.full(n, G.null_mean)
         null_scale = r_sum(family.dev_resids(G.y_arr, mu_null0, G.wt)) / n
         if include_log_phi:
             # in.out$scale replaces the null.scale/10 seed (mgcv.r:2028-2032)
@@ -6554,10 +6898,22 @@ def estimate_gam(
         if include_family_theta:
             theta0_parts.append(np.asarray(family.get_theta(), dtype=float))
         theta0 = np.concatenate(theta0_parts)
+        nth4 = 0
+        if G.use_fit3 and G.g3.get("fit4"):
+            # mgcv's order: the family's estimated parameters first
+            # (estimate.gam, mgcv.r:2040-2057)
+            nth4 = int(G.g3["nth"])
+            theta0_parts = [np.asarray(family.get_theta(), dtype=float)[:nth4], cur_rho]
+            if include_log_phi:
+                theta0_parts.append(np.array([cur_logphi]))
+            theta0 = np.concatenate(theta0_parts)
+            include_family_theta = False
 
         # Map the resolved method onto the outer-Newton criterion (mgcv's
         # scoreType, mgcv.r:1945-1959).
-        if method in ("REML", "ML"):
+        if G.use_fit3:
+            _criterion = "REML3"
+        elif method in ("REML", "ML"):
             _criterion = "REML"
         elif method in ("P-REML", "P-ML"):
             _criterion = "PREML"
@@ -6590,21 +6946,33 @@ def estimate_gam(
                 newton_fn=outer_newton,
             )
 
-        theta_sp = theta_hat[:n_work]
-        base = n_work
-        if include_log_phi:
-            log_phi_hat = float(theta_hat[base])
-            base += 1
-        else:
-            log_phi_hat = None
-        if include_family_theta:
-            family.set_theta(theta_hat[base : base + family.n_theta])
+        if G.use_fit3 and G.g3.get("fit4"):
+            # mgcv's order [theta, log sp, log scale]; gam.fit4 left the
+            # family at its last call's parameters
+            theta_sp = theta_hat[nth4 : nth4 + n_work]
+            log_phi_hat = float(theta_hat[-1]) if include_log_phi else None
             if isinstance(family, _tw_family):
                 tw_info = {
-                    "theta_hat": float(theta_hat[base]),
+                    "theta_hat": float(family.get_theta()[0]),
                     "p_hat": float(family.p),
                     "log_phi_hat": log_phi_hat,
                 }
+        else:
+            theta_sp = theta_hat[:n_work]
+            base = n_work
+            if include_log_phi:
+                log_phi_hat = float(theta_hat[base])
+                base += 1
+            else:
+                log_phi_hat = None
+            if include_family_theta:
+                family.set_theta(theta_hat[base : base + family.n_theta])
+                if isinstance(family, _tw_family):
+                    tw_info = {
+                        "theta_hat": float(theta_hat[base]),
+                        "p_hat": float(family.p),
+                        "log_phi_hat": log_phi_hat,
+                    }
         sp_out = np.exp(theta_sp)
         rho_hat = rho_full(theta_sp)
         # Build the final fit WITHOUT re-solving PIRLS at ρ̂: mgcv's gam.outer
@@ -6614,9 +6982,11 @@ def estimate_gam(
         outer_fit = get_outer_fit()
         if outer_fit is not None:
             fit = outer_fit
+        elif G.use_fit3:
+            raise G.g3.get("error") or RuntimeError("gam.fit3 failed")
         else:
             fit = fit_given_rho(rho_hat)
-        if G.pearson_scale_criterion:
+        if G.pearson_scale_criterion and not G.use_fit3:
             log_phi_hat = float(np.log(max(phi_pearson(fit), 1e-300)))
     return {
         "fit": fit,
@@ -6930,6 +7300,9 @@ class gam:
     # (binomial/poisson known at 1, everything else estimated) — the
     # pre-scale= behavior, byte-identical.
     _scale_resolved: float | None = None
+    # gam(scale=) as given (estimate.gam passes it on to gam.fit3 for an
+    # unknown scale)
+    _scale_arg: float = 0.0
     _pirls_start: np.ndarray | None = None
     _pirls_etastart: np.ndarray | None = None
     _pirls_mustart: np.ndarray | None = None
@@ -6992,6 +7365,9 @@ class gam:
         return self.method in ("P-REML", "P-ML")
 
     _edge_correct: bool | float = False
+    # gam.fit3's fixed arguments while newton runs on the gam.fit3 port
+    # (`_fit3_args`); None otherwise
+    _g3: dict | None = None
     _edge_theta1: np.ndarray | None = None
     # mgcv's attr(hess,"hess1")/attr(hess,"lsp1") (gam.fit3.r:1708-1711):
     # the deriv-2 Hessian and working log-sp at the walked-back θ1 —
@@ -7267,6 +7643,7 @@ class gam:
         if not (np.isscalar(scale) and np.isfinite(scale)):
             raise ValueError(f"scale must be a finite number, got {scale!r}")
         scale = float(scale)
+        self._scale_arg = scale
         if self._family_mgcv_extended:
             # mgcv.r:1948-1949: extended families resolve scale from the
             # family when scale≤0 (φ=1 for the tw/nb/scat deviance); a user
@@ -7729,6 +8106,8 @@ class gam:
         w0 = self._init_fisher_w(y, X=X)
         Xw0 = X * np.sqrt(np.maximum(w0, 0.0))[:, None]
         rank0, drop0, R0_struct = _pls_rank_drop(Xw0, slots, p)
+        if self._fit3_eligible(sp, method):
+            drop0 = drop0[:0]
         # Cache the n×q QR factor of √w₀·X for the magic path to reuse as its
         # getRpqr R (no second n×q QR). Valid only with NO column drop — after a
         # drop the magic design is the reduced X, factored fresh. Under
@@ -7848,6 +8227,7 @@ class gam:
         n_sp = len(slots)
         self._log_phi_hat: float | None = None
         self._outer_info: dict | None = None
+        self._outer_theta = np.zeros(0)
         # True when the Gaussian-additive GCV `magic` fast path runs (mgcv's
         # am.fit). Its post-proc mirrors magic.post.proc (mgcv.r:4475): edf1
         # only, edf2 NULL → edf, no Vc — mgcv computes no sp-uncertainty
@@ -7868,6 +8248,7 @@ class gam:
                 "in the constructor instead (e.g. Tweedie(p=...), "
                 "scat(theta=(nu, sigma)))."
             )
+        self._g3 = self._fit3_args(sp, method)
         # mgcv's estimate.gam (mgcv.r:1872): smoothness selection + final
         # fit. Bundle the setup outputs into G and thread the fitter callables
         # (the C1 poly seam newton/bfgs already use), then assign the returned
@@ -7886,6 +8267,8 @@ class gam:
             pearson_scale_criterion=self._pearson_scale_criterion,
             control=self._control,
             fixed_lsp0=self._fixed_lsp0,
+            null_mean=self._null_mean(),
+            g3=self._g3,
         )
         _res = estimate_gam(
             G,
@@ -7924,6 +8307,30 @@ class gam:
         self._used_nlm_optim = _res.get("used_nlm_optim", False)
         self._outer_deriv0 = self._used_efs or self._used_nlm_optim
 
+        # newton ran on the gam.fit3 port: gam.outer passes gam.fit3's last
+        # fit to gam.fit3.post.proc (mgcv.r:1684-1736); the rest of the
+        # assembly reads that fit through a _FitState.
+        fit3 = fit if isinstance(fit, dict) else None
+        post3 = None
+        if fit3 is not None:
+            post3 = self._fit3_post_proc(fit3, method)
+            fit = _FitState(
+                beta=np.asarray(fit3["coefficients"], dtype=float),
+                dev=float(fit3["deviance"]),
+                pen=float("nan"),
+                A_chol=None,
+                A_chol_lower=False,
+                S_full=None,
+                log_det_A=float("nan"),
+                eta=np.asarray(fit3["linear.predictors"], dtype=float),
+                mu=np.asarray(fit3["fitted.values"], dtype=float),
+                w=np.asarray(fit3["weights"], dtype=float),
+                z=np.asarray(fit3["z"], dtype=float),
+                converged=bool(fit3["converged"]),
+                boundary=bool(fit3["boundary"]),
+                warn=list(fit3["warn"]),
+            )
+
         # Surface inner-loop warnings once, for the final fit only — mgcv
         # accumulates them in gam.fit3's warn list and intermediate newton()
         # evaluations run with printWarn=FALSE (gam.fit3.r:796-807).
@@ -7947,7 +8354,7 @@ class gam:
         # id linkage and nothing fixed.
         self.full_sp = np.exp(np.asarray(rho_hat, dtype=float))
 
-        fit_F = self._fisher_view(fit)
+        fit_F = fit if post3 is not None else self._fisher_view(fit)
         A_chol = fit_F.A_chol
         A_chol_lower = fit_F.A_chol_lower
         # Fisher working weights — needed by reTest (Wood 2013) so summary()
@@ -7956,7 +8363,12 @@ class gam:
             np.asarray(fit_F.w, dtype=float).copy() if fit_F.w is not None else None
         )
         am = self._am if self._used_magic else None
-        if am is not None:
+        if post3 is not None:
+            A_inv = None
+            A_inv_XtWX = post3["F"]
+            edf = post3["edf"]
+            edf_total = r_sum(edf)
+        elif am is not None:
             # am.fit's magic.post.proc (mgcv.r:2646-2650): V = rV rV'.
             A_inv = r_tcrossprod(np.asarray(am["rV"], dtype=float))
             A_inv_XtWX = None
@@ -8013,7 +8425,15 @@ class gam:
             deviance_scale = pearson_scale
         self._pearson_scale = pearson_scale
         self._fletcher_scale = fletcher_scale
-        if am is not None:
+        if post3 is not None:
+            # gam.outer: the known scale, else gam.fit3's scale.est
+            # (mgcv.r:1722-1724)
+            scale = (
+                self._scale_fixed_value
+                if self._scale_known_fit
+                else float(fit3["scale.est"])
+            )
+        elif am is not None:
             # am.fit's sig2: magic's scale estimate, or the known scale.
             scale = float(am["sig2"])
         elif self._scale_known_fit:
@@ -8038,7 +8458,10 @@ class gam:
             else float("nan")
         )
 
-        if am is not None:
+        if post3 is not None:
+            Vp = post3["Vp"]
+            Ve = post3["Ve"]
+        elif am is not None:
             Vp = np.asarray(am["Vp"], dtype=float)
             Ve = np.asarray(am["Ve"], dtype=float)
         else:
@@ -8097,7 +8520,9 @@ class gam:
         self.sigma_squared = sigma_squared
         self.scale = sigma_squared  # mgcv's `$scale`
 
-        if am is not None:
+        if post3 is not None:
+            self.leverage = post3["hat"]
+        elif am is not None:
             # am.fit's hat: magic.post.proc's leverages of the rows with
             # positive weight; the others have none.
             self.leverage = np.zeros(n)
@@ -8130,7 +8555,10 @@ class gam:
         # as.integer(intercept) term is always 1 via gam).
         # For Gaussian (V=1, wt=1, offset=0) this reduces to
         # Σ(y - mean(y))² = tss.
-        if am is not None:
+        if post3 is not None:
+            self.null_deviance = float(fit3["null.deviance"])
+            self.df_null = float(n - int(np.sum(wt == 0.0)) - 1)
+        elif am is not None:
             # am.fit's own (mgcv.r:2632-2635): the intercept-free model's
             # null deviance is that of the offset.
             self.null_deviance = float(am["null_deviance"])
@@ -8215,7 +8643,19 @@ class gam:
         else:
             self.deviance_explained = float("nan")
 
-        if (
+        if post3 is not None:
+            # mgcv's outer.info$hess, newton's Hessian in the working
+            # parameters (with log scale when it is one)
+            self._n_theta_aug = 0
+            hess3 = (self._outer_info or {}).get("hess")
+            # gam.vcomp drops an extended family's parameters (mgcv.r:4296)
+            nth3 = int((self._g3 or {}).get("nth", 0))
+            H_aug = (
+                np.asarray(hess3, dtype=float)[nth3:, nth3:]
+                if method in ("REML", "ML", "P-REML", "P-ML") and hess3 is not None
+                else None
+            )
+        elif (
             method in ("REML", "ML", "P-REML", "P-ML")
             and n_sp > 0
             and not self._outer_deriv0
@@ -8290,7 +8730,14 @@ class gam:
         compute_edf2 = (
             method in ("REML", "ML", "P-REML", "P-ML") and not self._outer_deriv0
         )
-        if am is not None:
+        if post3 is not None:
+            # gam.fit3.post.proc: edf2 and Vc NULL off (RE)ML; edf2 := edf
+            # so logLik.gam/AIC use edf, Vc := Vp
+            self.edf1 = post3["edf1"]
+            self.edf2 = post3["edf2"] if post3["edf2"] is not None else edf.copy()
+            self.edf1_total = r_sum(self.edf1)
+            self.edf2_total = r_sum(self.edf2)
+        elif am is not None:
             # am.fit returns magic.post.proc's edf1 and no edf2 or Vc
             # (mgcv.r:2664-2669); edf2 := edf so logLik.gam/AIC use edf.
             self.edf1 = np.asarray(am["edf1"], dtype=float)
@@ -8329,7 +8776,15 @@ class gam:
             self.edf1_total = edf_total
             self.edf2_total = edf_total
             Vc_corr = np.zeros_like(Vp)
-        self.Vc = Vp + Vc_corr
+        if post3 is not None:
+            self.Vc = post3["Vc"] if post3["Vc"] is not None else Vp
+            edge3 = (self._outer_info or {}).get("edge")
+            if edge3 is not None:
+                # mgcv's attr(hess, "hess1") / "lsp1" (gam.fit3.r:1708-1710)
+                self._hess1_ec = np.asarray(edge3["hess1"], dtype=float)
+                self._lsp1_ec = np.asarray(edge3["lsp1"], dtype=float).copy()
+        else:
+            self.Vc = Vp + Vc_corr
 
         # edge.correct: recompute the Vc correction at the edge-corrected
         # smoothing parameters (gam.fit3.post.proc's k=2 pass,
@@ -8337,7 +8792,8 @@ class gam:
         # (mgcv computes edf2 only at k=1); only Vc is replaced. The k=2
         # prior on Vr is 1e-7, not the k=1 1/10 (gam.fit3.r:1011).
         if (
-            self._edge_theta1 is not None
+            post3 is None
+            and self._edge_theta1 is not None
             and method in ("REML", "ML")
             and n_sp > 0
             and np.isfinite(sigma_squared)
@@ -8421,7 +8877,10 @@ class gam:
         # (gam.fit3.r:850) — distinct from wt = pw·n when extra prior
         # weights are present.
         n_aic = self._binom_n if self._binom_n is not None else n
-        if am is not None:
+        if post3 is not None:
+            # gam(): gam.fit3's aic plus 2 sum(edf) (mgcv.r:1843)
+            mgcv_aic = float(fit3["aic"]) + 2.0 * edf_total
+        elif am is not None:
             mgcv_aic = float(am["aic"])
         else:
             family_aic = float(self.family.aic(y, fit.mu, dev1, wt, n_aic))
@@ -8446,7 +8905,20 @@ class gam:
         self.BIC = -2.0 * logLik + float(np.log(n)) * df_for_aic
         self._mgcv_aic = float(mgcv_aic)  # mgcv's m$aic (different from AIC!)
 
-        if self._is_laplace:
+        if post3 is not None:
+            # gam.outer's gcv.ubre: newton's final score (mgcv.r:1688); hea
+            # keeps twice the (RE)ML score
+            # the final fit carries the score when no newton ran
+            score3 = float(
+                fit3["score"] if "score" in fit3 else self._outer_info["score"]
+            )
+            if not self._is_laplace:
+                self.GCV_score = score3
+            elif self._reml_ind == 1.0:
+                self.REML_criterion = 2.0 * score3
+            else:
+                self.ML_criterion = 2.0 * score3
+        elif self._is_laplace:
             # `_reml` returns -2·V_R (REML/P-REML) or -2·V_ML (ML/P-ML);
             # `summary()`'s `/2` recovers mgcv's `-REML`/`-ML` display value.
             # P-REML/P-ML always use the Pearson-Laplace scale φ = P/(n−Mp)
@@ -8488,7 +8960,10 @@ class gam:
         self.vcomp = self._compute_vcomp()
 
         _fw_now = self._fisher_w if self._fisher_w is not None else np.ones(n)
-        if am is not None:
+        if post3 is not None:
+            # gdi1's rank estimate (gam.fit3.r:866)
+            self.rank = int(fit3["rank"])
+        elif am is not None:
             # am.fit's rank: magic's at convergence (mgcv.r:2652).
             self.rank = int(am["rank"])
         elif _fw_now.shape == w0.shape and np.array_equal(_fw_now, w0):
@@ -8579,6 +9054,183 @@ class gam:
             offset=self._offset,
         )["deviance"]
 
+    def _fit3_eligible(self, sp, method) -> bool:
+        """Whether the fit goes through the gam.fit3 port
+        (``hea.models._fit3``): an ordinary exponential family, the newton
+        optimizer (or no free smoothing parameter), the compiled gdi1, and
+        not the Gaussian GCV fit ``am.fit`` makes. Known before the design's
+        rank is checked: such a fit keeps every column, as mgcv's does, and
+        gdi1's rank detection zeroes what is not identifiable."""
+        from ._fit3 import _gdi1
+        from ._fit4 import _gdi2
+
+        if self._family_mgcv_extended:
+            # gam.fit4, which gam.fit3 hands an extended family to
+            # (gam.fit3.r:106), under newton, nlm, optim or efs
+            return not (
+                _gdi2 is None
+                or sp is not None
+                or getattr(self.family, "is_general", False)
+                or method not in ("REML", "ML")
+                or not (
+                    tuple(self.optimizer)[:1] == ("efs",)
+                    or tuple(self.optimizer)[:2]
+                    in (("outer", "newton"), ("outer", "nlm"), ("outer", "optim"))
+                )
+            )
+        return not (
+            _gdi1 is None
+            or (sp is not None and self._fixed_lsp0 is None)
+            or self.family.n_theta > 0
+            or not (
+                tuple(self.optimizer)[:1] == ("efs",)
+                or tuple(self.optimizer)[:2]
+                in (("outer", "newton"), ("outer", "nlm"), ("outer", "optim"))
+            )
+            or method not in ("REML", "ML", "P-REML", "P-ML", "GCV.Cp", "GACV.Cp")
+            or (method == "GCV.Cp" and self._use_am())
+        )
+
+    def _fit3_args(self, sp, method) -> dict | None:
+        """gam.outer's fixed arguments to newton's gam.fit3 calls
+        (mgcv.r:1678-1682) when the fit goes through the gam.fit3 port
+        (:meth:`_fit3_eligible`, with mgcv's penalty roots ``UrS`` built);
+        ``None`` leaves it to the other fitters."""
+        if (
+            not self._fit3_eligible(sp, method)
+            or (self._UrS is None and self._slots)
+            or self._keep_cols is not None
+        ):
+            return None
+        # estimate.gam's scale (mgcv.r:1946-1971): the known value, else the
+        # user's for (RE)ML and -1 for GCV/GACV; gam.fit3's PIRLS
+        # convergence test reads its absolute value
+        if self._scale_known_fit:
+            scale = self._scale_fixed_value
+        elif self._family_mgcv_extended:
+            scale = -1.0
+        elif method in ("GCV.Cp", "GACV.Cp"):
+            scale = self._scale_arg if self._scale_arg != 0 else -1.0
+        else:
+            scale = self._scale_arg
+        if method in ("GCV.Cp", "GACV.Cp"):
+            if scale > 0:
+                score_type = "UBRE"
+            else:
+                score_type = "GCV" if method == "GCV.Cp" else "GACV"
+        else:
+            score_type = method
+        Y, Z, Eb = _total_penalty_space(self._slots, self.p, self._H_fixed)
+        ctrl = self._control or _GAM_CONTROL_DEFAULTS
+        X = np.asfortranarray(self._X_full)
+        return {
+            "X": X,
+            "x_finite": r_matprod_safe(X),
+            "cache": {},
+            "y": self._y_arr,
+            "Eb": Eb,
+            "UrS": self._UrS if self._slots else [],
+            "U1": np.hstack([Y, Z]),
+            "Mp": Z.shape[1],
+            "weights": self._wt,
+            "offset": self._offset,
+            "null_coef": self._resolve_null_coef(),
+            "binom_n": self._binom_n,
+            "n_true": -1.0,
+            "scale": scale,
+            "score_type": score_type,
+            "sname": "REML"
+            if score_type in ("REML", "ML", "P-REML", "P-ML")
+            else score_type,
+            "gamma": self._gamma,
+            "epsilon": ctrl["epsilon"],
+            "maxit": ctrl["maxit"],
+            "scale_est": ctrl["scale_est"],
+            "start": self._pirls_start,
+            # gam(mustart=, etastart=) reach newton through ``...``: mustart
+            # seeds its first gam.fit3 call, etastart every call
+            # (gam.fit3.r:1294, 1360)
+            "mustart": self._pirls_mustart,
+            "etastart": self._pirls_etastart,
+            # extended families: gam.fit4, the family's estimated
+            # parameters first in sp
+            "fit4": self._family_mgcv_extended,
+            "nth": int(self.family.n_theta) if self._family_mgcv_extended else 0,
+            "use_wz": bool(getattr(self.family, "use_wz", False)),
+        }
+
+    def _fit3_post_proc(self, fit3: dict, method: str) -> dict:
+        """gam.outer's ``gam.fit3.post.proc(G$X, G$L, G$lsp0, G$S, G$off,
+        object, gamma)`` (mgcv.r:1735) on newton's last gam.fit3 fit, with
+        ``object$sp`` the exp of newton's working log smoothing parameters
+        and ``G$L``/``G$lsp0`` carrying the log scale as one more parameter
+        when (RE)ML estimates it (mgcv.r:2030-2038)."""
+        from ._fit3 import gam_fit3_post_proc
+
+        info = self._outer_info or {}
+        L = self._L
+        lsp0 = (
+            np.zeros(len(self._slots))
+            if self._lsp0 is None
+            else np.asarray(self._lsp0, dtype=float)
+        )
+        if self._fixed_lsp0 is not None:
+            # every sp fixed: gam.setup's L keeps no columns (mgcv.r:1529)
+            L = np.zeros((len(self._slots), 0))
+            lsp0 = np.asarray(self._fixed_lsp0, dtype=float)
+        if method in ("REML", "ML") and not self._scale_known_fit:
+            if L is not None:
+                n_r, n_c = L.shape
+                La = np.zeros((n_r + 1, n_c + 1))
+                La[:n_r, :n_c] = L
+                La[n_r, n_c] = 1.0
+                L = La
+            lsp0 = np.append(lsp0, 0.0)
+        # an extended family's estimated parameters lead (mgcv.r:2048-2056)
+        nth = int((self._g3 or {}).get("nth", 0))
+        if nth:
+            if L is not None:
+                La = np.zeros((L.shape[0] + nth, L.shape[1] + nth))
+                La[:nth, :nth] = np.eye(nth)
+                La[nth:, nth:] = L
+                L = La
+            lsp0 = np.concatenate([np.zeros(nth), lsp0])
+        # the model matrix the fit ran on (bam's PIRLS refits each work on
+        # their own iteration's R)
+        X3 = (self._g3 or {}).get("X")
+        return gam_fit3_post_proc(
+            self._X_full if X3 is None else X3,
+            L,
+            lsp0,
+            [slot.S for slot in self._slots],
+            [slot.col_start for slot in self._slots],
+            fit3,
+            scale=self._scale_fixed_value,
+            scale_estimated=not self._scale_known_fit,
+            method=method,
+            sp=np.exp(np.asarray(self._outer_theta, dtype=float)),
+            hess=info.get("hess"),
+            edge=info.get("edge"),
+            nth=nth,
+        )
+
+    def _null_mean(self) -> float:
+        """``mean(y)`` as mgcv's get.null.coef takes it (mgcv.r:1863), after
+        the family's ``initialize``: R's integer mean for an integer or
+        logical response, unless binomial's ``initialize`` has made it double
+        (``y[weights == 0] <- 0``)."""
+        y = self.y
+        y_arr = self._y_arr
+        if self.family.name == "Ordered Categorical":
+            # mgcv numbers ocat's classes 1..R, hea 0..R-1
+            y_arr = y_arr + 1.0
+        integer = isinstance(y, pl.Series) and (
+            y.dtype.is_integer() or y.dtype == pl.Boolean
+        )
+        if integer and self.family.name not in ("binomial", "quasibinomial"):
+            return r_mean_int(y_arr)
+        return r_mean(y_arr)
+
     def _resolve_null_coef(self) -> np.ndarray:
         """mgcv ``get.null.coef`` (mgcv.r:1854-1869): the null model's
         coefficients, gam.fit3/gam.fit4's divergence baseline and shrink
@@ -8594,7 +9246,7 @@ class gam:
             if fam_hook is not None:
                 nc, _null_scale = fam_hook(X, y, self._wt, self._offset)
             else:
-                mum = np.full(self.n, r_mean(y))
+                mum = np.full(self.n, self._null_mean())
                 etam = family.link.link(mum)
                 nc = r_qr_coef(r_qr(X), etam)
                 nc[np.isnan(nc)] = 0.0
@@ -9680,6 +10332,30 @@ class gam:
             self._outer_fit = None
             self._edge_theta1 = None
             return np.asarray(theta0, dtype=float)
+        work_dim, rho_full_fn, T_working_fn = (
+            self._work_dim,
+            self._rho_full,
+            self._T_working,
+        )
+        if criterion == "REML3" and (self._fixed_lsp0 is not None or not self._slots):
+            # no free sp: mgcv's L keeps no columns, so newton runs over the
+            # log scale alone (mgcv.r:2030-2038)
+            n_sl = len(self._slots)
+            lsp_fixed = (
+                np.zeros(0)
+                if self._fixed_lsp0 is None
+                else np.asarray(self._fixed_lsp0, dtype=float)
+            )
+
+            def rho_full_fn(t):
+                return lsp_fixed.copy()
+
+            def T_working_fn(k):
+                T = np.zeros((n_sl + k, k))
+                T[n_sl:, :] = np.eye(k)
+                return T
+
+            work_dim = 0
         res = newton(
             theta0,
             include_log_phi=include_log_phi,
@@ -9692,7 +10368,7 @@ class gam:
             max_half=max_half,
             qerror_thresh=qerror_thresh,
             family=self.family,
-            work_dim=self._work_dim,
+            work_dim=work_dim,
             X=getattr(self, "_X_full", None),
             y=getattr(self, "_y_arr", None),
             wt=getattr(self, "_wt", None),
@@ -9704,12 +10380,14 @@ class gam:
             fit_fn=self._fit_given_rho,
             score_fn=self._score_all,
             fisher_view_fn=self._fisher_view,
-            rho_full_fn=self._rho_full,
-            T_working_fn=self._T_working,
+            rho_full_fn=rho_full_fn,
+            T_working_fn=T_working_fn,
+            g3=getattr(self, "_g3", None),
         )
         self._outer_info = res["outer_info"]
         self._outer_fit = res["outer_fit"]
         self._edge_theta1 = res["edge_theta1"]
+        self._outer_theta = res["theta"]
         return res["theta"]
 
     def _outer_bfgs(
@@ -9767,9 +10445,11 @@ class gam:
             score_fn=self._score_all,
             rho_full_fn=self._rho_full,
             T_working_fn=self._T_working,
+            g3=getattr(self, "_g3", None),
         )
         self._outer_info = res["outer_info"]
         self._outer_fit = res["fit"]
+        self._outer_theta = res["theta"]
         return res["theta"]
 
     def _outer_efsudr(self, rho0: np.ndarray, log_phi0: float | None) -> dict:
@@ -9778,7 +10458,38 @@ class gam:
         (gam.outer never forwards gamma to efsudr, mgcv.r:1665, and
         efsudr hard-codes ``gamma=1`` in its gam.fit3 calls), and
         persists the ``outer_info``/``outer_fit`` writes like
-        `_outer_newton` does."""
+        `_outer_newton` does. On the gam.fit3 port the iteration is
+        `hea.models._fit3.efsudr3`."""
+        if self._g3 is not None:
+            from ._fit3 import efsudr3
+
+            lsp = np.asarray(rho0, dtype=float)
+            if log_phi0 is not None:
+                lsp = np.append(lsp, log_phi0)
+            nth = int(self._g3.get("nth", 0))
+            if nth:
+                # an extended family's parameters lead (mgcv.r:2048-2056)
+                th0 = np.asarray(self.family.get_theta(), dtype=float)[:nth]
+                lsp = np.concatenate([th0, lsp])
+            ctrl = self._control or _GAM_CONTROL_DEFAULTS
+            fit3 = efsudr3(
+                self._g3,
+                lsp,
+                self.family,
+                lspmax=ctrl["efs_lspmax"],
+                efs_tol=ctrl["efs_tol"],
+            )
+            self._outer_info = fit3["outer.info"]
+            self._outer_fit = fit3
+            self._outer_theta = fit3["lsp"]
+            n_s = len(self._slots)
+            return {
+                "fit": fit3,
+                "rho": fit3["lsp"][nth : nth + n_s],
+                "log_phi_reml": float(fit3["lsp"][-1])
+                if log_phi0 is not None
+                else None,
+            }
 
         def _reml1(rho_c, lp_c, fit_c):
             return _reml(
@@ -10852,6 +11563,9 @@ class gam:
         """
         if conf_lev <= 0.0 or conf_lev >= 1.0:  # mgcv's guard
             conf_lev = 0.95
+        if len(np.atleast_1d(self.sp)) == 0:
+            # mgcv.r:4245: no smoothing parameter estimated, no table
+            return None
         n_sp = len(self._slots)
         scale_sd = float(self.sigma) if np.isfinite(self.sigma) else float("nan")
 
@@ -13207,7 +13921,7 @@ class gam:
                 out.append(f"{pd_text}eigenvalue range [{ev_min:.7g},{ev_max:.7g}].")
         rank_disp = self.rank if self.rank is not None else self.p
         p_disp = getattr(self, "_p_orig", None) or self.p
-        out.append(f"Model rank = {rank_disp} / {p_disp}")
+        out.append(f"Model rank =  {rank_disp} / {p_disp} ")
         out.append("")
 
         ktab = self._k_check(
@@ -15092,11 +15806,18 @@ def _mgcv_getXXt(X: np.ndarray) -> np.ndarray:
     return out
 
 
+_tr_bt_ab_rs = rs_fn("tr_bt_ab")
+
+
 def _mgcv_trBtAB(A: np.ndarray, B: np.ndarray) -> float:
     """mgcv's ``trBtAB`` as compiled inline in get_stableS: for each column
     j of B and k of A, ``tr += A[i,k]*B[i,j]*B[k,j]`` over i - eight terms
     at a time rounded (both products) and added in order, the last
     ``n % 8`` (all when n < 8) with the final product fused."""
+    if _tr_bt_ab_rs is not None:
+        return float(
+            _tr_bt_ab_rs(np.asarray(A, dtype=float), np.asarray(B, dtype=float))
+        )
     n, m = B.shape
     nv = n - n % 8 if n >= 8 else 0
     tr = 0.0

@@ -18,6 +18,7 @@
 use crate::lapack::blas::dgemm;
 use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
+use rayon::prelude::*;
 
 #[inline(always)]
 fn fma(a: f64, b: f64, c: f64) -> f64 {
@@ -824,6 +825,403 @@ fn ztb(a: &mut [f64], o1: usize, o0: usize, v: &[f64], qc: i32, di: usize, p: us
     }
 }
 
+/// R's `revsort` (sort.c): `a` into descending order by heapsort, `ib`
+/// carried alongside.
+fn revsort(a: &mut [f64], ib: &mut [usize]) {
+    let n = a.len();
+    if n <= 1 {
+        return;
+    }
+    // 1-based, as R writes it
+    let mut l = (n >> 1) + 1;
+    let mut ir = n;
+    loop {
+        let (ra, ii);
+        if l > 1 {
+            l -= 1;
+            ra = a[l - 1];
+            ii = ib[l - 1];
+        } else {
+            ra = a[ir - 1];
+            ii = ib[ir - 1];
+            a[ir - 1] = a[0];
+            ib[ir - 1] = ib[0];
+            ir -= 1;
+            if ir == 1 {
+                a[0] = ra;
+                ib[0] = ii;
+                return;
+            }
+        }
+        let mut i = l;
+        let mut j = l << 1;
+        while j <= ir {
+            if j < ir && a[j - 1] > a[j] {
+                j += 1;
+            }
+            if ra > a[j - 1] {
+                a[i - 1] = a[j - 1];
+                ib[i - 1] = ib[j - 1];
+                i = j;
+                j += i;
+            } else {
+                j = ir + 1;
+            }
+        }
+        a[i - 1] = ra;
+        ib[i - 1] = ii;
+    }
+}
+
+/// mgcv's `XWXd1`: the `X'WX` blocks of the row terms `rs` against the
+/// column terms `cs` (0-based), as a compact `ptot x ctot` matrix
+/// (column-major), each constrained as `XWXd0` does. With `symmetric` (one
+/// side given; `cs` is then `rs`) a single-index diagonal block forms only
+/// its upper sub-blocks and the result is mirrored; otherwise every
+/// sub-block is formed. mgcv squashes `ptot` columns out of the row
+/// padding, which leaves later columns in place when the column terms are
+/// wider; all `ctot` are squashed here.
+#[allow(clippy::too_many_arguments)]
+fn xwxd1(
+    x: &[f64],
+    w_in: &[f64],
+    k: &[i32],
+    ks: &[i32],
+    m: &[i32],
+    p: &[i32],
+    ts: &[i32],
+    dt: &[i32],
+    v: &[f64],
+    qc: &[i32],
+    ar_weights: &[f64],
+    rs: &[usize],
+    cs: &[usize],
+    symmetric: bool,
+) -> (Vec<f64>, usize, usize) {
+    let nx = m.len();
+    let nt = ts.len();
+    let n = w_in.len();
+    let mut pt = vec![0usize; nt];
+    let mut pd = vec![0usize; nt];
+    let mut off = vec![0usize; nx + 1];
+    let mut voff = vec![0usize; nt + 1];
+    let mut q = 0;
+    for i in 0..nt {
+        for jj in 0..dt[i] as usize {
+            if jj == dt[i] as usize - 1 {
+                pd[i] = p[q] as usize;
+            }
+            off[q + 1] = off[q] + p[q] as usize * m[q] as usize;
+            pt[i] = if jj == 0 {
+                p[q] as usize
+            } else {
+                pt[i] * p[q] as usize
+            };
+            q += 1;
+        }
+        voff[i + 1] = if qc[i] == 0 {
+            voff[i]
+        } else if qc[i] > 0 {
+            voff[i] + pt[i]
+        } else {
+            voff[i] + v[voff[i]].round() as usize + 2
+        };
+    }
+    let constrained = |i: usize| -> usize {
+        if qc[i] == 0 {
+            pt[i]
+        } else if qc[i] > 0 {
+            pt[i] - 1
+        } else {
+            let si = v[voff[i]].round() as usize;
+            pt[i] - v[voff[i] + si + 1].round() as usize
+        }
+    };
+    // where each selected term starts, constrained and not, in the row set
+    // and in the column set
+    let mut tpsr = vec![0usize; nt + 1];
+    let mut tpsur = vec![0usize; nt + 1];
+    let (mut kk, mut ii) = (0usize, 0usize);
+    for &r in rs {
+        tpsr[r] = kk;
+        tpsur[r] = ii;
+        kk += constrained(r);
+        ii += pt[r];
+    }
+    let (ptot, nxwx) = (kk, ii);
+    let mut tpsc = vec![0usize; nt + 1];
+    let mut tpsuc = vec![0usize; nt + 1];
+    let (mut kk, mut ii) = (0usize, 0usize);
+    for &c in cs {
+        tpsc[c] = kk;
+        tpsuc[c] = ii;
+        kk += constrained(c);
+        ii += pt[c];
+    }
+    let (ctot, ncu) = (kk, ii);
+    let tri = !ar_weights.is_empty();
+    let (w, ws) = if tri {
+        let sw: Vec<f64> = w_in.iter().map(|v| v.sqrt()).collect();
+        let mut ws = vec![0.0f64; 2 * n - 2];
+        for i in 0..n - 1 {
+            let val = ar_weights[2 * i + 1] * ar_weights[2 * i + 2] * sw[i + 1] * sw[i];
+            ws[i] = val;
+            ws[i + n - 1] = val;
+        }
+        let mut wd = sw.clone();
+        for i in 0..n - 1 {
+            let a = fma(
+                ar_weights[2 * i + 1],
+                ar_weights[2 * i + 1],
+                ar_weights[2 * i] * ar_weights[2 * i],
+            );
+            wd[i] *= a * sw[i];
+        }
+        let i = n - 1;
+        wd[i] *= sw[i] * ar_weights[2 * i] * ar_weights[2 * i];
+        (wd, ws)
+    } else {
+        (w_in.to_vec(), Vec::new())
+    };
+    let cx = Ctx {
+        x,
+        k,
+        ks,
+        m,
+        p,
+        ts,
+        dt,
+        nx,
+        n,
+        off,
+        w,
+        ws,
+        tri,
+        ht: sm_inihash(),
+    };
+    // the main blocks, their sub-block counts and rough costs; the
+    // sub-blocks are formed most costly first (R's revsort), the order
+    // deciding which of two overlapping mirrored writes survives
+    let (mut bl_r, mut bl_c, mut sb, mut bl_cost) =
+        (Vec::new(), Vec::new(), vec![0usize], Vec::new());
+    for (ri, &r) in rs.iter().enumerate() {
+        let c0 = if symmetric { ri } else { 0 };
+        for &c in &cs[c0..] {
+            bl_r.push(r);
+            bl_c.push(c);
+            let si = cx.ksn(ts[r] as usize);
+            let cnt = if symmetric && r == c && si == 1 && !tri {
+                let i = pt[r] / pd[r];
+                i * (i + 1) / 2
+            } else {
+                (pt[r] / pd[r]) * (pt[c] / pd[c])
+            };
+            sb.push(sb[sb.len() - 1] + cnt);
+            let mrc = m[r].wrapping_mul(m[c]);
+            let cost = if (mrc as i64) < n as i64 {
+                let a = mrc as f64 * pd[c] as f64;
+                let x = mrc as f64 * pd[r] as f64;
+                if x < a {
+                    x
+                } else {
+                    a
+                }
+            } else {
+                let a = n as f64 * pd[c] as f64;
+                let x = n as f64 * pd[r] as f64;
+                if x < a {
+                    x
+                } else {
+                    a
+                }
+            };
+            bl_cost.push(cost);
+        }
+    }
+    let nsub = sb[sb.len() - 1];
+    let mut owner = vec![0usize; nsub];
+    let mut cost = vec![0.0f64; nsub];
+    let mut order: Vec<usize> = (0..nsub).collect();
+    let mut kb = 0;
+    for i in 0..nsub {
+        while i >= sb[kb + 1] {
+            kb += 1;
+        }
+        owner[i] = kb;
+        cost[i] = bl_cost[kb];
+    }
+    revsort(&mut cost, &mut order);
+    // Sub-blocks write only inside their main block, and only those of one
+    // main block can overwrite each other: each main block is formed on its
+    // own, its sub-blocks in their sorted order, the blocks in parallel.
+    let mut per_block: Vec<Vec<usize>> = vec![Vec::new(); bl_r.len()];
+    for &kk in &order {
+        per_block[owner[kk]].push(kk);
+    }
+    let blocks: Vec<Vec<f64>> = per_block
+        .par_iter()
+        .enumerate()
+        .map(|(kb, subs)| {
+            let (rb, cb) = (bl_r[kb], bl_c[kb]);
+            let ld = pt[rb];
+            let mut blk = vec![0.0f64; (pt[rb] * pt[cb]).max(1)];
+            let rt = pt[rb] / pd[rb];
+            let ct = pt[cb] / pd[cb];
+            for &kk in subs {
+                let mut i = kk - sb[kb];
+                let (r, c) = if symmetric && sb[kb + 1] - sb[kb] < rt * ct {
+                    let mut r = 0;
+                    while i >= rt - r {
+                        i -= rt - r;
+                        r += 1;
+                    }
+                    (r, i + r)
+                } else {
+                    (i / ct, i % ct)
+                };
+                xwxijs(&cx, &mut blk, 0, ld, rb, cb, r, c);
+            }
+            blk
+        })
+        .collect();
+    let mut xwx = vec![0.0f64; (nxwx * ncu.max(nxwx)).max(1)];
+    for (kb, blk) in blocks.iter().enumerate() {
+        let (rb, cb) = (bl_r[kb], bl_c[kb]);
+        let ld = pt[rb];
+        let base = tpsur[rb] + nxwx * tpsuc[cb];
+        for jj in 0..pt[cb] {
+            xwx[base + jj * nxwx..base + jj * nxwx + ld]
+                .copy_from_slice(&blk[jj * ld..jj * ld + ld]);
+        }
+    }
+    for (ri, &r) in rs.iter().enumerate() {
+        let c0 = if symmetric { ri } else { 0 };
+        for &c in &cs[c0..] {
+            let pa;
+            if dt[r] > 1 && qc[r] != 0 {
+                for jj in 0..pt[c] {
+                    let o0 = tpsur[r] + (tpsuc[c] + jj) * nxwx;
+                    let o1 = tpsr[r] + (tpsuc[c] + jj) * nxwx;
+                    ztb(&mut xwx, o1, o0, &v[voff[r]..], qc[r], 1, pt[r]);
+                }
+                pa = pt[r] - 1;
+            } else {
+                pa = pt[r];
+                if tpsur[r] != tpsr[r] {
+                    for jj in 0..pt[c] {
+                        let o0 = tpsur[r] + (tpsuc[c] + jj) * nxwx;
+                        let o1 = tpsr[r] + (tpsuc[c] + jj) * nxwx;
+                        for l in 0..pt[r] {
+                            xwx[o1 + l] = xwx[o0 + l];
+                        }
+                    }
+                }
+            }
+            if dt[c] > 1 && qc[c] != 0 {
+                for jj in 0..pa {
+                    let o0 = tpsr[r] + jj + tpsuc[c] * nxwx;
+                    let o1 = tpsr[r] + jj + tpsc[c] * nxwx;
+                    ztb(&mut xwx, o1, o0, &v[voff[c]..], qc[c], nxwx, pt[c]);
+                }
+            } else if tpsuc[c] != tpsc[c] {
+                for jj in 0..pa {
+                    let o0 = tpsr[r] + jj + tpsuc[c] * nxwx;
+                    let o1 = tpsr[r] + jj + tpsc[c] * nxwx;
+                    for l in 0..pt[c] {
+                        xwx[o1 + l * nxwx] = xwx[o0 + l * nxwx];
+                    }
+                }
+            }
+        }
+    }
+    let mut out = vec![0.0f64; ptot * ctot];
+    for cc in 0..ctot {
+        for rr in 0..ptot {
+            out[rr + cc * ptot] = xwx[rr + cc * nxwx];
+        }
+    }
+    if symmetric {
+        for i in 0..ptot {
+            for jj in i + 1..ptot {
+                out[jj + i * ptot] = out[i + jj * ptot];
+            }
+        }
+    }
+    (out, ptot, ctot)
+}
+
+/// mgcv's `XWXd1` (the `lt`/`rt` path of `XWXd`): the blocks of `X'WX`
+/// for the row terms `rs` against the column terms `cs` (0-based), an
+/// empty side meaning the other, as a `ptot x ctot` matrix (column-major).
+#[pyfunction]
+#[pyo3(name = "xwxd1")]
+#[allow(clippy::too_many_arguments)]
+fn xwxd1_py<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<'py, f64>,
+    w: PyReadonlyArray1<'py, f64>,
+    k: PyReadonlyArray1<'py, i32>,
+    ks: PyReadonlyArray1<'py, i32>,
+    m: PyReadonlyArray1<'py, i32>,
+    p: PyReadonlyArray1<'py, i32>,
+    ts: PyReadonlyArray1<'py, i32>,
+    dt: PyReadonlyArray1<'py, i32>,
+    v: PyReadonlyArray1<'py, f64>,
+    qc: PyReadonlyArray1<'py, i32>,
+    ar_weights: PyReadonlyArray1<'py, f64>,
+    rs: Vec<usize>,
+    cs: Vec<usize>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, usize, usize)> {
+    let (x, w, k, ks) = (x.as_slice()?, w.as_slice()?, k.as_slice()?, ks.as_slice()?);
+    let (m, p, ts, dt) = (m.as_slice()?, p.as_slice()?, ts.as_slice()?, dt.as_slice()?);
+    let (v, qc, arw) = (v.as_slice()?, qc.as_slice()?, ar_weights.as_slice()?);
+    let n = w.len();
+    let nx = m.len();
+    let nt = ts.len();
+    if ks.len() != 2 * nx || p.len() != nx || dt.len() != nt || qc.len() != nt {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "xwxd1: inconsistent dimensions",
+        ));
+    }
+    if rs.is_empty() && cs.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "xwxd1: give the row terms, the column terms or both",
+        ));
+    }
+    if rs.iter().chain(cs.iter()).any(|&t| t >= nt) {
+        return Err(pyo3::exceptions::PyIndexError::new_err(
+            "xwxd1: no such term",
+        ));
+    }
+    for q in 0..nx {
+        let (c0, c1) = (ks[q], ks[q + nx]);
+        if c0 < 0 || c1 < c0 || (c1 as usize) * n > k.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "xwxd1: bad index columns",
+            ));
+        }
+        let col = &k[c0 as usize * n..c1 as usize * n];
+        let (lo, hi) = col
+            .iter()
+            .fold((i32::MAX, i32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+        if !col.is_empty() && (lo < 0 || hi >= m[q]) {
+            return Err(pyo3::exceptions::PyIndexError::new_err(
+                "xwxd1: an index exceeds its marginal's rows",
+            ));
+        }
+    }
+    let (rs, cs, symmetric) = if rs.is_empty() {
+        (cs.clone(), cs, true)
+    } else if cs.is_empty() {
+        (rs.clone(), rs, true)
+    } else {
+        (rs, cs, false)
+    };
+    let (out, ptot, ctot) =
+        py.allow_threads(|| xwxd1(x, w, k, ks, m, p, ts, dt, v, qc, arw, &rs, &cs, symmetric));
+    Ok((PyArray1::from_vec(py, out), ptot, ctot))
+}
+
 /// mgcv's `XWXd0`: the full `X'WX` (`ptot x ptot`, column-major).
 #[pyfunction]
 #[pyo3(name = "xwxd0")]
@@ -1046,5 +1444,6 @@ fn xwxd0(
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(xwxd0_py, m)?)?;
+    m.add_function(wrap_pyfunction!(xwxd1_py, m)?)?;
     Ok(())
 }

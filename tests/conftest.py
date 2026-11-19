@@ -1,3 +1,4 @@
+import gzip
 import json
 import math
 import os
@@ -81,12 +82,22 @@ def load_hex_fixture(path: Path) -> dict:
     """A fixture file written by an R script's ``dumpl``: per line an array's
     name, its dimensions joined by commas and its values as hexadecimal
     floats (matrices column-major), R's ``NA`` as NaN; ``None`` where the
-    line says "NULL"."""
+    line says "NULL", and the string after "CHR" where it holds one. A
+    ``.gz`` file is read through gzip."""
+    path = Path(path)
+    text = (
+        gzip.decompress(path.read_bytes()).decode()
+        if path.suffix == ".gz"
+        else path.read_text()
+    )
     out: dict = {}
-    for line in Path(path).read_text().splitlines():
+    for line in text.splitlines():
         parts = line.split()
         if parts[1] == "NULL":
             out[parts[0]] = None
+            continue
+        if parts[1] == "CHR":
+            out[parts[0]] = parts[2]
             continue
         dims = [int(v) for v in parts[1].split(",")]
         vals = np.array(

@@ -15,98 +15,12 @@ use numpy::ndarray::ShapeBuilder;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 
-use crate::lapack::blas::{dgemm, dsyrk};
 use crate::lapack::chol::dpstrf_u;
 use crate::lapack::fma;
-use crate::lapack::gesdd::{dgesdd, dgesdd_lwork};
 use crate::lapack::ormtr::{dormqr_l, dormqr_l_lwork};
 use crate::lapack::qr::{dgeqp3_free, dgeqp3_lwork};
 use crate::lapack::syevr::{dsyevr_all_lower, dsyevr_lwork};
-
-/// `sum a[i] b[i]` as clang vectorizes it: for `n >= 8` the first
-/// `8 floor(n/8)` products rounded and added in order, the rest fused.
-fn dot_s8(a: &[f64], b: &[f64]) -> f64 {
-    let n = a.len();
-    let nv = if n >= 8 { n / 8 * 8 } else { 0 };
-    let mut s = 0.0;
-    for i in 0..nv {
-        s += a[i] * b[i];
-    }
-    for i in nv..n {
-        s = fma(a[i], b[i], s);
-    }
-    s
-}
-
-/// `sum a[i]^2` as clang unrolls it: for `n > 3` the first `4 floor(n/4)`
-/// squares rounded and added in order, the rest fused.
-fn sumsq_s4(a: &[f64]) -> f64 {
-    let n = a.len();
-    let nv = if n > 3 { n / 4 * 4 } else { 0 };
-    let mut s = 0.0;
-    for &x in &a[..nv] {
-        s += x * x;
-    }
-    for &x in &a[nv..] {
-        s = fma(x, x, s);
-    }
-    s
-}
-
-/// mgcv's `getXtX`: `X'X` for the `r`-by-`c` `x` by `dsyrk('L', 'T')`, the
-/// upper triangle copied from the lower.
-unsafe fn get_xtx(xtx: *mut f64, x: *const f64, r: i32, c: i32) {
-    dsyrk(b'L', b'T', c, r, 1.0, x, r, 0.0, xtx, c);
-    let c = c as usize;
-    for i in 0..c {
-        for j in 0..i {
-            *xtx.add(j + i * c) = *xtx.add(i + j * c);
-        }
-    }
-}
-
-/// mgcv's `getXXt`: `X X'` for the `r`-by-`c` `x` by `dsyrk('L', 'N')`, the
-/// upper triangle copied from the lower.
-unsafe fn get_xxt(xxt: *mut f64, x: *const f64, r: i32, c: i32) {
-    dsyrk(b'L', b'N', r, c, 1.0, x, r, 0.0, xxt, r);
-    let r = r as usize;
-    for i in 0..r {
-        for j in 0..i {
-            *xxt.add(j + i * r) = *xxt.add(i + j * r);
-        }
-    }
-}
-
-/// mgcv's `mgcv_mmult`: `A = op(B) op(C)` (`r`-by-`c`, common dimension
-/// `n`) by one `dgemm`, or by `getXtX`/`getXXt` when `B` and `C` are the
-/// same matrix and the product is its cross product.
-#[allow(clippy::too_many_arguments)]
-unsafe fn mgcv_mmult(
-    a: *mut f64,
-    b: *const f64,
-    c: *const f64,
-    bt: bool,
-    ct: bool,
-    r: i32,
-    cc: i32,
-    n: i32,
-) {
-    if r <= 0 || cc <= 0 || n <= 0 {
-        return;
-    }
-    if std::ptr::eq(b, c) {
-        if bt && !ct && r == cc {
-            get_xtx(a, b, n, r);
-            return;
-        } else if ct && !bt && r == cc {
-            get_xxt(a, b, cc, n);
-            return;
-        }
-    }
-    let (ta, lda) = if bt { (b'T', n) } else { (b'N', r) };
-    let (tb, ldb) = if ct { (b'T', cc) } else { (b'N', n) };
-    dgemm(ta, tb, r, cc, n, 1.0, b, lda, c, ldb, 0.0, a, r);
-}
+use crate::mgcv_c::{dot_s8, get_xtx, mgcv_mmult, mgcv_svd_full, sumsq_s4};
 
 /// mgcv's C `mroot`: the pivoted Cholesky factor of the symmetric `n`-by-`n`
 /// `a` (`mgcv_chol`: `dpstrf('U')` at its default tolerance, then the
@@ -151,30 +65,6 @@ unsafe fn mroot(a: &mut [f64], rank_in: i32, n: usize) -> usize {
         }
     }
     rank
-}
-
-/// mgcv's `mgcv_svd_full`: `dgesdd` with `JOBZ = 'O'` on the `r`-by-`c`
-/// `x` (`r >= c`): `U` over `x`, `V'` in `vt`, the singular values in `d`.
-unsafe fn mgcv_svd_full(x: &mut [f64], vt: &mut [f64], d: &mut [f64], r: usize, c: usize) {
-    let lwork = dgesdd_lwork(b'O', r as i32, c as i32).max(1);
-    let mut work = vec![0.0f64; lwork as usize];
-    let mut iwork = vec![0i32; 8 * c.max(1)];
-    let mut udum = [0.0f64; 1];
-    dgesdd(
-        b'O',
-        r as i32,
-        c as i32,
-        x.as_mut_ptr(),
-        r as i32,
-        d.as_mut_ptr(),
-        udum.as_mut_ptr(),
-        r as i32,
-        vt.as_mut_ptr(),
-        c as i32,
-        work.as_mut_ptr(),
-        lwork,
-        iwork.as_mut_ptr(),
-    );
 }
 
 /// What `fit_magic` leaves for `magic_gH` and the driver.
@@ -245,7 +135,13 @@ unsafe fn fit_magic(pr: &Problem, sp: &[f64], scale: &mut f64, f: &mut Fit) {
         }
     }
     let mut vt = vec![0.0f64; q * q];
-    mgcv_svd_full(&mut rm, &mut vt, &mut f.d, r, q);
+    mgcv_svd_full(
+        rm.as_mut_ptr(),
+        vt.as_mut_ptr(),
+        f.d.as_mut_ptr(),
+        r as i32,
+        q as i32,
+    );
     let mut rank = q;
     let xx = f.d[0] * pr.rank_tol;
     while f.d[rank - 1] < xx {

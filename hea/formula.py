@@ -888,8 +888,12 @@ _tp_eval_b_rs = rs_fn("tp_eval_b")
 _tp_eval_E_rs = rs_fn("tp_eval_E")
 _tp_col_sumsq_rs = rs_fn("tp_col_sumsq")
 _tp_uz_rows_rs = rs_fn("tp_uz_rows")
+# the fused per-row build of [eta | T] UZ
+_tp_eval_x_rs = rs_fn("tp_eval_x")
+_tp_matmult_ta_rs = rs_fn("tp_matmult_ta")
 _dqrqty_rows_rs = rs_fn("dqrqty_rows")
 _r_dstedc_rs = rs_fn("r_dstedc")
+_tp_rlanczos_rs = rs_fn("tp_rlanczos")
 
 
 _ORDERED_COLS_CV: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
@@ -5657,6 +5661,19 @@ def _tp_eval_X_raw(
     n = x_c.shape[0]
     nu = Xu.shape[0]
     M = UZ.shape[0] - nu
+    if _tp_eval_x_rs is not None:
+        pp = np.ascontiguousarray(_tp_gen_poly_powers(M, m, d).astype(np.int64))
+        return np.asarray(
+            _tp_eval_x_rs(
+                np.ascontiguousarray(x_c),
+                np.ascontiguousarray(Xu),
+                int(m),
+                int(d),
+                float(eta0),
+                pp,
+                np.ascontiguousarray(UZ, dtype=float),
+            )
+        )
     if _tp_eval_b_rs is not None:
         pp = np.ascontiguousarray(_tp_gen_poly_powers(M, m, d).astype(np.int64))
         b = _tp_eval_b_rs(
@@ -5821,6 +5838,10 @@ def _tp_matmult_tA(A: np.ndarray, B: np.ndarray) -> np.ndarray:
     """mgcv matrix.c ``matmult(C, A, B, tA=1, tB=0)``, ``C = A'B``: C is
     zeroed, then for each row k of A (in order) ``C[i][:] += A[k][i] B[k][:]``
     fused, so every entry is an in-order fused sum over k."""
+    if _tp_matmult_ta_rs is not None:
+        return np.asarray(
+            _tp_matmult_ta_rs(np.asarray(A, dtype=float), np.asarray(B, dtype=float))
+        )
     C = np.zeros((A.shape[1], B.shape[1]))
     for k in range(A.shape[0]):
         C = _rfma_vec(A[k][:, None], B[k][None, :], C)
@@ -5899,11 +5920,16 @@ def _tp_rlanczos(
     (mat.c:3579): R's LAPACK ``dstedc('I')``, eigenpairs in descending order
     (:func:`_mgcv_trisymeig`).
     """
+    if tol is None:
+        tol = float(np.finfo(float).eps) ** 0.7
+    if _tp_rlanczos_rs is not None and A.shape[0] > 0:
+        D_rs, U_rs = _tp_rlanczos_rs(
+            np.ascontiguousarray(A, dtype=float), int(m), int(lm), float(tol)
+        )
+        return np.asarray(D_rs), np.asarray(U_rs)
     from scipy.linalg.blas import daxpy, ddot, dsymv
 
     n = A.shape[0]
-    if tol is None:
-        tol = float(np.finfo(float).eps) ** 0.7
     eps_stop = tol
 
     biggest = False

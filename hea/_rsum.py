@@ -19,7 +19,14 @@ import math
 
 import numpy as np
 
+from ._dispatch import rs_fn
+
 _BLOCK = 1 << 20
+# where ``long double`` is ``double`` the in-order sum is a plain double loop,
+# which the extension runs without materializing the cumulative sums
+_sum_cols_rs = (
+    rs_fn("sum_cols_inorder") if np.finfo(np.longdouble).nmant == 52 else None
+)
 
 
 def _ld_sum_rows(xl: np.ndarray) -> np.ndarray:
@@ -31,6 +38,8 @@ def _ld_sum_rows(xl: np.ndarray) -> np.ndarray:
     s = np.zeros(p, dtype=np.longdouble)
     if n == 0 or p == 0:
         return s
+    if _sum_cols_rs is not None:
+        return np.asarray(_sum_cols_rs(np.asarray(xl, dtype=np.float64)))
     step = max(1, _BLOCK // p)
     for a in range(0, n, step):
         blk = np.concatenate([s[None, :], xl[a : a + step]], axis=0)
@@ -73,6 +82,16 @@ def r_mean(x) -> float:
             t = _ld_sum((xl - s) / n)
             s = s + t
     return float(s)
+
+
+def r_mean_int(x) -> float:
+    """``integer_mean`` / ``logical_mean`` (R summary.c), ``mean`` of an
+    integer or logical vector: the in-order sum in R's long double divided by
+    n in it, then rounded to double, in one pass where :func:`r_mean`
+    corrects a double vector's mean in a second."""
+    xl = np.asarray(x).astype(np.longdouble).ravel()
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return float(_ld_sum(xl) / np.longdouble(xl.size))
 
 
 def r_colsums(x: np.ndarray, na_rm: bool = False, mean: bool = False) -> np.ndarray:

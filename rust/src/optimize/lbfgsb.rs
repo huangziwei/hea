@@ -4,6 +4,7 @@ use super::linpack::{
     daxpy, daxpy_same, dcopy, dcopy_same, ddot, ddot_same, dpofa, dscal, dtrsl, dtrsl_same,
 };
 use crate::nmath::util::rfma;
+use crate::ralign::RVec;
 
 const DBL_EPSILON: f64 = f64::EPSILON;
 
@@ -13,18 +14,18 @@ pub trait Objective {
 }
 
 pub struct State {
-    ws: Vec<f64>,
-    wy: Vec<f64>,
-    sy: Vec<f64>,
-    ss: Vec<f64>,
-    wt: Vec<f64>,
-    wn: Vec<f64>,
-    snd: Vec<f64>,
-    z: Vec<f64>,
-    r: Vec<f64>,
-    d: Vec<f64>,
-    t: Vec<f64>,
-    wa: Vec<f64>,
+    ws: RVec,
+    wy: RVec,
+    sy: RVec,
+    ss: RVec,
+    wt: RVec,
+    wn: RVec,
+    snd: RVec,
+    z: RVec,
+    r: RVec,
+    d: RVec,
+    t: RVec,
+    wa: RVec,
     indx: Vec<usize>,
     iwhere: Vec<i32>,
     indx2: Vec<usize>,
@@ -70,19 +71,41 @@ pub struct State {
 
 impl State {
     pub fn new(n: usize, m: usize) -> Self {
+        // R's setulb carves these out of one S_alloc block, which starts on
+        // a 16-byte boundary, at lws = 1, lwy = lws + m n, ... (lbfgsb.c:
+        // 335-346); each part starts where its offset puts it, which
+        // Accelerate's ddot reads (`ralign`)
+        let mut at = 0usize;
+        let mut part = |len: usize| {
+            let v = RVec::at(len, 8 * (at % 2));
+            at += len;
+            v
+        };
+        let ws = part(n * m);
+        let wy = part(n * m);
+        let sy = part(m * m);
+        let ss = part(m * m);
+        let wt = part(m * m);
+        let wn = part(4 * m * m);
+        let snd = part(4 * m * m);
+        let z = part(n);
+        let r = part(n);
+        let d = part(n);
+        let t = part(n);
+        let wa = part(8 * m);
         State {
-            ws: vec![0.0; n * m],
-            wy: vec![0.0; n * m],
-            sy: vec![0.0; m * m],
-            ss: vec![0.0; m * m],
-            wt: vec![0.0; m * m],
-            wn: vec![0.0; 4 * m * m],
-            snd: vec![0.0; 4 * m * m],
-            z: vec![0.0; n],
-            r: vec![0.0; n],
-            d: vec![0.0; n],
-            t: vec![0.0; n],
-            wa: vec![0.0; 8 * m],
+            ws,
+            wy,
+            sy,
+            ss,
+            wt,
+            wn,
+            snd,
+            z,
+            r,
+            d,
+            t,
+            wa,
             indx: vec![0; n],
             iwhere: vec![0; n],
             indx2: vec![0; n],
