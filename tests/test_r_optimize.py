@@ -22,9 +22,11 @@ hea == R holds on each. Two sources:
 * everywhere else — a live-R oracle: ``_R_ORACLE`` runs the identical
   problems in Rscript and ships every result as ``%a`` hex floats
   (decimal round-trips would hide 1-ulp gaps). Skipped when Rscript is
-  absent. On reference-BLAS platforms (Linux CI) sequential dot order
-  makes the emulation exact at every length, so bit-parity is expected
-  there too.
+  absent. Against R's unfused reference BLAS (Linux CI) the sequential
+  dot order makes the emulation exact at every length, so bit-parity is
+  expected there too. An R whose BLAS fuses multiply-adds (Ubuntu
+  26.04's x86-64-v3 ``libblas3``) rounds differently; the oracle probes
+  for it and skips there.
 
 The Rosenbrock problems, verbatim (the Python objectives below must
 stay literal-for-literal identical — R parses these decimal literals
@@ -121,6 +123,10 @@ grv <- function(x) c(-400*x[1]*(x[2]-x[1]^2) - 2*(1-x[1]),
                      200*(x[2]-x[1]^2))
 emit <- function(key, ...) cat(key, sprintf("%a", as.double(c(...))), "\n")
 
+# whether this R's BLAS fuses its multiply-adds: dgemv's second update,
+# -1 + (1 + 2^-27)^2, is 2^-26 + 2^-54 fused and 2^-26 rounded twice
+emit("blas_probe", drop(matrix(c(-1, 1 + 2^-27), 1) %*% c(1, 1 + 2^-27)))
+
 r <- nlm(fr, c(-1.2, 1))
 emit("nlm_default", r$minimum, r$estimate, r$gradient, r$code, r$iterations)
 
@@ -178,6 +184,15 @@ def rv(tmp_path_factory):
             vals[key] = rest.strip()
         else:
             vals[key] = [float.fromhex(tok) for tok in rest.split()]
+    # hea's dot products off darwin are the unfused in-order loop of the
+    # reference BLAS; an R whose BLAS fuses them (Ubuntu 26.04's x86-64-v3
+    # libblas3, for one) takes other rounding at every step, so the two
+    # trajectories are not meant to agree to the bit
+    if vals["blas_probe"][0] != 2.0**-26:
+        pytest.skip(
+            "this R's BLAS fuses multiply-adds; the bit-exact oracle needs "
+            "the unfused reference BLAS hea's dot products follow"
+        )
     return vals
 
 
