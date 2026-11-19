@@ -21,7 +21,7 @@ module-name = "hea._rs"              # compiled module installs as hea/_rs
 
 [project]
 name = "hea"
-version = "0.2.0"
+version = "0.2.1"
 description = "R-style Linear Models with Python"
 authors = []
 requires-python = ">=3.11.0"
