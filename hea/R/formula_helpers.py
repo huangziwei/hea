@@ -36,6 +36,8 @@ from dataclasses import dataclass
 import numpy as np
 import polars as pl
 
+from .._rpow import _rpow
+from .._rsum import r_colsums, r_mean
 from ..formula import (
     BinOp,
     Call,
@@ -51,7 +53,7 @@ from ..formula import (
     expand,
     parse,
 )
-from .linalg import dqrdc2, dqrsl
+from .linalg import dqrdc2, dqrsl, r_vector_like
 
 __all__ = [
     "DF2formula",
@@ -496,12 +498,8 @@ class Poly(np.ndarray):
 
 
 def _r_mean(x: np.ndarray) -> float:
-    """R's ``mean.default`` — two-pass long-double mean, cast to double."""
-    xl = np.asarray(x, dtype=np.longdouble)
-    n = xl.size
-    tmp = xl.sum() / n
-    tmp = tmp + (xl - tmp).sum() / n
-    return float(tmp)
+    """R's ``mean.default`` on a double vector (``real_mean``)."""
+    return r_mean(x)
 
 
 def _poly_fit(x: np.ndarray, degree: int):
@@ -519,24 +517,23 @@ def _poly_fit(x: np.ndarray, degree: int):
     xc = x - xbar
     n = x.size
     p = degree + 1
-    X = np.column_stack([xc**d for d in range(p)])  # outer(x, 0:degree, ^)
+    X = np.column_stack(
+        [_rpow(xc, float(d)) for d in range(p)]
+    )  # outer(x, 0:degree, `^`)
     qr, qraux, _jpvt, rank = dqrdc2(X, 1e-7)
     if rank < degree:
         raise ValueError("'degree' must be less than number of unique points")
-    Z = np.empty((n, p))
-    for j in range(p):  # z <- QR$qr*(row==col)
+    # qr.qy(QR, z), z <- QR$qr*(row==col): dqrqy applies dqrsl to each column
+    # of its own copy of z, so every column lies where R's n x p copy has it
+    Z = r_vector_like((n, p))
+    for j in range(p):
         col = np.zeros(n)
         col[j] = qr[j, j]
-        qy, *_ = dqrsl(qr, n, rank, qraux, col, 10000)  # qr.qy(QR, z)
-        Z[:, j] = qy
-    Zl = Z.astype(np.longdouble)
-    norm2 = np.asarray((Zl**2).sum(axis=0), dtype=np.longdouble)  # colSums LD
-    alpha = np.asarray(
-        (xc.astype(np.longdouble)[:, None] * Zl**2).sum(axis=0) / norm2
-        + np.longdouble(xbar),
-        dtype=float,
-    )[:degree]
-    norm2 = np.concatenate([[1.0], np.asarray(norm2, dtype=float)])
+        dqrsl(qr, n, rank, qraux, col, 10000, qy=Z[:, j])
+    Z2 = Z * Z
+    norm2 = r_colsums(Z2)  # colSums(Z^2)
+    alpha = (r_colsums(xc[:, None] * Z2) / norm2 + xbar)[:degree]
+    norm2 = np.concatenate([[1.0], norm2])
     Zn = Z / np.sqrt(norm2[1:])
     return Zn[:, 1:], alpha, norm2
 
@@ -588,7 +585,7 @@ def poly(x, *args, degree=1, coefs=None, raw=False, simple=False):
         raise ValueError("'degree' must be at least 1")
     x = x.astype(float)
     if raw:
-        Z = np.column_stack([x**d for d in range(1, degree + 1)])
+        Z = np.column_stack([_rpow(x, float(d)) for d in range(1, degree + 1)])
         names = [str(d) for d in range(1, degree + 1)]
         if simple:
             return Z

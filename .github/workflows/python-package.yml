@@ -152,7 +152,9 @@ jobs:
 
   build:
 
-    runs-on: ubuntu-latest
+    # the live-R oracles (tests/test_r_optimize.py) need R on the unfused
+    # reference BLAS; Ubuntu 26.04 installs an x86-64-v3 libblas3 that fuses
+    runs-on: ubuntu-24.04
     needs: bench-gate
     if: needs.bench-gate.outputs.suite == 'true'
     env:

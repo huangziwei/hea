@@ -793,7 +793,7 @@ class lm:
         sharing a single jointly-na-omitted model frame (so every column has the
         identical X/QR — R's mlm). Combined accessors (coef p×m, fitted/residuals
         n×m, sigma per-column) delegate to the per-column sub-models."""
-        from hea.formula import _eval_lhs_expr
+        from hea.formula import _eval_lhs_series
         from hea.formula import deparse as _deparse
         from hea.formula import parse as _parse
 
@@ -865,9 +865,7 @@ class lm:
         add = {}
         for lbl, node in mv_specs:
             if lbl not in cols:
-                add[lbl] = data.select(_eval_lhs_expr(node, cols).alias(lbl))[
-                    lbl
-                ].to_numpy()
+                add[lbl] = _eval_lhs_series(node, data, lbl).to_numpy()
         if add:
             data = data.with_columns([pl.Series(k, v) for k, v in add.items()])
 

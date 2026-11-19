@@ -1076,7 +1076,8 @@ def optdrv(
     """uncmin.c ``optdrv`` (:2166): the optimization driver. Mutates
     ``x`` (working copy), fills ``xpls``/``gpls``; returns ``(fpls,
     itrmcd, itncnt, msg)`` with msg < 0 on input error, 0 otherwise."""
-    a = np.zeros((n, n))
+    # column-major, as the C's: its columns are what ddot reads
+    a = np.zeros((n, n), order="F")
     udiag = np.zeros(n)
     g = np.zeros(n)
     p = np.zeros(n)

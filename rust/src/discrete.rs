@@ -289,10 +289,9 @@ macro_rules! borrow_flat {
 /// weighted bin accumulation, used by the `XWXijs` simple diagonal branch
 /// (`wb[K[kk]] += w[kk]`, discrete.c:1786) and by `singleXty` (:327).
 ///
-/// The numpy spelling is `np.bincount(K, weights=v, minlength=m)`, which costs
-/// 0.118 ms at `n = 110k` against 0.04 ms here: bincount cannot fuse the `v·u`
-/// product (forcing an `n`-long temporary) and pays a bounds check per row that
-/// the one-shot [`indices_in_range`] proof removes.
+/// It replaces `np.bincount(K, weights=v, minlength=m)`, which cannot fuse
+/// the `v·u` product (forcing an `n`-long temporary) and pays a bounds check
+/// per row that the one-shot [`indices_in_range`] proof removes.
 #[pyfunction]
 #[pyo3(name = "bin_accum")]
 fn bin_accum<'py>(

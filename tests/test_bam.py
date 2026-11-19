@@ -42,7 +42,16 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import pytest
-from conftest import have_rscript
+from conftest import FIXTURE_ROOT, PINNED_ARITHMETIC, have_rscript, load_hex_fixture
+
+from hea._dispatch import HAVE_RS
+
+# mgcv's fits rest on R's reference LAPACK (QR, Cholesky, the symmetric eigen
+# solvers), whose ports live in the extension; without it the bases' gauge and
+# the near-singular directions move, so the exact-fit fixtures need it.
+_needs_rs = pytest.mark.skipif(
+    not HAVE_RS, reason="the reference-LAPACK ports live in hea._rs"
+)
 
 import hea
 from hea.family import Binomial, Gamma, Gaussian, Poisson
@@ -335,24 +344,16 @@ def test_chicago_lag():
 
 
 # =============================================================================
-# 2b. RF signal-regression: matrix-argument by= under discrete=True (RF1)
+# 2b. RF signal regression: matrix-argument by= (summation convention)
 # =============================================================================
 #
-# bam(discrete=TRUE) with a matrix-argument ``by=`` (mgcv summation
-# convention) was the RF1 blocker — ``_term_full_design`` applied the
-# (n, n_sum) by-matrix as a length-n scalar mask AFTER the row-sum and
-# raised a broadcast error. The fix multiplies the by per summation column
-# BEFORE the row-sum (mgcv smooth.r:3997-4008), mirroring the non-discrete
-# S1c path (formula.py:_summation_apply_blocks).
-#
-# mgcv ``bam(discrete=TRUE)`` (bamT) BINS the matrix-arg by-variable
-# (bam.r:2469-2483: ``by.var <- dk$mf[[termk]]``; weight ``by.var[dk$k]``) —
-# a lossy step for a continuous by. hea ``discrete=True`` now replicates this
-# (RF1a fix): it weights the smooth by the **binned** by, so it pins to bamT
-# tightly. The EXACT (un-binned) by lives at ``bam(discrete=FALSE)`` (bamF) —
-# a continuous by makes bamF ≠ bamT by ~1e-3. Sourcing the raw by under
-# discrete=TRUE would be a parity bug (reproducing bamF under the bamT flag);
-# the bamF check below carries a lower bound to guard against that regression.
+# The oracle is tests/r_oracle/dump_bam_rf_by.R, fitted on the CSV data hea
+# reads. mgcv ``bam(discrete=TRUE)`` (bamT) bins the matrix-argument by
+# variable (bam.r:2469-2483: ``by.var <- dk$mf[[termk]]``, weight
+# ``by.var[dk$k]``), so for a continuous by it differs from the exact-by
+# ``bam(discrete=FALSE)`` (bamF) by about 1e-3. hea's ``discrete=True`` must
+# reproduce bamT, and the bamF band in the discrete tests guards against it
+# using the raw by instead.
 
 _RF_BY = Path(__file__).parent / "fixtures" / "bam_rf_by"
 
@@ -365,100 +366,66 @@ def _load_rf_matrix(name: str, cols: list[str]) -> dict:
     return out
 
 
-@pytest.mark.skipif(
-    not (_RF_BY / "te" / "bamF_fitted.csv").exists(),
-    reason="bam_rf_by oracle missing — run tests/r_oracle/dump_bam_rf_by.R",
-)
-def test_bam_discrete_matrix_by_2d_matches_mgcv():
-    """2-D ``te(Lag, Xc, by=Stim)`` signal regression under discrete=True.
-    rank-1 marginal (bam.r:2470-2482) and the fit applies the **binned** by
-    """
-    sub = "te"
-    d = _load_rf_matrix(sub, ["y"])
-    M = _load_rf_matrix(sub, ["Lag", "Xc", "Stim"])
-    dat = {"y": d["y"], "Lag": M["Lag"], "Xc": M["Xc"], "Stim": M["Stim"]}
-    f = "y ~ te(Lag, Xc, by=Stim, k=c(4,3))"
+def _assert_rf_matches(m, sub, which, fit_rtol, edf_atol):
+    """Fitted values and total edf equal mgcv's ``which`` fit to the bit on
+    the pinned arithmetic, and to ``fit_rtol``/``edf_atol`` elsewhere."""
+    from hea._rsum import r_sum
 
-    m = hea.models.bam(f, dat, family=Poisson(), discrete=True)
-
-    fitF = np.loadtxt(_RF_BY / sub / "bamF_fitted.csv")
-    fitT = np.loadtxt(_RF_BY / sub / "bamT_fitted.csv")
-    edfT = float(np.loadtxt(_RF_BY / sub / "bamT_edfsum.csv"))
-    fit_hea = np.asarray(m.fitted_values)
-
-    rel_F = float(np.linalg.norm(fit_hea - fitF) / np.linalg.norm(fitF))
-    rel_T = float(np.linalg.norm(fit_hea - fitT) / np.linalg.norm(fitT))
-    assert rel_T < 1e-6, f"hea-discrete vs mgcv bamT fitted rel {rel_T:.2e} > 1e-6"
-    assert abs(float(np.sum(m.edf)) - edfT) < 1e-4, (
-        f"edf {np.sum(m.edf):.5f} vs mgcv bamT {edfT:.5f}"
+    fit_r = np.loadtxt(_RF_BY / sub / f"{which}_fitted.csv")
+    edf_r = float(np.loadtxt(_RF_BY / sub / f"{which}_edfsum.csv"))
+    fit_hea = np.asarray(m.fitted_values, dtype=float)
+    edf_hea = float(r_sum(np.asarray(m.edf, dtype=float)))
+    if PINNED_ARITHMETIC:
+        np.testing.assert_array_equal(fit_hea, fit_r, err_msg=f"{sub} {which} fitted")
+        assert edf_hea == edf_r, f"{sub} {which} edf {edf_hea!r} vs mgcv {edf_r!r}"
+        return
+    rel = float(np.linalg.norm(fit_hea - fit_r) / np.linalg.norm(fit_r))
+    assert rel < fit_rtol, f"{sub} {which} fitted rel {rel:.2e} > {fit_rtol:.0e}"
+    assert abs(edf_hea - edf_r) < edf_atol, (
+        f"{sub} {which} edf {edf_hea:.6f} vs mgcv {edf_r:.6f}"
     )
-    assert 1e-4 < rel_F < 5e-3, (
-        f"hea-discrete vs mgcv bamF fitted rel {rel_F:.2e} not in (1e-4, 5e-3)"
+
+
+def _assert_not_bamf(m, sub):
+    """A discrete fit sits about 1e-3 from the exact-by bamF fit."""
+    fit_f = np.loadtxt(_RF_BY / sub / "bamF_fitted.csv")
+    fit_hea = np.asarray(m.fitted_values, dtype=float)
+    rel_f = float(np.linalg.norm(fit_hea - fit_f) / np.linalg.norm(fit_f))
+    assert 1e-4 < rel_f < 5e-3, (
+        f"hea-discrete vs mgcv bamF fitted rel {rel_f:.2e} not in (1e-4, 5e-3)"
     )
 
 
 @pytest.mark.skipif(
-    not (_RF_BY / "s" / "bamF_fitted.csv").exists(),
+    not (_RF_BY / "te" / "bamT_fitted.csv").exists(),
     reason="bam_rf_by oracle missing — run tests/r_oracle/dump_bam_rf_by.R",
 )
-def test_bam_discrete_matrix_by_1d_matches_mgcv():
-    """1-D ``s(Lag, by=Stim)`` signal regression under discrete=True."""
-    sub = "s"
-    d = _load_rf_matrix(sub, ["y"])
-    M = _load_rf_matrix(sub, ["Lag", "Stim"])
-    dat = {"y": d["y"], "Lag": M["Lag"], "Stim": M["Stim"]}
-    f = "y ~ s(Lag, by=Stim, k=8)"
-
-    m = hea.models.bam(f, dat, family=Poisson(), discrete=True)
-
-    fitF = np.loadtxt(_RF_BY / sub / "bamF_fitted.csv")
-    fitT = np.loadtxt(_RF_BY / sub / "bamT_fitted.csv")
-    edfT = float(np.loadtxt(_RF_BY / sub / "bamT_edfsum.csv"))
-    fit_hea = np.asarray(m.fitted_values)
-
-    rel_F = float(np.linalg.norm(fit_hea - fitF) / np.linalg.norm(fitF))
-    rel_T = float(np.linalg.norm(fit_hea - fitT) / np.linalg.norm(fitT))
-    assert rel_T < 1e-6, f"hea-discrete vs mgcv bamT fitted rel {rel_T:.2e} > 1e-6"
-    assert abs(float(np.sum(m.edf)) - edfT) < 1e-4, (
-        f"edf {np.sum(m.edf):.5f} vs mgcv bamT {edfT:.5f}"
-    )
-    assert 1e-4 < rel_F < 5e-3, (
-        f"hea-discrete vs mgcv bamF fitted rel {rel_F:.2e} not in (1e-4, 5e-3)"
-    )
-
-
-@pytest.mark.skipif(
-    not (_RF_BY / "te_ridge" / "bamT_fitted.csv").exists(),
-    reason="bam_rf_by oracle missing — run tests/r_oracle/dump_bam_rf_by.R",
+@pytest.mark.parametrize(
+    "sub, f, cols, fit_rtol, edf_atol",
+    [
+        ("te", "y ~ te(Lag, Xc, by=Stim, k=c(4,3))", ["Lag", "Xc", "Stim"], 1e-6, 1e-4),
+        ("s", "y ~ s(Lag, by=Stim, k=8)", ["Lag", "Stim"], 1e-6, 1e-4),
+        (
+            "te_ridge",
+            "y ~ te(Lag, Xc, by=Stim, k=c(4,3))",
+            ["Lag", "Xc", "Stim"],
+            1e-5,
+            1e-3,
+        ),
+    ],
 )
-def test_bam_discrete_matrix_by_ridge_basin_matches_mgcv():
-    """RF1b regression guard: a near-ridge ``te(Lag, Xc, by=Stim)`` whose true
-    RF varies in Lag but is ~flat in Xc, so the fREML sp-search pushes the Xc
-    margin onto a near-linear ridge (sp ~5e3).
-    bam.r:2470-2482) aligned the design, hence the surface, hence the basin: hea
-    """
-    sub = "te_ridge"
+def test_bam_discrete_matrix_by_matches_mgcv(sub, f, cols, fit_rtol, edf_atol):
+    """Matrix-argument ``by=`` under ``discrete=True`` equals mgcv bamT: the
+    by enters as the first tensor marginal, binned (bam.r:2470-2482), and the
+    fit weights each summation column by ``by.var[k[:, ks_by+q]]``
+    (discrete.c tensorXb). ``te_ridge`` is a near-ridge surface (the Xc
+    margin's sp is about 5e3) where the fREML search has a second basin."""
     d = _load_rf_matrix(sub, ["y"])
-    M = _load_rf_matrix(sub, ["Lag", "Xc", "Stim"])
-    dat = {"y": d["y"], "Lag": M["Lag"], "Xc": M["Xc"], "Stim": M["Stim"]}
-    f = "y ~ te(Lag, Xc, by=Stim, k=c(4,3))"
-
+    dat = {"y": d["y"]}
+    dat.update(_load_rf_matrix(sub, cols))
     m = hea.models.bam(f, dat, family=Poisson(), discrete=True)
-
-    fitF = np.loadtxt(_RF_BY / sub / "bamF_fitted.csv")
-    fitT = np.loadtxt(_RF_BY / sub / "bamT_fitted.csv")
-    edfT = float(np.loadtxt(_RF_BY / sub / "bamT_edfsum.csv"))
-    fit_hea = np.asarray(m.fitted_values)
-
-    rel_F = float(np.linalg.norm(fit_hea - fitF) / np.linalg.norm(fitF))
-    rel_T = float(np.linalg.norm(fit_hea - fitT) / np.linalg.norm(fitT))
-    assert rel_T < 1e-5, f"hea-discrete vs mgcv bamT fitted rel {rel_T:.2e} > 1e-5"
-    assert abs(float(np.sum(m.edf)) - edfT) < 1e-3, (
-        f"edf {np.sum(m.edf):.5f} vs mgcv bamT {edfT:.5f} (basin drift?)"
-    )
-    assert 1e-4 < rel_F < 5e-3, (
-        f"hea-discrete vs mgcv bamF fitted rel {rel_F:.2e} not in (1e-4, 5e-3)"
-    )
+    _assert_rf_matches(m, sub, "bamT", fit_rtol, edf_atol)
+    _assert_not_bamf(m, sub)
 
 
 @pytest.mark.skipif(
@@ -466,32 +433,28 @@ def test_bam_discrete_matrix_by_ridge_basin_matches_mgcv():
     reason="bam_rf_by oracle missing — run tests/r_oracle/dump_bam_rf_by.R",
 )
 @pytest.mark.parametrize(
-    "sub,f,cols,fit_rtol,edf_atol",
+    "sub, f, cols, fit_rtol, edf_atol",
     [
         ("te", "y ~ te(Lag, Xc, by=Stim, k=c(4,3))", ["Lag", "Xc", "Stim"], 1e-5, 1e-3),
         ("s", "y ~ s(Lag, by=Stim, k=8)", ["Lag", "Stim"], 1e-8, 1e-8),
+        (
+            "te_ridge",
+            "y ~ te(Lag, Xc, by=Stim, k=c(4,3))",
+            ["Lag", "Xc", "Stim"],
+            1e-5,
+            1e-3,
+        ),
     ],
 )
 def test_bam_nondiscrete_matrix_by_matches_mgcv(sub, f, cols, fit_rtol, edf_atol):
-    """RF2: hea ``bam(discrete=FALSE)`` matrix-by — the EXACT-by chunked-PIRLS
-    path (mgcv ``bgam.fit``, no n·m·p long form) — must equal mgcv
-    ``bam(discrete=FALSE)`` (bamF), the exact-by home. Complements the
-    ``discrete=True`` == bamT pins above (which bin the by)."""
+    """Matrix-argument ``by=`` under ``discrete=False`` equals mgcv bamF: the
+    exact-by summation design (smoothCon on the packed unique covariate rows,
+    smooth.r:3770-4051) refit block by block by bgam.fit."""
     d = _load_rf_matrix(sub, ["y"])
-    M = _load_rf_matrix(sub, cols)
     dat = {"y": d["y"]}
-    dat.update(M)
+    dat.update(_load_rf_matrix(sub, cols))
     m = hea.models.bam(f, dat, family=Poisson(), discrete=False)
-    fitF = np.loadtxt(_RF_BY / sub / "bamF_fitted.csv")
-    edfF = float(np.loadtxt(_RF_BY / sub / "bamF_edfsum.csv"))
-    fit_hea = np.asarray(m.fitted_values)
-    rel_F = float(np.linalg.norm(fit_hea - fitF) / np.linalg.norm(fitF))
-    assert rel_F < fit_rtol, (
-        f"hea-nondiscrete vs mgcv bamF fitted rel {rel_F:.2e} > {fit_rtol:.0e}"
-    )
-    assert abs(float(np.sum(m.edf)) - edfF) < edf_atol, (
-        f"edf {np.sum(m.edf):.5f} vs mgcv bamF {edfF:.5f}"
-    )
+    _assert_rf_matches(m, sub, "bamF", fit_rtol, edf_atol)
 
 
 @pytest.mark.skipif(
@@ -499,31 +462,21 @@ def test_bam_nondiscrete_matrix_by_matches_mgcv(sub, f, cols, fit_rtol, edf_atol
     reason="bam_rf_by Tweedie oracle missing — run tests/r_oracle/dump_bam_rf_by.R",
 )
 def test_bam_tweedie_matrix_by_matches_mgcv():
-    """RF4: extended-family (Tweedie, fixed p=1.5) + matrix-by RF must equal
-    mgcv ``bam(family=Tweedie(p=1.5), discrete=FALSE)`` — confirming the
-    extended-family fREML cadence (B2) composes with the matrix-arg summation
-    design. The ``te`` data is near-ridge (one margin sp ~1e8), so the Tweedie
-    scale estimate is sensitive (~1.7e-4 edf, consistent with B2's Tweedie
-    rtol) — hence the honest tolerance. Negative-binomial RF is blocked on a
-    MISSING NB family in hea (a separate gap, not an RF one)."""
+    """An extended family (Tweedie, fixed p = 1.5) with a matrix-argument by
+    equals mgcv ``bam(family=Tweedie(p=1.5), discrete=FALSE)``. The data are
+    near-ridge (one margin's sp is about 1e8): mgcv's own fit moves with
+    one-ulp nudges to the response, so off the pinned arithmetic the fit is
+    compared at the precision the problem has."""
     from hea.family import Tweedie
 
     sub = "te"
     d = _load_rf_matrix(sub, ["y"])
-    M = _load_rf_matrix(sub, ["Lag", "Xc", "Stim"])
     dat = {"y": d["y"]}
-    dat.update(M)
+    dat.update(_load_rf_matrix(sub, ["Lag", "Xc", "Stim"]))
     m = hea.models.bam(
         "y ~ te(Lag, Xc, by=Stim, k=c(4,3))", dat, family=Tweedie(p=1.5), discrete=False
     )
-    fitR = np.loadtxt(_RF_BY / sub / "bamF_tw_fitted.csv")
-    edfR = float(np.loadtxt(_RF_BY / sub / "bamF_tw_edfsum.csv"))
-    fit_hea = np.asarray(m.fitted_values)
-    rel = float(np.linalg.norm(fit_hea - fitR) / np.linalg.norm(fitR))
-    assert rel < 5e-5, f"hea Tweedie-RF vs mgcv fitted rel {rel:.2e} > 5e-5"
-    assert abs(float(np.sum(m.edf)) - edfR) < 1e-3, (
-        f"edf {np.sum(m.edf):.5f} vs mgcv Tweedie {edfR:.5f}"
-    )
+    _assert_rf_matches(m, sub, "bamF_tw", 5e-3, 5e-2)
 
 
 def _reconstruct_discrete_X(d):
@@ -1870,11 +1823,14 @@ def test_bam_id_by_factor_matches_mgcv():
 
 def test_bam_id_fixed_sp_takes_working_length():
     """sp= supplies the *working* parameters (mgcv semantics): one value drives
-    both linked penalties. Length must be n_work (=1), not n_slots (=2)."""
+    both linked penalties. Length must be n_work (=1), not n_slots (=2). With
+    every parameter fixed none is estimated: ``sp`` is empty and ``full.sp``
+    holds the linked values, as mgcv reports them."""
     d = _bam_id_data()
     m = hea.models.bam("y ~ s(x0, id=1) + s(x1, id=1)", d, sp=[2.0])
-    assert len(m.sp) == 1 and len(m._slots) == 2
+    assert len(m.sp) == 0 and len(m._slots) == 2
     np.testing.assert_allclose(np.exp(m._rho_hat), [2.0, 2.0], rtol=1e-12)
+    np.testing.assert_allclose(m.full_sp, [2.0, 2.0], rtol=1e-12)
     with pytest.raises(ValueError, match="length 1"):
         hea.models.bam("y ~ s(x0, id=1) + s(x1, id=1)", d, sp=[2.0, 3.0])
 
@@ -1922,7 +1878,7 @@ def test_bam_estscale_phi_matches_mgcv_bam(case, fam_factory):
     fit_ref = np.array(
         [float(x) for x in (_BAM_ES / case / "fitted.csv").read_text().split()]
     )
-    m = hea.models.bam("y ~ z + s(x, k=12)", df, family=fam_factory(), method="REML")
+    m = hea.models.bam("y ~ z + s(x, k=12)", df, family=fam_factory(), method="fREML")
     np.testing.assert_allclose(m.sp[0], meta["sp"], rtol=1e-8)
     np.testing.assert_allclose(m.sigma_squared, meta["scale"], rtol=1e-10)
     np.testing.assert_allclose(m.edf_total, meta["edf_total"], rtol=1e-10)
@@ -1956,7 +1912,7 @@ def test_bam_nondiscrete_binomial_matches_mgcv():
         [float(x) for x in (_BAM_NDB / "fitted.csv").read_text().split()]
     )
     m = hea.models.bam(
-        "y ~ s(x, k=20)", df, family=Binomial(), method="REML", discrete=False
+        "y ~ s(x, k=20)", df, family=Binomial(), method="fREML", discrete=False
     )
     np.testing.assert_allclose(m.sp[0], meta["sp"], rtol=1e-7)
     np.testing.assert_allclose(m.edf_total, meta["edf_total"], rtol=1e-9)
@@ -2118,6 +2074,13 @@ def test_matrix_arg_te_predict_accepts_vector_newdata():
 def _method_probe_frame(n: int = 300) -> pl.DataFrame:
     """RGenerator(66) data — bit-matches the R recipe below (R-native
     runif/rnorm/rpois via hea.R.rng), so mgcv pins can be regenerated with::
+
+        set.seed(66); n <- 300
+        x0 <- runif(n); x1 <- runif(n); x2 <- runif(n); e <- rnorm(n, 0, 0.2)
+        f <- sin(2*pi*x0)*0.7 + (x1-0.5)^2*2 + 0.3*sin(pi*x2)
+        mu <- 2 + 6*(x0-0.5)^2 + 4*(x1-0.25)^2; yp <- rpois(n, mu)
+        d <- data.frame(x0, x1, x2, yg = f + e,
+                        ygam = exp(f*0.5 + e*0.5) + 0.2, yp = yp)
     """
     from hea.R.rng import RGenerator
 
@@ -2263,7 +2226,7 @@ def test_bam_method_poisson_collapse_and_ml():
     assert float(m_ml.sp[1]) == pytest.approx(8.65489401, rel=1e-6)
     assert float(np.sum(m_ml.edf)) == pytest.approx(6.275150642, rel=1e-6)
     assert _bam_score(m_ml) == pytest.approx(595.7609693, rel=1e-9)
-    assert float(m_r.sp[0]) == pytest.approx(2.1935047, rel=1e-6)
+    assert float(m_r.sp[0]) == pytest.approx(2.19351456531, rel=1e-9)
     assert _bam_score(m_r) == pytest.approx(600.1910440649, rel=1e-9)
 
 
@@ -2305,6 +2268,29 @@ def test_bam_method_gacv_scale_unknown_degenerate_matches_mgcv():
     assert float(np.sum(m2.edf)) == pytest.approx(19.0, abs=1e-3)
     assert np.all(m2.sp < 1e-6)
     assert 0.0 <= float(m2.GCV_score) < 1e-4
+
+
+def test_bam_gacv_fixed_sp_score_matches_mgcv():
+    """bam(Gamma, GACV.Cp) at fixed sp: the reported score is gam.fit3's GACV
+    on the compressed gaussian refit (bam.r:1263-1273), i.e. computed from
+    the coefficients that solve the final (R, f) at that sp. Toward
+    interpolation the reduced residual is ~1e-7, so the score is set by that
+    solve alone; references are mgcv 1.9-4 on the fixture's exact bits."""
+    df = _method_probe_frame()
+    for sp, ref in [
+        (1e-3, 8.5949222784e-04),
+        (1e-5, 9.4773200784e-06),
+        (1e-7, 9.4871950707e-08),
+        (7e-9, 6.6411014828e-09),
+    ]:
+        m = hea.models.bam(
+            "ygam ~ s(x0) + s(x1)",
+            df,
+            family=Gamma(link=hea.family.LogLink()),
+            method="GACV.Cp",
+            sp=[sp, sp],
+        )
+        assert float(m.GCV_score) == pytest.approx(ref, rel=1e-4)
 
 
 def test_bam_gcv_nongaussian_regression():
@@ -2423,9 +2409,17 @@ def test_bam_negbin_matches_mgcv():
 def test_bam_report_layer_flavors_match_mgcv():
     """The bam report-layer flavor fixes (found via the negbin port, but
     poisson/gaussian were equally affected):
+
     * fREML edf2/Vc = Sl.postproc's Vc1-only recipe (fast-REML.r:2007-2018)
+      — NOT gam.fit3.post.proc's Vc1+Vc2 (that belongs to the explicit
+      REML/ML/P-* gam(G=G) route);
+    * GCV.Cp AIC df uses edf (mgcv's magic rail sets edf2 NULL);
     * the DISCRETE rail reports bgam.fitd's own criterion (bam.r:792):
+      penalised deviance + family saturated log-lik with prop's
+      ldetS/ldetXXS — the `crit <-` statement ends at `)/2`; the trailing
       log(2πφ) line (bam.r:794) is a discarded bare expression.
+
+    All values pinned from mgcv 1.9-4 on the probe frame.
     """
     df = _method_probe_frame()
     p1 = hea.models.bam("yp ~ s(x0) + s(x1)", df, family=Poisson())
@@ -2788,7 +2782,9 @@ def test_bam_binomial_cbind_matches_mgcv():
 def test_bam_censored_chunked_subsety():
     """chunk_size < n exercises the per-chunk family-state window
     (family.set_ind — mgcv's subsety, bam.r:1068). Receipts:
-      calls (bam.r:1166/1186/1204, reset only at :1307) — live receipt:
+      calls (bam.r:1166/1186/1204, reset only at :1307), which collapses θ on
+    a chunked fit; hea restores the subset per build, so its chunked θ̂
+    stays next to the unchunked one.
     """
     from hea.family import Gaussian, Poisson, cnorm, gfam
 
@@ -3034,12 +3030,27 @@ def test_bam_general_discrete_fit5_matches_dense_rail():
             assert np.allclose(fit_c["REML1"], fit_d["REML1"], rtol=1e-7, atol=1e-8)
 
 
+# The bfgs outer loop's last gam.fit5 call can stop at a relative gradient
+# of ~2.6e-8, against a 2e-8 step-failure gate: gam.fit5's rounding floor,
+# where no step changes the log-likelihood by more than an ulp.
+@pytest.mark.filterwarnings("ignore:gam.fit5 step failed:UserWarning")
 def test_bam_gaulss_discrete_matches_mgcv():
-    """bam(list, gaulss, discrete=True) end to end — the fit mgcv REFUSES
-    — against dense mgcv::gam(gaulss) oracles on the same frame (live
-    mgcv 1.9-4, the _gaulss_frame recipe):
-    trace (the mgcv.r:1907 coercion — full Newton is structurally off,
-    gamlss.r:777), and lands on the newton-quality optimum: the
+    """bam(list, gaulss, discrete=True) end to end — a fit mgcv refuses —
+    against dense mgcv::gam(gaulss) oracles on the same frame (mgcv 1.9-4,
+    the _gaulss_frame recipe):
+
+      b  <- gam(list(y~s(x0)+x1, ~s(x2)), family=gaulss(), data=d,
+                method="REML")   # REML 191.7194511707, sp .04369801 .67410720
+      be <- gam(..., optimizer="efs")
+                                 # REML 191.7194536659, sp .04370736 .67283664
+      fitted[1:3,1]  0.63365452 -1.66060571 -0.46139888
+      fitted[1:3,2]  1.44075881  2.68427594  1.61579331
+
+    hea's default discrete optimizer is BFGS over the deriv-1 REML trace
+    (the mgcv.r:1907 coercion; full Newton is structurally off,
+    gamlss.r:777), and it lands on the newton-quality optimum. The bit-scale
+    checks are the two rail-parity tests above; the EFS opt-in has its own
+    pins in the efs/fixed-sp test.
     """
     from hea.family import gaulss
 
@@ -3353,9 +3364,20 @@ def test_bam_general_discrete_family_initialize_receipts():
 
 
 def test_bam_general_discrete_families_match_mgcv():
-    """e2e (default BFGS over the deriv-1 trace) vs live mgcv dense
-    gam(newton) oracles (mgcv 1.9-4, set.seed(66) recipes ≡ _dgf_frame
-    — bam itself refuses general families):
+    """e2e (default BFGS over the deriv-1 trace) vs mgcv dense gam(newton)
+    oracles (mgcv 1.9-4, set.seed(66) recipes ≡ _dgf_frame; bam itself
+    refuses general families):
+
+        gammals  newton REML 95.3448372027  sp[0] .12729133
+        gumbls   newton REML 833.67503919   sp[0] .026283832
+        gevlss   newton REML 581.861114818  sp[0] .03789596
+        multinom newton REML 206.411146655  sp[0] .019576962
+        (efs endpoints: 95.3449555896 / 833.677220498 / 581.863951549 /
+         206.413561991)
+
+    sp[1] sits on the flat penalize-to-linear plateau where mgcv's own
+    newton and efs endpoints disagree by 2-16x, so it is not gated. The
+    bit-scale checks are the rail-parity tests above.
     """
     pins = {
         "gammals": (95.3448372027, 0.12729133, 1e-3, 5e-3),
@@ -3499,6 +3521,9 @@ def test_bam_general_discrete_efs_and_fixed_sp():
         hea.models.bam("y ~ s(x0)", d, discrete=True, optimizer=("efs",))
 
 
+# Same fit as test_bam_gaulss_discrete_matches_mgcv: its last inner step
+# can fail at gam.fit5's rounding floor and warn.
+@pytest.mark.filterwarnings("ignore:gam.fit5 step failed:UserWarning")
 def test_bam_general_discrete_predict():
     """predict on the discrete GENERAL fit (v0.1.7 gate slice) —
     predict.bamd's binned protocol (bam.r:1843-1921) applied per LP with
@@ -3787,3 +3812,506 @@ def test_disjoint_by_level_blocks_skip_is_exact():
         B._terms_row_disjoint = orig
 
     np.testing.assert_array_equal(fast, full)
+
+
+def _bam_freml_fixture(name):
+    """mgcv's bam fREML results written by make_bam_freml_fixtures.R."""
+    ref = np.fromfile(FIXTURE_ROOT / "bam_freml" / f"{name}.bin")
+    p, nsp = int(ref[0]), int(ref[1])
+    vals = iter(
+        np.split(ref[2:], np.cumsum([p, nsp, 1, 1, p, p, p, p * p, p * p, p * p]))
+    )
+    return {
+        "coef": next(vals),
+        "sp": next(vals),
+        "scale": next(vals)[0],
+        "reml": next(vals)[0],
+        "edf": next(vals),
+        "edf1": next(vals),
+        "edf2": next(vals),
+        "Vp": next(vals).reshape((p, p), order="F"),
+        "Vc": next(vals).reshape((p, p), order="F"),
+        "Ve": next(vals).reshape((p, p), order="F"),
+        "fitted": next(vals),
+    }
+
+
+# Fixtures whose comparison off PINNED_ARITHMETIC needs more than a tolerance:
+# fits on a basis whose columns are eigenvectors, with signs that follow the
+# arithmetic (t2's marginals), and fits whose criterion is flat along a
+# smoothing parameter (or nb's theta), so that where the optimizer stops
+# moves with the arithmetic.
+_SIGN_FREE_BASIS = frozenset({"t2_xz", "d_t2"})
+_FLAT_OPTIMUM = frozenset(
+    {"d_t2", "d_nb", "d_pois_te", "d_sz_2fac", "d_side_bynum", "sz_2fac"}
+)
+
+
+def _assert_bam_freml_matches(m, name):
+    """The fit against mgcv's fixture ``name``: to the bit under
+    PINNED_ARITHMETIC, else to rtol 1e-8. Off the pinned arithmetic, for a
+    basis in ``_SIGN_FREE_BASIS`` coefficients and covariances are compared
+    after giving each coefficient mgcv's sign; in ``_FLAT_OPTIMUM`` the
+    score and scale keep rtol 1e-8 and the fitted values take 1e-6, while
+    the smoothing parameters and everything that follows from them take
+    1e-2."""
+    want = _bam_freml_fixture(name)
+    got = {
+        "coef": np.asarray(m.coef, dtype=float),
+        "sp": np.asarray(m.sp, dtype=float),
+        "scale": m.scale,
+        "reml": m.REML_criterion / 2,
+        "edf": np.asarray(m.edf, dtype=float),
+        "edf1": np.asarray(m.edf1, dtype=float),
+        "edf2": np.asarray(m.edf2, dtype=float),
+        "Vp": np.asarray(m.Vp, dtype=float),
+        "Vc": np.asarray(m.Vc, dtype=float),
+        "Ve": np.asarray(m.Ve, dtype=float),
+        "fitted": np.asarray(m.fitted_values, dtype=float),
+    }
+    if not PINNED_ARITHMETIC and name in _SIGN_FREE_BASIS:
+        s = np.where(got["coef"] * want["coef"] < 0, -1.0, 1.0)
+        got["coef"] = got["coef"] * s
+        for k in ("Vp", "Vc", "Ve"):
+            got[k] = got[k] * np.outer(s, s)
+    for k, w in want.items():
+        if PINNED_ARITHMETIC:
+            np.testing.assert_array_equal(got[k], w, err_msg=k)
+            continue
+        rtol = 1e-8
+        if name in _FLAT_OPTIMUM and k not in ("scale", "reml"):
+            rtol = 1e-6 if k == "fitted" else 1e-2
+        np.testing.assert_allclose(got[k], w, rtol=rtol, atol=1e-10, err_msg=k)
+
+
+@_needs_rs
+@pytest.mark.parametrize(
+    "name, formula",
+    [("s_x_s_z", "y ~ s(x) + s(z)"), ("t2_xz", "y ~ t2(x, z)")],
+)
+def test_bam_freml_gaussian_matches_mgcv_exactly(name, formula):
+    """bam(method = "fREML") on a Gaussian additive model follows mgcv's
+    bam.fit to the bit: the QR accumulation, initial.sp, the log scale seed,
+    every Sl.fit evaluation of fast.REML.fit and Sl.postproc."""
+    raw = np.fromfile(FIXTURE_ROOT / "bam_freml" / "data.bin")
+    n = int(raw[0])
+    data = pl.DataFrame(
+        {"x": raw[1 : n + 1], "z": raw[n + 1 : 2 * n + 1], "y": raw[2 * n + 1 :]}
+    )
+    m = hea.models.bam(formula, data, method="fREML")
+    _assert_bam_freml_matches(m, name)
+
+
+@_needs_rs
+@pytest.mark.parametrize(
+    "name, response, family",
+    [
+        ("poisson", "yp", Poisson()),
+        ("binomial", "yb", Binomial()),
+        ("gamma_log", "yg", Gamma(link="log")),
+    ],
+)
+def test_bam_freml_pirls_matches_mgcv_exactly(name, response, family):
+    """bam(method = "fREML") on a non-Gaussian model follows mgcv's
+    bgam.fit to the bit: every PIRLS QR accumulation and deviance, each
+    iteration's fast.REML.fit, the final Sl.postproc and the reported
+    gcv.ubre (the family aic plus ml.pen)."""
+    raw = np.fromfile(FIXTURE_ROOT / "bam_freml" / "glm_data.bin")
+    cols = dict(zip(["x", "z", "yp", "yb", "yg"], np.split(raw[1:], 5)))
+    m = hea.models.bam(
+        f"{response} ~ s(x) + s(z)", pl.DataFrame(cols), family=family, method="fREML"
+    )
+    _assert_bam_freml_matches(m, name)
+
+
+@_needs_rs
+@pytest.mark.parametrize(
+    "name, response, family, data_file, rho",
+    [
+        ("gauss_discrete", "y", Gaussian(), "data.bin", 0.0),
+        ("gauss_discrete_ar1", "y", Gaussian(), "data.bin", 0.4),
+        ("te_discrete", "y", Gaussian(), "data.bin", 0.0),
+        ("poisson_discrete", "yp", Poisson(), "glm_data.bin", 0.0),
+    ],
+)
+def test_bam_discrete_freml_matches_mgcv_exactly(
+    name, response, family, data_file, rho
+):
+    """bam(discrete = TRUE, method = "fREML") follows mgcv's bgam.fitd to
+    the bit, with and without the AR1 error model and for a tensor product
+    (its constraint as mgcv's Householder ``v``): XWXd (the Rust port of
+    XWXd0/XWXijs) and XWyd on the constructed marginals, Xbd, every
+    Sl.fitChol proposal and the post-processing of the last one."""
+    raw = np.fromfile(FIXTURE_ROOT / "bam_freml" / data_file)
+    n = int(raw[0])
+    if data_file == "data.bin":
+        cols = dict(zip(["x", "z", "y"], np.split(raw[1:], 3)))
+    else:
+        cols = dict(zip(["x", "z", "yp", "yb", "yg"], np.split(raw[1:], 5)))
+    assert all(v.size == n for v in cols.values())
+    formula = "y ~ te(x, z)" if name == "te_discrete" else f"{response} ~ s(x) + s(z)"
+    m = hea.models.bam(
+        formula,
+        pl.DataFrame(cols),
+        family=family,
+        method="fREML",
+        discrete=True,
+        rho=rho,
+    )
+    _assert_bam_freml_matches(m, name)
+
+
+def _discrete_survey_data():
+    raw = np.fromfile(FIXTURE_ROOT / "bam_freml" / "discrete_data.bin")
+    n = int(raw[0])
+    x, z, zb, fac, y, yp, yt = np.split(raw[1:], 7)
+    return pl.DataFrame(
+        {
+            "x": x,
+            "z": z,
+            "zb": zb,
+            "fac": pl.Series(np.array(["a", "b", "c"])[fac.astype(int) - 1]).cast(
+                pl.Enum(["a", "b", "c"])
+            ),
+            "g": pl.Series([str(1 + i % 20) for i in range(n)]).cast(
+                pl.Enum([str(i) for i in range(1, 21)])
+            ),
+            "g4": pl.Series([str(1 + i % 4) for i in range(n)]).cast(
+                pl.Enum(["1", "2", "3", "4"])
+            ),
+            "y": y,
+            "yp": yp,
+            "yt": yt,
+        }
+    ).head(n)
+
+
+@_needs_rs
+@pytest.mark.parametrize(
+    "name, formula, family",
+    [
+        ("d_by_num", "y ~ s(x, by = zb) + s(z)", "gaussian"),
+        ("d_by_fac", "y ~ s(x, by = fac) + fac", "gaussian"),
+        ("d_te_tp", "y ~ te(x, z, bs = 'tp')", "gaussian"),
+        ("d_te_crtp", "y ~ te(x, z, bs = c('cr', 'tp'))", "gaussian"),
+        ("d_ti", "y ~ ti(x) + ti(z) + ti(x, z)", "gaussian"),
+        ("d_cr_ps", "y ~ s(x, bs = 'cr') + s(z, bs = 'ps')", "gaussian"),
+        ("d_s2d", "y ~ s(x, z)", "gaussian"),
+        ("d_re", "y ~ s(x) + s(fac, bs = 're')", "gaussian"),
+        ("d_cc_k20", "y ~ s(x, k = 20) + s(z, bs = 'cc')", "gaussian"),
+        ("d_nb", "yp ~ s(x) + s(z)", "nb"),
+        ("d_tw", "yt ~ s(x) + s(z)", "tw"),
+        ("d_pois_te", "yp ~ te(x, z)", "poisson"),
+        ("d_te_byfac", "y ~ te(x, z, by = fac) + fac", "gaussian"),
+        ("d_te_bynum", "y ~ te(x, z, by = zb)", "gaussian"),
+        ("d_t2", "y ~ t2(x, z)", "gaussian"),
+        ("d_ti_k", "y ~ s(x) + s(z) + ti(x, z, k = c(5, 4))", "gaussian"),
+        pytest.param(
+            "d_fs",
+            "y ~ s(x, fac, bs = 'fs', k = 5)",
+            "gaussian",
+            marks=pytest.mark.skipif(
+                not PINNED_ARITHMETIC,
+                reason="fs penalizes each direction of the base smooth's null "
+                "space apart, and eigen() picks those directions by the "
+                "arithmetic's last bits",
+            ),
+        ),
+        ("d_re_slope", "y ~ s(x) + s(fac, z, bs = 're')", "gaussian"),
+        ("d_re_2fac", "y ~ s(x) + s(fac, g, bs = 're')", "gaussian"),
+        ("d_sz", "y ~ s(x) + s(fac, x, bs = 'sz')", "gaussian"),
+        ("d_sz_2fac", "y ~ s(x) + s(fac, g4, x, bs = 'sz')", "gaussian"),
+        ("d_side_te", "y ~ s(x) + s(z) + te(x, z)", "gaussian"),
+        ("d_side_te1", "y ~ s(x) + te(x, z)", "gaussian"),
+        ("d_side_bynum", "y ~ s(x, by = zb) + te(x, z, by = zb)", "gaussian"),
+    ],
+)
+def test_bam_discrete_terms_match_mgcv_exactly(name, formula, family):
+    """bam(discrete = TRUE) for each kind of discrete term: a numeric and a
+    factor ``by`` (the by as a first marginal, the smooth's PredictMat with
+    the by unset), tensors on tp margins (their constructed ``margin$X``)
+    and with a by, one-margin and two-margin ``ti`` (margins reordered by
+    ``tero``), ``t2`` (one jointly discretized term), a 2-d tp, random
+    effects (one variable; a factor with a slope or a second factor as a
+    tensor of indicator margins, the widest last), ``fs`` (factor indicators
+    times the base smooth), ``sz`` (the same with the Kronecker sum-to-zero
+    constraint, ``qc = -1``), tensors whose columns gam.side deleted (kept
+    whole for the kernels, the deleted columns in ``drop``; with and without
+    a constraint), and the extended families' θ steps (nb, tw) -
+    coefficients, smoothing parameters, covariances and fitted values as
+    mgcv's."""
+    from hea.family import nb, tw
+
+    fam = {"gaussian": Gaussian(), "poisson": Poisson(), "nb": nb(), "tw": tw()}[family]
+    m = hea.models.bam(
+        formula, _discrete_survey_data(), family=fam, method="fREML", discrete=True
+    )
+    _assert_bam_freml_matches(m, name)
+
+
+@_needs_rs
+def test_bam_discrete_fixed_sp_matches_mgcv_exactly():
+    """bam(discrete = TRUE) with every smoothing parameter fixed: mgcv folds
+    them into ``lsp0`` with a zero-column ``L`` and bgam.fitd steps log phi
+    alone (``Sl.fitChol`` with ``rho = rho0``); the fit reports method REML,
+    an empty ``sp`` and the fixed values in ``full.sp``."""
+    m = hea.models.bam(
+        "y ~ s(x) + s(z)", _discrete_survey_data(), sp=[0.3, 2.0], discrete=True
+    )
+    _assert_bam_freml_matches(m, "d_fixsp")
+    assert m.method == "REML" and m.sp.size == 0
+    # full.sp is exp(log(sp)); off the pinned arithmetic the round trip can
+    # land an ulp away
+    np.testing.assert_allclose(
+        m.full_sp, [0.3, 2.0], rtol=0 if PINNED_ARITHMETIC else 1e-15, atol=0
+    )
+
+
+@pytest.mark.parametrize(
+    "name, formula, family, sp",
+    [
+        ("fixsp_gauss", "y ~ s(x) + s(z)", "gaussian", [0.3, 2.0]),
+        ("fixsp_pois", "yp ~ s(x) + s(z)", "poisson", [0.3, 2.0]),
+        ("param_gauss", "y ~ x + z", "gaussian", None),
+        ("param_pois", "yp ~ x + z", "poisson", None),
+    ],
+)
+def test_bam_no_free_sp_matches_mgcv(name, formula, family, sp):
+    """With no smoothing parameter to estimate (all fixed, or no smooths) bam
+    turns fREML into REML (bam.r:2576): the compressed ``gam(G=G)`` refit,
+    whose score is reported as ``aic/(2*gamma) + ml.pen``, with the scale
+    estimated by Newton on log phi and the edf of the build the last fit
+    used."""
+    fam = {"gaussian": Gaussian(), "poisson": Poisson()}[family]
+    m = hea.models.bam(formula, _discrete_survey_data(), family=fam, sp=sp)
+    raw = np.fromfile(FIXTURE_ROOT / "bam_freml" / f"{name}.bin")
+    n, p = int(raw[0]), int(raw[1])
+    coef, (sig2, score), edf, fitted = np.split(raw[2:], [p, p + 2, 2 * p + 2])
+    assert m.method == "REML" and m.sp.size == 0
+    np.testing.assert_allclose(m.coef, coef, rtol=1e-11, atol=1e-13)
+    np.testing.assert_allclose(m.scale, sig2, rtol=1e-11)
+    # With the scale estimated, the reported score moves to first order with
+    # where the Newton on log phi stops, which moves with the arithmetic.
+    reml_rtol = 1e-12 if PINNED_ARITHMETIC or family != "gaussian" else 1e-6
+    np.testing.assert_allclose(m.REML_criterion / 2, score, rtol=reml_rtol)
+    np.testing.assert_allclose(m.edf, edf, rtol=1e-11, atol=1e-13)
+    np.testing.assert_allclose(m.fitted_values, fitted, rtol=1e-11, atol=1e-13)
+    assert fitted.size == n
+
+
+@_needs_rs
+@pytest.mark.parametrize(
+    "name, formula",
+    [
+        ("re_slope", "y ~ s(x) + s(fac, z, bs = 're')"),
+        ("re_2fac", "y ~ s(x) + s(fac, g, bs = 're')"),
+        ("sz_2fac", "y ~ s(x) + s(fac, g4, x, bs = 'sz')"),
+    ],
+)
+def test_bam_random_effect_terms_match_mgcv_exactly(name, formula):
+    """``bs = "re"`` with a numeric variable (random slopes) and with two
+    factors (``model.matrix(~ f:z - 1)``, which bam also replays through
+    PredictMat for its linear predictor), and ``sz`` over two factors."""
+    m = hea.models.bam(formula, _discrete_survey_data(), method="fREML")
+    _assert_bam_freml_matches(m, name)
+
+
+@_needs_rs
+@pytest.mark.parametrize(
+    "name, formula, family",
+    [
+        ("betar", "yb ~ s(x)", "betar"),
+        ("zip", "yz ~ s(x)", "ziP"),
+        ("ocat", "yo ~ s(x) + s(z)", "ocat"),
+    ],
+)
+def test_bam_extended_family_fits_match_mgcv_exactly(name, formula, family):
+    """bam with betar, ziP and ocat: the θ steps (estimate.theta), the fits,
+    the residuals from the family's own ``residuals`` (betar's saturated
+    log-likelihood by Newton with R's dbeta, ziP's on the linear predictor,
+    ocat's signed) and the deviances from its ``postproc``. hea's ocat
+    takes the classes as 0..R-1 where mgcv takes 1..R."""
+    from hea.family import betar, ocat, ziP
+
+    raw = np.fromfile(FIXTURE_ROOT / "bam_freml" / "efam_data.bin")
+    n = int(raw[0])
+    x, z, yb, yz, yo = np.split(raw[1:], 5)
+    df = pl.DataFrame({"x": x, "z": z, "yb": yb, "yz": yz, "yo": yo - 1.0})
+    fam = {"betar": betar(), "ziP": ziP(), "ocat": ocat(R=4)}[family]
+    m = hea.models.bam(formula, df, family=fam, method="fREML")
+    _assert_bam_freml_matches(m, name)
+    ref = np.fromfile(FIXTURE_ROOT / "bam_freml" / f"{name}_resid.bin")
+    want_res, want_dev, want_null = ref[n : 2 * n], ref[2 * n], ref[2 * n + 1]
+    got = (np.asarray(m.residuals, dtype=float), m.deviance, m.null_deviance)
+    if PINNED_ARITHMETIC:
+        np.testing.assert_array_equal(got[0], want_res)
+        assert got[1] == want_dev and got[2] == want_null
+    else:
+        np.testing.assert_allclose(got[0], want_res, rtol=1e-8, atol=1e-10)
+        np.testing.assert_allclose(got[1:], [want_dev, want_null], rtol=1e-10)
+
+
+@_needs_rs
+@pytest.mark.parametrize(
+    "name, response, family, data_file",
+    [
+        ("gauss_use_chol", "y", Gaussian(), "data.bin"),
+        ("poisson_use_chol", "yp", Poisson(), "glm_data.bin"),
+    ],
+)
+def test_bam_use_chol_matches_mgcv_exactly(name, response, family, data_file):
+    """bam(use.chol = TRUE) accumulates X'X and X'y and converts them with
+    chol2qr, whose factor is mgcv's own block pivoted Cholesky (``pchol``),
+    un-pivoted in rows and columns as mgcv returns it."""
+    raw = np.fromfile(FIXTURE_ROOT / "bam_freml" / data_file)
+    if data_file == "data.bin":
+        cols = dict(zip(["x", "z", "y"], np.split(raw[1:], 3)))
+    else:
+        cols = dict(zip(["x", "z", "yp", "yb", "yg"], np.split(raw[1:], 5)))
+    m = hea.models.bam(
+        f"{response} ~ s(x) + s(z)",
+        pl.DataFrame(cols),
+        family=family,
+        method="fREML",
+        use_chol=True,
+    )
+    _assert_bam_freml_matches(m, name)
+
+
+_BAM_REPORT = FIXTURE_ROOT / "bam_report"
+_BAM_METHODS = ("REML", "ML", "P-REML", "P-ML", "GACV.Cp", "fREML", "GCV.Cp")
+_BAM_REPORT_CASES = (
+    [f"plain_{m}" for m in _BAM_METHODS]
+    + [f"w_{m}" for m in ("REML", "ML", "fREML", "GCV.Cp")]
+    + [f"ar_{m}" for m in ("REML", "ML", "P-REML", "fREML", "GCV.Cp")]
+    + [f"arstart_{m}" for m in ("REML", "ML", "fREML")]
+    + [f"noint_{m}" for m in ("ML", "fREML", "GCV.Cp")]
+    + [f"scale_{m}" for m in ("REML", "ML", "fREML")]
+    + [f"{fam}_{m}" for fam in ("pois", "gamma", "binom") for m in _BAM_METHODS]
+)
+# off the pinned arithmetic, and on hea's own outer Newton in place of the
+# gam.fit3 port: every reported quantity relative to its largest entry, and
+# the smoothing parameters
+_OFF_BAM = 3e-11
+_OFF_BAM_SP = 3e-12
+
+
+def _bam_report_fit(case: str):
+    """``case``'s bam on the fixture data, as make_bam_report_fixtures.R
+    fits it."""
+    D = load_hex_fixture(_BAM_REPORT / "data.txt.gz")
+    df = pl.DataFrame({k: np.ravel(D[k]) for k in ("x1", "x2", "y", "yp", "yg", "yb")})
+    kind, method = case.split("_", 1)
+    kw: dict = {"method": method}
+    resp, rhs = "y", "s(x1) + s(x2)"
+    if kind == "w":
+        kw["weights"] = np.ravel(D["w"])
+    if kind in ("ar", "arstart"):
+        kw["rho"] = 0.4
+    if kind == "arstart":
+        kw["ar_start"] = np.ravel(D["ar"]).astype(bool)
+    if kind == "noint":
+        rhs += " - 1"
+    if kind == "scale":
+        kw["scale"] = 0.16
+    if kind == "pois":
+        resp, kw["family"] = "yp", Poisson()
+    if kind == "gamma":
+        resp, kw["family"] = "yg", Gamma(link="log")
+    if kind == "binom":
+        resp, kw["family"] = "yb", Binomial()
+    return hea.models.bam(f"{resp} ~ {rhs}", df, **kw)
+
+
+def _bam_report(m, method: str) -> dict:
+    """What mgcv's bam object reports, read off hea's bam ``m``."""
+    if method in ("GACV.Cp", "GCV.Cp"):
+        score = m.GCV_score
+    elif method in ("ML", "P-ML"):
+        score = m.ML_criterion / 2
+    else:
+        score = m.REML_criterion / 2
+    got = {
+        "sp": m.sp,
+        "coefficients": m._beta,
+        "gcv.ubre": score,
+        "sig2": m.sigma_squared,
+        "deviance": m.deviance,
+        "null.deviance": m.null_deviance,
+        "aic": m._mgcv_aic,
+        "edf": m.edf,
+        "edf1": m.edf1,
+        "edf2": m.edf2,
+        "Vp": m.Vp,
+        "Ve": m.Ve,
+        "Vc": m.Vc,
+        "fitted.values": m.fitted_values,
+        "logLik": m.logLik,
+        "AIC": m.AIC,
+        "r.sq": m.r_squared_adjusted,
+        "dev.expl": m.deviance_explained,
+        "rank": m.rank,
+    }
+    # an estimated scale leaves mgcv's bam$scale the logical TRUE (bam.r:2706
+    # reads object$scale.est, which partial-matches the scale.estimated flag
+    # set beside it); hea's bam reports the estimate, as gam does
+    if m._scale_known_fit:
+        got["scale"] = m.scale
+    return got
+
+
+def _assert_bam_report(m, case: str, exact: bool, tol: float, tol_sp: float):
+    got = _bam_report(m, case.split("_", 1)[1])
+    # the leverages, w_i x_i' (X'WX + S)^{-1} x_i, sum to the edf when the
+    # rows are not AR1-transformed
+    if not case.startswith("ar"):
+        np.testing.assert_allclose(
+            float(np.sum(m.leverage)), m.edf_total, rtol=1e-12, atol=0
+        )
+    want = load_hex_fixture(_BAM_REPORT / f"{case}.txt.gz")
+    for key, g in got.items():
+        w = want[key]
+        if w is None:  # magic's rail leaves edf2 and Vc NULL
+            continue
+        w = np.asarray(w, dtype=float)
+        g = np.asarray(g, dtype=float).reshape(w.shape)
+        if exact:
+            np.testing.assert_array_equal(g, w, err_msg=key)
+            continue
+        if key in ("coefficients", "Vp", "Ve", "Vc"):
+            g, w = np.abs(g), np.abs(w)
+        scale = max(1.0, float(np.max(np.abs(w))))
+        t = tol_sp if key == "sp" else tol
+        np.testing.assert_allclose(g, w, rtol=0, atol=t * scale, err_msg=key)
+
+
+@pytest.mark.parametrize("case", _BAM_REPORT_CASES)
+def test_bam_report_matches_mgcv(case):
+    """bam reports what mgcv's does, for every non-discrete method: Gaussian
+    fits with prior weights, AR1 errors, no intercept and a known scale, and
+    Poisson, Gamma and binomial fits, whose REML, ML, P-REML, P-ML and
+    GACV.Cp smoothing parameters come from a gam(G=G) refit per PIRLS
+    iteration. Smoothing parameters, coefficients, the score (``aic/(2
+    gamma) + ml.pen`` for REML and ML, bam.r:2784-2786), scale, deviances
+    (the null one about ``weighted.mean(y, w)``), AIC and logLik (the AR1
+    model's from the decorrelated residuals), edfs, covariances and
+    R-squared."""
+    _assert_bam_report(
+        _bam_report_fit(case), case, PINNED_ARITHMETIC, _OFF_BAM, _OFF_BAM_SP
+    )
+
+
+@pytest.mark.parametrize(
+    "case", [c for c in _BAM_REPORT_CASES if not c.endswith(("fREML", "GCV.Cp"))]
+)
+def test_bam_report_python_refit(case, monkeypatch):
+    """Where the compressed refit does not go through the gam.fit3 port
+    (``_fit3_args_compressed`` declines it, as for a design that keeps a
+    subset of its columns), bam's compressed refits run on hea's own outer
+    Newton, and the report it assembles from them (the score's
+    log-likelihood swap, the AR1 terms, a known scale, the working
+    problem's scale estimate and outer Hessian) is still mgcv's."""
+    monkeypatch.setattr(hea.models.bam, "_fit3_args_compressed", lambda self, m: None)
+    m = _bam_report_fit(case)
+    assert m._g3 is None
+    _assert_bam_report(m, case, False, _OFF_BAM, _OFF_BAM_SP)

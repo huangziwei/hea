@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from conftest import assert_fp_equiv, load_dataset
+from conftest import PINNED_ARITHMETIC, assert_fp_equiv, load_dataset
 from scipy.stats import chi2
 
 from hea.family import Gaussian, Poisson
@@ -1608,7 +1608,11 @@ def test_machines_correlated_slopes_grow_the_cholesky_pattern():
         ("score ~ Machine + (1|Worker) + (1|Machine:Worker)", -112.6347235),
     ):
         m = gmm(f, d, REML=False)
-        np.testing.assert_allclose(float(m.logLik()), want, rtol=0, atol=1e-5)
+        # off the pinned arithmetic the optimizer stops elsewhere near the
+        # optimum, as lme4's does under other arithmetic
+        np.testing.assert_allclose(
+            float(m.logLik()), want, rtol=0, atol=1e-5 if PINNED_ARITHMETIC else 5e-4
+        )
 
 
 def test_gmm_factorizes_through_hea_sparse():

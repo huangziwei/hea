@@ -32,7 +32,6 @@ from enum import IntEnum
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-from scipy.linalg import qr as _scipy_qr
 from scipy.linalg import solve_triangular
 from scipy.optimize import minimize, minimize_scalar
 from scipy.sparse import csc_array, eye_array
@@ -262,7 +261,19 @@ def _deriv12(
     upper: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Central-difference gradient + Hessian — port of lme4's ``deriv12``.
+
+    lme4 ships its own central-difference scheme in ``R/deriv.R`` instead
+    of using ``numDeriv::hessian`` (Richardson extrapolation); the comment
     at modular.R:664 explicitly notes the choice: "don't use numDeriv —
+    cruder but fewer dependencies, no worries". The post-fit
+    ``m@optinfo$derivs`` and the Hessian-based ``vcov()`` rely on this
+    specific scheme, so for byte-match we port it directly rather than
+    swapping in a more sophisticated estimator.
+
+    Bound handling (lower/upper, ``NaN`` ≡ R's ``NA``): when
+    ``x[j] + delta`` exceeds ``upper[j]``, the right step shrinks to
+    ``upper[j] - x[j]`` and the central-difference formula uses the
+    asymmetric step. Symmetric on the lower side. This is the same
     "udelta / ldelta" trick R/deriv.R:38-53 uses for optima at the bound.
     """
     x = np.asarray(x, dtype=float)
@@ -1029,7 +1040,8 @@ def _glmm_devfun_factory(
     Port of ``mkdevfun`` (lmer.R:308-384) — the GLMM branch. Returns a closure
         ``mkGlmerDevfun``'s ``.Call(glmerLaplace, ...)`` at modular.R:888.
       (θ, β); β is folded into the offset (lmer.R:347 trick), so PIRLS only
-    (``uOnly <- nAGQ == 0L``, lmer.R:447) — that's a latent bug in the
+    (``uOnly <- nAGQ == 0L``, lmer.R:447), a latent bug in lme4's
+    seldom-used ``compDev=FALSE`` branch; this follows the C++ behaviour.
     """
     if nagq < 0:
         raise ValueError(f"nagq must be >= 0, got {nagq}")
@@ -2146,6 +2158,8 @@ def _bobyqa_bobyqb(
 ):
     """Main BOBYQA iteration loop. Port of ``bobyqb.f``.
     improvement whose ``F``-reduction is below ``ftol`` (NLopt ``bobyqa.c:2818``),
+    reproducing lme4's default ``nloptwrap`` optimizer. ``None`` (glmer's
+    minqa path) runs Powell's native rho → rhoend schedule unchanged.
     """
     HALF = 0.5
     ONE = 1.0
@@ -4127,28 +4141,31 @@ def _check_rank_drop_cols(
     tol: float = 1e-7,
     action: str = "message+drop.cols",
 ) -> tuple[np.ndarray, list[str], list[str]]:
-    """Detect rank-deficient design matrix and drop redundant columns.
-    Port of lme4's ``chkRank.drop.cols`` (modular.R:235-293). Uses a
+    """Detect a rank-deficient fixed-effects matrix and drop redundant columns.
+
+    Port of lme4's ``chkRank.drop.cols`` (modular.R): R's
+    ``qr(X, tol, LAPACK = FALSE)`` (LINPACK ``dqrdc2``, whose limited
+    pivoting moves a column to the end when its remaining norm falls below
+    ``tol`` times its original norm) gives the rank, and the columns kept
+    are ``pivot[1:rank]`` — the ones ``lm()`` keeps. ``action`` follows
+    ``glmerControl(check.rankX=)``:
+
+    * ``"ignore"`` → never drop, return as-is.
+    * ``"silent.drop.cols"`` → drop, no message.
+    * ``"message+drop.cols"`` (default) → drop and print a message.
+    * ``"warn+drop.cols"`` → drop and emit ``UserWarning``.
+    * ``"stop.deficient"`` → raise on rank deficiency.
+
+    Returns ``(X_kept, kept_names, dropped_names)``.
     """
+    from ..R.linalg import dqrdc2
+
     if action == "ignore":
         return X, list(col_names), []
     _n, p = X.shape
     if p == 0:
         return X, list(col_names), []
-    # Order-preserving Householder QR (no pivoting) — keep R[j,j] in the
-    # original column ordering. A column is rank-deficient iff its
-    # orthogonal component (R diagonal at that row) is small relative to
-    # ``|R[0,0]|``. This matches R's ``lm()``/``glmer`` behaviour of
-    # dropping the *later* of any pair of collinear columns — and matches
-    # LINPACK QR's pivoting heuristic for typical designs (main effects
-    # first, interactions later) while avoiding LAPACK-vs-LINPACK pivot
-    # divergences. Mirrors R's modular.R:259 (``qr(X, LAPACK=FALSE)``)
-    # via the simpler "first p_rank columns that add rank" semantics.
-    _, R = _scipy_qr(X, mode="economic")
-    diag = np.abs(np.diag(R))
-    thresh = tol * (diag[0] if diag.size else 1.0)
-    keep_mask = diag > thresh
-    rank = int(keep_mask.sum())
+    _qr, _qraux, pivot, rank = dqrdc2(np.asarray(X, dtype=float), tol=tol)
     if rank == p:
         return X, list(col_names), []
     if action == "stop.deficient":
@@ -4157,8 +4174,6 @@ def _check_rank_drop_cols(
             f"(rank(X) = {rank} < {p} = p); the fixed effects will be "
             "jointly unidentifiable"
         )
-    keep = np.flatnonzero(keep_mask).tolist()
-    dropped = [col_names[j] for j in range(p) if not keep_mask[j]]
     msg = (
         f"fixed-effect model matrix is rank deficient so dropping "
         f"{p - rank} column / coefficient"
@@ -4172,7 +4187,13 @@ def _check_rank_drop_cols(
         import sys
 
         print(msg, file=sys.stderr)
+    keep = [int(j) - 1 for j in pivot[:rank]]
+    dropped = [col_names[int(j) - 1] for j in pivot[rank:]]
     X_kept = X[:, keep]
+    if dqrdc2(np.asarray(X_kept, dtype=float), tol=tol)[3] < len(keep):
+        raise ValueError(
+            "Dropping columns failed to produce full column rank design matrix"
+        )
     kept_names = [col_names[j] for j in keep]
     return X_kept, kept_names, dropped
 
@@ -8658,8 +8679,14 @@ def _norm_inter(t: np.ndarray, alpha: np.ndarray) -> np.ndarray:
 def _boot_ci_one(
     t0: float, t_col: np.ndarray, conf: float, kind: str
 ) -> tuple[float, float]:
-    """One parameter's bootstrap CI — port of ``boot::boot.ci`` for the three
+    """One parameter's bootstrap CI: a port of ``boot::boot.ci`` for the three
     types ``confint.bootMer`` exposes (the last two columns of each method):
+
+    * ``perc``  — ``boot:::perc.ci``: interpolated percentiles at ``α/1−α``.
+    * ``basic`` — ``boot:::basic.ci``: ``2·t0 − perc`` (pivot reflection).
+    * ``norm``  — ``boot:::norm.ci``: ``(t0 − bias) ± Φ⁻¹((1+conf)/2)·sd(t)``
+      with ``bias = mean(t) − t0`` and ``sd`` the bootstrap-replicate SD
+      (divisor ``R−1``).
     """
     t_col = np.asarray(t_col, float)
     finite = t_col[np.isfinite(t_col)]

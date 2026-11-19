@@ -32,7 +32,12 @@ import sys
 
 import numpy as np
 import pytest
-from conftest import have_rscript, r_scalar_values, run_rs_r_oracle
+from conftest import (
+    PINNED_ARITHMETIC,
+    have_rscript,
+    r_scalar_values,
+    run_rs_r_oracle,
+)
 
 rs = pytest.importorskip("hea._rs")
 
@@ -835,9 +840,11 @@ _FMA_CASES = [c for c in CASES if c[0].startswith("fma_")]
 def test_fma_cases_python_matches_rs(case):
     """Pure-Python nmath scalars ≡ rust 0-ulp at the FMA-materialization
     points. Both sides share the per-arch ``_rfma``/``rfma`` contraction and
-    platform-libm (``__sinpi``/``lgamma``) decisions, so unlike the live-R
-    gate this holds bit-for-bit on every platform; it pins the Python twins
-    of every contraction site the ``fma_*`` R cases pin for rust."""
+    platform-libm (``__sinpi``/``lgamma``) decisions; the Python side's
+    elementwise math is numpy's, the C library's under PINNED_ARITHMETIC,
+    so there it holds bit for bit and elsewhere to rtol 1e-12. It pins the
+    Python twins of every contraction site the ``fma_*`` R cases pin for
+    rust."""
     from hea.R import nmath as nm
 
     py_fn = {
@@ -860,6 +867,12 @@ def test_fma_cases_python_matches_rs(case):
         [py_fn[fn](*(float(v) for v in args), *flags) for args in zip(*arrays)]
     )
     assert got_py.shape == got_rs.shape
+    if not PINNED_ARITHMETIC:
+        # the Python twins compute with numpy's float64 math, which off the
+        # pinned arithmetic rounds by the CPU's own kernels (AVX2 / AVX-512
+        # on x86-64) where the rust ones call the C library
+        np.testing.assert_allclose(got_py, got_rs, rtol=1e-12, atol=0)
+        return
     for g, e in zip(got_py, got_rs):
         if np.isnan(e):
             assert np.isnan(g)
@@ -1330,78 +1343,46 @@ def test_gamlss_xwx_row_col_consistent():
 
 
 # ---------------------------------------------------------------------------
-# tweedie_series — mgcv `tweedious` (misc.c:170) scalar-p series via the rust
-# per-row sweep. The returned 7 columns are (log_a, E[j], Var[j], E[jψ]) plus
-# mgcv's three p-param working-derivative accumulators (m_wp1, m_comb, m_dwpp,
-# misc.c:346-503). Two gates: (1) rust vs the numpy dense-matrix oracle (==
-# `_tweedie_log_a_vec` forced off) — not 0-ulp, the sweep reduces in a
-# different order + uses `rfma` for the wp1²+wp2 combine; (2) the whole
-# `_ld_tweedie_work` vs LIVE R `ldTweedie` (the new R arm).
+# mgcv's Tweedie density series (C ``tweedious``/``tweedious2``) and the whole
+# ldTweedie: the Rust kernels against the pure-Python ports, and
+# ``_ld_tweedie_work`` against live R.
 import hea.family as _fam
 
 
-@pytest.mark.parametrize("p", [1.05, 1.1, 1.5, 1.93, 1.99])
+@pytest.mark.parametrize("th", [-2.0, -0.3, 0.0, 0.3, 2.5])
 @pytest.mark.parametrize("phi", [0.3, 1.0, 5.0])
-def test_tweedie_series_parity(p, phi):
-    if _fam._rs_tweedie_series is None:
-        pytest.skip("hea._rs.tweedie_series unavailable")
-    rng = np.random.default_rng(int(p * 100) + int(phi * 10))
-    y = rng.uniform(0.01, 500.0, 1500)
-    out_rs = _fam._tweedie_log_a_vec(y, phi, p)
-    orig = _fam._rs_tweedie_series
-    _fam._rs_tweedie_series = None
-    try:
-        out_np = _fam._tweedie_log_a_vec(y, phi, p)
-    finally:
-        _fam._rs_tweedie_series = orig
-    for a, b in zip(out_rs, out_np):
-        np.testing.assert_allclose(a, b, rtol=1e-8, atol=1e-9)
-
-
-@pytest.mark.parametrize("p", [1.05, 1.1, 1.5, 1.93, 1.99])
-@pytest.mark.parametrize("phi", [0.3, 1.0, 5.0])
-def test_tweedious_work_rs_matches_py(p, phi):
-    """The faithful tweedious/tweedious2 twins: rust ``tweedious_work`` /
-    ``tweedious_work_pv`` vs the pure-Python reference ports. Both use plain
-    ops (no fma) and the same nmath scalars, so they are BIT-IDENTICAL (0 ulp) —
-    unlike the moment kernels' `rfma` combine, which forces the 1e-8 gate."""
+def test_tweedious_work_rs_matches_py(th, phi):
+    """mgcv's C ``tweedious`` (one ``(th, rho)``) and ``tweedious2`` (per
+    row): the Rust kernels and the pure-Python ports compute the same
+    expressions, fused alike, with libm ``lgamma`` and the nmath digamma /
+    trigamma, so they agree to the bit."""
     if _fam._rs_tweedious_work is None:
         pytest.skip("hea._rs.tweedious_work unavailable")
-    rng = np.random.default_rng(int(p * 100) + int(phi * 10))
-    y = rng.uniform(0.01, 500.0, 800)
+    rng = np.random.default_rng(int(abs(th) * 100) + int(phi * 10))
+    y = rng.uniform(0.01, 60.0, 150)
     rho = float(np.log(phi))
-    eth = np.exp(-abs(0.3))  # θ = 0.3 (scalar buffer path)
     a, b = 1.001, 1.999
-    dpth1 = eth * (b - a) / (1 + eth) ** 2
-    dpth2 = ((a - b) * eth + (b - a) * eth * eth) / (1 + eth) ** 3
-    sr = _fam._tweedious_work_scalar(y, rho, p, dpth1, dpth2)
-    sp = _fam._tweedious_work_scalar_py(y, rho, p, dpth1, dpth2)
+    sr, er = _fam._tweedious_work_scalar(y, th, rho, a, b)
+    sp, ep = _fam._tweedious_work_scalar_py(y, th, rho, a, b)
     np.testing.assert_array_equal(sr, sp)
+    assert er == ep
     thv = rng.uniform(-1.0, 1.2, y.size)
     rhv = rng.uniform(-0.6, 0.5, y.size)
-    ev = np.exp(-np.abs(thv))
-    pv = np.where(thv > 0, (b + a * ev) / (1 + ev), (b * ev + a) / (ev + 1))
-    d1v = ev * (b - a) / (1 + ev) ** 2
-    d2v = np.where(
-        thv > 0,
-        ((a - b) * ev + (b - a) * ev * ev) / (1 + ev) ** 3,
-        ((a - b) * ev * ev + (b - a) * ev) / (1 + ev) ** 3,
-    )
-    pr = _fam._tweedious_work_pv(y, rhv, pv, d1v, d2v)
-    pp = _fam._tweedious_work_pv_py(y, rhv, pv, d1v, d2v)
+    pr, er2 = _fam._tweedious_work_pv(y, thv, rhv, a, b)
+    pp, ep2 = _fam._tweedious_work_pv_py(y, thv, rhv, a, b)
     np.testing.assert_array_equal(pr, pp)
+    assert er2 == ep2
 
 
 @pytest.mark.parametrize("theta,rho", [(-0.5, 0.3), (0.0, -0.4), (0.7, 0.8)])
-def test_tweedie_ldwork_matches_r(theta, rho):
-    """R arm: hea ``_ld_tweedie_work`` vs live mgcv ``ldTweedie`` in the
-    (θ, ρ) working parameterisation (``all.derivs=TRUE``). The log-density,
-    1st derivatives and the closed-form μ columns hit the libm floor; the 2nd
-    p-derivatives (cols 2/4/5) carry an inherent saddle+series cancellation
-    that mgcv shares (R itself is ~1e-9 off the float128 truth for large y), so
-    those gate at the cancellation floor on moderate y. nmath (R's Rmath)
-    special functions + mgcv's working-derivative reduction back the tight arms."""
+def test_tweedie_ldwork_matches_r(theta, rho, tmp_path):
+    """hea ``_ld_tweedie_work`` vs mgcv ``ldTweedie(..., all.derivs=TRUE)``
+    in the (θ, ρ) working parameterization, every column: the R arithmetic
+    of the saddle and zero parts and the C series (``tweedious``) the same
+    way. Data go to R and back as raw doubles."""
     import subprocess
+
+    from conftest import PINNED_ARITHMETIC
 
     from hea.R import runif, set_seed
 
@@ -1411,25 +1392,22 @@ def test_tweedie_ldwork_matches_r(theta, rho):
     ld = _fam._ld_tweedie_work(
         y, mu, np.full_like(y, theta), np.full_like(y, rho), a=1.001, b=1.999
     )
-    ys = ",".join(map(repr, y.tolist()))
-    mus = ",".join(map(repr, mu.tolist()))
+    fin, fout = tmp_path / "in.bin", tmp_path / "out.bin"
+    np.concatenate([y, mu]).tofile(fin)
     src = (
-        f"suppressMessages(library(mgcv)); y<-c({ys}); mu<-c({mus}); "
-        f"M<-ldTweedie(y,mu,rho={rho!r},theta={theta!r},a=1.001,b=1.999,"
-        "all.derivs=TRUE); "
-        "write.table(format(M,digits=17),stdout(),row.names=F,"
-        "col.names=F,quote=F)"
+        "suppressMessages(library(mgcv)); "
+        f"v <- readBin('{fin}', 'double', n = {2 * y.size}); "
+        f"y <- v[1:{y.size}]; mu <- v[{y.size + 1}:{2 * y.size}]; "
+        f"M <- ldTweedie(y, mu, rho = {rho!r}, theta = {theta!r}, a = 1.001, "
+        "b = 1.999, all.derivs = TRUE); "
+        f"writeBin(as.numeric(M), '{fout}')"
     )
-    out = subprocess.run(
-        ["Rscript", "-e", src], capture_output=True, text=True, check=True
-    ).stdout
-    R = np.array(
-        [[float(v) for v in ln.split()] for ln in out.splitlines() if ln.strip()]
-    )
-    for c in (0, 1, 3, 6, 7, 8, 9):
-        np.testing.assert_allclose(ld[:, c], R[:, c], rtol=1e-9, atol=1e-10)
-    for c in (2, 4, 5):
-        np.testing.assert_allclose(ld[:, c], R[:, c], rtol=1e-6, atol=1e-7)
+    subprocess.run(["Rscript", "-e", src], capture_output=True, text=True, check=True)
+    R = np.fromfile(fout).reshape(-1, y.size).T
+    if PINNED_ARITHMETIC:
+        np.testing.assert_array_equal(ld, R)
+    else:
+        np.testing.assert_allclose(ld, R, rtol=1e-9, atol=1e-10)
 
 
 from hea.R import nmath as _nmath
@@ -1675,7 +1653,9 @@ def test_optif9_rs_python_parity():
         return f_val, f_grad
 
     rng = np.random.default_rng(42)
-    for n in (2, 3, 4):
+    # from five parameters on the dots reach five terms, which go to the
+    # platform BLAS on darwin
+    for n in (2, 3, 4, 5, 6):
         for rep in range(3):
             x0 = rng.standard_normal(n) * (1.0 + rep)
             ts = np.abs(rng.standard_normal(n)) + 0.1
@@ -1735,6 +1715,9 @@ def test_optif9_rs_python_parity():
 
 
 def test_lbfgsb_rs_python_parity():
+    """The extension's L-BFGS-B and the Python fallback take the same path,
+    the dots of five terms and more (the ``2 col`` dots once ``col >= 3``,
+    the ``n``-long ones from five parameters) included."""
     import math
 
     from hea.R.lbfgsb import lbfgsb as py_lbfgsb
@@ -1755,7 +1738,7 @@ def test_lbfgsb_rs_python_parity():
         return g
 
     rng = np.random.default_rng(7)
-    for n in (2, 3, 4):
+    for n in (2, 3, 4, 6):
         for rep in range(3):
             x0 = rng.standard_normal(n) * (1 + rep)
             for lo, up, nbd in (

@@ -52,7 +52,12 @@ def _coerce_to_list(values):
 
 
 def _auto_accuracy(scaled_values, largest_with_cents):
-    """scales' auto-precision rule for currency / number formatters:"""
+    """scales' auto-precision rule for currency / number formatters:
+
+    * any |x| >= ``largest_with_cents`` → accuracy 1 (no decimals);
+    * else, if all values are exact integers → accuracy 1;
+    * else accuracy 0.01 (two decimals).
+    """
     finite = [v for v in scaled_values if v is not None]
     if not finite:
         return 1

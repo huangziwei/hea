@@ -551,9 +551,9 @@ def test_drop1_glm_Chisq_gamma_pins_to_R_on_trees():
     g = glm("Volume ~ log(Girth) + log(Height)", trees, family=Gamma(link="inverse"))
     out = _capture(drop1, g, test="Chisq")
     assert "scaled dev." in out
-    assert "152.6788" in out
+    assert "152.6783" in out
     assert "2.2188" in out
-    assert "336.331" in out
+    assert "336.3307" in out
 
 
 def test_drop1_glm_F_gamma_uses_residual_mean_deviance_denom():
@@ -570,7 +570,7 @@ def test_drop1_glm_F_gamma_uses_residual_mean_deviance_denom():
 def test_drop1_glm_AIC_for_Gamma_holds_dispersion_fixed():
     """For Gamma, drop1.glm AIC ≠ standard glm.AIC of the dropped fit.
     R freezes dispersion at the full model's value across all rows so
-    AICs are comparable across drops. Pin: drop log(Girth) AIC = 336.33
+    AICs are comparable across drops. Pin: drop log(Girth) AIC = 336.3307
     (R's drop1) vs 240.26 (standalone refit AIC).
     """
     trees = load_dataset("R", "trees")
@@ -578,7 +578,7 @@ def test_drop1_glm_AIC_for_Gamma_holds_dispersion_fixed():
     g_dropped = glm("Volume ~ log(Height)", trees, family=Gamma(link="inverse"))
     np.testing.assert_allclose(g_dropped.AIC, 240.2625, atol=5e-3)
     out = _capture(drop1, g, test="Chisq")
-    assert "336.331" in out
+    assert "336.3307" in out
     assert "240.26" not in out
 
 

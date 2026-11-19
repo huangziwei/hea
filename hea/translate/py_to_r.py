@@ -526,7 +526,18 @@ class Translator:
         return f"{target}${expr.attr}"
 
     def _emit_call(self, call: P.Call) -> str:
-        """Four dispatch layers:"""
+        """Four dispatch layers:
+
+        1. **Method-form helper on an expression** — ``col("x").mean()`` /
+           ``(...).sd()`` etc. become ``mean(x, ...)`` / ``sd(...)``. This must
+           come before chain detection because ``mean`` is not a verb.
+        2. **Method chain on something** — walk the attribute chain; if any
+           method is a known verb or ggplot extension, emit a ``|>`` pipe /
+           ``+`` chain.
+        3. **Known helper function** — ``col("x")``, ``case_when(...)``,
+           ``if_else(...)``, translated by the registry inverse.
+        4. **Plain function call** — emit ``func(args)``.
+        """
         if isinstance(call.func, P.Attribute):
             method_form = self._maybe_emit_method_form_helper(call)
             if method_form is not None:

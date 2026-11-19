@@ -1749,7 +1749,13 @@ def test_nth_expr_oob_uses_default():
 
 
 def test_lag_with_first_default_canonical_pattern():
-    """The motivating use case from R:"""
+    """The motivating use case from R::
+
+        mutate(diff = time - lag(time, default = first(time)))
+
+    The first row gets diff = 0 (lag uses first(time)); later rows are the
+    real differences, as in R's output.
+    """
     events = DataFrame({"time": [1, 3, 8, 15, 20]})
     out = events.mutate(
         diff=pl.col("time")
@@ -1812,7 +1818,18 @@ def test_groupby_mutate_returns_groupby():
 
 
 def test_groupby_filter_reductions_are_per_group():
-    """The motivating user pattern, written exactly as in dplyr:"""
+    """The motivating user pattern, written as in dplyr::
+
+        flights |> group_by(year, month, day) |>
+          mutate(r = min_rank(sched_dep_time)) |>
+          filter(r %in% c(1, max(r)))
+
+    Two things make this work: ``GroupBy.filter`` wraps the predicate in
+    ``.over(by_cols)`` so ``col("r").max()`` is per group, and hea's
+    ``is_in`` (see ``test_is_in_accepts_mixed_literal_expr_list``) accepts a
+    Python list mixing literals and Exprs, so ``[1, col("r").max()]`` reads
+    like R's ``c(1, max(r))``.
+    """
     flights = DataFrame(
         {
             "year": [2013] * 8,
@@ -1967,7 +1984,16 @@ def test_IQR_in_grouped_summarize():
 
 
 def test_lag_then_cumsum_group_pattern():
-    """End-to-end translation of dplyr's canonical event-grouping idiom:"""
+    """End-to-end translation of dplyr's canonical event-grouping idiom::
+
+        events |> mutate(
+            diff    = time - lag(time, default = first(time)),
+            has_gap = diff >= 5,
+            group   = cumsum(has_gap),
+        )
+
+    checked against the R output shown in the dplyr docs.
+    """
     events = DataFrame(
         {
             "time": [0, 1, 2, 3, 5, 10, 11, 12, 14, 15, 20, 21, 24, 25],

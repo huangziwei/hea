@@ -1426,14 +1426,9 @@ def psigamma5(x, deriv):
 
 
 def psigamma_vec(x, deriv):
-    """Vectorised :func:`psigamma5` (rust fast path, else the scalar oracle).
-    ``deriv`` is the scalar polygamma order; mirrors ``scipy``'s
-    ``polygamma(deriv, x)`` but uses R's ``dpsifn`` (mgcv-faithful).
-
-    Bit-exact vs R for x > 0 (all of betar/nb/scat use); the x < 0 reflection
-    cancels badly, so a residual ~5-ulp libm/cancellation noise can appear at
-    rare arguments (sub-fixture-tolerance; high-order derivatives at x < 0 are
-    unused in hea — only the n=1 negative case, twlss, is exercised)."""
+    """Vectorised :func:`psigamma5` (the Rust port when available): R's
+    ``psigamma(x, deriv)`` elementwise for a scalar ``deriv``, R's
+    ``dpsifn`` underneath."""
     if _rs_psigamma is not None:
         xa = np.ascontiguousarray(x, dtype=float)
         return _rs_psigamma(xa.reshape(-1), float(deriv)).reshape(xa.shape)
@@ -1521,10 +1516,15 @@ def _lgammafn(x):
 
 
 def _lgammafn_arr(x):
-    """Element-wise :func:`_lgammafn` over an array (scalar -> float)."""
+    """Element-wise :func:`_lgammafn` over an array (scalar -> float), by
+    the compiled port when there is one."""
     x = np.asarray(x, dtype=float)
     if x.ndim == 0:
         return _lgammafn(float(x))
+    if _lgammafn_rs is not None:
+        return np.asarray(_lgammafn_rs(np.ascontiguousarray(x.ravel()))).reshape(
+            x.shape
+        )
     out = np.empty(x.shape, dtype=float)
     flat = x.ravel()
     o = out.ravel()
@@ -1532,6 +1532,8 @@ def _lgammafn_arr(x):
         o[i] = _lgammafn(float(flat[i]))
     return out
 
+
+_lgammafn_rs = rs_fn("lgammafn")
 
 _PG_SCALEFACTOR = 2.0**256  # (2^32)^8
 _M_CUTOFF = _M_LN2 * 1024 / _DBL_EPSILON  # = 3.196577e18

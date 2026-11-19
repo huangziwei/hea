@@ -290,8 +290,15 @@ def _save_translated(
 
 
 def _execute_r_and_load(r_source: str):
-    """Run translated R via the parity runner's :func:`run_r`, then
-    return:
+    """Run translated R via the parity runner's :func:`run_r` and return:
+
+    - a polars DataFrame when the final expression is frame-shaped
+      (``data.frame`` / atomic / ``ggplot$data``);
+    - otherwise the R subprocess's captured stdout as a string, for model
+      fits, ``summary.lm``, ``aov``, lists, etc. The R driver auto-prints
+      these, so the caller sees what an R REPL would show.
+
+    Used only when the user asks ``to_R(..., execute=True)``.
     """
     import tempfile
 

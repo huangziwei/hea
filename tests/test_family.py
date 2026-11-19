@@ -21,12 +21,14 @@ File sections:
 
 from __future__ import annotations
 
+import math
 import warnings
 from pathlib import Path
 
 import numpy as np
 import polars as pl
 import pytest
+from conftest import PINNED_ARITHMETIC
 
 import hea
 from hea.family import (
@@ -738,6 +740,14 @@ _TW_DEV_Y = np.array([0.0, 0.5, 1.0, 2.5, 4.0])
 _TW_DEV_MU = np.array([0.6, 0.7, 1.2, 2.0, 3.5])
 
 
+def _rtol(pinned: float, elsewhere: float) -> float:
+    """A pin's relative tolerance: ``pinned`` under the arithmetic R's values
+    were written with; ``elsewhere``, numpy's float64 math rounds by the
+    CPU's own kernels (AVX2 / AVX-512 on x86-64), and a value that cancels
+    moves by more than an ulp."""
+    return pinned if PINNED_ARITHMETIC else elsewhere
+
+
 @pytest.mark.parametrize(
     "p, dev_oracle",
     [
@@ -903,19 +913,36 @@ def test_tweedie_ls_zero_weights_dropped():
     np.testing.assert_allclose(ls_drop, ls_two, rtol=1e-12)
 
 
-def test_tw_dls_dp_chain_to_theta_oracle_p15():
-    """dls/dp · dp/dθ_tw must equal Σ ldTweedie[, 'th'] at default (a=1.01, b=1.99)."""
-    f = tw()
-    dls_dp = f.dls_dp(_TW_DEV_Y, np.ones(5), scale=1.0)
-    np.testing.assert_allclose(dls_dp * f.dp_dtheta(), -0.1740833687231026, rtol=1e-9)
+def test_tw_ls_theta_derivative_oracle_p15():
+    """tw()$ls's θ-derivative (``lsth1[1]``) equals mgcv's
+    ``sum(ldTweedie(y, y, rho = log(phi), theta)[, "th"])`` at the default
+    (a, b) = (1.01, 1.99); exact to rtol 1e-14 only under PINNED_ARITHMETIC
+    (see the p = 1.7 oracle below)."""
+    from conftest import PINNED_ARITHMETIC
 
-
-def test_tw_dls_dp_chain_to_theta_oracle_p17():
     f = tw()
-    f.set_theta(np.log((1.7 - 1.01) / (1.99 - 1.7)))
-    dls_dp = f.dls_dp(_TW_DEV_Y, np.ones(5), scale=2.0)
+    lsth1 = f.ls_extended(_TW_DEV_Y, np.ones(5), scale=1.0)["lsth1"]
     np.testing.assert_allclose(
-        dls_dp * f.dp_dtheta(), -0.0302015497694411161, rtol=1e-9
+        lsth1[0],
+        -0.1740833687231026,
+        rtol=1e-14 if PINNED_ARITHMETIC else 1e-12,
+    )
+
+
+def test_tw_ls_theta_derivative_oracle_p17():
+    """The θ-derivative oracle at p = 1.7, scale 2. It cancels heavily, so
+    the C library's last bits in the series' ``lgamma`` and ``exp`` move it
+    past rtol 1e-14 under another C library, R's own value with it: exact
+    only under PINNED_ARITHMETIC."""
+    from conftest import PINNED_ARITHMETIC
+
+    f = tw()
+    f.set_theta(math.log((1.7 - 1.01) / (1.99 - 1.7)))
+    lsth1 = f.ls_extended(_TW_DEV_Y, np.ones(5), scale=2.0)["lsth1"]
+    np.testing.assert_allclose(
+        lsth1[0],
+        -0.0302015497694411161,
+        rtol=1e-14 if PINNED_ARITHMETIC else 1e-12,
     )
 
 
@@ -1236,7 +1263,10 @@ def test_scat_estimate_theta(init_name: str):
     s.set_theta(th0)
     th_h = _estimate_theta(s, y, mu, scale=1.0, wt=np.ones(len(y)), tol=1e-7)
     err = float(np.max(np.abs(th_h - th_oracle)))
-    assert err < 1e-12, f"{init_name}-init: hea={th_h}, mgcv={th_oracle}, err={err:.3e}"
+    # off the pinned arithmetic the Newton steps' last bits, and with them
+    # where the search stops, are the CPU's
+    lim = 1e-12 if PINNED_ARITHMETIC else 1e-10
+    assert err < lim, f"{init_name}-init: hea={th_h}, mgcv={th_oracle}, err={err:.3e}"
 
 
 _SCAT_BAM = Path(__file__).parent / "fixtures" / "scat_bam"
@@ -2191,6 +2221,8 @@ def test_cox_ph_ll_matches_mgcv_oracle():
         deriv=4,
         d1b=d1b,
         d2b=d2b,
+        Hp=Hp,
+        rank=p,
         fh=(L, np.arange(p)),
         D=np.ones(p),
     )
@@ -3133,13 +3165,14 @@ def test_ld_tweedie_work_matches_mgcv():
 
 
 def test_tweedious_work_census_matches_mgcv():
-    """Census gate for the faithful tweedious/tweedious2 port (per-term θ-chain,
-    up-then-down sweep from the located peak, ``eps = double.eps²``) vs live
-    mgcv ldTweedie(all.derivs=TRUE). Block A: constant θ/ρ (buffer=TRUE scalar
-    C_tweedious). Block B: per-row θ/ρ (vector C_tweedious2 with the lgamma(j+1)
-    recursion). ``y[0]=0`` exercises the closed-form point mass.
-    ``w2i/wi − (w1i/wi)²`` cancellation (mgcv misc.c:499-500) amplifies the
+    """``_ld_tweedie_work`` against mgcv 1.9-4's ldTweedie(all.derivs=TRUE),
+    17-digit references. Block A: one θ/ρ for every row (the C
+    ``tweedious``). Block B: θ/ρ per row (``tweedious2``, with its
+    ``lgamma(j+1)`` recursion). ``y[0] = 0`` is the closed-form point mass.
+    Bit-exact on the pinned arithmetic.
     """
+    from conftest import PINNED_ARITHMETIC
+
     from hea.family import _ld_tweedie_work
 
     a, b = 1.001, 1.999
@@ -3372,6 +3405,8 @@ def test_tweedious_work_census_matches_mgcv():
     ha = _ld_tweedie_work(
         y, mu, np.full(y.size, 0.42), np.full(y.size, -0.18), a=a, b=b
     )
+    if PINNED_ARITHMETIC:
+        np.testing.assert_array_equal(ha, ref_a)
     da = np.abs(ha - ref_a)
     assert np.all(da <= tol), (
         "block A over tol at cols "
@@ -3601,6 +3636,8 @@ def test_tweedious_work_census_matches_mgcv():
         ]
     )
     hb = _ld_tweedie_work(y, mu, th_b, rho_b, a=a, b=b)
+    if PINNED_ARITHMETIC:
+        np.testing.assert_array_equal(hb, ref_b)
     db = np.abs(hb - ref_b)
     assert np.all(db <= tol), (
         "block B over tol at cols "
@@ -5748,7 +5785,7 @@ def test_cpois_components_match_mgcv():
             1.8,
             0.046856172595730383,
         ],
-        rtol=1e-14,
+        rtol=_rtol(1e-14, 1e-12),
         atol=0,
     )
     assert np.all(dr >= 0.0)
@@ -5765,7 +5802,7 @@ def test_cpois_components_match_mgcv():
             2.0,
             0.1865592035083572,
         ],
-        rtol=1e-14,
+        rtol=_rtol(1e-14, 1e-12),
         atol=0,
     )
     np.testing.assert_allclose(
@@ -5778,7 +5815,7 @@ def test_cpois_components_match_mgcv():
             0.0,
             0.34589032104013429,
         ],
-        rtol=1e-14,
+        rtol=_rtol(1e-14, 1e-12),
         atol=1e-300,
     )
     assert D["EDmu2"] is D["Dmu2"]  # mgcv: r$EDmu2 = r$Dmu2 (alias)
@@ -5792,7 +5829,7 @@ def test_cpois_components_match_mgcv():
             0.0,
             -0.14239116315360656,
         ],
-        rtol=1e-13,
+        rtol=_rtol(1e-13, 1e-12),
         atol=1e-300,
     )
     np.testing.assert_allclose(
@@ -5805,7 +5842,7 @@ def test_cpois_components_match_mgcv():
             0.0,
             0.093556511921981667,
         ],
-        rtol=1e-13,
+        rtol=_rtol(1e-13, 1e-12),
         atol=1e-300,
     )
 
@@ -5815,14 +5852,14 @@ def test_cpois_components_match_mgcv():
     assert np.all(np.isfinite(dd["Deta3"])) and np.all(np.isfinite(dd["Deta4"]))
 
     np.testing.assert_allclose(
-        fam.aic(y, mu, 0.0, wt, 0), 8.2329365948746229, rtol=1e-14
+        fam.aic(y, mu, 0.0, wt, 0), 8.2329365948746229, rtol=_rtol(1e-14, 1e-12)
     )
     le = fam.ls_extended(y, wt)
-    np.testing.assert_allclose(le["ls"], -2.5160365863162668, rtol=1e-14)
+    np.testing.assert_allclose(le["ls"], -2.5160365863162668, rtol=_rtol(1e-14, 1e-12))
     assert float(np.sum(np.abs(le["lsth1"]))) == 0.0
     assert float(np.sum(np.abs(le["LSTH1"]))) == 0.0
     np.testing.assert_allclose(
-        fam.ls(y, wt, 1.0), [-2.5160365863162668, 0.0, 0.0], rtol=1e-14
+        fam.ls(y, wt, 1.0), [-2.5160365863162668, 0.0, 0.0], rtol=_rtol(1e-14, 1e-12)
     )
 
     from hea.family import _dppois
@@ -5840,7 +5877,7 @@ def test_cpois_components_match_mgcv():
             -1.0450897209662637,
             -0.17224867495290261,
         ],
-        rtol=1e-14,
+        rtol=_rtol(1e-14, 1e-12),
     )
     np.testing.assert_allclose(
         _dppois(y0p, y1p, mup, log_p=False),
@@ -5852,7 +5889,7 @@ def test_cpois_components_match_mgcv():
             0.35166026666369643,
             0.8417698200687822,
         ],
-        rtol=1e-14,
+        rtol=_rtol(1e-14, 1e-12),
     )
 
     np.testing.assert_array_equal(fam.initialize(y, wt), y)
@@ -5953,7 +5990,7 @@ def test_clog_components_match_mgcv():
             0.9907951404171742,
             3847863142179033.5,
         ],
-        rtol=1e-13,
+        rtol=_rtol(1e-13, 1e-11),
         atol=0,
     )
 
@@ -6048,24 +6085,36 @@ def test_clog_components_match_mgcv():
             -4.5499406133689004e-14,
         ],
     }
+    # the last point lies 34 scales into the tail, where alpha rounds to within
+    # a few ulps of 1 and alpha (1 - alpha) is a rounding residue; off the
+    # pinned arithmetic its derivatives are compared absolutely
+    tail_atol = 0.0 if PINNED_ARITHMETIC else 1e-11
     for k, v in exp.items():
-        np.testing.assert_allclose(D[k], v, rtol=1e-13, atol=0, err_msg=k)
+        rtol = _rtol(1e-13, 1e-11)
+        np.testing.assert_allclose(D[k][:5], v[:5], rtol=rtol, atol=0, err_msg=k)
+        np.testing.assert_allclose(
+            D[k][5:], v[5:], rtol=rtol, atol=tail_atol, err_msg=k
+        )
     np.testing.assert_array_equal(D["EDmu2"], D["Dmu2"])
     assert D["EDmu2th"] is D["Dmu2th"]
 
     # aic (SATURATED pieces only — the slot never sees μ; gam.fit4.r:794
     # reports it verbatim), and ls with NONZERO θ-derivatives.
     np.testing.assert_allclose(
-        fam.aic(y, mu, 0.0, wt, 0), 15.910610320785761, rtol=1e-14
+        fam.aic(y, mu, 0.0, wt, 0), 15.910610320785761, rtol=_rtol(1e-14, 1e-11)
     )
     le = fam.ls_extended(y, wt)
-    np.testing.assert_allclose(le["ls"], -6.5018787506728541, rtol=1e-14)
-    np.testing.assert_allclose(le["lsth1"], [-3.9623749785560696], rtol=1e-14)
-    np.testing.assert_allclose(le["lsth2"], [[-0.073257888763456291]], rtol=1e-13)
+    np.testing.assert_allclose(le["ls"], -6.5018787506728541, rtol=_rtol(1e-14, 1e-11))
+    np.testing.assert_allclose(
+        le["lsth1"], [-3.9623749785560696], rtol=_rtol(1e-14, 1e-11)
+    )
+    np.testing.assert_allclose(
+        le["lsth2"], [[-0.073257888763456291]], rtol=_rtol(1e-13, 1e-11)
+    )
     np.testing.assert_allclose(
         le["LSTH1"].ravel(),
         [-1.0, -0.96237497855606957, -1.0, 0.0, 0.0, -1.0],
-        rtol=1e-14,
+        rtol=_rtol(1e-14, 1e-11),
     )
 
 
@@ -6143,7 +6192,7 @@ def test_bcg_components_match_mgcv():
             1.8920743538362341,
             22.957041212134278,
         ],
-        rtol=1e-14,
+        rtol=_rtol(1e-14, 1e-8),
         atol=0,
     )
     np.testing.assert_array_equal(fam._dev_sign, [1, 1, -1, -1, -1, -1])
@@ -6159,7 +6208,7 @@ def test_bcg_components_match_mgcv():
             2.8009839610885905,
             12.69035263562167,
         ],
-        rtol=1e-13,
+        rtol=_rtol(1e-13, 1e-8),
         atol=0,
     )
     np.testing.assert_allclose(
@@ -6172,7 +6221,7 @@ def test_bcg_components_match_mgcv():
             2.7946577680930598,
             3.8568290720002807,
         ],
-        rtol=1e-13,
+        rtol=_rtol(1e-13, 1e-8),
         atol=0,
     )
     assert D["EDmu2"] is D["Dmu2"] and D["EDmu2th"] is D["Dmu2th"]
@@ -6192,7 +6241,7 @@ def test_bcg_components_match_mgcv():
             -0.56019679221771812,
             -38.071057906864986,
         ],
-        rtol=1e-13,
+        rtol=_rtol(1e-13, 1e-8),
         atol=0,
     )
     np.testing.assert_allclose(
@@ -6211,7 +6260,7 @@ def test_bcg_components_match_mgcv():
             -3.3599155147072026,
             -24.260839851622222,
         ],
-        rtol=1e-13,
+        rtol=_rtol(1e-13, 1e-8),
         atol=0,
     )
     np.testing.assert_allclose(
@@ -6224,7 +6273,7 @@ def test_bcg_components_match_mgcv():
             1.0617526205466099,
             0.08918904228937663,
         ],
-        rtol=1e-12,
+        rtol=_rtol(1e-12, 1e-8),
         atol=0,
     )
     np.testing.assert_allclose(
@@ -6243,7 +6292,7 @@ def test_bcg_components_match_mgcv():
             -5.8016660602954424,
             -7.9812252708657638,
         ],
-        rtol=1e-13,
+        rtol=_rtol(1e-13, 1e-8),
         atol=0,
     )
     np.testing.assert_allclose(
@@ -6256,7 +6305,7 @@ def test_bcg_components_match_mgcv():
             -0.89905663520180124,
             -0.065243109622599604,
         ],
-        rtol=1e-12,
+        rtol=_rtol(1e-12, 1e-8),
         atol=0,
     )
     np.testing.assert_allclose(
@@ -6281,7 +6330,7 @@ def test_bcg_components_match_mgcv():
             0.67198310294144048,
             72.782519554865985,
         ],
-        rtol=1e-12,
+        rtol=_rtol(1e-12, 1e-8),
         atol=0,
     )
     np.testing.assert_allclose(
@@ -6306,7 +6355,7 @@ def test_bcg_components_match_mgcv():
             4.5202487267662903,
             48.204515664210703,
         ],
-        rtol=1e-12,
+        rtol=_rtol(1e-12, 1e-8),
         atol=0,
     )
     np.testing.assert_allclose(
@@ -6331,7 +6380,7 @@ def test_bcg_components_match_mgcv():
             12.204421427510779,
             16.177963935588195,
         ],
-        rtol=1e-12,
+        rtol=_rtol(1e-12, 1e-8),
         atol=1e-15,
     )
     np.testing.assert_allclose(
@@ -6350,12 +6399,12 @@ def test_bcg_components_match_mgcv():
             -3.0054465345994732,
             -0.071837797964690253,
         ],
-        rtol=1e-12,
+        rtol=_rtol(1e-12, 1e-8),
         atol=0,
     )
 
     np.testing.assert_allclose(
-        fam.aic(y, mu, 0.0, wt, 0), 35.895971253414217, rtol=1e-14
+        fam.aic(y, mu, 0.0, wt, 0), 35.895971253414217, rtol=_rtol(1e-14, 1e-8)
     )
     assert fam.ls(y, wt, 1.0)[0] == np.inf
     le = fam.ls_extended(y, wt)
@@ -6886,7 +6935,7 @@ def test_negbin_components_match_mgcv():
     y = np.array([0.0, 1.0, 3.0, 7.0])
     mu = np.array([1.5, 2.0, 2.5, 6.0])
     w = np.ones(4)
-    np.testing.assert_array_equal(
+    np.testing.assert_allclose(
         f.dev_resids(y, mu, w),
         [
             2.2384631517416911,
@@ -6894,9 +6943,22 @@ def test_negbin_components_match_mgcv():
             0.040324184185464018,
             0.038014875766715139,
         ],
+        rtol=_rtol(0.0, 1e-12),
+        atol=0,
     )
-    assert f.aic(y, mu, None, w, None) == 14.422747381464536
-    np.testing.assert_array_equal(f.ls(y, w, 1.0), [-5.8830735480899392, 0.0, 0.0])
+    # R's sum() accumulates in LDOUBLE, and the terms sum to the first value
+    # in a double one (arm64 macOS) and to the next double up in the wider
+    # ones (x86-64 and aarch64 Linux); the terms are logs, whose last bits
+    # off the pinned arithmetic are the CPU's numpy kernels'.
+    if PINNED_ARITHMETIC:
+        assert f.aic(y, mu, None, w, None) in (14.422747381464536, 14.422747381464537)
+    else:
+        np.testing.assert_allclose(
+            f.aic(y, mu, None, w, None), 14.422747381464536, rtol=1e-13, atol=0
+        )
+    np.testing.assert_allclose(
+        f.ls(y, w, 1.0), [-5.8830735480899392, 0.0, 0.0], rtol=_rtol(0.0, 1e-12), atol=0
+    )
     np.testing.assert_array_equal(f.variance(mu), [2.625, 4.0, 5.625, 24.0])
     np.testing.assert_array_equal(f.dvar(mu), [2.5, 3.0, 3.5, 7.0])
     np.testing.assert_array_equal(f.d2var(mu), [1.0, 1.0, 1.0, 1.0])
@@ -6979,7 +7041,7 @@ def test_qnbinom_pnbinom_mu_match_r():
             -0.025711834520021577,
         ],
     )
-    np.testing.assert_array_equal(
+    np.testing.assert_allclose(
         [nm.pnbinom_mu(x, 2.5, 7.3, False) for x in [0, 1, 3, 7, 20]],
         [
             0.96713112555470993,
@@ -6988,15 +7050,24 @@ def test_qnbinom_pnbinom_mu_match_r():
             0.40042188625479869,
             0.025384100194534378,
         ],
+        rtol=_rtol(0.0, 1e-13),
+        atol=0,
     )
     np.testing.assert_array_equal(
         [nm.pnbinom_mu(x, 0.0, 0.0) for x in [-1, 0, 3]], [0.0, 1.0, 1.0]
     )
-    np.testing.assert_array_equal(
+    np.testing.assert_allclose(
         [nm.pnbinom_mu(x, np.inf, 7.3) for x in [0, 3, 7]],
         [0.00067553877519384439, 0.067406047117412868, 0.55410661183907739],
+        rtol=_rtol(0.0, 1e-13),
+        atol=0,
     )
-    assert nm.pnbinom_mu(2.9999999, 2.5, 7.3) == 0.26302499000982504
+    np.testing.assert_allclose(
+        nm.pnbinom_mu(2.9999999, 2.5, 7.3),
+        0.26302499000982504,
+        rtol=_rtol(0.0, 1e-13),
+        atol=0,
+    )
     rs_q = nm.rs_fn("qnbinom_mu")
     rs_p = nm.rs_fn("pnbinom_mu")
     if rs_q is not None:

@@ -1,43 +1,16 @@
-//! Tweedie density series — mechanical port of mgcv's `tweedious` (src/misc.c:170),
-//! the per-row windowed summation of the Dunn & Smyth (2005) series for
-//! `log a(y, φ, p) = log Σ_{j≥1} W_j` and its working-parameter derivatives.
+//! mgcv's Tweedie density series: mechanical ports of the C `tweedious`
+//! (src/misc.c:170, one `(th, rho)` for every observation, the `j` terms
+//! buffered) and `tweedious2` (misc.c:513, `(th, rho)` per observation,
+//! `lgamma(j + 1)` carried along the sweep), returning `log W` and its
+//! derivatives in the working parameters `(rho, th)`.
 //!
-//! mgcv builds the j-indexed terms once into a shared buffer (the special
-//! functions `lgamma(j+1)`, `lgamma(-jα)`, `digamma(-jα)`, `trigamma(-jα)`
-//! depend only on j for scalar p), then for each observation sweeps OUTWARD
-//! from the series peak `j_max` with an early break once a term drops `LD_EPS`
-//! below the peak (misc.c:285-505). The numpy port (`hea/family.py::
-//! _tweedie_log_a_vec`) instead materialises a dense `(n_active, J)` matrix
-//! sized to the WIDEST row and reduces along j — O(n·J) work and memory. This
-//! kernel keeps mgcv's per-row sweep: O(Σ_i width_i), no `(n, J)` array, rayon
-//! over the (independent) rows.
-//!
-//! Two kernel families share this file:
-//!
-//!  * `tweedie_series` (scalar p) returns the four well-conditioned `j`-moments
-//!    `(log_a, E[j], Var[j], E[jψ])` plus mgcv's THREE p-parameterisation
-//!    working-derivative accumulators `(E[wp1], E[wp1²+wp2], E[wp1·j/(1−p)+wpp])`
-//!    under `p_j = W_j/ΣW_k` — mgcv `wdlogwdp/wi`, `wdW2d2W/wi`, `dWpp/wi`
-//!    (misc.c:346-352) BEFORE the θ-chain. It serves the classic fixed-p family's
-//!    p-derivative path (`_d2ls_dp`/`dls_dp`), which reapplies `dpth1/dpth2`
-//!    outside. Combining `wp1²+wp2` PER TERM (the curvature, which nearly
-//!    cancels) — instead of summing `E[wp1²]` and `E[wp2]` separately and
-//!    subtracting — avoids the ~1e-11 catastrophic cancellation of the split.
-//!
-//!  * `tweedious_work` / `tweedious_work_pv` (below) are the FAITHFUL ports of
-//!    the C `tweedious`/`tweedious2`: they apply the θ-chain PER TERM inside the
-//!    sweep and return the SIX working-parameter log-density derivatives
-//!    `[w, w1, w2, w1p, w2p, w2pp]` directly (mgcv's C outputs), consumed by
-//!    `_ld_tweedie_work`. Plain ops — the C source carries no explicit fma.
-//!
-//! Special functions are the bundled nmath ports (`lgammafn`, `psigamma_scalar`
-//! — R's own Rmath C, NOT scipy), so the series matches the arm64 R build to the
-//! libm floor. In `tweedie_series`, `rfma` is used where mgcv's C fuses on arm64
-//! (the `wp1²+wp2` combine + the `j·wp_base+x` builds); the reductions follow
-//! mgcv's statement structure (stored intermediates NOT fused). Gates: rust-vs-R
-//! (ldTweedie oracle) + rust-vs-numpy (moments 1e-8; tweedious_work bit-exact).
+//! Each row is summed up from its series maximum and then down, to `eps`
+//! relative to the largest term. The arithmetic is the compiled C's: clang
+//! fuses `a*b + c` within an expression (and the left product of
+//! `a*b + c*d`), so those are `rfma` here and nothing else is; `lgamma` is
+//! libm's (as the C calls it, not R's `lgammafn`), digamma and trigamma are
+//! the nmath ports.
 
-use crate::nmath::lgamma::lgammafn;
 use crate::nmath::psigamma::psigamma_scalar;
 use crate::nmath::util::rfma;
 use numpy::ndarray::Array2;
@@ -45,424 +18,506 @@ use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
-/// Scalar-p Tweedie series + moments (mgcv `tweedious`). All special-function
-/// Builds the shared `j = 1..=J` nmath tables once (α constant), then sweeps
-/// each active row. Per row, `ly[i] = log(y[i])` and the integer peak `j_int[i]`
-/// (1-based) drive `log W_j = j·w_base − lgamma(j+1) − lgamma(-jα) − j·α·ly`
-/// (mgcv `wb[jb] − j·alogy`, misc.c:286/331). `w_base`/`wp_base`/`wp2_base`/`onep`
-/// (= 1−p) are the scalar `p`-bases (misc.c:230-232,287-293). Returns the
-/// `(n_active, 7)` matrix `[log_a, E[j], Var[j], E[jψ], E[wp1], E[wp1²+wp2],
-/// E[wp1·j/(1−p)+wpp]]` (the last three are mgcv's p-param working accumulators).
-/// `J` is sized by the caller (curvature + right-edge grow) so the eps gate fires
-/// within `[1, J]` for every row.
-#[pyfunction]
-#[pyo3(name = "tweedie_series")]
-#[allow(clippy::too_many_arguments)]
-fn tweedie_series<'py>(
-    py: Python<'py>,
-    ly: PyReadonlyArray1<'py, f64>,
-    j_int: PyReadonlyArray1<'py, i64>,
-    alpha: f64,
-    w_base: PyReadonlyArray1<'py, f64>,
-    wp_base: PyReadonlyArray1<'py, f64>,
-    wp2_base: PyReadonlyArray1<'py, f64>,
-    onep: f64,
-    j_cap: i64,
-    ld_eps: f64,
-) -> Bound<'py, PyArray2<f64>> {
-    let ly = ly.as_slice().unwrap();
-    let j_int = j_int.as_slice().unwrap();
-    let w_base = w_base.as_slice().unwrap();
-    let wp_base = wp_base.as_slice().unwrap();
-    let wp2_base = wp2_base.as_slice().unwrap();
-    let n = ly.len();
-    let jmax = j_cap.max(1);
-    let jcount = jmax as usize;
-    let onep2 = onep * onep;
-
-    let mut lgam_j1 = vec![0.0f64; jcount];
-    let mut lgam_nja = vec![0.0f64; jcount];
-    let mut psi = vec![0.0f64; jcount];
-    let mut trig = vec![0.0f64; jcount];
-    for k in 0..jcount {
-        let jf = (k + 1) as f64;
-        lgam_j1[k] = lgammafn(jf + 1.0);
-        lgam_nja[k] = lgammafn(-jf * alpha);
-        psi[k] = psigamma_scalar(-jf * alpha, 0.0);
-        trig[k] = psigamma_scalar(-jf * alpha, 1.0);
-    }
-
-    let mut out = vec![0.0f64; n * 7];
-
-    let fill = |i: usize, row: &mut [f64]| {
-        let lyi = ly[i];
-        let wb0 = w_base[i]; // per-row: phi (hence rho/onep) may vary by weight
-        let wpb = wp_base[i];
-        let wp2b = wp2_base[i];
-        let alogy = alpha * lyi; // mgcv alogy[i] = α·log y (misc.c:248)
-        let logy1p2 = lyi / onep2; // mgcv logy1p2 = log y/(1−p)² (misc.c:243)
-        let logy1p3 = logy1p2 / onep; // mgcv logy1p3 = logy1p2/(1−p) (misc.c:250)
-        let mut ji = j_int[i];
-        if ji < 1 {
-            ji = 1;
-        }
-        if ji > jmax {
-            ji = jmax;
-        }
-        let lw = |j: i64| -> f64 {
-            let k = (j - 1) as usize;
-            let jf = j as f64;
-            let wb = rfma(jf, wb0, -lgam_j1[k]) - lgam_nja[k];
-            wb - jf * alogy
-        };
-        let wmax = lw(ji);
-        let wmin = wmax - ld_eps;
-
-        let mut s0 = 0.0f64; // Σ W_j (scaled by exp(-wmax)) = mgcv wi
-        let mut s1 = 0.0f64; // Σ W_j·j
-        let mut s2 = 0.0f64; // Σ W_j·j²
-        let mut sp1 = 0.0f64; // Σ W_j·j·ψ
-        let mut s_wp1 = 0.0f64; // Σ W_j·wp1  (mgcv wdlogwdp, pre-chain)
-        let mut s_comb = 0.0f64; // Σ W_j·(wp1²+wp2)  (mgcv wdW2d2W, pre-chain)
-        let mut s_dwpp = 0.0f64; // Σ W_j·(wp1·j/(1−p)+wpp)  (mgcv dWpp, pre-chain)
-
-        // One term's contribution given its 1-based index j and log-weight lwj.
-        // wp1/wp2/wpp are the p-parameterisation working derivatives of log W_j
-        // (mgcv misc.c:289-293,333-334), before the θ-chain. `wp1²+wp2` is fused
-        // (`rfma`) — it is the per-term curvature whose pieces nearly cancel, so
-        // summing them separately and subtracting loses ~1e-11; combining per
-        // term keeps full precision (mgcv misc.c:392).
-        macro_rules! accumulate {
-            ($j:expr, $lwj:expr) => {{
-                let k = ($j - 1) as usize;
-                let jf = $j as f64;
-                let w = ($lwj - wmax).exp();
-                let psij = psi[k];
-                let jf_o2 = jf / onep2;
-                let xj = jf_o2 * psij;
-                let wp1 = rfma(jf, wpb, xj) - jf * logy1p2;
-                let wp2xx = trig[k] * jf_o2 * jf_o2;
-                let wp2 = rfma(jf, wp2b, 2.0 * xj / onep) - wp2xx - 2.0 * jf * logy1p3;
-                let wpp = jf_o2;
-                s0 += w;
-                s1 += w * jf;
-                s2 += w * jf * jf;
-                sp1 += w * (jf * psij);
-                s_wp1 += w * wp1;
-                s_comb += w * rfma(wp1, wp1, wp2);
-                s_dwpp += w * (wp1 * jf / onep + wpp);
-            }};
-        }
-
-        // Upsweep from the peak (inclusive), then downsweep — mgcv accumulates
-        // each term THEN breaks once it drops below `wmin` (misc.c:329-358,415).
-        let mut j = ji;
-        loop {
-            let lwj = if j == ji { wmax } else { lw(j) };
-            accumulate!(j, lwj);
-            if lwj < wmin || j >= jmax {
-                break;
-            }
-            j += 1;
-        }
-        let mut j = ji - 1;
-        while j >= 1 {
-            let lwj = lw(j);
-            accumulate!(j, lwj);
-            if lwj < wmin {
-                break;
-            }
-            j -= 1;
-        }
-
-        let jb = s1 / s0;
-        row[0] = wmax + s0.ln(); // log_a (log-sum-exp, reference-invariant)
-        row[1] = jb;
-        row[2] = s2 / s0 - jb * jb; // Var[j] = E[j²]−E[j]² (mgcv misc.c:499 form)
-        row[3] = sp1 / s0;
-        row[4] = s_wp1 / s0; // E[wp1]            (mgcv wdlogwdp/wi)
-        row[5] = s_comb / s0; // E[wp1²+wp2]      (mgcv wdW2d2W/wi)
-        row[6] = s_dwpp / s0; // E[wp1·j/(1−p)+wpp] (mgcv dWpp/wi)
-    };
-
-    if n >= crate::par::PAR_THRESHOLD {
-        py.allow_threads(|| {
-            out.par_chunks_mut(7)
-                .enumerate()
-                .for_each(|(i, row)| fill(i, row));
-        });
-    } else {
-        out.chunks_mut(7)
-            .enumerate()
-            .for_each(|(i, row)| fill(i, row));
-    }
-    Array2::from_shape_vec((n, 7), out)
-        .unwrap()
-        .into_pyarray(py)
+extern "C" {
+    fn lgamma_r(x: f64, sign: *mut i32) -> f64;
 }
 
-/// Scalar-p tweedious working-parameter derivatives (mgcv C `tweedious`,
-/// misc.c:170-510). Unlike `tweedie_series` (which returns p-param MOMENTS and
-/// lets the caller reapply the θ-chain), this applies the chain PER TERM inside
-/// the sweep and returns the six working-parameter log-density derivatives
-/// `[w, w1, w2, w1p, w2p, w2pp]` = `[logW, dρ, dρρ, dθ, dθθ, dθρ]` — mgcv's C
-/// outputs, added to the saddle part by `_ld_tweedie_work`. `rho` is scalar
-/// (single φ, buffer=TRUE path); `p`/`dpth1`/`dpth2` scalar. Bases are computed
-/// internally (misc.c:227-232). Plain ops — the C source carries no explicit
-/// fma (its accumulators use stored temporaries, not fused within one
-/// expression). Twin of `_tweedious_work_scalar_py`.
-#[pyfunction]
-#[pyo3(name = "tweedious_work")]
-#[allow(clippy::too_many_arguments)]
-fn tweedious_work<'py>(
-    py: Python<'py>,
-    y: PyReadonlyArray1<'py, f64>,
-    rho: f64,
-    p: f64,
-    dpth1: f64,
-    dpth2: f64,
-    log_eps: f64,
-    j_cap: i64,
-) -> Bound<'py, PyArray2<f64>> {
-    let y = y.as_slice().unwrap();
-    let n = y.len();
-    let phi = rho.exp();
+/// libm `lgamma`, which mgcv's `tweedious`/`tweedious2` call (not R's
+/// `lgammafn`); the reentrant form, so rows can run on several threads.
+#[inline]
+fn libm_lgamma(x: f64) -> f64 {
+    let mut sign = 0i32;
+    unsafe { lgamma_r(x, &mut sign) }
+}
+
+/// `p` and its first two derivatives in the working parameter `th`, as the
+/// C computes them (misc.c:209-222 / 547-557), fused as compiled.
+#[inline]
+fn tw_p_th(th: f64, a: f64, b: f64) -> (f64, f64, f64) {
+    if th > 0.0 {
+        let exp_th = (-th).exp();
+        let x = 1.0 + exp_th;
+        let p = rfma(a, exp_th, b) / x;
+        let x1 = x * x;
+        let bma = exp_th * (b - a);
+        let dpth1 = bma / x1;
+        let dpth2 = rfma(a - b, exp_th, exp_th * bma) / (x * x1);
+        (p, dpth1, dpth2)
+    } else {
+        let exp_th = th.exp();
+        let x = exp_th + 1.0;
+        let p = rfma(b, exp_th, a) / x;
+        let x1 = x * x;
+        let bma = exp_th * (b - a);
+        let dpth1 = bma / x1;
+        let dpth2 = rfma((a - b) * exp_th, exp_th, bma) / (x * x1);
+        (p, dpth1, dpth2)
+    }
+}
+
+/// The parts of `log W_j` and its derivatives that are a multiple of `j`.
+struct TwBases {
+    onep: f64,
+    onep2: f64,
+    alpha: f64,
+    w_base: f64,
+    wp_base: f64,
+    wp2_base: f64,
+}
+
+#[inline]
+fn tw_bases(p: f64, rho: f64) -> TwBases {
     let onep = 1.0 - p;
     let onep2 = onep * onep;
     let twop = 2.0 - p;
     let alpha = twop / onep;
-    let w_base = alpha * (p - 1.0).ln() + rho / onep - twop.ln();
-    let log_neg = (-onep).ln() + rho;
-    let wp_base = log_neg / onep2 - alpha / onep + 1.0 / twop;
+    let w_base = rfma(alpha, (-onep).ln(), rho / onep) - twop.ln();
+    let lr = (-onep).ln() + rho;
+    let wp_base = lr / onep2 - alpha / onep + 1.0 / twop;
     let wp2_base =
-        2.0 * log_neg / (onep2 * onep) - (3.0 * alpha - 2.0) / onep2 + 1.0 / (twop * twop);
+        (lr + lr) / (onep2 * onep) - rfma(alpha, 3.0, -2.0) / onep2 + 1.0 / (twop * twop);
+    TwBases {
+        onep,
+        onep2,
+        alpha,
+        w_base,
+        wp_base,
+        wp2_base,
+    }
+}
 
+/// `tweedious`'s buffered terms for index `j` (misc.c:285-293):
+/// `(wb, wb1, wp1, wp2, wpp)`.
+#[inline]
+fn tw_jterms(j: i64, bs: &TwBases) -> (f64, f64, f64, f64, f64) {
+    let jf = j as f64;
+    let nja = ((-j) as f64) * bs.alpha;
+    let wb = rfma(jf, bs.w_base, -libm_lgamma(jf + 1.0)) - libm_lgamma(nja);
+    let wb1 = ((-j) as f64) / bs.onep;
+    let xx = jf / bs.onep2;
+    let x = xx * psigamma_scalar(nja, 0.0);
+    let wp1 = rfma(jf, bs.wp_base, x);
+    let xx2 = psigamma_scalar(nja, 1.0) * xx * xx;
+    let wp2 = rfma(jf, bs.wp2_base, (x + x) / bs.onep) - xx2;
+    let wpp = jf / bs.onep2;
+    (wb, wb1, wp1, wp2, wpp)
+}
+
+/// The six sums of a sweep (`wi`, `w1i`, `w2i`, `wdlogwdp`, `wdW2d2W`,
+/// `dWpp`).
+#[derive(Default)]
+struct TwSums {
+    wi: f64,
+    w1i: f64,
+    w2i: f64,
+    wdlogwdp: f64,
+    wd_w2d2w: f64,
+    dwpp: f64,
+}
+
+impl TwSums {
+    /// One term of the sum (misc.c:331-352), fused as compiled: the `j`
+    /// products in `wp1j`/`wp2j`, the left product of the θ-chain, and the
+    /// `w1i`/`w2i` updates are fused; the other three sums add rounded
+    /// products.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    fn add(
+        &mut self,
+        j: i64,
+        wj: f64,
+        wmax: f64,
+        w1j: f64,
+        wp1: f64,
+        wp2: f64,
+        wpp: f64,
+        logy1p2: f64,
+        logy1p3: f64,
+        dpth1: f64,
+        dpth2: f64,
+        onep: f64,
+    ) {
+        let jf = j as f64;
+        let wp1j0 = rfma(-jf, logy1p2, wp1);
+        let wp2j0 = rfma(-((2 * j) as f64), logy1p3, wp2);
+        let wp2j = rfma(wp1j0, dpth2, wp2j0 * dpth1 * dpth1);
+        let wp1j = wp1j0 * dpth1;
+        let wppj = wpp * dpth1;
+        let ws = (wj - wmax).exp();
+        self.wi += ws;
+        self.w1i = rfma(ws, w1j, self.w1i);
+        self.w2i = rfma(ws * w1j, w1j, self.w2i);
+        self.wdlogwdp += ws * wp1j;
+        self.wd_w2d2w += ws * rfma(wp1j, wp1j, wp2j);
+        self.dwpp += ws * (wp1j * jf / onep + wppj);
+    }
+
+    /// The final transformations (misc.c:498-503), fused as compiled.
+    #[inline]
+    fn finish(&self, wmax: f64, row: &mut [f64]) {
+        let a1 = self.w1i / self.wi;
+        let a2 = self.wdlogwdp / self.wi;
+        row[0] = wmax + self.wi.ln();
+        row[1] = -self.w1i / self.wi;
+        row[2] = rfma(-a1, a1, self.w2i / self.wi);
+        row[3] = a2;
+        row[4] = rfma(-a2, a2, self.wd_w2d2w / self.wi);
+        row[5] = rfma(a1, a2, self.dwpp / self.wi);
+    }
+}
+
+/// mgcv's buffer limit on the series length (`jal_lim`, misc.c).
+const JAL_LIM: i64 = 50_000_000;
+
+/// mgcv C `tweedious` (misc.c:170-510): the Tweedie series `log W` and its
+/// derivatives in the working parameters `(rho, th)` at one `(th, rho)`
+/// for every `y > 0`, columns `[w, w1, w2, w1p, w2p, w2pp]`. The terms are
+/// those mgcv buffers over `j` (they depend on `j` alone), each row summed
+/// up from its series maximum and then down, to `eps` relative to the
+/// largest term. The second value is mgcv's `eps` on return: `-1` when a
+/// series ran past the buffer limit, `-2` when an index overflowed (rows
+/// from that one on are not computed).
+#[pyfunction]
+#[pyo3(name = "tweedious_work")]
+fn tweedious_work<'py>(
+    py: Python<'py>,
+    y: PyReadonlyArray1<'py, f64>,
+    th: f64,
+    rho: f64,
+    a: f64,
+    b: f64,
+    eps: f64,
+) -> (Bound<'py, PyArray2<f64>>, f64) {
+    let y = y.as_slice().unwrap();
+    let n = y.len();
     let mut out = vec![0.0f64; n * 6];
-    let fill = |i: usize, row: &mut [f64]| {
-        let lyi = y[i].ln();
-        let alogy = alpha * lyi;
-        let logy1p2 = lyi / onep2;
-        let logy1p3 = logy1p2 / onep;
-        // locate the series maximum (misc.c:303-305)
-        let x = y[i].powf(twop) / (phi * twop);
-        let mut jm = x.floor();
-        if x - jm > 0.5 || jm < 1.0 {
-            jm += 1.0;
+    if n == 0 {
+        return (
+            Array2::from_shape_vec((0, 6), out)
+                .unwrap()
+                .into_pyarray(py),
+            eps,
+        );
+    }
+    let phi = rho.exp();
+    let (p, dpth1, dpth2) = tw_p_th(th, a, b);
+    let log_eps = eps.ln();
+    let bs = tw_bases(p, rho);
+    let twop = 2.0 - p;
+    let mut ymax = y[0];
+    let mut ymin = y[0];
+    for &yi in &y[1..] {
+        if yi > ymax {
+            ymax = yi;
+        } else if yi < ymin {
+            ymin = yi;
         }
-        let jm = jm as i64;
-        let jmf = jm as f64;
-        let wmax = jmf * w_base - lgammafn(jmf + 1.0) - lgammafn(-jmf * alpha) - jmf * alogy;
+    }
+    let x_lo = ymin.powf(twop) / (phi * twop);
+    let j_lo = (x_lo.floor() as i64).max(1);
+    let x_hi = ymax.powf(twop) / (phi * twop);
+    let j_hi = (x_hi.ceil() as i64).max(j_lo);
+    let j0 = (j_lo - 1000).max(1);
+    // The terms depend on `j` alone, so one table serves every row. mgcv
+    // fills its buffer over `[j_lo, j_hi]` and extends it as sweeps run
+    // past either end; here the table spans the sweeps of the rows with the
+    // smallest and largest `y`, which reach furthest, and any other index
+    // is formed on demand to the same value.
+    let sweep_ends = |yi: f64| -> (i64, i64) {
+        let ly = yi.ln();
+        let alogy = bs.alpha * ly;
+        let x = yi.powf(twop) / (phi * twop);
+        let mut jm = x.floor() as i64;
+        if x - (jm as f64) > 0.5 || jm < 1 {
+            jm += 1;
+        }
+        let jalogy = (jm as f64) * alogy;
+        let jm = jm.clamp(j_lo, j_hi);
+        let wb_of = |j: i64| -> f64 {
+            let jf = j as f64;
+            rfma(jf, bs.w_base, -libm_lgamma(jf + 1.0)) - libm_lgamma(((-j) as f64) * bs.alpha)
+        };
+        let wmin = (wb_of(jm) - jalogy) + log_eps;
+        let mut up = jm;
+        while wb_of(up) - (up as f64) * alogy >= wmin && up - j0 < JAL_LIM {
+            up += 1;
+        }
+        let mut down = jm - 1;
+        while down > 1 && wb_of(down) - (down as f64) * alogy >= wmin {
+            down -= 1;
+        }
+        (down.max(1), up)
+    };
+    let (t_lo, _) = sweep_ends(ymin);
+    let (_, t_hi) = sweep_ends(ymax);
+    let t_lo = t_lo.min(j_lo);
+    let t_hi = t_hi.max(j_hi);
+    let table: Vec<(f64, f64, f64, f64, f64)> = if n >= crate::par::PAR_THRESHOLD {
+        py.allow_threads(|| {
+            (t_lo..=t_hi)
+                .into_par_iter()
+                .map(|j| tw_jterms(j, &bs))
+                .collect()
+        })
+    } else {
+        (t_lo..=t_hi).map(|j| tw_jterms(j, &bs)).collect()
+    };
+    let term = |j: i64| -> (f64, f64, f64, f64, f64) {
+        if j >= t_lo && j <= t_hi {
+            table[(j - t_lo) as usize]
+        } else {
+            tw_jterms(j, &bs)
+        }
+    };
+
+    // Each row's series location `x`; mgcv stops at the first row whose
+    // index overflows and leaves the later rows.
+    let xs: Vec<f64> = if n >= crate::par::PAR_THRESHOLD {
+        py.allow_threads(|| {
+            y.par_iter()
+                .map(|&yi| yi.powf(twop) / (phi * twop))
+                .collect()
+        })
+    } else {
+        y.iter().map(|&yi| yi.powf(twop) / (phi * twop)).collect()
+    };
+    let mut n_ok = n;
+    for (i, &x) in xs.iter().enumerate() {
+        let mut jm = x.floor() as i64;
+        if x - (jm as f64) > 0.5 || jm < 1 {
+            jm += 1;
+        }
+        if ((jm as f64) - x).abs() > 1.0 {
+            n_ok = i;
+            break;
+        }
+    }
+    let failed = n_ok < n;
+
+    let fill = |i: usize, row: &mut [f64]| -> bool {
+        let yi = y[i];
+        let ly = yi.ln();
+        let alogy = bs.alpha * ly;
+        let logy1p2 = ly / bs.onep2;
+        let logy1p3 = logy1p2 / bs.onep;
+        let x = xs[i];
+        let mut jm = x.floor() as i64;
+        if x - (jm as f64) > 0.5 || jm < 1 {
+            jm += 1;
+        }
+        let jalogy = (jm as f64) * alogy;
+        let jm = jm.clamp(j_lo, j_hi);
+        let wmax = term(jm).0 - jalogy;
         let wmin = wmax + log_eps;
-        let mut wi = 0.0f64;
-        let mut w1i = 0.0f64;
-        let mut w2i = 0.0f64;
-        let mut wdlogwdp = 0.0f64;
-        let mut wd_w2d2w = 0.0f64;
-        let mut dwpp = 0.0f64;
-
-        // Per-term (misc.c:329-352): p-param wp1/wp2, θ-chain, accumulate.
-        macro_rules! accumulate {
-            ($j:expr) => {{
-                let jf = $j as f64;
-                let wj = jf * w_base - lgammafn(jf + 1.0) - lgammafn(-jf * alpha) - jf * alogy;
-                let w1j = -jf / onep;
-                let nja = -jf * alpha;
-                let xx = jf / onep2;
-                let xdig = xx * psigamma_scalar(nja, 0.0);
-                let wp1j0 = (jf * wp_base + xdig) - jf * logy1p2;
-                let wp2j0 = (jf * wp2_base + 2.0 * xdig / onep
-                    - psigamma_scalar(nja, 1.0) * xx * xx)
-                    - 2.0 * jf * logy1p3;
-                let wp2j = wp1j0 * dpth2 + wp2j0 * dpth1 * dpth1;
-                let wp1j = wp1j0 * dpth1;
-                let wppj = xx * dpth1;
-                let ws = (wj - wmax).exp();
-                wi += ws;
-                w1i += ws * w1j;
-                w2i += ws * w1j * w1j;
-                wdlogwdp += ws * wp1j;
-                wd_w2d2w += ws * (wp1j * wp1j + wp2j);
-                dwpp += ws * (wp1j * jf / onep + wppj);
-                wj
-            }};
-        }
-
+        let mut sums = TwSums::default();
+        let mut run_out = false;
         let mut j = jm;
         loop {
-            let wj = accumulate!(j);
+            let (wb, wb1, wp1, wp2, wpp) = term(j);
+            let wj = wb - (j as f64) * alogy;
+            sums.add(
+                j, wj, wmax, wb1, wp1, wp2, wpp, logy1p2, logy1p3, dpth1, dpth2, bs.onep,
+            );
             if wj < wmin {
                 break;
             }
             j += 1;
-            if j - jm > j_cap {
+            if j - j0 >= JAL_LIM {
+                run_out = true;
                 break;
             }
         }
         let mut j = jm - 1;
         while j >= 1 {
-            let wj = accumulate!(j);
+            let (wb, wb1, wp1, wp2, wpp) = term(j);
+            let wj = wb - (j as f64) * alogy;
+            sums.add(
+                j, wj, wmax, wb1, wp1, wp2, wpp, logy1p2, logy1p3, dpth1, dpth2, bs.onep,
+            );
             if wj < wmin {
                 break;
             }
             j -= 1;
         }
-
-        row[0] = wmax + wi.ln();
-        row[1] = -w1i / wi;
-        row[2] = w2i / wi - (w1i / wi) * (w1i / wi);
-        row[3] = wdlogwdp / wi;
-        row[4] = wd_w2d2w / wi - (wdlogwdp / wi) * (wdlogwdp / wi);
-        row[5] = (w1i / wi) * (wdlogwdp / wi) + dwpp / wi;
+        sums.finish(wmax, row);
+        run_out
     };
 
-    if n >= crate::par::PAR_THRESHOLD {
+    let run_out = if n_ok >= crate::par::PAR_THRESHOLD {
         py.allow_threads(|| {
-            out.par_chunks_mut(6)
+            out[..n_ok * 6]
+                .par_chunks_mut(6)
                 .enumerate()
-                .for_each(|(i, row)| fill(i, row));
-        });
+                .map(|(i, row)| fill(i, row))
+                .reduce(|| false, |u, v| u || v)
+        })
     } else {
-        out.chunks_mut(6)
-            .enumerate()
-            .for_each(|(i, row)| fill(i, row));
-    }
-    Array2::from_shape_vec((n, 6), out)
-        .unwrap()
-        .into_pyarray(py)
+        let mut any = false;
+        for (i, row) in out[..n_ok * 6].chunks_mut(6).enumerate() {
+            any |= fill(i, row);
+        }
+        any
+    };
+    let eps_out = if failed {
+        -2.0
+    } else if run_out {
+        -1.0
+    } else {
+        eps
+    };
+    (
+        Array2::from_shape_vec((n, 6), out)
+            .unwrap()
+            .into_pyarray(py),
+        eps_out,
+    )
 }
 
-/// Vector-p tweedious working-parameter derivatives (mgcv C `tweedious2`,
-/// misc.c:513-661). Per-row `rho`/`p`/`dpth1`/`dpth2`; bases recomputed per row.
-/// `lgamma(j+1)` is built by RECURSION along the sweep (`+= ln(j)` up,
-/// `-= ln(j+1)` down) from a fresh `lgamma` at each sweep's start — mgcv's
-/// `lgammaj1` recursion (misc.c:596-644). Returns `(n, 6)` `[w,w1,w2,w1p,w2p,
-/// w2pp]`. Twin of `_tweedious_work_pv_py`.
+/// mgcv C `tweedious2` (misc.c:513-661): as `tweedious` with a `(th, rho)`
+/// per row and no buffer. Each row sums one sweep up from its series
+/// maximum and one down, `lgamma(j + 1)` carried along by `+= log(j)` up
+/// and `+= -log(j + 1)` down from a fresh `lgamma` at each sweep's start;
+/// `wmax` is formed in one expression, its last product fused.
 #[pyfunction]
 #[pyo3(name = "tweedious_work_pv")]
 #[allow(clippy::too_many_arguments)]
 fn tweedious_work_pv<'py>(
     py: Python<'py>,
     y: PyReadonlyArray1<'py, f64>,
+    th: PyReadonlyArray1<'py, f64>,
     rho: PyReadonlyArray1<'py, f64>,
-    p: PyReadonlyArray1<'py, f64>,
-    dpth1: PyReadonlyArray1<'py, f64>,
-    dpth2: PyReadonlyArray1<'py, f64>,
-    log_eps: f64,
-    _j_cap: i64,
-) -> Bound<'py, PyArray2<f64>> {
+    a: f64,
+    b: f64,
+    eps: f64,
+) -> (Bound<'py, PyArray2<f64>>, f64) {
     let y = y.as_slice().unwrap();
+    let th = th.as_slice().unwrap();
     let rho = rho.as_slice().unwrap();
-    let p = p.as_slice().unwrap();
-    let dpth1 = dpth1.as_slice().unwrap();
-    let dpth2 = dpth2.as_slice().unwrap();
     let n = y.len();
-
+    let log_eps = eps.ln();
     let mut out = vec![0.0f64; n * 6];
-    let fill = |i: usize, row: &mut [f64]| {
-        let pi = p[i];
-        let d1 = dpth1[i];
-        let d2 = dpth2[i];
-        let phi = rho[i].exp();
-        let onep = 1.0 - pi;
-        let onep2 = onep * onep;
-        let twop = 2.0 - pi;
-        let alpha = twop / onep;
-        let alogy_raw = y[i].ln();
-        let logy1p2 = alogy_raw / onep2;
-        let logy1p3 = logy1p2 / onep;
-        let alogy = alogy_raw * alpha;
-        let w_base = alpha * (-onep).ln() + rho[i] / onep - twop.ln();
-        let log_neg = (-onep).ln() + rho[i];
-        let wp_base = log_neg / onep2 - alpha / onep + 1.0 / twop;
-        let wp2_base =
-            2.0 * log_neg / (onep2 * onep) - (3.0 * alpha - 2.0) / onep2 + 1.0 / (twop * twop);
-        let x = y[i].powf(twop) / (phi * twop);
-        let mut jm = x.floor();
-        if x - jm > 0.5 || jm < 1.0 {
-            jm += 1.0;
-        }
-        let jm = jm as i64;
-        let jmf = jm as f64;
-        let wmax = jmf * w_base - lgammafn(jmf + 1.0) - lgammafn(-jmf * alpha) - jmf * alogy;
-        let wmin = wmax + log_eps;
-        let mut wi = 0.0f64;
-        let mut w1i = 0.0f64;
-        let mut w2i = 0.0f64;
-        let mut wdlogwdp = 0.0f64;
-        let mut wd_w2d2w = 0.0f64;
-        let mut dwpp = 0.0f64;
 
-        // Single toggling sweep with the lgamma(j+1) recursion (misc.c:595-648).
+    let mut n_ok = n;
+    for i in 0..n {
+        let phi = rho[i].exp();
+        let (p, _, _) = tw_p_th(th[i], a, b);
+        let twop = 2.0 - p;
+        let x = y[i].powf(twop) / (phi * twop);
+        let mut jm = x.floor() as i64;
+        if x - (jm as f64) > 0.5 || jm < 1 {
+            jm += 1;
+        }
+        if ((jm as f64) - x).abs() > 1.0 {
+            n_ok = i;
+            break;
+        }
+    }
+    let failed = n_ok < n;
+
+    let fill = |i: usize, row: &mut [f64]| -> bool {
+        let phi = rho[i].exp();
+        let (p, dpth1, dpth2) = tw_p_th(th[i], a, b);
+        let twop = 2.0 - p;
+        let x = y[i].powf(twop) / (phi * twop);
+        let mut jm = x.floor() as i64;
+        if x - (jm as f64) > 0.5 || jm < 1 {
+            jm += 1;
+        }
+        let bs = tw_bases(p, rho[i]);
+        let ly = y[i].ln();
+        let logy1p2 = ly / bs.onep2;
+        let logy1p3 = logy1p2 / bs.onep;
+        let alogy = ly * bs.alpha;
+        let jmf = jm as f64;
+        let nja_m = ((-jm) as f64) * bs.alpha;
+        let wmax = rfma(
+            -jmf,
+            alogy,
+            rfma(jmf, bs.w_base, -libm_lgamma(jmf + 1.0)) - libm_lgamma(nja_m),
+        );
+        let wmin = wmax + log_eps;
+        let mut sums = TwSums::default();
         let mut j = jm;
         let mut incr: i64 = 1;
-        let mut lgammaj1 = lgammafn(jmf + 1.0);
-        let mut ok = false;
-        while !ok {
+        let mut lgammaj1 = libm_lgamma(jmf + 1.0);
+        let mut k: i64 = 0;
+        let mut too_long = false;
+        loop {
             let jf = j as f64;
-            let wbj = jf * w_base - lgammaj1 - lgammafn(-jf * alpha);
-            let w1j = -jf / onep;
-            let nja = -jf * alpha;
-            let xx = jf / onep2;
-            let xdig = xx * psigamma_scalar(nja, 0.0);
-            let wp1jb = jf * wp_base + xdig;
-            let wp2jb = jf * wp2_base + 2.0 * xdig / onep - psigamma_scalar(nja, 1.0) * xx * xx;
+            let nja = ((-j) as f64) * bs.alpha;
+            let wbj = rfma(jf, bs.w_base, -lgammaj1) - libm_lgamma(nja);
+            let wb1j = ((-j) as f64) / bs.onep;
+            let xx = jf / bs.onep2;
+            let xd = xx * psigamma_scalar(nja, 0.0);
+            let wp1jb = rfma(jf, bs.wp_base, xd);
+            let xx2 = psigamma_scalar(nja, 1.0) * xx * xx;
+            let wp2jb = rfma(jf, bs.wp2_base, (xd + xd) / bs.onep) - xx2;
             let wj = wbj - jf * alogy;
-            let wp1j0 = wp1jb - jf * logy1p2;
-            let wp2j0 = wp2jb - 2.0 * jf * logy1p3;
-            let wp2j = wp1j0 * d2 + wp2j0 * d1 * d1;
-            let wp1j = wp1j0 * d1;
-            let wppj = xx * d1;
-            let ws = (wj - wmax).exp();
-            wi += ws;
-            w1i += ws * w1j;
-            w2i += ws * w1j * w1j;
-            wdlogwdp += ws * wp1j;
-            wd_w2d2w += ws * (wp1j * wp1j + wp2j);
-            dwpp += ws * (wp1j * jf / onep + wppj);
+            sums.add(
+                j, wj, wmax, wb1j, wp1jb, wp2jb, xx, logy1p2, logy1p3, dpth1, dpth2, bs.onep,
+            );
             j += incr;
+            let mut done = false;
             if incr > 0 {
                 lgammaj1 += (j as f64).ln();
                 if wj < wmin {
                     j = jm - 1;
                     incr = -1;
                     if j == 0 {
-                        ok = true;
+                        done = true;
                     }
-                    lgammaj1 = lgammafn(j as f64 + 1.0);
+                    lgammaj1 = libm_lgamma(j as f64 + 1.0);
                 }
             } else {
-                lgammaj1 += -((j as f64) + 1.0).ln();
+                lgammaj1 += -((j + 1) as f64).ln();
                 if wj < wmin || j < 1 {
-                    ok = true;
+                    done = true;
                 }
             }
+            k += 1;
+            if k >= JAL_LIM {
+                too_long = true;
+                done = true;
+            }
+            if done {
+                break;
+            }
         }
-        row[0] = wmax + wi.ln();
-        row[1] = -w1i / wi;
-        row[2] = w2i / wi - (w1i / wi) * (w1i / wi);
-        row[3] = wdlogwdp / wi;
-        row[4] = wd_w2d2w / wi - (wdlogwdp / wi) * (wdlogwdp / wi);
-        row[5] = (w1i / wi) * (wdlogwdp / wi) + dwpp / wi;
+        sums.finish(wmax, row);
+        too_long
     };
 
-    if n >= crate::par::PAR_THRESHOLD {
+    let too_long = if n_ok >= crate::par::PAR_THRESHOLD {
         py.allow_threads(|| {
-            out.par_chunks_mut(6)
+            out[..n_ok * 6]
+                .par_chunks_mut(6)
                 .enumerate()
-                .for_each(|(i, row)| fill(i, row));
-        });
+                .map(|(i, row)| fill(i, row))
+                .reduce(|| false, |u, v| u || v)
+        })
     } else {
-        out.chunks_mut(6)
-            .enumerate()
-            .for_each(|(i, row)| fill(i, row));
-    }
-    Array2::from_shape_vec((n, 6), out)
-        .unwrap()
-        .into_pyarray(py)
+        let mut any = false;
+        for (i, row) in out[..n_ok * 6].chunks_mut(6).enumerate() {
+            any |= fill(i, row);
+        }
+        any
+    };
+    let eps_out = if failed {
+        -2.0
+    } else if too_long {
+        -1.0
+    } else {
+        eps
+    };
+    (
+        Array2::from_shape_vec((n, 6), out)
+            .unwrap()
+            .into_pyarray(py),
+        eps_out,
+    )
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(tweedie_series, m)?)?;
     m.add_function(wrap_pyfunction!(tweedious_work, m)?)?;
     m.add_function(wrap_pyfunction!(tweedious_work_pv, m)?)?;
     Ok(())

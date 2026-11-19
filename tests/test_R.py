@@ -15,7 +15,7 @@ import sys
 import numpy as np
 import polars as pl
 import pytest
-from conftest import have_rscript, r_scalar_values
+from conftest import PINNED_ARITHMETIC, have_rscript, r_scalar_values
 
 import hea
 from hea import R as R_mod
@@ -3038,7 +3038,7 @@ def test_poly_polym_vs_r():
     P = poly(x, 3)
     assert P.shape == (10, 3)
     assert P.colnames == ["1", "2", "3"]
-    _assert_r_tol(
+    _assert_r(
         [
             (float(P[0, 0]), f"poly({X}, 3)[1,1]", -0.48794634266742815),
             (float(P[0, 2]), f"poly({X}, 3)[1,3]", -0.48225328622075542),
@@ -3057,14 +3057,14 @@ def test_poly_polym_vs_r():
         ]
     )
     Rraw = poly(x, 3, raw=True)
-    _assert_r_tol(
+    _assert_r(
         [
             (float(Rraw[1, 2]), f"poly({X}, 3, raw=TRUE)[2,3]", 15.625),
             (float(Rraw[3, 1]), f"poly({X}, 3, raw=TRUE)[4,2]", 17.64),
         ]
     )
     pred = predict_poly(P, np.array([2.0, 5.5, 9.9]))
-    _assert_r_tol(
+    _assert_r(
         [
             (
                 float(pred[0, 2]),
@@ -3085,7 +3085,7 @@ def test_poly_polym_vs_r():
     M = polym(x1, x2, degree=2)
     assert M.colnames == ["1.0", "2.0", "0.1", "1.1", "0.2"]
     assert M.shape == (5, 5)
-    _assert_r_tol(
+    _assert_r(
         [
             (float(M[0, 0]), f"polym({X1}, {X2}, degree=2)[1,1]", -0.632455532033676),
             (float(M[0, 3]), f"polym({X1}, {X2}, degree=2)[1,4]", 0.197278784766429),
@@ -4190,3 +4190,76 @@ def test_cbind_frames_rejects_a_non_divisor_height():
         cbind(tall, pl.DataFrame({"d": [1, 2, 3]}))
     with pytest.raises(ValueError, match=r"differing number of rows: 4, 0"):
         cbind(tall, pl.DataFrame({"e": []}))
+
+
+def test_kappa_matches_r():
+    # base R's kappa(z) at its defaults: qr() (dqrdc2) then LINPACK dtrco on
+    # the triangular factor. Pins are R 4.6.0's printed values at %.17g for a
+    # symmetric, a wide, a triangular and an ill-conditioned matrix (entries
+    # 1/(i+j), kappa ~ 6e7). dqrdc2 and dtrco call the BLAS, so the pins are
+    # exact under PINNED_ARITHMETIC; elsewhere the ill-conditioned case's
+    # smallest pivot (~1e-7) carries the BLAS's last bits, which the estimate
+    # amplifies to ~2.5e-10 relative.
+    from hea.R._linpack import _dtrco
+    from hea.R.linalg import kappa
+
+    def pin(ref, rel):
+        return ref if PINNED_ARITHMETIC else pytest.approx(ref, rel=rel)
+
+    cases = [
+        (np.array([[4.0, 2, 1], [2, 5, 3], [1, 3, 6]]), 6.3967740047466632),
+        (
+            np.array([1, 2, 3, 4, 5, 6, 7, 8, 10, 2], dtype=float).reshape(
+                2, 5, order="F"
+            ),
+            3.1960934670835432,
+        ),
+        (np.array([[2.0, 1, -1], [0, 3, 0.5], [0, 0, 1e-3]]), 6996.0034266133625),
+    ]
+    for z, ref in cases:
+        assert kappa(z) == pin(ref, 1e-13)
+    k = np.arange(1, 7)
+    assert kappa(1.0 / np.add.outer(k, k)) == pin(61143998.238278121, 1e-9)
+    assert kappa(np.zeros((0, 0))) == 0.0
+
+    # dtrco alone, on R's own qr() factor of that matrix: bit-for-bit under
+    # PINNED_ARITHMETIC (its dasum/ddot run in the BLAS's order).
+    r_factor = np.array(
+        [
+            [
+                -0.7153999246255167,
+                -0.5241823308777919,
+                -0.4174044486619454,
+                -0.3481606098916692,
+                -0.29924280875531856,
+                -0.2626912394877123,
+            ],
+            [
+                0.0,
+                -0.051526072523724285,
+                -0.06649420838870491,
+                -0.07009016836281279,
+                -0.06947778611074845,
+                -0.06721859004829395,
+            ],
+            [
+                0.0,
+                0.0,
+                0.0029438993539924,
+                0.005306676406475802,
+                0.006897162712885516,
+                0.007906255499115252,
+            ],
+            [
+                0.0,
+                0.0,
+                0.0,
+                0.00013137610141517457,
+                0.00030106193493496857,
+                0.0004629895663748126,
+            ],
+            [0.0, 0.0, 0.0, 0.0, 4.352834590174995e-06, 1.2040671207277943e-05],
+            [0.0, 0.0, 0.0, 0.0, 0.0, -9.360444389376745e-08],
+        ]
+    )
+    assert 1.0 / _dtrco(r_factor, 6, 1) == pin(61143998.238278121, 1e-13)

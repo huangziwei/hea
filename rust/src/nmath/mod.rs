@@ -21,6 +21,9 @@ pub mod tukey;
 pub mod util;
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(util::rfma_vec, m)?)?;
+    m.add_function(wrap_pyfunction!(util::rfma_dot, m)?)?;
+    m.add_function(wrap_pyfunction!(util::sum_cols_inorder, m)?)?;
     m.add_function(wrap_pyfunction!(norm::pnorm, m)?)?;
     m.add_function(wrap_pyfunction!(norm::qnorm, m)?)?;
     m.add_function(wrap_pyfunction!(norm::dnorm, m)?)?;

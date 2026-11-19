@@ -856,19 +856,44 @@ def _contains_dot(node) -> bool:
 
 import contextlib
 import contextvars
+import itertools
 import locale as _locale
 import math
+import warnings
 
 import numpy as np
 import polars as pl
-from scipy.linalg import eigh_tridiagonal as _eigh_tridiagonal
+from scipy.linalg.lapack import dstevd as _dstevd
 
+from hea._bandchol import bandchol
+from hea._crspl import crspl
 from hea._dispatch import rs_fn
 from hea._polars_compat import cat_pool
-from hea._rfma import _rfma_vec
+from hea._rfma import _rfma, _rfma_dot, _rfma_vec
+from hea._rlinalg import (
+    r_backsolve,
+    r_crossprod,
+    r_eigen_sym,
+    r_matprod,
+    r_norm,
+    r_solve,
+    r_svd,
+)
+from hea._rpow import _r_mod, _r_pow_scalar, _rpow
+from hea._rquantile import r_quantile7
+from hea._rsplines import spline_design
+from hea._rsum import r_colsums, r_mean, r_var
 
 _tp_eval_b_rs = rs_fn("tp_eval_b")
 _tp_eval_E_rs = rs_fn("tp_eval_E")
+_tp_col_sumsq_rs = rs_fn("tp_col_sumsq")
+_tp_uz_rows_rs = rs_fn("tp_uz_rows")
+# the fused per-row build of [eta | T] UZ
+_tp_eval_x_rs = rs_fn("tp_eval_x")
+_tp_matmult_ta_rs = rs_fn("tp_matmult_ta")
+_dqrqty_rows_rs = rs_fn("dqrqty_rows")
+_r_dstedc_rs = rs_fn("r_dstedc")
+_tp_rlanczos_rs = rs_fn("tp_rlanczos")
 
 
 _ORDERED_COLS_CV: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
@@ -878,6 +903,9 @@ _ORDERED_COLS_CV: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVa
 
 _SPARSE_CONS_CV: contextvars.ContextVar[int] = contextvars.ContextVar(
     "_hea_sparse_cons", default=0
+)
+_MOD_CON_CV: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "_hea_mod_con", default=0
 )
 
 
@@ -1122,6 +1150,7 @@ def _factor_from_series(
     """Build a factor block, honouring R's ``xlevels`` when one is in scope.
     present here (``model.frame(..., xlev=object$xlevels)``, models.R:568-593).
     (models.R:753-763): every factor/character variable in the model frame,
+    keyed by its deparsed name (``g``, ``factor(g)``, ``ordered(g)``).
     """
     xl = _XLEV_CV.get().get(label)
     blk = (
@@ -1320,7 +1349,7 @@ def _eval_numeric(node, data: pl.DataFrame) -> np.ndarray:
         if op == "/":
             return lhs / r
         if op == "^":
-            return lhs**r
+            return _r_pow_vec(lhs, r)
         raise TypeError(f"unsupported binop {op!r} in numeric context")
     if isinstance(node, Call):
         block = _eval_call(node, data)
@@ -1424,11 +1453,16 @@ def _eval_call(call: Call, data: pl.DataFrame):
             base_node = call.kwargs.get("base")
             if base_node is None and len(call.args) >= 2:
                 base_node = call.args[1]
-            out = (
-                np.log(v)
-                if base_node is None
-                else np.log(v) / np.log(_eval_numeric(base_node, data))
-            )
+            if base_node is None:
+                out = np.log(v)
+            else:
+                # R's logbase: log10 and log2 for those bases, else the ratio.
+                b = np.broadcast_to(_eval_numeric(base_node, data), v.shape)
+                out = np.where(
+                    b == 10,
+                    np.log10(v),
+                    np.where(b == 2, np.log2(v), np.log(v) / np.log(b)),
+                )
             return _NumBlock(values=out.reshape(-1, 1), suffixes=[""], label=label)
         f = {
             "exp": np.exp,
@@ -1724,7 +1758,7 @@ def _eval_call(call: Call, data: pl.DataFrame):
             if df is not None and len(interior) == 0:
                 n_interior = df - degree - (1 if intercept else 0)
                 if n_interior > 0:
-                    interior = np.quantile(v, np.linspace(0, 1, n_interior + 2)[1:-1])
+                    interior = _r_df_knots(v, n_interior, bnd, ns=False)
             if store is not None:
                 store[label] = {"interior": interior, "bnd": bnd}
         cols = _bs_basis(v, degree, bnd, interior, None, intercept)
@@ -1748,7 +1782,7 @@ def _eval_call(call: Call, data: pl.DataFrame):
             if df is not None and len(interior) == 0:
                 n_interior = df - 1 - (1 if intercept else 0)
                 if n_interior > 0:
-                    interior = np.quantile(v, np.linspace(0, 1, n_interior + 2)[1:-1])
+                    interior = _r_df_knots(v, n_interior, bnd, ns=True)
             if store is not None:
                 store[label] = {"interior": interior, "bnd": bnd}
         cols = _ns_basis(v, bnd, interior, None, intercept)
@@ -1830,124 +1864,130 @@ def _parse_boundary(node, data, x):
     return (float(x.min()), float(x.max()))
 
 
-def _bs_basis(x, degree, boundary, interior_knots, df, intercept):
-    """B-spline basis matching R's `splines::bs()`. Returns (n, df) matrix.
-    Parametric-term helper used from `_eval_call` (e.g. `y ~ bs(x, df=10)`).
-    NOT mgcv's `s(x, bs="bs")` smoother — that's `_build_bs_smooth` below.
-    """
-    from scipy.interpolate import BSpline as _BSpline
+def _r_df_knots(x, n_interior: int, boundary, *, ns: bool) -> np.ndarray:
+    """The interior knots ``splines::bs()``/``ns()`` place for ``df``:
+    ``quantile(x[!outside], seq.int(0, 1, length.out = n + 2)[-c(1, n + 2)])``
+    (type 7), then knots equal
+    to a boundary knot shoved an eighth of the way to the nearest other
+    knot - ``bs()`` warns when every knot sits on that boundary, ``ns()``
+    stops."""
+    x = np.asarray(x, dtype=float)
+    x = x[~np.isnan(x)]
+    bk = np.sort(np.asarray(boundary, dtype=float))
+    lout = n_interior + 2
+    probs = np.arange(1, lout - 1) * (1.0 / (lout - 1))
+    knots = r_quantile7(x[(x >= bk[0]) & (x <= bk[1])], probs)
+    lr_eq = [knots.min() in (bk[0], bk[1]), knots.max() in (bk[0], bk[1])]
+    if not any(lr_eq):
+        return knots
+    all_eq = [False, False]
+    for side in (0, 1):
+        if not lr_eq[side]:
+            continue
+        piv = bk[side]
+        i_eq = knots == piv
+        if np.all(i_eq):
+            msg = f"all interior knots match {'left' if side == 0 else 'right'} boundary knot"
+            if ns:
+                raise ValueError(msg)
+            warnings.warn(msg, stacklevel=3)
+            all_eq[side] = True
+        elif side == 0:
+            knots[i_eq] = knots[i_eq] + (knots[knots > piv].min() - piv) / 8
+        else:
+            knots[i_eq] = knots[i_eq] - (piv - knots[knots < piv].max()) / 8
+    if ns or not ((lr_eq[0] and all_eq[0]) or (lr_eq[1] and all_eq[1])):
+        warnings.warn(
+            "shoving 'interior' knots matching boundary knots to inside", stacklevel=3
+        )
+    return knots
 
-    ord = degree + 1
+
+def _bs_basis(x, degree, boundary, interior_knots, df, intercept):
+    """R ``splines::bs()`` basis for x, given its interior knots and
+    ``Boundary.knots``: ``splineDesign`` on the boundary knots repeated
+    ``degree + 1`` times around the interior ones and, for x beyond a
+    boundary knot, the Taylor expansion of every basis function about a
+    pivot a quarter of the way into the end knot interval. Parametric-term
+    helper for ``y ~ bs(x, df=10)``; mgcv's ``s(x, bs="bs")`` is
+    :func:`_bs_design`."""
+    ord_ = degree + 1
     if df is not None and len(interior_knots) == 0:
         n_interior = df - degree - (1 if intercept else 0)
         if n_interior > 0:
-            probs = np.linspace(0, 1, n_interior + 2)[1:-1]
-            interior_knots = np.quantile(x, probs)
-    Aknots = np.concatenate(
-        [
-            np.repeat(boundary[0], ord),
-            np.sort(np.asarray(interior_knots, dtype=float)),
-            np.repeat(boundary[1], ord),
-        ]
-    )
-    n_basis = len(Aknots) - ord
-    out = np.zeros((len(x), n_basis))
+            interior_knots = _r_df_knots(x, n_interior, boundary, ns=False)
     x = np.asarray(x, dtype=float)
-    for i in range(n_basis):
-        c = np.zeros(n_basis)
-        c[i] = 1.0
-        spl = _BSpline(Aknots, c, degree, extrapolate=True)
-        out[:, i] = np.nan_to_num(spl(x), nan=0.0)
-    right_mask = x == boundary[1]
-    if right_mask.any():
-        out[right_mask, :] = 0
-        out[right_mask, -1] = 1.0
+    bk = np.sort(np.asarray(boundary, dtype=float))
+    ol = x < bk[0]
+    orr = x > bk[1]
+    outside = ol | orr
+    Aknots = np.sort(
+        np.concatenate([np.repeat(bk, ord_), np.asarray(interior_knots, dtype=float)])
+    )
+    if outside.any():
+        derivs = np.arange(ord_)
+        scalef = np.array([float(math.factorial(i)) for i in range(ord_)])
+        basis = np.zeros((x.size, Aknots.size - degree - 1))
+        e = 1 / 4
+        for side, idx in ((ol, ord_), (orr, Aknots.size - ord_ - 1)):
+            if not side.any():
+                continue
+            b = bk[0] if side is ol else bk[1]
+            k_pivot = (1 - e) * b + e * Aknots[idx]
+            dx = x[side] - k_pivot
+            xl = np.column_stack(
+                [np.ones(dx.size)] + [_rpow(dx, float(j)) for j in range(1, ord_)]
+            )
+            tt = spline_design(Aknots, np.repeat(k_pivot, ord_), ord_, derivs)
+            basis[side] = r_matprod(xl, tt / scalef[:, None])
+        inside = ~outside
+        if inside.any():
+            basis[inside] = spline_design(Aknots, x[inside], ord_)
+    else:
+        basis = spline_design(Aknots, x, ord_)
     if not intercept:
-        out = out[:, 1:]
-    return out
+        basis = basis[:, 1:]
+    return basis
 
 
 def _ns_basis(x, boundary, interior_knots, df, intercept):
-    """Natural cubic spline basis matching R's ns()."""
-    from scipy.interpolate import BSpline as _BSpline
+    """R ``splines::ns()`` basis for x, given its interior knots and
+    ``Boundary.knots``: the cubic ``splineDesign`` basis (extended linearly
+    beyond each boundary knot from its value and slope there), projected by
+    ``qr.qty`` on ``qr(t(const))`` off the second derivatives at the two
+    boundary knots, dropping the first two columns."""
+    from .R.linalg import dqrdc2
 
     if df is not None and len(interior_knots) == 0:
         n_interior = df - 1 - (1 if intercept else 0)
         if n_interior > 0:
-            probs = np.linspace(0, 1, n_interior + 2)[1:-1]
-            interior_knots = np.quantile(x, probs)
-    degree = 3
-    ord = 4
-    interior_knots = np.sort(np.asarray(interior_knots, dtype=float))
-    Aknots = np.concatenate(
-        [
-            np.repeat(boundary[0], ord),
-            interior_knots,
-            np.repeat(boundary[1], ord),
-        ]
-    )
-    n_basis = len(Aknots) - ord
-
-    def _B(xe):
-        xc = np.clip(xe, boundary[0], boundary[1])
-        out = np.zeros((len(xe), n_basis))
-        for i in range(n_basis):
-            c = np.zeros(n_basis)
-            c[i] = 1.0
-            out[:, i] = np.nan_to_num(
-                _BSpline(Aknots, c, degree, extrapolate=False)(xc), nan=0.0
-            )
-        right = np.asarray(xe) == boundary[1]
-        if right.any():
-            out[right, :] = 0
-            out[right, -1] = 1.0
-        return out
-
-    def _Bdd(xe):
-        out = np.zeros((len(xe), n_basis))
-        for i in range(n_basis):
-            c = np.zeros(n_basis)
-            c[i] = 1.0
-            out[:, i] = _BSpline(Aknots, c, degree, extrapolate=False).derivative(2)(xe)
-        return np.nan_to_num(out, nan=0.0)
-
-    def _Bd(xe):
-        eps = (boundary[1] - boundary[0]) * 1e-7
-        xc = np.clip(xe, boundary[0] + eps, boundary[1] - eps)
-        out = np.zeros((len(xe), n_basis))
-        for i in range(n_basis):
-            c = np.zeros(n_basis)
-            c[i] = 1.0
-            out[:, i] = np.nan_to_num(
-                _BSpline(Aknots, c, degree, extrapolate=False).derivative(1)(xc),
-                nan=0.0,
-            )
-        return out
-
-    lo, hi = boundary
-    B = _B(x)
-    const = _Bdd(np.array([lo, hi], dtype=float))  # 2 × n_basis
-    Bd_bnd = _Bd(np.array([lo, hi], dtype=float))  # boundary slopes
-    Blo = _B(np.array([lo], dtype=float))
-    Bhi = _B(np.array([hi], dtype=float))
+            interior_knots = _r_df_knots(x, n_interior, boundary, ns=True)
+    x = np.asarray(x, dtype=float)
+    bk = np.sort(np.asarray(boundary, dtype=float))
+    interior_knots = np.asarray(interior_knots, dtype=float)
+    ol = x < bk[0]
+    orr = x > bk[1]
+    outside = ol | orr
+    Aknots = np.sort(np.concatenate([np.repeat(bk, 4), interior_knots]))
+    if outside.any():
+        basis = np.zeros((x.size, interior_knots.size + 4))
+        for side, k_pivot in ((ol, bk[0]), (orr, bk[1])):
+            if not side.any():
+                continue
+            xl = np.column_stack([np.ones(int(side.sum())), x[side] - k_pivot])
+            tt = spline_design(Aknots, np.repeat(k_pivot, 2), 4, np.array([0, 1]))
+            basis[side] = r_matprod(xl, tt)
+        inside = ~outside
+        if inside.any():
+            basis[inside] = spline_design(Aknots, x[inside], 4)
+    else:
+        basis = spline_design(Aknots, x, 4)
+    const = spline_design(Aknots, bk, 4, np.array([2, 2]))
     if not intercept:
-        B = B[:, 1:]
         const = const[:, 1:]
-        Bd_bnd = Bd_bnd[:, 1:]
-        Blo = Blo[:, 1:]
-        Bhi = Bhi[:, 1:]
-    Q, _ = np.linalg.qr(const.T, mode="complete")
-    H = Q[:, 2:]
-    N = B @ H
-
-    xv = np.asarray(x, dtype=float)
-    below = xv < lo
-    above = xv > hi
-    if below.any():
-        N[below] = (Blo @ H)[0] + np.outer(xv[below] - lo, (Bd_bnd[0:1] @ H)[0])
-    if above.any():
-        N[above] = (Bhi @ H)[0] + np.outer(xv[above] - hi, (Bd_bnd[1:2] @ H)[0])
-    return N
+        basis = basis[:, 1:]
+    qr, qraux, _pv, rank = dqrdc2(np.ascontiguousarray(const.T))
+    return _dqrsl_qty_rows(basis, qr, qraux, rank)[:, 2:]
 
 
 def _harmonic_basis(x, K: int, period: float):
@@ -1983,22 +2023,22 @@ def _eval_level_list(node) -> list:
 def _poly_orthogonal(
     x: np.ndarray, degree: int, state: dict | None = None
 ) -> np.ndarray:
-    """Orthogonal polynomials matching R's `poly(x, degree)` (non-raw)."""
+    """R's ``poly(x, degree)`` (non-raw): the QR fit of the centred
+    Vandermonde (:func:`hea.R.formula_helpers._poly_fit`), and at predict
+    time ``predict.poly``'s three-term recurrence from the stored
+    ``alpha``/``norm2`` (:func:`hea.R.formula_helpers._poly_predict`)."""
+    from .R.formula_helpers import _poly_fit, _poly_predict
+
     x = np.asarray(x, dtype=float)
-    if state and "Rinv" in state:  # replay (predict)
-        xc = x - state["mean"]
-        Xn = np.column_stack([xc**d for d in range(degree + 1)])
-        return ((Xn @ state["Rinv"]) * state["signs"])[:, 1:]
-    mean = x.mean()
-    xc = x - mean
-    X = np.column_stack([xc**d for d in range(degree + 1)])
-    Q, R_mat = np.linalg.qr(X)
-    signs = np.sign(np.diag(R_mat))
+    if state and "alpha" in state:  # replay (predict)
+        return _poly_predict(
+            x, degree, {"alpha": state["alpha"], "norm2": state["norm2"]}
+        )
+    Z, alpha, norm2 = _poly_fit(x, degree)
     if state is not None:  # capture (fit)
-        state["mean"] = mean
-        state["Rinv"] = np.linalg.inv(R_mat)
-        state["signs"] = signs
-    return (Q * signs)[:, 1:]
+        state["alpha"] = alpha
+        state["norm2"] = norm2
+    return Z
 
 
 def _eval_atom(node, data: pl.DataFrame, cache: dict | None = None):
@@ -2216,6 +2256,9 @@ def _encode_term_marginals(
 ) -> list[_NumBlock]:
     """The term's per-atom column blocks, before the row-tensor product.
     (mgcv ``terms2tensor``, bam.r:2091-2174). Blocks come back in atom order,
+    which ``_khatri_rao`` treats as fastest-varying first. The factor-coding
+    (marginality) rule of :func:`_encode_term` is applied here, and
+    ``covered`` is updated in place.
     """
     if not term.atoms:
         return [
@@ -2765,6 +2808,9 @@ class SmoothBlock:
     S: list[np.ndarray]  # penalty matrices, each (k, k)
     spec: BasisSpec | None = None  # predict-time replay state
     S_scale: list[float] | None = None
+    # a tensor smooth's margin designs as constructed (mgcv
+    # ``margin[[j]]$X``, after any np reparameterization), row for row with X
+    margin_X: list[np.ndarray] | None = None
 
 
 class _RawBasis:
@@ -2799,30 +2845,31 @@ class _RenamedRawBasis(_RawBasis):
 
 @dataclass(slots=True)
 class _AbsorbTransform:
-    """Replay ``_absorb_sumzero`` on new-data rows.
+    """Replay ``_absorb_sumzero`` on new-data rows, as mgcv's ``PredictMat``
+    does with the stored ``qrc``: full path ``t(qr.qty(qrc, t(X)))[, -(1:j)]``;
+    partial path (``indi`` set) the same on ``X[, indi]``, written back to
+    ``indi[1:nz]``, then the columns ``indi[(nz+1):nx]`` dropped."""
 
-    Two paths matching the in-sample code:
-      * full path (``full_Z`` set): ``X_new = X @ full_Z``.
-      * sparse path (``indi``/``Z_sub``/``keep_mask`` set): ``X[:, indi]`` is
-        rotated by ``Z_sub``, the result placed back at ``indi[:nz]``, then
-        the dropped column is removed via ``keep_mask``.
-    """
-
-    full_Z: np.ndarray | None = None
+    qr: np.ndarray | None = None
+    qraux: np.ndarray | None = None
+    rank: int = 0
+    nc: int = 0
     indi: np.ndarray | None = None
-    Z_sub: np.ndarray | None = None
-    keep_mask: np.ndarray | None = None
 
     def apply(self, X: np.ndarray) -> np.ndarray:
-        if self.full_Z is not None:
-            return X @ self.full_Z
-        if self.indi is None:
+        if self.qr is None:
             return X
-        nz = len(self.indi) - 1
+        X = np.asarray(X, dtype=float)
+        if self.indi is None:
+            return _dqrsl_qty_rows(X, self.qr, self.qraux, self.rank)[:, self.nc :]
+        nx = len(self.indi)
+        nz = nx - self.nc
         X_new = X.copy()
         if nz > 0:
-            X_new[:, self.indi[:nz]] = X[:, self.indi] @ self.Z_sub
-        return X_new[:, self.keep_mask]
+            X_new[:, self.indi[:nz]] = _dqrsl_qty_rows(
+                X[:, self.indi], self.qr, self.qraux, self.rank
+            )[:, self.nc : nx]
+        return np.delete(X_new, self.indi[nz:nx], axis=1)
 
 
 @dataclass(slots=True)
@@ -2889,12 +2936,9 @@ class BasisSpec:
     to the other exists; we instead carry a separate raw evaluator for
     predict that re-applies the full-absorb ``Z_p`` from raw.
 
-    ``coef_remap`` is set when fit and predict bases differ (also t2 only):
-    after fit, β must be transformed so ``predict_mat(new) @ β`` matches
-    ``X_fit @ β_partial`` from the partial-absorb fit. Stored as ``(M, X̄)``
-    such that ``X_fit = 1·X̄ + X_predict @ M`` exactly (both in- and
-    out-of-sample). Mirrors mgcv's ``G$P`` post-fit transform in
-    ``estimate.gam`` (smooth.r:264-267).
+    ``Xp`` is the block's model matrix in the prediction basis when that
+    differs from the fit basis (smoothCon's ``sm$Xp``, also t2 only); the
+    model assembles mgcv's ``G$P`` from it.
     """
 
     raw: _RawBasis
@@ -2902,7 +2946,7 @@ class BasisSpec:
     absorb: _AbsorbTransform | _SweepDropTransform | None = None
     keep_cols: np.ndarray | None = None
     predict_raw: _RawBasis | None = None
-    coef_remap: tuple[np.ndarray, np.ndarray] | None = None
+    Xp: np.ndarray | None = None
     summation_dim: int | None = None
     matrix_vars: tuple[str, ...] | None = None
 
@@ -2933,13 +2977,23 @@ class BasisSpec:
             and matrix_vars
             and any(v in data.columns and is_matrix_col(data[v]) for v in matrix_vars)
         ):
+            # PredictMat (smooth.r:4330-4378): a sweep-and-drop constraint
+            # acts on the basis before the by and the summation, which
+            # accumulates the m columns in order as ``colSums``; a QR
+            # constraint is applied to the summed design.
             long_data, n, m = long_form_view(data, list(matrix_vars))
             raw = self.predict_raw if self.predict_raw is not None else self.raw
             X = raw.eval(long_data)
+            sweep = isinstance(self.absorb, _SweepDropTransform)
+            if sweep:
+                X = self.absorb.apply(X)
             if self.by is not None and apply_by:
                 X = self.by.apply(X, long_data)
-            X = X.reshape(n, m, X.shape[1]).sum(axis=1)
-            if self.absorb is not None:
+            X3 = X.reshape(n, m, X.shape[1])
+            X = 0.0 + X3[:, 0, :]
+            for col in range(1, m):
+                X = X + X3[:, col, :]
+            if self.absorb is not None and not sweep:
                 X = self.absorb.apply(X)
             if self.keep_cols is not None:
                 X = X[:, self.keep_cols]
@@ -2964,7 +3018,7 @@ class _CRRawBasis(_RawBasis):
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         x = data[self.term].to_numpy().astype(float)
-        return _cr_basis(x, self.knots)
+        return crspl(x, self.knots)[0]
 
 
 @dataclass(slots=True)
@@ -2990,7 +3044,7 @@ class _PSRawBasis(_RawBasis):
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         x = data[self.term].to_numpy().astype(float)
-        return _ps_basis(x, self.knots, self.m0)
+        return _pspline_predict(x, self.knots, self.m0)
 
 
 @dataclass(slots=True)
@@ -3003,7 +3057,7 @@ class _BSRawBasis(_RawBasis):
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         x = data[self.term].to_numpy().astype(float)
-        return _bs_design(x, self.knots, self.m0, deriv=0)
+        return _pspline_predict(x, self.knots, self.m0 - 1)
 
 
 @dataclass(slots=True)
@@ -3016,17 +3070,17 @@ class _CPRawBasis(_RawBasis):
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         x = data[self.term].to_numpy().astype(float)
-        return _cp_basis(x, self.knots, self.ord_)
+        return _cp_predict(x, self.knots, self.ord_)
 
 
 @dataclass(slots=True)
 class _GPRawBasis(_RawBasis):
     """`smooth.construct.gp.smooth.spec` — Gaussian-process / Kammann–Wand.
 
-    Stores the resolved kernel definition (`defn`), the centered knot grid
-    (`xu_c`), the kept eigenvectors (`UZ`), and the data shift; predict
-    rebuilds [E(x_c, xu_c) @ UZ | T(x_c)] using the same defn so rho is
-    fixed at fit time.
+    Stores the resolved kernel definition (`defn`), the centred knots
+    (`xu_c`), the kept eigenvectors (`UZ`) and the covariate shift; predict
+    is ``Predict.matrix.gp.smooth`` with that defn, so rho stays at its fit
+    value.
     """
 
     term: list[str]
@@ -3038,19 +3092,17 @@ class _GPRawBasis(_RawBasis):
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         x_full = np.column_stack([data[v].to_numpy().astype(float) for v in self.term])
-        x_c = x_full - self.shift
-        E_x = _gp_E_with_defn(x_c, self.xu_c, self.defn)
-        X_radial = E_x @ self.UZ
-        T_mat = _gp_T(x_c, self.stationary)
-        return np.hstack([X_radial, T_mat])
+        return _gp_predict(x_full, self.shift, self.xu_c, self.defn, self.UZ)
 
 
 @dataclass(slots=True)
 class _TPRawBasis(_RawBasis):
     """`smooth.construct.tp.smooth.spec` — thin-plate regression spline.
 
-    Predict is `[η(||x_c - Xu_c||) | T(x_c)] @ UZ`, with column-norm
-    rescaling `w` reapplied after — same chain as `_tp_raw` builds at fit.
+    Predict is mgcv's ``predict_tprs``: each row ``[η(||x_c - Xu_c||) |
+    T(x_c)]`` mapped through the rescaled basis ``UZ W⁻¹`` (``tprs_setup``
+    divides UZ's columns by ``w`` in place, so R's stored ``UZ`` is already
+    scaled), one BLAS ``dgemv`` per row.
     """
 
     term: list[str]
@@ -3067,8 +3119,7 @@ class _TPRawBasis(_RawBasis):
         x_full = np.column_stack([data[v].to_numpy().astype(float) for v in self.term])
         x_c = x_full - self.shift
         eta0 = _tp_eta_const(self.m, self.d)
-        X_raw = _tp_eval_X_raw(x_c, self.Xu, self.m, self.d, self.UZ, eta0)
-        return X_raw / self.w
+        return _tp_eval_X_raw(x_c, self.Xu, self.m, self.d, self.UZ / self.w, eta0)
 
 
 @dataclass(slots=True)
@@ -3105,7 +3156,7 @@ class _ADRawBasis(_RawBasis):
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         cols = [data[t].to_numpy().astype(float) for t in self.term]
         bases = [
-            _ps_basis(cols[i], self.knots_per_term[i], self.m0)
+            _pspline_predict(cols[i], self.knots_per_term[i], self.m0)
             for i in range(len(self.term))
         ]
         if len(bases) == 1:
@@ -3118,27 +3169,36 @@ class _ADRawBasis(_RawBasis):
 
 @dataclass(slots=True)
 class _RERawBasis(_RawBasis):
-    """`smooth.construct.re.smooth.spec` — random-effect indicator basis.
-
-    Predict reproduces mgcv's PredictMat output: one column per fit-time
-    column even if new data exercises fewer levels (those columns are
-    all-zero on rows that don't match any fit-time combo). ``combos[j]`` is
-    the tuple of factor values defining column j (single-element tuple for
-    1D re; multi-element for `s(f1, f2, bs="re")`-style interactions).
-    """
+    """`smooth.construct.re.smooth.spec` — ``model.matrix(~ t1:t2:... - 1)``
+    (Predict.matrix.random.effect, smooth.r): every factor in the term coded
+    by indicators of its fit-time ``levels`` (no intercept, no main effects),
+    one column per level combination with the first factor varying fastest,
+    each column the product over the term's variables in order of the
+    indicators and the numeric variables; non-finite entries are 0.
+    ``levels[i]`` is None for a numeric variable."""
 
     term: list[str]
-    combos: list[tuple]
+    levels: list
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         n = data.shape[0]
+        fac = [i for i, lv in enumerate(self.levels) if lv is not None]
+        combos = [
+            tuple(reversed(c))
+            for c in itertools.product(*(self.levels[i] for i in reversed(fac)))
+        ]
         cols = [data[t].to_numpy() for t in self.term]
-        out = np.zeros((n, len(self.combos)))
-        for j, combo in enumerate(self.combos):
-            mask = np.ones(n, dtype=bool)
-            for ci, lev in zip(cols, combo):
-                mask &= ci == lev
-            out[:, j] = mask.astype(float)
+        out = np.empty((n, len(combos)))
+        for j, combo in enumerate(combos):
+            lev_of = dict(zip(fac, combo))
+            v = np.ones(n)
+            for i, ci in enumerate(cols):
+                if i in lev_of:
+                    v = v * (ci == lev_of[i]).astype(float)
+                else:
+                    v = v * ci.astype(float)
+            out[:, j] = v
+        out[~np.isfinite(out)] = 0.0
         return out
 
 
@@ -3184,11 +3244,21 @@ class _FSRawBasis(_RawBasis):
     rank: int
     null_d: int
     base_raw: _RawBasis  # the inner tp/etc. raw basis
-    P: np.ndarray  # nat.param transform: Xr = Xb @ P
+    P: np.ndarray  # nat.param transform: Xr = Xb %*% P
+
+    @property
+    def margins(self) -> list[_RawBasis]:
+        """The term as a tensor product, as bam's discrete fit builds it
+        (smooth.r:2128-2149): the factor's indicator columns
+        (``model.matrix(~fterm - 1)``) and the base basis times ``P``."""
+        return [
+            _FactorDummyRawBasis(term=self.fterm, levels=list(self.flev)),
+            _LinearTransformRawBasis(inner=self.base_raw, M=self.P),
+        ]
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         Xb = self.base_raw.eval(data)
-        Xr = Xb @ self.P
+        Xr = r_matprod(Xb, self.P)
         n = Xr.shape[0]
         nf = len(self.flev)
         p = self.p
@@ -3198,6 +3268,32 @@ class _FSRawBasis(_RawBasis):
             mask = (fac_arr == lev).astype(float)
             out[:, j * p : (j + 1) * p] = Xr * mask[:, None]
         return out
+
+
+@dataclass(slots=True)
+class _FactorDummyRawBasis(_RawBasis):
+    """``model.matrix(~ term - 1)`` for a factor: one indicator column per
+    level, in level order (the ``random.effect`` margin mgcv gives fs/re
+    terms under discrete fitting)."""
+
+    term: str
+    levels: list
+
+    def eval(self, data: pl.DataFrame) -> np.ndarray:
+        f = data[self.term].to_numpy()
+        return np.column_stack([(f == lev).astype(float) for lev in self.levels])
+
+
+@dataclass(slots=True)
+class _AbsorbedRawBasis(_RawBasis):
+    """Wrap a raw basis with smoothCon's constraint absorption, replayed by
+    ``absorb`` (an :class:`_AbsorbTransform`) as ``PredictMat`` does."""
+
+    inner: _RawBasis
+    absorb: _AbsorbTransform
+
+    def eval(self, data: pl.DataFrame) -> np.ndarray:
+        return self.absorb.apply(self.inner.eval(data))
 
 
 @dataclass(slots=True)
@@ -3212,7 +3308,7 @@ class _LinearTransformRawBasis(_RawBasis):
     M: np.ndarray
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
-        return self.inner.eval(data) @ self.M
+        return r_matprod(self.inner.eval(data), self.M)
 
 
 @dataclass(slots=True)
@@ -3246,30 +3342,25 @@ class _T2RawBasis(_RawBasis):
       * ``P_per_margin`` — per-margin nat.param transform; ``Xi_np = Xi_raw @ P``
       * ``ranks``       — per-margin range size (range first, null after)
       * ``null_dim``    — overall null dimension (controls drop-last-col / Zn)
-      * ``Zn``          — partial absorb.cons rotation for the null block when
-        ``null_dim >= 2`` (else None — null_dim 0 needs no constraint, null_dim 1
-        drops the last column).
+      * ``absorb``      — smoothCon's partial absorption of the null-block
+        constraint when ``null_dim >= 2`` (None otherwise: null_dim 0 needs no
+        constraint, null_dim 1 drops the last column).
     """
 
     margins: list[_RawBasis]
     P_per_margin: list[np.ndarray]
     ranks: list[int]
     null_dim: int
-    Zn: np.ndarray | None
+    absorb: _AbsorbTransform | None
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         Xm_np = [m.eval(data) @ P for m, P in zip(self.margins, self.P_per_margin)]
-        X, sub_cols = _t2_model_matrix(Xm_np, self.ranks)
-        nup = sum(sub_cols)
+        X, _ = _t2_model_matrix(Xm_np, self.ranks)
         if self.null_dim == 0:
             return X
         if self.null_dim == 1:
-            keep = np.ones(X.shape[1], dtype=bool)
-            keep[-1] = False
-            return X[:, keep]
-        X_R = X[:, :nup]
-        X_N = X[:, nup:]
-        return np.concatenate([X_R, X_N @ self.Zn], axis=1)
+            return X[:, :-1]
+        return self.absorb.apply(X)
 
 
 @dataclass(slots=True)
@@ -3278,21 +3369,20 @@ class _T2PredictRawBasis(_RawBasis):
 
     Where ``_T2RawBasis`` mirrors ``smoothCon``'s partial-absorb output
     (``sm$X`` keeps a constant component in the range cols), this mirrors
-    ``PredictMat``: re-evaluate the raw t2 design at new data and apply
-    ``Z_p`` from ``qr.qy(qrc, [0; I_q])`` — i.e. drop the 1-d constant
-    direction from the *full* tensor column span. ``Z_p`` is computed at
-    fit time from ``colSums(X_raw_full)`` so it is independent of new data.
+    ``PredictMat``: re-evaluate the raw t2 design at new data and replay the
+    full ``qr(t(Cp))`` absorption of the prediction constraint
+    ``Cp = colSums(X)`` fixed at fit time.
     """
 
     margins: list[_RawBasis]
     P_per_margin: list[np.ndarray]
     ranks: list[int]
-    Z_p: np.ndarray
+    absorb: _AbsorbTransform
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         Xm_np = [m.eval(data) @ P for m, P in zip(self.margins, self.P_per_margin)]
         X, _ = _t2_model_matrix(Xm_np, self.ranks)
-        return X @ self.Z_p
+        return self.absorb.apply(X)
 
 
 @dataclass(slots=True)
@@ -3314,6 +3404,16 @@ class _SZRawBasis(_RawBasis):
     nf: list[int]
     base_raw: _RawBasis
     p0: int
+
+    @property
+    def margins(self) -> list[_RawBasis]:
+        """The term as a tensor product, as bam's discrete fit builds it
+        (smooth.r sz constructor): each factor's indicator columns, then the
+        base basis; the sum-to-zero contrasts are applied to the product."""
+        return [
+            _FactorDummyRawBasis(term=ft, levels=list(lv))
+            for ft, lv in zip(self.ftermlist, self.flev)
+        ] + [self.base_raw]
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         Xb = self.base_raw.eval(data)
@@ -3405,6 +3505,9 @@ def _collect_name_idents(node, out: set[str]) -> None:
 def _smooth_id_value(call: Call) -> str | None:
     """The smooth's ``id=`` linkage key as a canonical string, or None.
     mgcv keys its id machinery by ``as.character(id)`` (mgcv.r:1202), so
+    ``id=1`` and ``id="1"`` link with each other. R's coercions are mirrored:
+    whole-number doubles print without a decimal part, logicals print
+    TRUE/FALSE.
     """
     node = call.kwargs.get("id")
     if node is None:
@@ -3682,14 +3785,24 @@ def _defer_matrix_block(
     cls: str,
     term: list[str],
     raw_basis: _RawBasis | None,
+    label: str | None = None,
 ) -> list[SmoothBlock]:
     """Matrix-argument (summation-convention) deferral.
+
+    Returns the single RAW long-form block: ``X`` is the (n*m, p_raw) basis,
+    ``S_list`` the symmetrised (but *un-scaled*) penalties, and the spec
+    records the numeric ``by=`` (if any). ``_summation_apply_blocks`` then runs
+    mgcv's ``smoothCon`` pipeline in order — scale.penalty on this long-form X
     (smooth.r:3879, *before* the by-multiply), by-multiply + summation
     (smooth.r:3997-4008), the centering constraint (dropped when the by-matrix
     row-sums vary, smooth.r:3925-3943) and check.rank (smooth.r:4035) on the
+    row-summed (n, p) design.
+
+    Factor ``by`` and ``pc=`` are rejected: mgcv itself stops on a factor by
     with matrix arguments (smooth.r:3970), and the point-constraint path has no
+    summation-convention analogue.
     """
-    base_label = _smooth_label(call)
+    base_label = label if label is not None else _smooth_label(call)
     if _smooth_pc_value(call) is not None:
         raise NotImplementedError(
             f"pc= point constraint with a matrix-argument (summation "
@@ -3727,13 +3840,15 @@ def _apply_by_and_absorb(
     pre_scaled: bool = False,
     C_source: np.ndarray | None = None,
     S_scale: list[float] | None = None,
+    label: str | None = None,
 ) -> list[SmoothBlock]:
-    """Apply mgcv's smoothCon post-processing:
-    scale.penalty → by-handling → absorb.cons → SmoothBlock(s).
-    replacing X with the own-data evaluation (smooth.r:3870-3877: doing it
-    X (smooth.r:3848-3851) *before* the dataX replacement, so id-linked
+    """Apply mgcv's smoothCon post-processing to a constructor's ``X`` and
+    penalties: scale.penalty, by-variable handling, absorb.cons, then the
+    SmoothBlock(s). The penalties are taken as the constructor returns them:
+    smoothCon never symmetrizes, the constructors that need it (tp, cr, cc,
+    tensor products) do so themselves. ``label`` is the smooth's label when
+    the constructor changed it from the call's (``tero``).
     """
-    S_list = [(S + S.T) / 2.0 for S in S_list]
     _id_cap = _ID_RAW_CAPTURE.get()
     if _id_cap is not None:
         _id_cap.update(X=X, S=S_list, raw=raw_basis, cls=cls)
@@ -3747,7 +3862,7 @@ def _apply_by_and_absorb(
 
     sparse_cons = _SPARSE_CONS_CV.get()
     by_expr = _smooth_by_expr(call)
-    base_label = _smooth_label(call)
+    base_label = label if label is not None else _smooth_label(call)
 
     # pc= point constraint (smooth.r:3676-3679): mgcv REPLACES the default
     # sum-to-zero C = colMeans(X) with the smooth's basis row evaluated at the
@@ -3778,7 +3893,7 @@ def _apply_by_and_absorb(
                     f"pc= point constraint with the sweep-drop constraint "
                     f"(bs with sparse.cons=-1) on {base_label} is not supported"
                 )
-            X2, S2, T = _absorb_sweep_drop(X, S_list)
+            X2, S2, T = _absorb_sweep_drop(X, S_list, C_source=C_source)
         else:
             X2, S2, T = _absorb_sumzero(
                 X,
@@ -3828,7 +3943,11 @@ def _apply_by_and_absorb(
                 f"pc= point constraint with the sweep-drop constraint "
                 f"(bs with sparse.cons=-1) on {base_label} is not supported"
             )
-        sd_shared = _absorb_sweep_drop(X, S_list) if sparse_cons == -1 else None
+        sd_shared = (
+            _absorb_sweep_drop(X, S_list, C_source=C_source)
+            if sparse_cons == -1
+            else None
+        )
         blocks: list[SmoothBlock] = []
         for lev in levels:
             mask = (by_arr == lev).astype(float)
@@ -3905,13 +4024,17 @@ def _scale_penalty(
     X: np.ndarray,
     S_list: list[np.ndarray],
 ) -> tuple[list[np.ndarray], list[float]]:
-    """Match mgcv's `scale.penalty=TRUE` rescaling.
-    ("multiply S[[i]] by this to get original S[[i]]", smooth.r:3884),
-    initialised to 1 wherever the rescale doesn't apply (smooth.r:3877).
+    """smoothCon's ``scale.penalty = TRUE`` step (smooth.r:3879-3886):
+    ``maXX <- norm(X, type = "I")^2``, then for each penalty
+    ``maS <- norm(S)/maXX; S <- S/maS``, with ``maS`` returned as the
+    ``S.scale`` that maps the scaled penalty back. ``S.scale`` stays 1 where
+    the rescale does not apply (smooth.r:3877), including an all-zero ``X``
+    or penalty, which R's division would turn into NaN.
     """
     if X.size == 0 or not S_list:
         return ([np.asarray(s, dtype=float) for s in S_list], [1.0] * len(S_list))
-    maXX = float(np.abs(X).sum(axis=1).max()) ** 2
+    nI = r_norm(X, "I")
+    maXX = nI * nI
     out = []
     scales: list[float] = []
     for S in S_list:
@@ -3920,43 +4043,54 @@ def _scale_penalty(
             out.append(S)
             scales.append(1.0)
             continue
-        normS = float(np.abs(S).sum(axis=0).max())
+        normS = r_norm(S, "O")
         if normS == 0 or maXX == 0:
             out.append(S)
             scales.append(1.0)
         else:
-            out.append(S * (maXX / normS))
-            scales.append(normS / maXX)
+            maS = normS / maXX
+            out.append(S / maS)
+            scales.append(maS)
     return out, scales
 
 
 def _build_re_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
     """`bs="re"` → `model.matrix(~ term1:term2:...-1, data)`."""
     term_vars = _smooth_term_vars(call)
-    rhs = None
-    for v in term_vars:
-        node = Name(v)
-        rhs = node if rhs is None else BinOp(":", rhs, node)
-    fake = Formula(lhs=None, rhs=rhs)
-    ef = expand(fake)
-    ef.intercept = False
-    X_df = materialize(ef, data)
-    X = X_df.to_numpy().astype(float)
+    levels = [
+        _factor_levels(data[t]) if _is_factor_like(data[t]) else None for t in term_vars
+    ]
+    base_label = _smooth_label(call)
+    raw: _RawBasis
+    if _TERO_CV.get() and len(term_vars) > 1:
+        # Under discrete fitting a multi-variable re is tensor.possible: one
+        # model.matrix margin per variable, the widest (the first of equal
+        # widths) swapped to the end, relabelled from the reordered terms
+        # (smooth.r re constructor, bam.r:2261-2267); its coefficients follow
+        # the tensor product's order.
+        margins = [
+            _RERawBasis(term=[t], levels=[lv]) for t, lv in zip(term_vars, levels)
+        ]
+        Xm = [m.eval(data) for m in margins]
+        maxd, maxi = 0, 0
+        for i, Xi in enumerate(Xm):
+            if Xi.shape[1] > maxd:
+                maxi, maxd = i, Xi.shape[1]
+        order = list(range(len(margins)))
+        if maxi < len(margins) - 1:
+            order[maxi], order[-1] = order[-1], order[maxi]
+            term_vars = [term_vars[i] for i in order]
+            base_label = f"s({','.join(term_vars)})"
+        margins = [margins[i] for i in order]
+        Xm = [Xm[i] for i in order]
+        raw = _TensorRawBasis(margins=margins)
+        X = _tensor_prod_X(Xm)
+    else:
+        raw = _RERawBasis(term=list(term_vars), levels=levels)
+        X = raw.eval(data)
     S_list = [np.eye(X.shape[1])]
     S_list, S_scale = _scale_penalty(X, S_list)
-    base_label = _smooth_label(call)
     by_expr = _smooth_by_expr(call)
-
-    fac_arrs = [data[t].to_numpy() for t in term_vars]
-    combos: list[tuple] = []
-    for j in range(X.shape[1]):
-        nz = np.where(X[:, j] > 0)[0]
-        if len(nz) == 0:
-            combos.append((object(),) * len(term_vars))
-        else:
-            r = int(nz[0])
-            combos.append(tuple(arr[r] for arr in fac_arrs))
-    raw = _RERawBasis(term=list(term_vars), combos=combos)
     if by_expr is None:
         return [
             SmoothBlock(
@@ -4180,65 +4314,107 @@ def _build_mrf_smooth(
     )
 
 
+def _dqrsl_qty_rows(
+    Y: np.ndarray, qr: np.ndarray, qraux: np.ndarray, rank: int
+) -> np.ndarray:
+    """R ``t(qr.qty(qrc, t(Y)))`` for a LINPACK ``qr``: ``dqrqty``, i.e.
+    ``dqrsl`` with ``job = 1000`` on each row of ``Y`` as a column of
+    ``t(Y)``. Each reflector is a BLAS ``ddot`` and ``daxpy`` on ``x(j:, j)``
+    (with ``x(j,j)`` set to ``qraux(j)``) and ``qty(j:)``, addressed inside
+    the factor and inside the row as ``dqrsl`` addresses them: the vendor
+    BLAS rounds differently when an operand starts at another 16-byte
+    alignment, and R hands ``.Fortran`` 16-byte-aligned copies."""
+    Y = np.array(Y, dtype=float, order="C", copy=True)
+    x = np.array(np.asarray(qr, dtype=float).T, order="C", copy=True)
+    qraux = np.asarray(qraux, dtype=float)
+    n = x.shape[1]
+    if _dqrqty_rows_rs is not None:
+        return np.asarray(_dqrqty_rows_rs(x, qraux, int(rank), Y))
+    from scipy.linalg.blas import daxpy, ddot
+
+    for r in range(Y.shape[0]):
+        qty = Y[r]
+        for j in range(min(rank, x.shape[0], n - 1)):
+            if qraux[j] == 0.0:
+                continue
+            temp = x[j, j]
+            x[j, j] = qraux[j]
+            t = -ddot(x[j, j:], qty[j:]) / x[j, j]
+            qty[j:] = daxpy(x[j, j:], qty[j:], a=t)
+            x[j, j] = temp
+    return Y
+
+
 def _absorb_sumzero(
     X: np.ndarray,
     S_list: list[np.ndarray],
     C_source: np.ndarray | None = None,
+    C: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], _AbsorbTransform]:
-    """Apply mgcv's default `absorb.cons=TRUE` sum-to-zero constraint."""
+    """mgcv smoothCon's ``absorb.cons=TRUE`` (smooth.r:4076-4120) for the
+    sum-to-zero row ``C = colMeans(sm$X)`` (or a given ``C``). With every
+    column constrained, ``qrc <- qr(t(C))`` and ``X Z``, ``Z'SZ`` come from
+    ``qr.qty`` with the first row dropped; when some columns of ``C`` are
+    zero only those (``indi``) are rotated and the last of them dropped."""
+    from .R.linalg import dqrdc2
+
     _n, k = X.shape
     if k == 0:
         return X, list(S_list), _AbsorbTransform()
-    C = (C_source if C_source is not None else X).mean(axis=0)
-    indi = np.flatnonzero(C != 0)  # exact inequality, matching mgcv
+    if C is None:
+        C = r_colsums(C_source if C_source is not None else X, mean=True)
+    C = np.asarray(C, dtype=float).reshape(1, k)
+    j = C.shape[0]
+    indi = np.flatnonzero(r_colsums(C) != 0)
     nx = len(indi)
-    if nx == k:
-        Q, _ = np.linalg.qr(C.reshape(k, 1), mode="complete")
-        Z = Q[:, 1:]
-        X_new = X @ Z
-        S_new = [Z.T @ S @ Z for S in S_list]
-        return X_new, S_new, _AbsorbTransform(full_Z=Z)
-
-    nc = 1  # single constraint (one row)
-    nz = nx - nc
-    Q_sub, _ = np.linalg.qr(C[indi].reshape(nx, 1), mode="complete")  # nx × nx
-    Z_sub = Q_sub[:, 1:]  # nx × (nx-1)
-
-    X_new = X.copy()
-    if nz > 0:
-        X_new[:, indi[:nz]] = X[:, indi] @ Z_sub
-    drop_idx = indi[-1]
-    keep_mask = np.ones(k, dtype=bool)
-    keep_mask[drop_idx] = False
-    X_new = X_new[:, keep_mask]
-
+    if nx < k:
+        nc = j
+        nz = nx - nc
+        qr, qraux, _pv, rank = dqrdc2(np.ascontiguousarray(C[:, indi].T))
+        S_new = []
+        for S in S_list:
+            ZSZ = np.array(S, dtype=float, copy=True)
+            if nz > 0:
+                ZSZ[indi[:nz], :] = _dqrsl_qty_rows(
+                    np.ascontiguousarray(S[indi, :].T), qr, qraux, rank
+                ).T[nc:nx, :]
+            ZSZ = np.delete(ZSZ, indi[nz:nx], axis=0)
+            if nz > 0:
+                ZSZ[:, indi[:nz]] = _dqrsl_qty_rows(ZSZ[:, indi], qr, qraux, rank)[
+                    :, nc:nx
+                ]
+            S_new.append(np.delete(ZSZ, indi[nz:nx], axis=1))
+        X_new = np.array(X, dtype=float, copy=True)
+        if nz > 0:
+            X_new[:, indi[:nz]] = _dqrsl_qty_rows(X[:, indi], qr, qraux, rank)[:, nc:nx]
+        X_new = np.delete(X_new, indi[nz:nx], axis=1)
+        return (
+            X_new,
+            S_new,
+            _AbsorbTransform(qr=qr, qraux=qraux, rank=rank, nc=nc, indi=indi),
+        )
+    qr, qraux, _pv, rank = dqrdc2(np.ascontiguousarray(C.T))
     S_new = []
     for S in S_list:
-        ZSZ = S.copy()
-        if nz > 0:
-            ZSZ[indi[:nz], :] = Z_sub.T @ S[indi, :]
-        ZSZ = ZSZ[keep_mask, :]
-        if nz > 0:
-            ZSZ[:, indi[:nz]] = ZSZ[:, indi] @ Z_sub
-        ZSZ = ZSZ[:, keep_mask]
-        S_new.append(ZSZ)
-    return (
-        X_new,
-        S_new,
-        _AbsorbTransform(
-            indi=indi,
-            Z_sub=Z_sub,
-            keep_mask=keep_mask,
-        ),
-    )
+        ZSZ = _dqrsl_qty_rows(
+            np.ascontiguousarray(np.asarray(S, dtype=float).T), qr, qraux, rank
+        ).T[j:, :]
+        S_new.append(_dqrsl_qty_rows(ZSZ, qr, qraux, rank)[:, j:])
+    X_new = _dqrsl_qty_rows(X, qr, qraux, rank)[:, j:]
+    return X_new, S_new, _AbsorbTransform(qr=qr, qraux=qraux, rank=rank, nc=j)
 
 
 def _absorb_sweep_drop(
     X: np.ndarray,
     S_list: list[np.ndarray],
+    C_source: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], _SweepDropTransform]:
-    """Apply mgcv's ``sparse.cons = -1`` constraint absorption (sweep-drop)."""
-    n, p = X.shape
+    """Apply mgcv's ``sparse.cons = -1`` constraint absorption (sweep-drop):
+    ``C = colMeans(sm$X)`` and the dropped column, the first of least
+    variance, come from ``sm$X`` as constructed (``C_source`` when the
+    model matrix is then replaced by another data set's, smooth.r:3822-3889),
+    and ``X`` loses that column and has ``C`` swept from the rest."""
+    _n, p = X.shape
     if p == 0:
         return (
             X,
@@ -4248,8 +4424,11 @@ def _absorb_sweep_drop(
                 C_minus=np.empty(0),
             ),
         )
-    C = X.mean(axis=0)
-    vcol = X.var(axis=0, ddof=1) if n > 1 else np.zeros(p)
+    Xc = X if C_source is None else np.asarray(C_source, dtype=float)
+    C = r_colsums(Xc, mean=True)  # colMeans(sm$X)
+    # apply(sm$X, 2, var); the first column of least variance is dropped
+    nc = Xc.shape[0]
+    vcol = np.array([r_var(Xc[:, j]) for j in range(p)]) if nc > 1 else np.zeros(p)
     drop = int(np.argmin(vcol))
     keep = np.ones(p, dtype=bool)
     keep[drop] = False
@@ -4257,63 +4436,6 @@ def _absorb_sweep_drop(
     X_new = X[:, keep] - C_minus[None, :]
     S_new = [S[np.ix_(keep, keep)] for S in S_list]
     return X_new, S_new, _SweepDropTransform(drop_idx=drop, C_minus=C_minus)
-
-
-def _cr_F_matrix(knots: np.ndarray) -> np.ndarray:
-    """Natural-cubic-spline 'F' matrix: y'' at knots = F @ y."""
-    nk = len(knots)
-    h = np.diff(knots)
-    B = np.zeros((nk - 2, nk - 2))
-    D = np.zeros((nk - 2, nk))
-    for i in range(nk - 2):
-        B[i, i] = (h[i] + h[i + 1]) / 3
-        if i > 0:
-            B[i, i - 1] = h[i] / 6
-        if i < nk - 3:
-            B[i, i + 1] = h[i + 1] / 6
-        D[i, i] = 1.0 / h[i]
-        D[i, i + 1] = -1.0 / h[i] - 1.0 / h[i + 1]
-        D[i, i + 2] = 1.0 / h[i + 1]
-    F = np.zeros((nk, nk))
-    F[1 : nk - 1, :] = np.linalg.solve(B, D)
-    return F
-
-
-def _cr_basis(x: np.ndarray, knots: np.ndarray) -> np.ndarray:
-    """Evaluate the natural cubic regression spline basis at points `x`.
-    Returns (n, nk) matrix. Based on Wood (2017) §5.3.2. Each column acts
-    """
-    nk = len(knots)
-    h = np.diff(knots)
-    F = _cr_F_matrix(knots)
-    j = np.searchsorted(knots, x, side="right") - 1
-    j = np.clip(j, 0, nk - 2)
-    hj = h[j]
-    a_r = (x - knots[j]) / hj
-    a_l = 1.0 - a_r
-    c_l = (a_l**3 - a_l) * hj**2 / 6.0
-    c_r = (a_r**3 - a_r) * hj**2 / 6.0
-    nx = len(x)
-    X = np.zeros((nx, nk))
-    idx_n = np.arange(nx)
-    X[idx_n, j] += a_l
-    X[idx_n, j + 1] += a_r
-    X += c_l[:, None] * F[j, :] + c_r[:, None] * F[j + 1, :]
-    return X
-
-
-def _cr_penalty(knots: np.ndarray) -> np.ndarray:
-    """Natural-cubic-spline integrated-squared-second-derivative penalty."""
-    nk = len(knots)
-    h = np.diff(knots)
-    F = _cr_F_matrix(knots)
-    T = np.zeros((nk, nk))
-    for j in range(nk - 1):
-        T[j, j] += h[j] / 3.0
-        T[j + 1, j + 1] += h[j] / 3.0
-        T[j, j + 1] += h[j] / 6.0
-        T[j + 1, j] += h[j] / 6.0
-    return F.T @ T @ F
 
 
 def _cr_default_k(call: Call) -> int:
@@ -4354,7 +4476,9 @@ def _cr_raw(
         xu = np.unique(x[~np.isnan(x)])
         if len(xu) < nk:
             raise ValueError(f"cr smooth: fewer unique x than knots ({len(xu)} < {nk})")
-        knots = np.quantile(xu, np.linspace(0.0, 1.0, nk))
+        # quantile(unique(x), seq(0, 1, length = nk)), smooth.r:1477
+        probs = np.concatenate([[0.0], np.arange(1, nk - 1) * (1.0 / (nk - 1)), [1.0]])
+        knots = r_quantile7(xu, probs)
     else:
         knots = np.asarray(knots_vec, dtype=float).ravel()
         if knots.size != nk:
@@ -4362,8 +4486,10 @@ def _cr_raw(
                 f"number of supplied knots != k for a cr smooth on {term[0]!r}: "
                 f"got {knots.size}, need {nk}"
             )
-    X = _cr_basis(x, knots)
-    S_list = [] if _cr_is_fixed(call) else [_cr_penalty(knots)]
+    X, S, _F = crspl(x, knots)
+    S_list = []
+    if not _cr_is_fixed(call):
+        S_list = [(S + S.T) / 2]  # smooth.r:1489
     return X, S_list, knots
 
 
@@ -4395,16 +4521,19 @@ def _shrink_null_penalty(
     shrink: float = 0.1,
 ) -> np.ndarray:
     """mgcv shrinkage (``attr(object,'shrink')=0.1``): lift S's null-space
-    eigenvalues so the whole smooth is penalised/shrinkable — the cs/ts bases.
-    """
-    w, V = np.linalg.eigh(0.5 * (S + S.T))  # ascending
-    lam = float(w[null_dim])  # smallest positive eigenvalue
+    eigenvalues so the whole smooth is penalised/shrinkable — the cs/ts
+    bases. ``es <- eigen(S, symmetric=TRUE)``; ts sets the last
+    ``null_dim`` values to ``values[k-M]*shrink``, cs (``cascade``) sets
+    ``values[k-1] <- values[k-2]*shrink`` then ``values[k] <- values[k-1]*
+    shrink``; ``S <- vectors %*% (values * t(vectors))``."""
+    vals, V = r_eigen_sym(S)  # descending, as R's eigen
+    k = vals.size
     if cascade:
-        w[1] = lam * shrink
-        w[0] = w[1] * shrink
+        vals[k - 2] = vals[k - 3] * shrink
+        vals[k - 1] = vals[k - 2] * shrink
     else:
-        w[:null_dim] = lam * shrink
-    return V @ (w[:, None] * V.T)
+        vals[k - null_dim :] = vals[k - null_dim - 1] * shrink
+    return r_matprod(V, vals[:, None] * np.ascontiguousarray(V.T))
 
 
 def _build_cs_smooth(
@@ -4483,48 +4612,46 @@ def _cc_getBD(knots: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _cc_cwrap(x0: float, x1: float, x: np.ndarray) -> np.ndarray:
-    """Fold x into [x0, x1] via periodic wrap (mgcv's `cwrap`)."""
+    """mgcv ``cwrap(x0, x1, x)`` (smooth.r): x folded periodically into
+    ``[x0, x1]`` with R's ``%%``."""
     h = x1 - x0
-    out = x.copy()
+    out = np.array(x, dtype=float, copy=True)
     over = out > x1
     if np.any(over):
-        out[over] = x0 + np.mod(out[over] - x1, h)
+        out[over] = x0 + _r_mod(out[over] - x1, h)
     under = out < x0
     if np.any(under):
-        out[under] = x1 - np.mod(x0 - out[under], h)
+        out[under] = x1 - _r_mod(x0 - out[under], h)
     return out
 
 
 def _cc_basis(x: np.ndarray, knots: np.ndarray, BD: np.ndarray) -> np.ndarray:
-    """Evaluate cyclic cubic basis at x; returns (n_obs, nk-1)."""
+    """``Predict.matrix.cyclic.smooth``'s ``pred.mat`` (smooth.r:1659): the
+    cyclic cubic basis at ``x`` (wrapped onto the knot range), the sum of
+    its six row-scaled terms formed and added left to right as R does."""
     nk = len(knots)
-    h = np.diff(knots)
+    h = knots[1:] - knots[:-1]
     x = _cc_cwrap(float(knots[0]), float(knots[-1]), x)
     j = np.full(x.shape, nk, dtype=int)  # 1-based
     for i in range(nk, 1, -1):
-        mask = x <= knots[i - 1]
-        j[mask] = i
-    j1 = j - 1  # left bracket index, 1-based in [1, nk-1]
-    hj = j1 - 1  # 0-based index into h (length nk-1)
+        j[x <= knots[i - 1]] = i
+    j1 = j - 1  # 1-based left knot
+    hj = j1 - 1  # 0-based into h
     j_wrap = j.copy()
     j_wrap[j_wrap == nk] = 1
     j1_0 = j1 - 1
     j_0 = j_wrap - 1
     eye = np.eye(nk - 1)
-    xk_right = knots[j1]  # knots[j1+1] 1-based → knots[j1] 0-based
-    xk_left = knots[j1 - 1]  # knots[j1] 1-based → knots[j1-1] 0-based
-    h_local = h[hj]
-    a_r = (xk_right - x) / h_local  # (knots[j1+1] - x)/h[hj]
-    a_l = (x - xk_left) / h_local  # (x - knots[j1])/h[hj]
-    c_r = (xk_right - x) ** 3 / (6.0 * h_local) - h_local * (xk_right - x) / 6.0
-    c_l = (x - xk_left) ** 3 / (6.0 * h_local) - h_local * (x - xk_left) / 6.0
-    X = (
-        BD[j1_0, :] * c_r[:, None]
-        + BD[j_0, :] * c_l[:, None]
-        + eye[j1_0, :] * a_r[:, None]
-        + eye[j_0, :] * a_l[:, None]
-    )
-    return X
+    u = knots[j1] - x  # knots[j1+1] - x
+    v = x - knots[j1 - 1]  # x - knots[j1]
+    hh = h[hj]
+    t1 = (BD[j1_0] * _rpow(u, 3.0)[:, None]) / (6 * hh)[:, None]
+    t2 = (BD[j_0] * _rpow(v, 3.0)[:, None]) / (6 * hh)[:, None]
+    t3 = BD[j1_0] * (hh * u / 6)[:, None]
+    t4 = BD[j_0] * (hh * v / 6)[:, None]
+    t5 = eye[j1_0] * (u / hh)[:, None]
+    t6 = eye[j_0] * (v / hh)[:, None]
+    return t1 + t2 - t3 - t4 + t5 + t6
 
 
 def _cc_default_k(call: Call) -> int:
@@ -4576,9 +4703,12 @@ def _cc_raw(
                 f"got {kv.size}, need 2 or {nk}"
             )
     B, D = _cc_getBD(kn)
-    BD = np.linalg.solve(B, D)
+    BD = r_solve(B, D)
     X = _cc_basis(x, kn, BD)
-    S_list: list[np.ndarray] = [] if _cc_is_fixed(call) else [D.T @ BD]
+    S_list: list[np.ndarray] = []
+    if not _cc_is_fixed(call):
+        S = r_matprod(np.ascontiguousarray(D.T), BD)
+        S_list = [(S + S.T) / 2]  # smooth.r:1626
     return X, S_list, kn, BD
 
 
@@ -4687,10 +4817,51 @@ def _ps_knots(
 
 
 def _ps_basis(x: np.ndarray, knots: np.ndarray, m0: int) -> np.ndarray:
-    """B-spline basis of degree m0+1 evaluated at x (matches splines::spline.des)."""
-    from scipy.interpolate import BSpline
+    """The ps constructor's model matrix, ``spline.des(k, x, m[1]+2, x*0)``:
+    B-splines of order ``m0 + 2`` at x (smooth.r:1789)."""
+    x = np.asarray(x, dtype=float)
+    return spline_design(knots, x, m0 + 2, np.zeros(x.size, dtype=int))
 
-    return BSpline.design_matrix(x, knots, m0 + 1).toarray()
+
+def _pspline_predict(
+    x: np.ndarray, knots: np.ndarray, m1: int, deriv: int = 0
+) -> np.ndarray:
+    """mgcv ``Predict.matrix.pspline.smooth`` (smooth.r:1836) for
+    ``m[1] = m1``: B-splines of order ``m1 + 2`` inside the inner knot range
+    ``[knots[m1+2], knots[nk-m1-1]]`` (1-based) and, beyond it, the linear
+    extrapolation of the smooth from its value and slope at that end
+    (derivative ``deriv`` of it; zero for ``deriv >= 2``)."""
+    x = np.asarray(x, dtype=float)
+    knots = np.asarray(knots, dtype=float)
+    m = m1 + 1
+    ll = knots[m]
+    ul = knots[knots.size - m - 1]
+    m = m + 1
+    n = x.size
+    ind = (x <= ul) & (x >= ll)
+    if int(ind.sum()) == n:
+        return spline_design(knots, x, m, np.full(n, deriv))
+    D = spline_design(knots, np.array([ll, ll, ul, ul]), m, np.array([0, 1, 0, 1]))
+    X = np.zeros((n, D.shape[1]))
+    nin = int(ind.sum())
+    if nin > 0:
+        X[ind] = spline_design(knots, x[ind], m, np.full(nin, deriv))
+    if deriv < 2:
+        lo = x < ll
+        if lo.any():
+            X[lo] = (
+                r_matprod(np.column_stack([np.ones(int(lo.sum())), x[lo] - ll]), D[0:2])
+                if deriv == 0
+                else np.tile(D[1], (int(lo.sum()), 1))
+            )
+        hi = x > ul
+        if hi.any():
+            X[hi] = (
+                r_matprod(np.column_stack([np.ones(int(hi.sum())), x[hi] - ul]), D[2:4])
+                if deriv == 0
+                else np.tile(D[3], (int(hi.sum()), 1))
+            )
+    return X
 
 
 def _ps_penalty(k: int, m1: int) -> np.ndarray:
@@ -4768,43 +4939,42 @@ def _cp_default_k(call: Call, m0: int) -> int:
     return max(10, m0)
 
 
-def _cp_basis(x: np.ndarray, knots: np.ndarray, ord_: int) -> np.ndarray:
-    """`cSplineDes(x, knots, ord=ord_)` — cyclic B-spline basis.
-    Evaluates each basis function via `BSpline.basis_element` so that we can
-    sample points where the left-padded basis is only partially defined;
-    points above `xc` get an additive contribution from the wrapped x.
-    """
-    from scipy.interpolate import BSpline
-
+def _cp_basis(
+    x: np.ndarray, knots: np.ndarray, ord_: int, derivs: int = 0
+) -> np.ndarray:
+    """mgcv ``cSplineDes(x, knots, ord, derivs)`` (smooth.r:296): the
+    B-spline design on the knots with the last ``ord - 1`` intervals copied
+    in front, plus, for x above ``knots[nk-ord+1]`` (1-based), the design at
+    x moved back by one period."""
+    x = np.array(x, dtype=float, copy=True)
     nk = len(knots)
     if ord_ < 2:
         raise ValueError("order too low")
     if nk < ord_:
         raise ValueError("too few knots")
-    k1 = float(knots[0])
-    kn = float(knots[-1])
-    pad_src = knots[nk - ord_ : nk - 1]
-    t = np.concatenate([k1 - (kn - pad_src), knots])
-    nb = len(t) - ord_
-
-    def _eval(xv: np.ndarray) -> np.ndarray:
-        out = np.zeros((len(xv), nb))
-        for i in range(nb):
-            loc = t[i : i + ord_ + 1]
-            if loc[0] == loc[-1]:
-                continue
-            be = BSpline.basis_element(loc, extrapolate=False)
-            v = be(xv)
-            out[:, i] = np.nan_to_num(v, nan=0.0)
-        return out
-
-    X1 = _eval(x)
-    xc = float(knots[nk - ord_])
+    knots = np.sort(np.asarray(knots, dtype=float))
+    k1 = knots[0]
+    if x.min() < k1 or x.max() > knots[nk - 1]:
+        raise ValueError("x out of range")
+    xc = knots[nk - ord_]
+    knots = np.concatenate([k1 - (knots[nk - 1] - knots[nk - ord_ : nk - 1]), knots])
     ind = x > xc
-    if np.any(ind):
-        x_w = x[ind] - kn + k1
-        X1[ind] += _eval(x_w)
+    X1 = spline_design(knots, x, ord_, derivs, outer_ok=True)
+    x[ind] = x[ind] - knots.max() + k1
+    if ind.sum():
+        X2 = spline_design(knots, x[ind], ord_, derivs, outer_ok=True)
+        X1[ind] = X1[ind] + X2
     return X1
+
+
+def _cp_predict(x: np.ndarray, knots: np.ndarray, ord_: int) -> np.ndarray:
+    """mgcv ``Predict.matrix.cpspline.smooth``: x outside the knot range
+    wrapped by ``cwrap``, then ``cSplineDes``."""
+    x = np.asarray(x, dtype=float)
+    k0, k1 = float(np.min(knots)), float(np.max(knots))
+    if x.min() < k0 or x.max() > k1:
+        x = _cc_cwrap(k0, k1, x)
+    return _cp_basis(x, knots, ord_)
 
 
 def _cp_penalty(np_cols: int, p_ord: int) -> np.ndarray:
@@ -4865,66 +5035,73 @@ def _bs_knots_eval(
 
 
 def _bs_design(x: np.ndarray, knots: np.ndarray, m0: int, deriv: int = 0) -> np.ndarray:
-    """B-spline of order m0+1 (degree m0) evaluated at x (or its `deriv`-th
-    derivative). Matches `splines::spline.des(knots, x, m0+1, derivs=deriv)`."""
-    from scipy.interpolate import BSpline
-
-    if deriv == 0:
-        return BSpline.design_matrix(x, knots, m0).toarray()
-    nb = len(knots) - (m0 + 1)
-    out = np.zeros((len(x), nb))
-    for i in range(nb):
-        c = np.zeros(nb)
-        c[i] = 1.0
-        spl = BSpline(knots, c, m0, extrapolate=False)
-        out[:, i] = np.nan_to_num(spl(x, nu=deriv), nan=0.0)
-    return out
-
-
-def _bs_penalty_W1(pord: int) -> np.ndarray:
-    """Local quadrature weight matrix for ∫_{-1}^{1} p(t)^2 dt, where p is a
-    polynomial of degree pord represented by its values at pord+1 evenly-
-    spaced points in [-1,1]. Returns a (pord+1)×(pord+1) SPD matrix."""
-    pts = np.linspace(-1, 1, pord + 1)
-    V = np.stack([pts**j for j in range(pord + 1)], axis=1)  # V[i,j] = pts[i]^j
-    P = np.linalg.inv(V)
-    H = np.zeros((pord + 1, pord + 1))
-    for i in range(pord + 1):
-        for j in range(pord + 1):
-            s = i + j
-            if s % 2 == 0:
-                H[i, j] = 2.0 / (s + 1)
-    return P.T @ H @ P
+    """``spline.des(knots, x, m0 + 1, derivs = deriv)$design``: B-splines of
+    order ``m0 + 1`` at x, or their ``deriv``-th derivatives (the bs
+    constructor's model matrix and penalty, smooth.r:1912)."""
+    x = np.asarray(x, dtype=float)
+    return spline_design(knots, x, m0 + 1, np.full(x.size, deriv))
 
 
 def _bs_penalty(knots: np.ndarray, m0: int, m2: int) -> np.ndarray:
-    """Integrated-squared-m2-derivative penalty for the bs basis with order m0+1."""
+    """The ``bs`` smooth's penalty on the order-``m2`` derivative
+    (``smooth.construct.bs.smooth.spec``, smooth.r): the derivative basis at
+    ``pord + 1`` points per knot interval (``pord = m0 - m2``; interval
+    midpoints when 0), the interval quadrature weights ``W1 = t(P) %*% H %*%
+    P`` laid into the band of W, W's ``bandchol`` factor applied to that
+    basis, then ``crossprod``, each step as mgcv writes it."""
     nk = len(knots) - 2 * m0
     k0 = knots[m0 : m0 + nk]
-    h = np.diff(k0)  # length nk-1
     pord = m0 - m2
     if pord < 0:
         raise ValueError("requested non-existent derivative in B-spline penalty")
-
+    h = k0[1:] - k0[:-1]
     if pord == 0:
-        k1 = 0.5 * (k0[:-1] + k0[1:])
+        k1 = (k0[1:] + k0[:-1]) / 2
         D = _bs_design(k1, knots, m0, deriv=m2)
-        D_scaled = np.sqrt(h)[:, None] * D
-        return D_scaled.T @ D_scaled
-
+        return r_crossprod(np.sqrt(h)[:, None] * D)
     h1 = np.repeat(h / pord, pord)
-    k1 = np.cumsum(np.concatenate([[k0[0]], h1]))
+    k1 = np.cumsum(np.concatenate([[k0[0]], h1]).astype(np.longdouble)).astype(float)
     D = _bs_design(k1, knots, m0, deriv=m2)
-
-    W1 = _bs_penalty_W1(pord)  # (pord+1, pord+1)
-    n_quad = len(k1)
-    W = np.zeros((n_quad, n_quad))
-    for i in range(nk - 1):
-        a = i * pord
-        b = a + pord + 1
-        W[a:b, a:b] += (h[i] / 2.0) * W1
-
-    return D.T @ W @ D
+    # seq(-1, 1, length = pord + 1)
+    pts = np.concatenate([[-1.0], -1.0 + np.arange(1, pord) * (2.0 / pord), [1.0]])
+    V = np.column_stack([_rpow(pts, float(j)) for j in range(pord + 1)])
+    P = r_solve(V)
+    s = np.arange(pord + 1)[:, None] + np.arange(pord + 1)[None, :]
+    H = (1 + np.where(s % 2 == 0, 1.0, -1.0)) / (s + 1)
+    W1 = r_matprod(r_matprod(np.ascontiguousarray(P.T), H), P)
+    h = h / 2
+    L = h.size
+    ld0 = np.tile(np.diag(W1), L) * np.repeat(h, pord + 1)
+    i1 = np.concatenate(
+        [
+            np.tile(np.arange(1, pord + 1), L)
+            + np.repeat(np.arange(L) * (pord + 1), pord),
+            [ld0.size],
+        ]
+    )
+    ld = ld0[i1 - 1]
+    # i0 <- 1:(length(h)-1)*pord+1; i2 <- 1:(length(h)-1)*(pord+1), where
+    # 1:0 is c(1, 0) and the zero index drops out of ld0[i2]
+    one_to = np.arange(1, L) if L >= 2 else np.array([1, 0])
+    i0 = one_to * pord + 1
+    i2 = one_to * (pord + 1)
+    add = ld0[i2[i2 > 0] - 1]
+    vals = ld[i0 - 1] + np.resize(add, i0.size)
+    for idx, v in zip(i0, vals, strict=True):
+        ld[idx - 1] = v
+    B = np.zeros((pord + 1, ld.size))
+    B[0] = ld
+    for k in range(1, pord + 1):
+        diwk = np.diag(W1, k)
+        ind = np.arange(ld.size - k)
+        band = np.repeat(h, pord) * np.tile(np.concatenate([diwk, np.zeros(k - 1)]), L)
+        B[k, ind] = band[ind]
+    B = bandchol(B)
+    D1 = B[0][:, None] * D
+    for k in range(1, pord + 1):
+        ind = np.arange(D.shape[0] - k)
+        D1[ind] = D1[ind] + B[k, ind][:, None] * D[ind + k]
+    return r_crossprod(D1)
 
 
 def _bs_raw(
@@ -5065,20 +5242,11 @@ def _build_cp_smooth(
     )
 
 
-def _gp_parse_m(call: Call) -> tuple[bool, int, float, float]:
-    """Resolve (stationary, type, rho_init, power_k).
-    Defaults: stationary=False, type=3 (Matern ν=1.5), rho=auto, k=1."""
+def _gp_p_order(call: Call) -> tuple[float, ...] | None:
+    """The gp smooth's ``p.order`` (its ``m`` argument), or None when unset."""
     m_src = call.kwargs.get("m")
     vals = _eval_c_vec_floats(m_src) if m_src is not None else None
-    if not vals:
-        return (False, 3, -1.0, 1.0)
-    stationary = vals[0] < 0
-    t = abs(round(vals[0]))
-    if t == 0:  # shouldn't happen, but guard
-        t = 3
-    rho = vals[1] if len(vals) > 1 else -1.0
-    pk = vals[2] if len(vals) > 2 else 1.0
-    return (stationary, t, rho, pk)
+    return tuple(float(v) for v in vals) if vals else None
 
 
 def _gp_apply_kernel(E: np.ndarray, type_: int, power_k: float) -> np.ndarray:
@@ -5096,33 +5264,41 @@ def _gp_apply_kernel(E: np.ndarray, type_: int, power_k: float) -> np.ndarray:
     raise ValueError(f"unknown GP kernel type {type_}")
 
 
-def _gp_E_defn(
-    x: np.ndarray,
-    xk: np.ndarray,
-    type_: int,
-    rho_init: float,
-    power_k: float,
-    sign_type: int,
+def _gp_E(
+    x: np.ndarray, xk: np.ndarray, defn: tuple[float, ...] | None
 ) -> tuple[np.ndarray, tuple[float, float, float]]:
-    """`gpE(x, xk, defn)`: distance-based kernel matrix + resolved defn.
-    If rho_init <= 0, rho is set to max of the raw distance matrix."""
-    diff = x[:, None, :] - xk[None, :, :]
-    E_raw = np.sqrt((diff**2).sum(axis=2))
-    rho = rho_init if rho_init > 0 else float(E_raw.max())
-    E = E_raw / rho
-    K = _gp_apply_kernel(E, type_, power_k)
-    return K, (sign_type * type_, rho, power_k)
+    """mgcv ``gpE(x, xk, defn)``: the kernel matrix between the rows of x and
+    the knots xk, and the resolved ``defn = c(sign.type*type, rho, k)``.
 
-
-def _gp_E_with_defn(
-    x: np.ndarray, xk: np.ndarray, defn: tuple[float, float, float]
-) -> np.ndarray:
-    """Recompute kernel using a pre-resolved defn (rho already known)."""
-    st_t, rho, power_k = defn
-    type_ = abs(round(st_t))
+    Distances are ``sqrt(rowSums((x_i - xk_j)^2))``, the squares summed over
+    covariates in order as ``rowSums`` does. ``defn`` is mgcv's ``m``
+    argument (``None`` for its default): type ``|round(defn[1])|`` (3 when
+    absent), its sign marking the stationary form, range ``rho = defn[2]``
+    (``max`` of the distances when absent or <= 0) and power-exponential
+    ``k = defn[3]`` (1 when absent).
+    """
     diff = x[:, None, :] - xk[None, :, :]
-    E = np.sqrt((diff**2).sum(axis=2)) / rho
-    return _gp_apply_kernel(E, type_, power_k)
+    sq = diff * diff
+    acc = np.zeros(sq.shape[:2], dtype=np.longdouble)
+    for j in range(sq.shape[2]):
+        acc = acc + sq[:, :, j]
+    E = np.sqrt(acc.astype(float))
+    rho, power_k, sign_type = -1.0, 1.0, 1.0
+    if not defn:
+        type_ = 3
+    else:
+        type_ = abs(round(defn[0]))
+        sign_type = float(np.sign(defn[0]))
+    if defn is not None and len(defn) > 1:
+        rho = float(defn[1])
+    if defn is not None and len(defn) > 2:
+        power_k = float(defn[2])
+    if rho <= 0:
+        rho = float(E.max())
+    E = E / rho
+    if type_ not in (1, 2, 3, 4, 5) or power_k > 2 or power_k <= 0:
+        raise ValueError("incorrect arguments to GP smoother")
+    return _gp_apply_kernel(E, type_, power_k), (sign_type * type_, rho, power_k)
 
 
 def _gp_T(x_c: np.ndarray, stationary: bool) -> np.ndarray:
@@ -5144,53 +5320,85 @@ def _gp_default_k(call: Call, d: int, null_space_dim: int) -> int:
     return bs_dim
 
 
+def _gp_predict(
+    x: np.ndarray,
+    shift: np.ndarray,
+    knt: np.ndarray,
+    defn: tuple[float, float, float],
+    UZ: np.ndarray,
+) -> np.ndarray:
+    """mgcv ``Predict.matrix.gp.smooth``: ``cbind(gpE(x, knt) %*% UZ, gpT(x))``
+    on the centred covariates, built in blocks of ``nrow(knt)`` rows as mgcv
+    does (each block is its own ``%*%``)."""
+    x = x - shift
+    n, nk = x.shape[0], knt.shape[0]
+
+    def block(xb: np.ndarray) -> np.ndarray:
+        Eb, _ = _gp_E(xb, knt, defn)
+        return np.hstack([r_matprod(Eb, UZ), _gp_T(xb, defn[0] < 0)])
+
+    if n <= nk:
+        return block(x)
+    X = np.empty((n, UZ.shape[1] + (1 if defn[0] < 0 else x.shape[1] + 1)))
+    for a in range(0, (n // nk) * nk, nk):
+        X[a : a + nk] = block(x[a : a + nk])
+    if n % nk:
+        a = (n // nk) * nk
+        X[a:] = block(x[a:])
+    return X
+
+
 def _build_gp_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
+    """mgcv ``smooth.construct.gp.smooth.spec``: knots are the ordered unique
+    covariate rows (a seeded ``max.knots`` subsample of them for large data),
+    centred on ``colMeans(x)``; the radial basis is the ``k`` eigenvectors of
+    largest-magnitude eigenvalue of ``gpE(knt, knt)`` from ``slanczos``
+    (mgcv's Lanczos, tolerance ``eps^0.5``), and the model matrix is
+    ``Predict.matrix.gp.smooth`` at the data."""
     term = _smooth_term_vars(call)
     d = len(term)
-    x_full = np.column_stack([data[v].to_numpy().astype(float) for v in term])
-    stationary, type_, rho_init, power_k = _gp_parse_m(call)
-    null_space_dim = 1 if stationary else d + 1
+    x = np.column_stack([data[v].to_numpy().astype(float) for v in term])
+    n = x.shape[0]
+    p_order = _gp_p_order(call)
+    stationary = p_order is not None and p_order[0] < 0
+    max_knots, seed = _xt_max_knots_seed(call)
 
-    bs_dim = _gp_default_k(call, d, null_space_dim)
-    bs_dim = max(bs_dim, d + 2)
+    bs_dim = _gp_default_k(call, d, 1 if stationary else d + 1)
 
-    xu = np.unique(x_full, axis=0)
-    nk = xu.shape[0]
-    if nk < bs_dim:
+    xu = _mgcv_ordered_unique(x)
+    if xu.shape[0] < bs_dim:
         raise ValueError(
-            f"gp: fewer unique covariate combinations ({nk}) than bs.dim ({bs_dim})"
+            "A term has fewer unique covariate combinations than specified "
+            "maximum degrees of freedom"
         )
-
-    shift = x_full.mean(axis=0)
-    x_c = x_full - shift
-    xu_c = xu - shift
-
-    sign_type = -1 if stationary else 1
-    E, defn = _gp_E_defn(xu_c, xu_c, type_, rho_init, power_k, sign_type)
-
-    k_radial = bs_dim - null_space_dim
-
-    if k_radial < nk:
-        eigs, vecs = np.linalg.eigh(E)
-        order = np.argsort(-np.abs(eigs))[:k_radial]
-        lam = eigs[order]
-        UZ = vecs[:, order]
-        D = np.zeros((bs_dim, bs_dim))
-        D[:k_radial, :k_radial] = np.diag(lam)
+    nu = xu.shape[0]
+    if n > max_knots and nu > max_knots:
+        knt = xu[_RUnif(seed).sample_int(nu, max_knots)]
     else:
-        UZ = np.eye(nk)
-        D = np.zeros((bs_dim, bs_dim))
-        D[:nk, :nk] = E
+        knt = xu
+    nk = knt.shape[0]
 
-    E_x = _gp_E_with_defn(x_c, xu_c, defn)
-    X_radial = E_x @ UZ
-    T = _gp_T(x_c, stationary)
-    X = np.hstack([X_radial, T])
+    shift = r_colsums(x, mean=True)
+    knt_c = knt - shift
+    E, defn = _gp_E(knt_c, knt_c, p_order)
+
+    bs_dim = max(bs_dim, d + 2)
+    null_space_dim = 1 if stationary else d + 1
+    k = bs_dim - null_space_dim
+    if k < nk:
+        lam, UZ = _tp_rlanczos(E, k, -1, tol=float(np.finfo(float).eps) ** 0.5)
+        D = np.diag(np.concatenate([lam, np.zeros(null_space_dim)]))
+    else:
+        D = np.zeros((bs_dim, bs_dim))
+        D[:k, :k] = E
+        UZ = np.eye(k)
+
+    X = _gp_predict(x, shift, knt_c, defn, UZ)
 
     raw = _GPRawBasis(
         term=list(term),
         shift=shift,
-        xu_c=xu_c,
+        xu_c=knt_c,
         defn=defn,
         UZ=UZ,
         stationary=stationary,
@@ -5403,6 +5611,18 @@ def _tp_T(X: np.ndarray, m: int, d: int) -> np.ndarray:
     return T
 
 
+def _tp_col_sumsq(X: np.ndarray) -> np.ndarray:
+    """Column sums of squares as tprs.c:494 accumulates them: down the rows
+    in order, `w += x*x` fused on arm64."""
+    X = np.ascontiguousarray(X, dtype=float)
+    if _tp_col_sumsq_rs is not None:
+        return np.asarray(_tp_col_sumsq_rs(X))
+    w = np.zeros(X.shape[1])
+    for j in range(X.shape[0]):
+        w = _rfma_vec(X[j], X[j], w)
+    return w
+
+
 def _tp_E(Xu: np.ndarray, m: int, d: int) -> np.ndarray:
     """`tpsE` — full η matrix on unique rows Xu (nu × d)."""
     nu = Xu.shape[0]
@@ -5441,6 +5661,19 @@ def _tp_eval_X_raw(
     n = x_c.shape[0]
     nu = Xu.shape[0]
     M = UZ.shape[0] - nu
+    if _tp_eval_x_rs is not None:
+        pp = np.ascontiguousarray(_tp_gen_poly_powers(M, m, d).astype(np.int64))
+        return np.asarray(
+            _tp_eval_x_rs(
+                np.ascontiguousarray(x_c),
+                np.ascontiguousarray(Xu),
+                int(m),
+                int(d),
+                float(eta0),
+                pp,
+                np.ascontiguousarray(UZ, dtype=float),
+            )
+        )
     if _tp_eval_b_rs is not None:
         pp = np.ascontiguousarray(_tp_gen_poly_powers(M, m, d).astype(np.int64))
         b = _tp_eval_b_rs(
@@ -5451,7 +5684,7 @@ def _tp_eval_X_raw(
             float(eta0),
             pp,
         )
-        return b @ UZ
+        return _tp_uz_rows(b, UZ)
     E = np.empty((n, nu))
     chunk = max(1, _chunk_elems // max(nu, 1))
     Xu0 = np.ascontiguousarray(Xu[:, 0]) if d == 1 else None
@@ -5471,60 +5704,147 @@ def _tp_eval_X_raw(
                 zk = diff[..., k]
                 rsq = _rfma_vec(zk, zk, rsq)
         E[s:e] = _tp_fast_eta_vec(m, d, rsq, eta0)
-    return np.hstack([E, _tp_T(x_c, m, d)]) @ UZ  # one full matmul
+    return _tp_uz_rows(np.hstack([E, _tp_T(x_c, m, d)]), UZ)
+
+
+def _tp_uz_rows(B: np.ndarray, UZ: np.ndarray) -> np.ndarray:
+    """``(UZ)'b`` for every row ``b`` of ``B``: one BLAS ``dgemv('T')`` per
+    row, as tprs.c issues it in ``tprs_setup`` and ``predict_tprs``. A single
+    ``B @ UZ`` (``dgemm``) rounds differently from those row calls."""
+    B = np.ascontiguousarray(B, dtype=float)
+    UZ = np.asarray(UZ, dtype=float)
+    if _tp_uz_rows_rs is not None:
+        return np.asarray(_tp_uz_rows_rs(B, np.ascontiguousarray(UZ)))
+    from scipy.linalg.blas import dgemv
+
+    out = np.empty((B.shape[0], UZ.shape[1]))
+    if UZ.shape[1] == 0:
+        return out
+    UZF = np.asfortranarray(UZ)
+    for i in range(B.shape[0]):
+        out[i] = dgemv(1.0, UZF, B[i], trans=1)
+    return out
+
+
+def _mgcv_strict8_dot(x: np.ndarray, y: np.ndarray) -> float:
+    """``s = 0; for (k < L) s += x[k]*y[k];`` as mgcv's shipped arm64 build
+    compiles it in matrix.c's ``QT`` and ``HQmult``: for L >= 8 clang
+    vectorizes the products eight at a time and adds them to ``s`` one by
+    one in index order, unfused (an in-order reduction); the last ``L % 8``
+    terms, and every term when L < 8, are fused ``fmadd``s. Without FMA
+    (x86-64) both paths round each product and sum in order."""
+    L = x.shape[0]
+    nv = L - L % 8 if L >= 8 else 0
+    s = 0.0
+    for xi, yi in zip(x[:nv].tolist(), y[:nv].tolist()):
+        s = s + xi * yi
+    for xi, yi in zip(x[nv:].tolist(), y[nv:].tolist()):
+        s = _rfma(xi, yi, s)
+    return s
+
+
+def _tp_qt(A_in: np.ndarray, full_q: bool = False) -> np.ndarray:
+    """mgcv matrix.c ``QT(Q, A, fullQ)``: Householder factorization
+    ``A Q = [0, T]`` of the n × m matrix A (n <= m), one reflector per row,
+    each rotating row i's first ``m - i`` entries into its last.
+
+    ``full_q=False`` returns the reflector storage (row i is ``u_i =
+    p sqrt(g)``, as ``HQmult`` expects); ``full_q=True`` returns the m × m
+    ``Q`` formed explicitly, the rows of an identity updated in place by
+    each reflector ``(I - g p p')``. The loops keep C's order and the
+    arithmetic of mgcv's arm64 build: ``lsq += p[j]*p[j]`` is a fused fold,
+    the reflector dot ``x += p[k]*p1[k]`` is ``_mgcv_strict8_dot``, and the
+    updates ``p1[k] += -x*p[k]`` are fused.
+    """
+    A = np.array(A_in, dtype=float, copy=True)
+    n, m = A.shape
+    Q = np.eye(m) if full_q else np.zeros((n, m))
+    for i in range(n):
+        cu = m - i
+        p = A[i]
+        mx = float(np.max(np.abs(p[:cu]))) if cu > 0 else 0.0
+        if mx:
+            p[:cu] = p[:cu] / mx
+        lsq = math.sqrt(_rfma_dot(p[:cu], p[:cu]))
+        if p[cu - 1] < 0.0:
+            lsq = -lsq
+        p[cu - 1] += lsq
+        g = 1.0 / (lsq * p[cu - 1]) if lsq else 0.0
+        lsq *= mx
+        for j in range(i + 1, n):
+            p1 = A[j]
+            x = _mgcv_strict8_dot(p[:cu], p1[:cu]) * g
+            p1[:cu] = _rfma_vec(-x, p[:cu], p1[:cu])
+        if full_q:
+            for j in range(m):
+                p1 = Q[j]
+                x = _mgcv_strict8_dot(p[:cu], p1[:cu]) * g
+                p1[:cu] = _rfma_vec(-x, p[:cu], p1[:cu])
+        else:
+            g = math.sqrt(g)
+            Q[i, :cu] = p[:cu] * g
+            Q[i, cu:] = 0.0
+        A[i, cu - 1] = -lsq
+        A[i, : cu - 1] = 0.0
+    return Q
 
 
 def _tp_qt_factor(A_in: np.ndarray) -> np.ndarray:
-    """`QT(Q, A, fullQ=0)` — produces HH vector storage Z (n × m)."""
-    A = A_in.astype(float, copy=True)
-    n, m = A.shape
-    Z = np.zeros((n, m))
-    for i in range(n):
-        row = A[i]
-        cu = m - i
-        mx = float(np.max(np.abs(row[:cu]))) if cu > 0 else 0.0
-        if mx > 0.0:
-            row[:cu] /= mx
-        lsq = float(np.sqrt(np.sum(row[:cu] ** 2)))
-        if row[cu - 1] < 0:
-            lsq = -lsq
-        row[cu - 1] += lsq
-        if lsq != 0:
-            g = 1.0 / (lsq * row[cu - 1])
-        else:
-            g = 0.0
-        lsq *= mx
-        for j in range(i + 1, n):
-            x = float(np.dot(row[:cu], A[j, :cu])) * g
-            A[j, :cu] -= x * row[:cu]
-        g_sqrt = math.sqrt(g) if g > 0 else 0.0
-        Z[i, :cu] = row[:cu] * g_sqrt
-        Z[i, cu:] = 0.0
-    return Z
+    """``QT(Q, A, fullQ=0)``: the Householder vectors, one per row of A."""
+    return _tp_qt(A_in, full_q=False)
 
 
 def _tp_hqmult_right(
     C_in: np.ndarray, Z: np.ndarray, transposed: bool = False
 ) -> np.ndarray:
-    """`HQmult(C, Z, p=0, t=transposed)`."""
-    C = C_in.astype(float, copy=True)
+    """mgcv matrix.c ``HQmult(C, Z, p=0, t=transposed)``: ``C Q`` (or
+    ``C Q'``) for ``Q = H_0 H_1 ...``, ``H_k = I - u_k u_k'``. Per
+    reflector: ``Cu[i] = sum_j C[i][j] u[j]`` with the arithmetic of
+    ``_mgcv_strict8_dot`` (the row dot is contiguous, so mgcv's build
+    vectorizes it in order), then ``C[i][j] -= Cu[i] u[j]`` fused."""
+    C = np.array(C_in, dtype=float, copy=True)
     nhh = Z.shape[0]
     order = range(nhh - 1, -1, -1) if transposed else range(nhh)
+    L = C.shape[1]
+    nv = L - L % 8 if L >= 8 else 0
     for k in order:
         u = Z[k]
-        Cu = C @ u
-        C -= np.outer(Cu, u)
+        cu = np.zeros(C.shape[0])
+        for j in range(nv):
+            cu = cu + C[:, j] * u[j]
+        for j in range(nv, L):
+            cu = _rfma_vec(C[:, j], u[j], cu)
+        C = _rfma_vec(-cu[:, None], u[None, :], C)
     return C
 
 
 def _tp_hqmult_left_transposed(C_in: np.ndarray, Z: np.ndarray) -> np.ndarray:
-    """`HQmult(C, Z, p=1, t=1)` — C := Q' @ C where Q = H_0 … H_{r-1}."""
-    C = C_in.astype(float, copy=True)
+    """mgcv matrix.c ``HQmult(C, Z, p=1, t=1)``: ``Q' C`` for ``Q = H_0 H_1
+    ...``. Per reflector: ``Cu[i] = sum_j C[j][i] u[j]`` as an in-order
+    fused fold over the rows j (a strided loop mgcv's build leaves scalar),
+    then ``C[i][j] -= Cu[j] u[i]`` fused."""
+    C = np.array(C_in, dtype=float, copy=True)
     nhh = Z.shape[0]
     for k in range(nhh):
         u = Z[k]
-        uC = u @ C
-        C -= np.outer(u, uC)
+        cu = np.zeros(C.shape[1])
+        for j in range(C.shape[0]):
+            cu = _rfma_vec(C[j, :], u[j], cu)
+        C = _rfma_vec(-u[:, None], cu[None, :], C)
+    return C
+
+
+def _tp_matmult_tA(A: np.ndarray, B: np.ndarray) -> np.ndarray:
+    """mgcv matrix.c ``matmult(C, A, B, tA=1, tB=0)``, ``C = A'B``: C is
+    zeroed, then for each row k of A (in order) ``C[i][:] += A[k][i] B[k][:]``
+    fused, so every entry is an in-order fused sum over k."""
+    if _tp_matmult_ta_rs is not None:
+        return np.asarray(
+            _tp_matmult_ta_rs(np.asarray(A, dtype=float), np.asarray(B, dtype=float))
+        )
+    C = np.zeros((A.shape[1], B.shape[1]))
+    for k in range(A.shape[0]):
+        C = _rfma_vec(A[k][:, None], B[k][None, :], C)
     return C
 
 
@@ -5553,18 +5873,64 @@ def _tp_is_fixed(call: Call) -> bool:
     return False
 
 
+def _mgcv_trisymeig(d: np.ndarray, g: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """mgcv's ``mgcv_trisymeig`` (mat.c:3579) with vectors, descending: the
+    eigenpairs of the symmetric tridiagonal matrix with diagonal ``d`` and
+    off-diagonal ``g``, from LAPACK ``dstedc('I')`` with the order reversed.
+
+    The solve is the Rust port of R's bundled LAPACK when the extension is
+    present, which reproduces R's ``dstedc`` bit for bit; otherwise scipy's
+    ``dstevd`` (the same routine after a scaling step that only matrices near
+    under/overflow take) from whatever LAPACK scipy links.
+    """
+    d = np.ascontiguousarray(d, dtype=float)
+    g = np.ascontiguousarray(g, dtype=float)
+    if _r_dstedc_rs is not None:
+        w, zt, _info = _r_dstedc_rs(d, g)
+        V = zt.T
+    else:
+        w, V, _info = _dstevd(d.copy(), g.copy(), compute_v=1)
+    return w[::-1].copy(), V[:, ::-1].copy()
+
+
 def _tp_rlanczos(
     A: np.ndarray,
     m: int,
     lm: int,
     tol: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Port of mgcv/src/mat.c::Rlanczos (symmetric Lanczos w/ full reorth).
-    negative last) — matching mgcv tprs.c's `minus = -1` call at tprs.c:408.
+    """Port of mgcv/src/mat.c::Rlanczos (symmetric Lanczos with full
+    reorthogonalization): the ``m`` largest and ``lm`` smallest eigenpairs
+    of ``A``. ``lm < 0`` asks for the ``m`` eigenvalues of largest
+    magnitude, positive first and negative last — tprs.c:408's
+    ``minus = -1`` call, with ``tol = DBL_EPSILON^0.7``.
+
+    The BLAS calls are mgcv's: ``dsymv`` (upper triangle) for ``z = A q_j``
+    and ``ddot``/``daxpy`` for the two modified Gram-Schmidt passes, issued
+    in the same order through scipy's BLAS (the library R links on this
+    platform). The plain C loops — the start-vector norm, ``a_j = q_j'z``,
+    ``b_j = ||z||``, the three-term update and the Ritz sums — run in index
+    order with the contraction clang applies on arm64: ``z - a_j q_j`` and
+    ``z - (a_j q_j + b_{j-1} q_{j-1})`` become ``fmsub`` and
+    ``fsub(z, fmadd(a_j, q_j, b_{j-1} q_{j-1}))``. These bits decide the
+    Lanczos tridiagonal, hence the iteration count and the sign of each
+    Ritz vector, which is the sign of a ``tp`` basis column.
+
+    Each convergence check solves the tridiagonal with ``mgcv_trisymeig``
+    (mat.c:3579): R's LAPACK ``dstedc('I')``, eigenpairs in descending order
+    (:func:`_mgcv_trisymeig`).
     """
-    n = A.shape[0]
     if tol is None:
         tol = float(np.finfo(float).eps) ** 0.7
+    if _tp_rlanczos_rs is not None and A.shape[0] > 0:
+        D_rs, U_rs = _tp_rlanczos_rs(
+            np.ascontiguousarray(A, dtype=float), int(m), int(lm), float(tol)
+        )
+        return np.asarray(D_rs), np.asarray(U_rs)
+    from scipy.linalg.blas import daxpy, ddot, dsymv
+
+    n = A.shape[0]
+    eps_stop = tol
 
     biggest = False
     if lm < 0:
@@ -5573,72 +5939,64 @@ def _tp_rlanczos(
 
     f_check = (m + lm) // 2
     f_check = max(f_check, 10)
-    kk_fc = n // 10
-    kk_fc = max(kk_fc, 1)
-    f_check = min(f_check, kk_fc)
+    kk = n // 10
+    kk = max(kk, 1)
+    f_check = min(f_check, kk)
 
-    ia, ic, im_mod = 106, 1283, 6075
-    jran = 1
+    # mat.c's quick generator for a "somewhat randomized" start vector.
+    jran, ia, ic, im_mod = 1, 106, 1283, 6075
     q0 = np.empty(n, dtype=float)
+    bt = 0.0
     for i in range(n):
         jran = (jran * ia + ic) % im_mod
-        q0[i] = jran / im_mod - 0.5
-    q0 /= float(np.sqrt(np.sum(q0 * q0)))
-
-    Q = np.zeros((n + 1, n))
-    Q[0] = q0
+        xx = jran / im_mod - 0.5
+        q0[i] = xx
+        bt = _rfma(xx, xx, bt)
+    bt = math.sqrt(bt)
+    q: list[np.ndarray] = [q0 / bt]
 
     a = np.zeros(n)
     b = np.zeros(n)
     err = np.full(n, 1e300)
+    At = A.T  # A is symmetric; the transpose is the Fortran-ordered view dsymv reads
 
-    buf = np.empty(n)
-
-    d_sorted: np.ndarray | None = None
-    v_eig: np.ndarray | None = None
+    d: np.ndarray | None = None
+    v: np.ndarray | None = None
 
     j = 0
     while j < n:
-        qj = Q[j]
-        z = A @ qj
-        np.multiply(qj, z, out=buf)
-        aj = float(buf.sum())
-        a[j] = aj
+        z = dsymv(1.0, At, q[j], lower=0)
+        xx = _rfma_dot(q[j], z)
+        a[j] = xx
         if j == 0:
-            z -= aj * qj
+            z = _rfma_vec(-xx, q[j], z)
         else:
-            z -= aj * qj
-            z -= b[j - 1] * Q[j - 1]
-            Qact = Q[: j + 1]  # (j+1, n)
-            for _ in range(2):
-                c = Qact @ z
-                z -= c @ Qact
-        np.multiply(z, z, out=buf)
-        bj = float(np.sqrt(buf.sum()))
-        b[j] = bj
-        if j < n - 1 and bj > 0.0:
-            np.divide(z, bj, out=Q[j + 1])
+            yy = b[j - 1]
+            z = z - _rfma_vec(xx, q[j], yy * q[j - 1])
+            for _rep in range(2):
+                for i in range(j + 1):
+                    xx = -ddot(z, q[i])
+                    z = daxpy(q[i], z, a=xx)
+        b[j] = math.sqrt(_rfma_dot(z, z))
+        if j < n - 1:
+            q.append(z / b[j])
 
         if ((j >= m + lm) and (j % f_check == 0)) or (j == n - 1):
-            d_copy = a[: j + 1].copy()
-            g_copy = b[:j].copy()
-            w, V = _eigh_tridiagonal(d_copy, g_copy, lapack_driver="stemr")
-            w = w[::-1].copy()
-            V = V[:, ::-1].copy()
-            d_sorted = w
-            v_eig = V
+            d, v = _mgcv_trisymeig(a[: j + 1], b[:j])
 
-            normTj = max(abs(w[0]), abs(w[-1]))
-            err[: j + 1] = np.abs(bj * V[j, :])
+            normTj = abs(d[0])
+            normTj = max(normTj, abs(d[j]))
+            for k in range(j + 1):
+                err[k] = abs(b[j] * v[j, k])
 
             if j >= m + lm:
-                max_err = normTj * tol
+                max_err = normTj * eps_stop
                 if biggest:
                     pi = 0
                     ni = 0
                     converged = True
                     while pi + ni < m:
-                        if abs(w[pi]) >= abs(w[j - ni]):
+                        if abs(d[pi]) >= abs(d[j - ni]):
                             if err[pi] > max_err:
                                 converged = False
                                 break
@@ -5666,18 +6024,17 @@ def _tp_rlanczos(
                         break
         j += 1
 
-    assert d_sorted is not None and v_eig is not None
+    assert d is not None and v is not None
 
-    Qj = Q[:j].T
     D_out = np.empty(m + lm)
     U_out = np.zeros((n, m + lm))
-    for k_idx in range(m):
-        D_out[k_idx] = d_sorted[k_idx]
-        U_out[:, k_idx] = Qj @ v_eig[:j, k_idx]
-    for k_idx in range(m, m + lm):
-        kk_idx = j - (m + lm - k_idx)
-        D_out[k_idx] = d_sorted[kk_idx]
-        U_out[:, k_idx] = Qj @ v_eig[:j, kk_idx]
+    for k_idx in range(m + lm):
+        col = k_idx if k_idx < m else j - (lm + m - k_idx)
+        D_out[k_idx] = d[col]
+        u = np.zeros(n)
+        for el in range(j):
+            u = _rfma_vec(q[el], v[el, col], u)
+        U_out[:, k_idx] = u
     return D_out, U_out
 
 
@@ -5782,7 +6139,7 @@ def _tp_raw(
     """
     d = len(term)
     x_full = np.column_stack([data[v].to_numpy().astype(float) for v in term])
-    shift = x_full.mean(axis=0)
+    shift = np.array([r_mean(x_full[:, i]) for i in range(d)])
     x_c = x_full - shift
     n = x_c.shape[0]
 
@@ -5800,7 +6157,9 @@ def _tp_raw(
     mk_tp, seed_tp = _xt_max_knots_seed(call)
     Xu_sub = _mgcv_knot_subsample(x_c, mk_tp, seed=seed_tp)
     if Xu_sub is not None:
-        Xu = Xu_sub
+        # tprs_setup passes supplied knots through Xd_strip like data rows,
+        # and its msort leaves them in lexicographic row order.
+        Xu = np.unique(Xu_sub, axis=0)
         yxindex = None
     else:
         Xu, yxindex = np.unique(x_c, axis=0, return_inverse=True)
@@ -5814,8 +6173,9 @@ def _tp_raw(
     pure_knot = nu == k
 
     if pure_knot:
-        Z_hh = _tp_qt_factor(T_mat.T.copy())
-        Q_full = _tp_hqmult_right(np.eye(nu), Z_hh, transposed=False)
+        # tprs.c:390-397: UZ is QT's explicit Q for T', Z its reflectors.
+        Q_full = _tp_qt(T_mat.T, full_q=True)
+        Z_hh = _tp_qt(T_mat.T, full_q=False)
 
         UZ = np.zeros((nu + M, k))
         UZ[:nu, : k - M] = Q_full[:, : k - M]
@@ -5823,23 +6183,7 @@ def _tp_raw(
             UZ[(nu + M) - i - 1, k - i - 1] = 1.0
 
         eta0 = _tp_eta_const(m, d)
-        pi_pow = _tp_gen_poly_powers(M, m, d)
-        X_raw = np.zeros((n, k))
-        b = np.empty(nu + M)
-        for i in range(n):
-            x_i = x_c[i]
-            diff = Xu - x_i  # (nu, d)
-            rsq = np.sum(diff * diff, axis=1)
-            for j in range(nu):
-                b[j] = _tp_fast_eta(m, d, float(rsq[j]), eta0)
-            for j in range(M):
-                val = 1.0
-                for dim_idx in range(d):
-                    pk = pi_pow[j, dim_idx]
-                    if pk > 0:
-                        val *= x_i[dim_idx] ** pk
-                b[nu + j] = val
-            X_raw[i, :] = UZ.T @ b
+        X_raw = _tp_eval_X_raw(x_c, Xu, m, d, UZ, eta0)
 
         if _tp_is_fixed(call):
             S_list: list[np.ndarray] = []
@@ -5850,12 +6194,11 @@ def _tp_raw(
             S = _tp_hqmult_left_transposed(S, Z_hh)
             S[-M:, :] = 0.0
             S[:, -M:] = 0.0
-            S = (S + S.T) / 2.0
             S_list = [S]
     else:
         v_k, U = _tp_rlanczos(E, k, -1)
 
-        TU = T_mat.T @ U
+        TU = _tp_matmult_tA(T_mat, U)
         Z_hh = _tp_qt_factor(TU)
 
         UZ = np.zeros((nu + M, k))
@@ -5883,13 +6226,21 @@ def _tp_raw(
             S = _tp_hqmult_left_transposed(S, Z_hh)
             S[-M:, :] = 0.0
             S[:, -M:] = 0.0
-            S = (S + S.T) / 2.0
             S_list = [S]
 
-    w = np.sqrt(np.sum(X_raw**2, axis=0) / n)
+    # tprs.c:493-498 rescales column i to unit rms: `w += X[j][i]*X[j][i]` in
+    # row order (fused on arm64), then row i and column i of S are divided by
+    # w_i as i runs, so S[a][b] is divided by w_min(a,b) first. R then
+    # symmetrises the returned S, `(S + t(S))/2`.
+    w = np.sqrt(_tp_col_sumsq(X_raw) / n)
     w = np.where(w == 0, 1.0, w)
     X_raw = X_raw / w
-    S_list = [S / w[:, None] / w[None, :] for S in S_list]
+    if S_list:
+        idx = np.arange(k)
+        lo = np.minimum.outer(idx, idx)
+        hi = np.maximum.outer(idx, idx)
+        S_list = [(S / w[lo]) / w[hi] for S in S_list]
+        S_list = [(S + S.T) / 2.0 for S in S_list]
 
     state = {"shift": shift, "Xu": Xu, "m": m, "d": d, "UZ": UZ, "w": w, "M": M, "k": k}
     return X_raw, S_list, M, k, k - M, state
@@ -5914,7 +6265,7 @@ def _build_tp_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
             w=state["w"],
         )
         X_raw = X_raw[:, :keep]
-        col_means = X_raw.mean(axis=0)
+        col_means = r_colsums(X_raw, mean=True)
         X_raw = X_raw - col_means[None, :]
         S_list = [S[:keep, :keep] for S in S_list]
         S_list = [(S + S.T) / 2.0 for S in S_list]
@@ -5997,31 +6348,36 @@ def _lowrank_kernel_reduce(
     T: np.ndarray,
     k: int,
 ) -> tuple[np.ndarray, np.ndarray, int, int]:
-    """mgcv's ds/sos low-rank reduction. ``K`` (nk,nk) kernel, ``T`` (nk,M)
-    null space, ``k`` target basis dim → ``(S (k,k), UZ (nk,k-M), null_dim,
-    rank)``. Mirrors ``er<-slanczos(K,k,-1); qru<-qr(t(t(T)%*%er$vec)); ...``;
-    slanczos(K,k,-1) = the k eigenpairs of largest magnitude (K is only
-    conditionally definite), via the Rlanczos port (``_tp_rlanczos``) — a
-    dense ``eigh`` + magnitude sort spans the same space but picks a
-    different orthonormal basis whenever eigenvalues cluster, which shifts
-    ‖S‖ and hence the *reported* sp by a model-invariant factor vs mgcv.
+    """mgcv's ds/sos low-rank reduction (smooth.r:3323-3346 / :3069-3090).
+    ``K`` (nk,nk) kernel, ``T`` (nk,M) null space, ``k`` target basis dim →
+    ``(S (k,k), UZ (nk,k-M), null_dim, rank)``::
+
+        er  <- slanczos(K, k, -1)          # k largest-magnitude eigenpairs
+        U1  <- t(t(T) %*% er$vectors); qru <- qr(U1)
+        S   <- qr.qty(qru, t(qr.qty(qru, diag(er$values))[-ind,]))[-ind,]
+        UZ  <- t(qr.qty(qru, t(er$vectors))[-ind,])
+
+    with ``ind = 1:M``; ``slanczos`` is mgcv's Rlanczos at ``tol = eps^0.5``
+    and ``qr``/``qr.qty`` are LINPACK ``dqrdc2``/``dqrsl``.
     """
+    from .R.linalg import dqrdc2
+
     nk = K.shape[0]
     M = T.shape[1]
     if k < nk:
-        vals, vecs = _tp_rlanczos(K, k, -1)  # (k,), (nk, k)
-        D = np.diag(vals)  # (k, k)
+        vals, vecs = _tp_rlanczos(K, k, -1, tol=float(np.finfo(float).eps) ** 0.5)
+        D = np.diag(vals)
     else:
         k = nk
         vecs = np.eye(nk)
-        D = K
-    U1 = vecs.T @ T  # (k, M)
-    Q, _ = np.linalg.qr(U1, mode="complete")  # (k, k)
-    QtD = Q.T @ D  # (k, k)
-    S_core = (Q.T @ QtD[M:, :].T)[M:, :]  # (k-M, k-M)
+        D = np.asarray(K, dtype=float)
+    U1 = np.ascontiguousarray(r_matprod(np.ascontiguousarray(T.T), vecs).T)  # (k, M)
+    qr, qraux, _pv, rank_q = dqrdc2(U1)
+    A = _dqrsl_qty_rows(np.ascontiguousarray(D.T), qr, qraux, rank_q).T[M:, :]
+    S_core = _dqrsl_qty_rows(A, qr, qraux, rank_q).T[M:, :]
     S = np.zeros((k, k))
-    S[: k - M, : k - M] = 0.5 * (S_core + S_core.T)
-    UZ = (Q.T @ vecs.T)[M:, :].T  # (nk, k-M)
+    S[: k - M, : k - M] = S_core
+    UZ = _dqrsl_qty_rows(vecs, qr, qraux, rank_q)[:, M:]
     return S, UZ, M, k - M
 
 
@@ -6032,35 +6388,44 @@ def _duchon_E(
     s: float,
     n: int,
 ) -> np.ndarray:
-    """`DuchonE` — generalised polyharmonic kernel between rows of x and xk.
-    ``ke = 2m + 2s − n`` (> 0 under the validity constraint m+s>n/2); E = dᵏ·log d
-    when ke even, dᵏ otherwise, times the mgcv sign."""
+    """mgcv's ``DuchonE`` (smooth.r:3181): the kernel between the rows of
+    ``x`` and ``xk``. ``d`` is ``sqrt(rowSums((x - xk)^2))``, the squares
+    summed across columns left to right as ``rowSums`` does; with
+    ``k = 2m + 2s - n``, ``E = d^k log(d)`` (0 at ``d == 0``) when ``k`` is
+    even and ``d^k`` otherwise, ``^`` being R's (:func:`hea._rpow._rpow`),
+    times ``1 - 2((floor(k/2) + 1) %% 2)``."""
     diff = x[:, None, :] - xk[None, :, :]
-    dist = np.sqrt((diff * diff).sum(axis=-1))
-    ke = round(2 * m + 2 * s - n)
-    if ke % 2 == 0:
-        logd = np.log(np.where(dist > 0, dist, 1.0))
-        E = np.where(dist > 0, (dist**ke) * logd, 0.0)
+    sq = diff * diff
+    acc = sq[..., 0]
+    for j in range(1, sq.shape[-1]):
+        acc = acc + sq[..., j]
+    d = np.sqrt(acc)
+    k = 2 * m + 2 * s - n
+    if k % 2 == 0:
+        pos = d != 0
+        E = d.copy()
+        dp = d[pos]
+        E[pos] = _rpow(dp, k) * np.log(dp)
     else:
-        E = dist**ke
-    sign_e = 1 - 2 * (((ke // 2) + 1) % 2)
+        E = _rpow(d, k)
+    sign_e = 1 - 2 * ((math.floor(k / 2) + 1) % 2)
     return E * sign_e
 
 
 def _duchon_T(X: np.ndarray, m: int, n: int) -> np.ndarray:
-    """`DuchonT` — null-space polynomials (total degree < m) in n covariates,
-    M = C(m+n−1, n) columns. Same monomials as tp's null space but WITHOUT
-    tp's m-bump."""
+    """mgcv's ``DuchonT`` (smooth.r:3164): column ``i`` is the product over
+    covariates of ``x[, j]^p[i, j]`` for the ``poly.pow`` exponents, built
+    as ``y <- y * x[, j]^p[i, j]`` from ``y = 1`` with R's ``^``."""
     from math import comb
 
     M = comb(m + n - 1, n)
     pi_pow = _tp_gen_poly_powers(M, m, n)
     T = np.ones((X.shape[0], M), dtype=float)
     for j in range(M):
+        y = np.ones(X.shape[0])
         for kk in range(n):
-            p = int(pi_pow[j, kk])
-            if p > 0:
-                T[:, j] *= X[:, kk] ** p
+            y = y * _rpow(X[:, kk], float(pi_pow[j, kk]))
+        T[:, j] = y
     return T
 
 
@@ -6110,10 +6475,35 @@ class _DSRawBasis(_RawBasis):
 
     def eval(self, data: pl.DataFrame) -> np.ndarray:
         x = np.column_stack([data[v].to_numpy().astype(float) for v in self.term])
-        x_c = x - self.shift
-        E = _duchon_E(x_c, self.knt, self.m, self.s, self.d)
-        T = _duchon_T(x_c, self.m, self.d)
-        return np.hstack([E @ self.UZ, T])
+        return _ds_predict(x - self.shift, self.knt, self.UZ, self.m, self.s, self.d)
+
+
+def _ds_predict(
+    x_c: np.ndarray,
+    knt: np.ndarray,
+    UZ: np.ndarray,
+    m: int,
+    s: float,
+    d: int,
+) -> np.ndarray:
+    """``Predict.matrix.duchon.spline`` (smooth.r:3361) on centred data:
+    ``cbind(DuchonE(x, knt) %*% UZ, DuchonT(x))``, built in blocks of ``nk``
+    rows (then the remainder) when there are more rows than knots, each
+    product R's ``%*%`` on its block as mgcv issues it."""
+    n = x_c.shape[0]
+    nk = knt.shape[0]
+
+    def block(xb: np.ndarray) -> np.ndarray:
+        Eb = _duchon_E(xb, knt, m, s, d)
+        return np.hstack([r_matprod(Eb, UZ), _duchon_T(xb, m, d)])
+
+    if n > nk:
+        n_chunk = n // nk
+        parts = [block(x_c[i * nk : (i + 1) * nk]) for i in range(n_chunk)]
+        if n > n_chunk * nk:
+            parts.append(block(x_c[n_chunk * nk :]))
+        return np.vstack(parts)
+    return block(x_c)
 
 
 def _ds_raw(
@@ -6153,13 +6543,13 @@ def _ds_raw(
     if nk < M + 1:
         raise ValueError("ds smooth: too few unique covariate combinations")
     k = _ds_default_k(call, M, d)
-    shift = x.mean(axis=0)
+    shift = r_colsums(x, mean=True)  # object$shift <- colMeans(x)
     x_c = x - shift
     knt_c = knt - shift
     E_kk = _duchon_E(knt_c, knt_c, m, s, d)
     T_kk = _duchon_T(knt_c, m, d)
     S, UZ, _null, _rank = _lowrank_kernel_reduce(E_kk, T_kk, k)
-    X = np.hstack([_duchon_E(x_c, knt_c, m, s, d) @ UZ, _duchon_T(x_c, m, d)])
+    X = _ds_predict(x_c, knt_c, UZ, m, s, d)
     raw = _DSRawBasis(term=list(term), shift=shift, knt=knt_c, UZ=UZ, m=m, s=s, d=d)
     return X, [S], raw
 
@@ -6386,109 +6776,115 @@ def _nat_param(
     X: np.ndarray,
     S: np.ndarray,
     rank: int | None = None,
-    type_: int = 1,
+    type_: int = 0,
     unit_fnorm: bool = True,
     return_rank: bool = False,
 ):
-    """Port of mgcv's `nat.param(X, S, rank, type, unit.fnorm)`."""
+    """mgcv ``nat.param(X, S, rank, type, tol = eps^0.8, unit.fnorm)``: a
+    reparameterization ``X P`` in which the penalty is diagonal (type 0), the
+    identity on its range (types 1-3), with the unpenalized columns last.
+    Returns ``(X, D, P)`` (and the rank when ``return_rank``).
+
+    Types 2 and 3 take the eigen-decomposition of S directly; type 3 then
+    rotates the null space so a constant vector comes last. Types 0 and 1
+    go through R's ``qr(X)`` (LINPACK ``dqrdc2``) and the eigen-decomposition
+    of ``R^-T S R^-1``. Every step is the R call mgcv makes — ``eigen``
+    (``dsyevr``), ``%*%``, ``forwardsolve``/``backsolve``, ``qr.Q``,
+    ``colSums`` and ``mean`` — since the eigenvector signs it fixes are the
+    signs of the returned columns. With ``unit.fnorm`` the penalized and
+    unpenalized blocks of X are each scaled to unit mean square; mgcv scales
+    the matching rows of P for types 2-3 (columns for 0-1), which agrees with
+    the columns of X because both blocks end with the same scale."""
+    from .R.linalg import dqrdc2, dqrsl
+
+    tol = float(np.finfo(float).eps) ** 0.8
+    X = np.asarray(X, dtype=float)
     p = X.shape[1]
-    _np_tol = float(np.finfo(float).eps) ** 0.8
 
-    if type_ == 3:
-        S_sym = 0.5 * (S + S.T)
-        from scipy.linalg import eigh as _sla_eigh
+    def _fnorm_scale(M: np.ndarray) -> float:
+        return 1.0 / math.sqrt(r_mean((M * M).ravel(order="F")))
 
-        w, V = _sla_eigh(S_sym, driver="evr")
-        idx = np.argsort(-w)  # descending to match R's eigen()
-        w = w[idx]
-        V = V[:, idx]
+    if type_ in (2, 3):
+        vals, vecs = r_eigen_sym(S)
+        if rank is None or rank < 1 or rank > S.shape[1]:
+            rank = int(np.sum(vals > vals.max() * tol))
         null_exists = rank < p
         E = np.ones(p)
-        if rank > 0:
-            E[:rank] = np.sqrt(np.clip(w[:rank], 0.0, None))
-        X_rot = X @ V
-        col_norm = np.sum(X_rot**2, axis=0) / (E**2)
-        av_norm = float(np.mean(col_norm[:rank])) if rank > 0 else 1.0
+        with np.errstate(invalid="ignore"):
+            E[:rank] = np.sqrt(vals[:rank])
+        X = r_matprod(X, vecs)
+        col_norm = r_colsums(X * X)
+        col_norm = col_norm / (E * E)
+        av_norm = r_mean(col_norm[:rank])
         if null_exists:
-            E[rank:] = np.sqrt(col_norm[rank:] / av_norm)
-        E_safe = np.where(E > 1e-14, E, 1.0)
-        X_new = X_rot / E_safe
-        P = V / E_safe
-        if null_exists and rank < p - 1:
+            for i in range(rank, p):
+                E[i] = math.sqrt(col_norm[i] / av_norm)
+        P = vecs / E[None, :]
+        X = X / E[None, :]
+        if null_exists and type_ == 3 and rank < p - 1:
             ind = np.arange(rank, p)
-            rind = np.arange(p - 1, rank - 1, -1)  # reversed
-            Xn = X_new[:, ind]
-            Xn_c = Xn - Xn.mean(axis=0, keepdims=True)
-            w_n, V_n = np.linalg.eigh(Xn_c.T @ Xn_c)
-            o = np.argsort(-w_n)
-            V_n = V_n[:, o]
-            X_new[:, rind] = X_new[:, ind] @ V_n
-            P[:, rind] = P[:, ind] @ V_n
-        D = np.zeros(rank)
+            rind = ind[::-1]
+            Xn = X[:, ind]
+            n = Xn.shape[0]
+            one = np.ones((n, 1))
+            Xn = Xn - r_matprod(one, r_matprod(one.T, Xn)) / n
+            _, um_vecs = r_eigen_sym(r_matprod(np.ascontiguousarray(Xn.T), Xn))
+            X[:, rind] = r_matprod(X[:, ind], um_vecs)
+            P[:, rind] = r_matprod(P[:, ind], um_vecs)
+        scale = 1.0
         if unit_fnorm:
-            if rank > 0:
-                scale = 1.0 / np.sqrt(np.mean(X_new[:, :rank] ** 2))
-                X_new[:, :rank] *= scale
-                P[:, :rank] *= scale
-                D = np.full(rank, scale**2)
+            scale = _fnorm_scale(X[:, :rank])
+            X[:, :rank] = X[:, :rank] * scale
+            P[:rank, :] = P[:rank, :] * scale
             if null_exists:
-                scalef = 1.0 / np.sqrt(np.mean(X_new[:, rank:] ** 2))
-                X_new[:, rank:] *= scalef
-                P[:, rank:] *= scalef
-        else:
-            if rank > 0:
-                D = np.ones(rank)
-        return X_new, D, P
+                scalef = _fnorm_scale(X[:, rank:])
+                X[:, rank:] = X[:, rank:] * scalef
+                P[rank:, :] = P[rank:, :] * scalef
+        D = np.full(rank, scale * scale)
+        return (X, D, P, rank) if return_rank else (X, D, P)
 
-    Q, R = np.linalg.qr(X, mode="reduced")
-    from scipy.linalg import eigh as _sla_eigh
-    from scipy.linalg import solve_triangular as _sla_tri
-
-    Y = _sla_tri(R.T, S.T, lower=True)  # R^-T S'
-    RSR = _sla_tri(R.T, Y.T, lower=True)  # R^-T (S R^-1)
-    w, V = _sla_eigh(RSR, lower=True, driver="evr")
-    order = np.argsort(-w)  # descending
-    w = w[order]
-    V = V[:, order]
-
-    if rank is None:  # mgcv: rank = sum(eigenvalues > max·tol)
-        rank = int(np.sum(w > (w.max() * _np_tol))) if w.size else 0
-    D = np.clip(w[:rank].copy(), 0.0, None)
-    X_new = Q @ V
-    P = _sla_tri(R, V, lower=False)
-
+    qr, qraux, _pivot, qrank = dqrdc2(X, tol=tol)
+    n = qr.shape[0]
+    kq = min(qr.shape)
+    R = np.triu(qr[:kq, :])
+    RSR = r_backsolve(
+        np.ascontiguousarray(R.T),
+        np.ascontiguousarray(
+            r_backsolve(
+                np.ascontiguousarray(R.T), np.ascontiguousarray(S.T), upper=False
+            ).T
+        ),
+        upper=False,
+    )
+    vals, vecs = r_eigen_sym(RSR)
+    if rank is None or rank < 1 or rank > S.shape[1]:
+        rank = int(np.sum(vals > vals.max() * tol))
+    null_exists = rank < p
+    D = vals[:rank].copy()
+    Q = np.empty((n, kq))
+    eye_cols = np.zeros(n)
+    for j in range(kq):
+        eye_cols[:] = 0.0
+        eye_cols[j] = 1.0
+        Q[:, j] = dqrsl(qr, n, qrank, qraux, eye_cols.copy(), 10000)[0]
+    X = r_matprod(Q, vecs)
+    P = r_backsolve(R, vecs)
     if type_ == 1:
-        E = np.concatenate([np.sqrt(D), np.ones(p - rank)])
-        E_safe = np.where(E > 1e-14, E, 1.0)
-        X_new = X_new / E_safe
-        P = P / E_safe
-        D = np.ones(rank)
-
-    if type_ == 1 and rank < p - 1:
-        ind = np.arange(rank, p)
-        rind = np.arange(p - 1, rank - 1, -1)  # reversed
-        Xn = X_new[:, ind]
-        Xn_c = Xn - Xn.mean(axis=0, keepdims=True)
-        w_n, V_n = np.linalg.eigh(Xn_c.T @ Xn_c)
-        o = np.argsort(-w_n)
-        V_n = V_n[:, o]
-        X_new[:, rind] = X_new[:, ind] @ V_n
-        P[:, rind] = P[:, ind] @ V_n
-
+        with np.errstate(invalid="ignore"):
+            E = np.concatenate([np.sqrt(D), np.ones(p - D.size)])
+        P = P / E[None, :]
+        X = X / E[None, :]
+        D = D * 0 + 1
     if unit_fnorm:
-        if rank > 0:
-            scale = 1.0 / np.sqrt(np.mean(X_new[:, :rank] ** 2))
-            X_new[:, :rank] *= scale
-            P[:, :rank] *= scale
-            D = D * scale**2
-        if rank < p:
-            scalef = 1.0 / np.sqrt(np.mean(X_new[:, rank:] ** 2))
-            X_new[:, rank:] *= scalef
-            P[:, rank:] *= scalef
-
-    if return_rank:
-        return X_new, D, P, rank
-    return X_new, D, P
+        scale = _fnorm_scale(X[:, :rank])
+        X[:, :rank] = X[:, :rank] * scale
+        P[:, :rank] = P[:, :rank] * scale
+        D = D * (scale * scale)
+        if null_exists:
+            scalef = _fnorm_scale(X[:, rank:])
+            X[:, rank:] = X[:, rank:] * scalef
+            P[:, rank:] = P[:, rank:] * scalef
+    return (X, D, P, rank) if return_rank else (X, D, P)
 
 
 def _fs_find_factor(
@@ -6564,6 +6960,7 @@ def _build_fs_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         base_raw=base_raw,
         P=P,
     )
+    dummy = np.column_stack([(fac_arr == lev).astype(float) for lev in flev])
     return [
         SmoothBlock(
             label=_smooth_label(call),
@@ -6573,6 +6970,7 @@ def _build_fs_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
             S=S_list,
             spec=BasisSpec(raw=raw, by=None, absorb=None),
             S_scale=S_scale,
+            margin_X=[dummy, Xr],
         )
     ]
 
@@ -6592,21 +6990,16 @@ def _xz_kr_contrast(X: np.ndarray, m: list[int], inner_p: int) -> np.ndarray:
 
 
 def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
-    """`bs="sz"` — zero-center nested smooth.
-    Fallthrough: mgcv's sz.smooth.spec (smooth.r:2211-2214) checks for any
-    """
+    """`bs="sz"` — mgcv's sz.smooth.spec: a smooth of the non-factor
+    variables for each combination of the factors' levels, constrained to
+    sum to zero over each factor (the Kronecker contrasts ``XZKr``). With no
+    factor it is the base smooth."""
     term = _smooth_term_vars(call)
-    fterm, _others = _fs_find_factor(term, data)
-    if fterm is None:
+    # every factor in the term (smooth.r sz constructor); none -> the base
+    ftermlist = [t for t in term if _is_factor_like(data[t])]
+    otherlist = [t for t in term if t not in ftermlist]
+    if not ftermlist:
         return _build_tp_smooth(call, data)
-
-    ftermlist: list[str] = []
-    otherlist: list[str] = []
-    for t in term:
-        if data[t].dtype in (pl.Categorical, pl.Enum):
-            ftermlist.append(t)
-        else:
-            otherlist.append(t)
     if not otherlist:
         raise NotImplementedError(
             "sz smooth with only factor terms (→ re fallback) not supported"
@@ -6697,6 +7090,10 @@ def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
         base_raw=base_raw,
         p0=p0,
     )
+    margin_X = [
+        np.column_stack([(fa == lev).astype(float) for lev in lv])
+        for fa, lv in zip(fac_arrs, flev)
+    ] + [Xb]
     return [
         SmoothBlock(
             label=label,
@@ -6706,6 +7103,7 @@ def _build_sz_smooth(call: Call, data: pl.DataFrame) -> list[SmoothBlock]:
             S=S_out,
             spec=BasisSpec(raw=raw, by=None, absorb=None),
             S_scale=S_scale,
+            margin_X=margin_X,
         )
     ]
 
@@ -6764,8 +7162,11 @@ def _ad_Db_1d(nk: int) -> np.ndarray:
 
 
 def _ad_penalty_basis_1d(nk: int, k_pen: int) -> np.ndarray:
-    """The inner ps basis V (shape (nk-2, k_pen)) used to weight the
-    rows of the outer 2nd-difference matrix Db. Matches mgcv:
+    """The inner ps basis V (shape (nk-2, k_pen)) that weights the rows of
+    the outer 2nd-difference matrix Db. Matches mgcv's::
+
+        x <- 1:(nk-2)/nk
+        s(x, k=k_pen, bs="ps", m=2, fx=TRUE)
     """
     x_v = np.arange(1, nk - 1, dtype=float) / nk
     knots = _ps_knots(x_v, m0=2, k=k_pen)
@@ -7069,21 +7470,25 @@ def _te_parse_margins(call: Call, data: pl.DataFrame) -> list[dict]:
     return specs
 
 
-def _apply_tero(specs: list[dict]) -> list[dict]:
-    """Apply mgcv's ``tero`` margin reorder (bam.r:1900-1917)."""
+def _tero_order(specs: list[dict]) -> list[int]:
+    """mgcv ``tero`` (bam.r:2037-2054): the margin order with the largest
+    ``bs.dim`` (the last of equals) swapped to the end."""
+    order = list(range(len(specs)))
     if len(specs) < 2:
-        return specs
+        return order
     maxd = -1
     maxi = 0
     for i, spec in enumerate(specs):
         if int(spec["k"]) >= maxd:
             maxi = i
             maxd = int(spec["k"])
-    if maxi == len(specs) - 1:
-        return specs
-    out = list(specs)
-    out[maxi], out[-1] = out[-1], out[maxi]
-    return out
+    order[maxi], order[-1] = order[-1], order[maxi]
+    return order
+
+
+def _apply_tero(specs: list[dict]) -> list[dict]:
+    """Apply mgcv's ``tero`` margin reorder (bam.r:2037-2054)."""
+    return [specs[i] for i in _tero_order(specs)]
 
 
 def _te_make_margin_call(spec: dict) -> Call:
@@ -7121,7 +7526,7 @@ def _te_build_margin_raw(
         raw = _CRRawBasis(term=term[0], knots=kn)
 
         def _predict(x_new: np.ndarray) -> np.ndarray:
-            return _cr_basis(np.asarray(x_new, dtype=float), kn)
+            return crspl(np.asarray(x_new, dtype=float), kn)[0]
 
         return X, S_list, _predict, True, raw
     if bs == "cc":
@@ -7137,7 +7542,7 @@ def _te_build_margin_raw(
         raw = _CPRawBasis(term=term[0], knots=kn, ord_=ord_)
 
         def _predict(x_new: np.ndarray) -> np.ndarray:
-            return _cp_basis(np.asarray(x_new, dtype=float), kn, ord_)
+            return _cp_predict(np.asarray(x_new, dtype=float), kn, ord_)
 
         return X, S_list, _predict, False, raw
     if bs == "ps":
@@ -7145,7 +7550,7 @@ def _te_build_margin_raw(
         raw = _PSRawBasis(term=term[0], knots=kn, m0=m0)
 
         def _predict(x_new: np.ndarray) -> np.ndarray:
-            return _ps_basis(np.asarray(x_new, dtype=float), kn, m0)
+            return _pspline_predict(np.asarray(x_new, dtype=float), kn, m0)
 
         return X, S_list, _predict, False, raw
     if bs == "bs":
@@ -7153,7 +7558,7 @@ def _te_build_margin_raw(
         raw = _BSRawBasis(term=term[0], knots=kn, m0=m0)
 
         def _predict(x_new: np.ndarray) -> np.ndarray:
-            return _bs_design(np.asarray(x_new, dtype=float), kn, m0, deriv=0)
+            return _pspline_predict(np.asarray(x_new, dtype=float), kn, m0 - 1)
 
         return X, S_list, _predict, False, raw
     if bs == "tp":
@@ -7202,24 +7607,21 @@ def _te_build_margin_centered(
     knots_vec: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[np.ndarray], object, bool, _RawBasis]:
     """Centered margin = bare margin (:func:`_te_build_margin_raw`) + sum-to-zero
-    absorb, returning `(X, S_list, predict, noterp, raw)`. Equivalent to
-    `smoothCon(..., absorb.cons=TRUE)[[1]]` but keeps the Z matrix so
-    `predict(x_new)` evaluates the raw basis and applies the same rotation.
+    absorb, returning `(X, S_list, predict, noterp, raw)`: mgcv's
+    `smoothCon(..., absorb.cons=TRUE)[[1]]` (scale.penalty, then the
+    `qr(t(C))` absorption of :func:`_absorb_sumzero`), keeping the transform
+    so `predict(x_new)` replays it on the raw basis.
     """
     X_raw, S_raw, predict_bare, noterp, bare = _te_build_margin_raw(
         spec, data, knots_vec=knots_vec
     )
     S_sym = [(S + S.T) / 2.0 for S in S_raw]
     S_scaled, _ = _scale_penalty(X_raw, S_sym)
-    C = X_raw.mean(axis=0)
-    Q, _ = np.linalg.qr(C.reshape(-1, 1), mode="complete")
-    Z = Q[:, 1:]
-    X = X_raw @ Z
-    S_list = [Z.T @ S @ Z for S in S_scaled]
-    raw = _LinearTransformRawBasis(inner=bare, M=Z)
+    X, S_list, absorb = _absorb_sumzero(X_raw, S_scaled)
+    raw = _AbsorbedRawBasis(inner=bare, absorb=absorb)
 
     def _predict(x_new: np.ndarray) -> np.ndarray:
-        return np.asarray(predict_bare(x_new)) @ Z
+        return absorb.apply(np.asarray(predict_bare(x_new)))
 
     return X, S_list, _predict, noterp, raw
 
@@ -7231,14 +7633,21 @@ def _te_reparam_margin(
     `np=TRUE` path at smooth.r:796-822).
     """
     np_cols = X.shape[1]
-    knt = np.linspace(float(np.min(x_vals)), float(np.max(x_vals)), np_cols)
+    lo, hi = float(np.min(x_vals)), float(np.max(x_vals))
+    # seq(min(x), max(x), length = np)
+    knt = np.concatenate(
+        [[lo], lo + np.arange(1, np_cols - 1) * ((hi - lo) / (np_cols - 1)), [hi]]
+    )
     P = predict_basis(knt)
-    U, d, Vt = np.linalg.svd(P, full_matrices=False)
+    sv = r_svd(P)
+    d = sv["d"]
     if d[-1] / d[0] < float(np.finfo(float).eps) ** 0.66:
         return X, S_list, None
-    XP = Vt.T @ (U.T / d[:, None])  # V @ diag(1/d) @ U^T
-    X_new = X @ XP
-    S_new = [XP.T @ S @ XP for S in S_list]
+    # sv$v %*% (t(sv$u)/sv$d), then Xm %*% XP and t(XP) %*% Sm %*% XP
+    XP = r_matprod(sv["v"], np.ascontiguousarray(sv["u"].T) / d[:, None])
+    X_new = r_matprod(X, XP)
+    XPt = np.ascontiguousarray(XP.T)
+    S_new = [r_matprod(r_matprod(XPt, S), XP) for S in S_list]
     return X_new, S_new, XP
 
 
@@ -7258,10 +7667,15 @@ def _tensor_prod_X(Xm: list[np.ndarray]) -> np.ndarray:
 def _tensor_prod_S(
     Sm_lists: list[list[np.ndarray]],
 ) -> tuple[list[np.ndarray], list[int]]:
-    """Kronecker-lift each marginal penalty over the tensor basis.
-    (smooth.r:773); this is the hea extension that lifts each one. Single-penalty
-    """
+    """mgcv ``tensor.prod.penalties`` (smooth.r): each marginal penalty
+    Kronecker-lifted over the identities of the other margins, in margin
+    order, then made exactly symmetric as ``(M + t(M))/2``; a single margin's
+    penalty is returned as it is. A margin with several penalties (mgcv
+    stops on those, smooth.r:773) has each one lifted. Also returns the
+    margin each penalty came from."""
     m = len(Sm_lists)
+    if m == 1:
+        return [np.asarray(S, dtype=float) for S in Sm_lists[0]], [0] * len(Sm_lists[0])
     dims = [Sm_lists[i][0].shape[0] for i in range(m)]
     out: list[np.ndarray] = []
     pen_margin: list[int] = []
@@ -7288,12 +7702,6 @@ def _build_te_smooth(
 ) -> list[SmoothBlock]:
     """`te(...)` / `ti(...)` constructor."""
     specs = _te_parse_margins(call, data)
-    # tero (bam.r:1900-1917): on the discrete=True path, reorder margins so
-    # the largest ``bs.dim`` is last. ``maxd`` ties go to the *latest* margin
-    # (mgcv uses ``>=`` so a later equal-size margin wins). The user's
-    # original margin order is unchanged on the non-discrete path.
-    if _TERO_CV.get() and not inter:
-        specs = _apply_tero(specs)
     n_bases = len(specs)
 
     if inter:
@@ -7310,6 +7718,20 @@ def _build_te_smooth(
                 )
     else:
         mc_list = [False] * n_bases
+    # tero (bam.r:2037-2054, applied to every tensor.smooth.spec - te and ti
+    # - at bam.r:2259): on the discrete=True path the margins (with their
+    # ``mc``) are reordered so the largest ``bs.dim`` is last, the last of
+    # equals winning. The non-discrete path keeps the user's order.
+    label = _smooth_label(call)
+    term_all = _smooth_term_vars(call)
+    if _TERO_CV.get():
+        order = _tero_order(specs)
+        if order != list(range(n_bases)):
+            # tero relabels a reordered tensor from its margins' terms
+            specs = [specs[i] for i in order]
+            mc_list = [mc_list[i] for i in order]
+            term_all = [t for sp in specs for t in sp["term"]]
+            label = f"{call.fn}({','.join(term_all)})"
 
     np_flag = call.kwargs.get("np")
     do_np = True
@@ -7342,7 +7764,8 @@ def _build_te_smooth(
 
         scaled = []
         for S in Si_list:
-            top = float(np.linalg.eigvalsh(0.5 * (S + S.T))[-1])
+            # Sm[[i]]/eigen(Sm[[i]], symmetric=TRUE, only.values=TRUE)$values[1]
+            top = float(r_eigen_sym(S, only_values=True)[0])
             scaled.append(S / top if top > 0 else S)
 
         Xm.append(Xi)
@@ -7357,8 +7780,6 @@ def _build_te_smooth(
             del S_list[idx]
 
     cls = "tensor.smooth"
-    label = _smooth_label(call)
-    term_all = _smooth_term_vars(call)
     tensor_raw = _TensorRawBasis(margins=margin_raws)
 
     if matrix_arg:
@@ -7371,6 +7792,7 @@ def _build_te_smooth(
             cls,
             term_all,
             tensor_raw,
+            label=label,
         )
 
     if inter:
@@ -7384,10 +7806,11 @@ def _build_te_smooth(
                 S=S_list,
                 spec=BasisSpec(raw=tensor_raw, by=None, absorb=None),
                 S_scale=S_scale,
+                margin_X=Xm,
             )
         ]
 
-    return _apply_by_and_absorb(
+    blocks = _apply_by_and_absorb(
         call,
         data,
         X,
@@ -7395,7 +7818,11 @@ def _build_te_smooth(
         cls,
         term_all,
         raw_basis=tensor_raw,
+        label=label,
     )
+    for b in blocks:
+        b.margin_X = Xm
+    return blocks
 
 
 def _build_ti_smooth(
@@ -7589,7 +8016,7 @@ def _build_t2_smooth(
             P_per_margin=P_per_margin,
             ranks=ranks,
             null_dim=0,
-            Zn=None,
+            absorb=None,
         )
         return [
             SmoothBlock(
@@ -7603,94 +8030,62 @@ def _build_t2_smooth(
             )
         ]
 
-    cP = X_raw_full.sum(axis=0).reshape(-1, 1)
-    Q_p, _ = np.linalg.qr(cP, mode="complete")
-    Z_p = Q_p[:, 1:]
+    # smoothCon (smooth.r:3870-4120) scales the penalties on the unconstrained
+    # X, absorbs t2's prediction constraint Cp = colSums(X) (smooth.r:1129) by
+    # the full qr(t(Cp)) route, then its fit constraint: set-to-zero on the
+    # last column when the null space has dimension 1, else colSums over the
+    # null columns (smooth.r:1112-1116), absorbed by the partial (indi) route.
+    S_scaled, S_scale = _scale_penalty(X_raw_full, S_list)
+    _, _, absorb_p = _absorb_sumzero(X_raw_full, [], C=r_colsums(X_raw_full))
     t2_predict = _T2PredictRawBasis(
         margins=margin_raws,
         P_per_margin=P_per_margin,
         ranks=ranks,
-        Z_p=Z_p,
+        absorb=absorb_p,
     )
-
-    if null_dim == 1:
-        # Fix the single null-space parameter to zero — drop its column (smooth.r:1118).
-        keep = np.ones(p, dtype=bool)
-        keep[-1] = False
-        X = X_raw_full[:, keep]
-        S_list = [S[np.ix_(keep, keep)] for S in S_list]
-        S_list, S_scale = _scale_penalty(X, S_list)
-        t2_raw = _T2RawBasis(
-            margins=margin_raws,
-            P_per_margin=P_per_margin,
-            ranks=ranks,
-            null_dim=1,
-            Zn=None,
-        )
-        Xp_in = X_raw_full @ Z_p
-        X_bar = X.mean(axis=0)
-        M = np.linalg.lstsq(Xp_in, X - X_bar, rcond=None)[0]
+    if _MOD_CON_CV.get() == 2:
+        # gam.setup(modCon = 2), bam's call: smoothCon replaces the fit
+        # constraint by the prediction one (smooth.r:3856), so the smooth is
+        # fitted in its prediction basis.
+        X, S_new, _ = _absorb_sumzero(X_raw_full, S_scaled, C=r_colsums(X_raw_full))
         return [
             SmoothBlock(
                 label=label,
                 term=term_all,
                 cls=cls,
                 X=X,
-                S=S_list,
-                spec=BasisSpec(
-                    raw=t2_raw,
-                    by=None,
-                    absorb=None,
-                    predict_raw=t2_predict,
-                    coef_remap=(M, X_bar),
-                ),
+                S=S_new,
+                spec=BasisSpec(raw=t2_predict, by=None, absorb=None),
                 S_scale=S_scale,
             )
         ]
-
-    # Partial absorb.cons (smooth.r:4076-4100): C has zero cols on the range
-    # space, so only the null-space cols of X / S get rotated. QR is on the
-    # nx×1 slice cN = colSums(X_N); Z' = Q[:, 1:] spans the null of cN within
-    # the null-space coordinates. Range-space cols pass through unchanged.
-    S_list, S_scale = _scale_penalty(X_raw_full, S_list)
-    X_R = X_raw_full[:, :nup]
-    X_N = X_raw_full[:, nup:]
-    cN = X_N.sum(axis=0).reshape(-1, 1)
-    Qn, _ = np.linalg.qr(cN, mode="complete")
-    Zn = Qn[:, 1:]
-    X = np.concatenate([X_R, X_N @ Zn], axis=1)
-    S_list_new: list[np.ndarray] = []
-    for S in S_list:
-        S_RR = S[:nup, :nup]
-        S_RN = S[:nup, nup:] @ Zn
-        S_NR = Zn.T @ S[nup:, :nup]
-        S_NN = Zn.T @ S[nup:, nup:] @ Zn
-        top = np.concatenate([S_RR, S_RN], axis=1)
-        bot = np.concatenate([S_NR, S_NN], axis=1)
-        S_list_new.append(np.concatenate([top, bot], axis=0))
+    if null_dim == 1:
+        X = X_raw_full[:, :-1]
+        S_new = [S[:-1, :-1] for S in S_scaled]
+        absorb_f = None
+    else:
+        C = np.concatenate([np.zeros(nup), r_colsums(X_raw_full[:, nup:])])
+        X, S_new, absorb_f = _absorb_sumzero(X_raw_full, S_scaled, C=C)
     t2_raw = _T2RawBasis(
         margins=margin_raws,
         P_per_margin=P_per_margin,
         ranks=ranks,
         null_dim=null_dim,
-        Zn=Zn,
+        absorb=absorb_f,
     )
-    Xp_in = X_raw_full @ Z_p
-    X_bar = X.mean(axis=0)
-    M = np.linalg.lstsq(Xp_in, X - X_bar, rcond=None)[0]
     return [
         SmoothBlock(
             label=label,
             term=term_all,
             cls=cls,
             X=X,
-            S=S_list_new,
+            S=S_new,
             spec=BasisSpec(
                 raw=t2_raw,
                 by=None,
                 absorb=None,
                 predict_raw=t2_predict,
-                coef_remap=(M, X_bar),
+                Xp=absorb_p.apply(X_raw_full),
             ),
             S_scale=S_scale,
         )
@@ -7739,6 +8134,60 @@ def _check_rank(
     return X_new, S_new, keep_mask
 
 
+def _extract_data_pack(
+    data: pl.DataFrame,
+    term: list[str],
+    matrix_vars: list[str],
+    n: int,
+    m: int,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """mgcv ``ExtractData`` packing for a matrix-argument smooth
+    (smooth.r:3708-3741). When the first term is a matrix, the stacked
+    covariate rows - R's column-major long form, row ``l*n + i`` - are
+    reduced by ``uniquecombs`` (smooth.r:156-235) to their unique
+    combinations in first-occurrence order, compared by value for a single
+    variable and by their ``as.character`` text for several. The packing is
+    kept only if it leaves fewer than ``0.9*n*m`` rows.
+
+    Returns ``(rows, ind)`` in hea's row-major long form (row ``i*m + l``):
+    ``rows[u]`` is the row holding unique combination ``u`` and ``ind[r]``
+    the combination of row ``r``; ``None`` when nothing is packed.
+    """
+    from ._rformat import r_as_character
+
+    if not term or term[0] not in matrix_vars:
+        return None
+    cols = []
+    for v in term:
+        if v in matrix_vars:
+            cols.append(matrix_to_2d(data[v]).astype(float).T.reshape(-1))
+        else:
+            cols.append(np.tile(data[v].to_numpy().astype(float), m))
+    N = n * m
+    if len(cols) == 1:
+        _u, first, inv = np.unique(cols[0], return_index=True, return_inverse=True)
+    else:
+        codes = []
+        for c in cols:
+            vals, inv_c = np.unique(c, return_inverse=True)
+            _k, key_id = np.unique(np.array(r_as_character(vals)), return_inverse=True)
+            codes.append(np.asarray(key_id).reshape(-1)[np.asarray(inv_c).reshape(-1)])
+        _u, first, inv = np.unique(
+            np.column_stack(codes), axis=0, return_index=True, return_inverse=True
+        )
+    first = np.asarray(first).reshape(-1)
+    order = np.argsort(first, kind="stable")
+    if not len(order) < N * 0.9:
+        return None
+    rank = np.empty_like(order)
+    rank[order] = np.arange(len(order))
+    ind_r = rank[np.asarray(inv).reshape(-1)]
+    rows_r = first[order]
+    rows = (rows_r % n) * m + rows_r // n
+    ind = ind_r.reshape(m, n).T.reshape(-1)
+    return rows, ind
+
+
 def _summation_apply_blocks(
     blocks: list[SmoothBlock],
     n: int,
@@ -7746,29 +8195,50 @@ def _summation_apply_blocks(
     matrix_vars: list[str],
     long_data: pl.DataFrame,
     no_outer_cons: bool = False,
+    pack_ind: np.ndarray | None = None,
 ) -> list[SmoothBlock]:
-    """Run mgcv's ``smoothCon`` matrix-argument pipeline on each raw long-form
-    block, in mgcv's order (smooth.r:3877-4051):
-         by-multiply (smooth.r:3879). Scaling on the row-summed X instead
-         ``Σ_k by[i,k]·X[i,k,:]`` (smooth.r:3997-4008).
-         constraint, smooth.r:3925-3943) or ``no_outer_cons`` (ti, whose
-         (matrixArg always sets ``check.rank=TRUE``, smooth.r:4035).
+    """mgcv ``smoothCon`` for a matrix-argument (summation convention) smooth
+    (smooth.r:3770-4051), on each raw block. ``b.X`` is the constructor's
+    ``sm$X``: one row per unique covariate combination when the data were
+    packed (``pack_ind`` maps every long-form row to its combination), else
+    one row per long-form row. In smoothCon's order:
+
+    * ``C = colMeans(sm$X)`` (smooth.r:3829) and, for ``sparse.cons = -1``,
+      the least-variable column to drop (smooth.r:3836-3837);
+    * scale.penalty from ``sm$X`` (smooth.r:3879-3886);
+    * the constraint is dropped when the row sums ``L1`` of the by matrix
+      vary (smooth.r:3923-3931);
+    * sweep-and-drop, if used, is applied to ``sm$X`` before the by and the
+      summation (smooth.r:3942-3962);
+    * by-multiply and summation over the ``m`` columns, accumulated in order
+      as ``colSums`` does (smooth.r:3997-4024);
+    * the QR constraint on ``C`` is absorbed into the summed design
+      (smooth.r:4076-4120), and ``check.rank`` (smooth.r:4035) follows.
     """
     out: list[SmoothBlock] = []
     mvars = tuple(matrix_vars)
     sparse_cons = _SPARSE_CONS_CV.get()
     eps = float(np.finfo(float).eps)
     for b in blocks:
-        X = b.X
-        if X.shape[0] != n * m:
+        X0 = b.X
+        if pack_ind is None and X0.shape[0] != n * m:
             raise RuntimeError(
                 f"matrix-arg summation: builder for {b.label!r} returned X "
-                f"with {X.shape[0]} rows, expected n*m = {n * m}"
+                f"with {X0.shape[0]} rows, expected n*m = {n * m}"
             )
+        if pack_ind is not None and X0.shape[0] <= int(pack_ind.max()):
+            raise RuntimeError(
+                f"matrix-arg summation: builder for {b.label!r} returned X "
+                f"with {X0.shape[0]} rows for {int(pack_ind.max()) + 1} "
+                "unique covariate combinations"
+            )
+        p0 = X0.shape[1]
+        C0 = r_colsums(X0, mean=True) if p0 else np.zeros(0)
         S_list = list(b.S)
-        S_list, S_scale = _scale_penalty(X, S_list)
+        S_list, S_scale = _scale_penalty(X0, S_list)
         drop_cons = False
         by_mask = b.spec.by if b.spec is not None else None
+        by_arr = None
         if by_mask is not None:
             by_col = _eval_by_col(by_mask.expr, long_data)
             by_arr = (
@@ -7777,17 +8247,32 @@ def _summation_apply_blocks(
                 else np.asarray(by_col)
             )
             by_arr = by_arr.astype(float)
-            X = X * by_arr[:, None]
-            L1 = by_arr.reshape(n, m).sum(axis=1)
-            sd_L1 = float(np.std(L1, ddof=1)) if n > 1 else 0.0
-            drop_cons = sd_L1 > float(np.mean(L1)) * eps * 1000.0
-        X_summed = X.reshape(n, m, X.shape[1]).sum(axis=1)
+            L1 = r_matprod(by_arr.reshape(n, m), np.ones((m, 1)))[:, 0]
+            sd_L1 = math.sqrt(r_var(L1)) if n > 1 else 0.0
+            drop_cons = sd_L1 > r_mean(L1) * eps * 1000.0
         abs_T = None
-        if not no_outer_cons and not drop_cons:
-            if sparse_cons == -1:
-                X_summed, S_list, abs_T = _absorb_sweep_drop(X_summed, S_list)
-            else:
-                X_summed, S_list, abs_T = _absorb_sumzero(X_summed, S_list)
+        use_cons = not no_outer_cons and not drop_cons and p0 > 0
+        if use_cons and sparse_cons == -1:
+            vcol = (
+                np.array([r_var(X0[:, j]) for j in range(p0)])
+                if X0.shape[0] > 1
+                else np.zeros(p0)
+            )
+            drop = int(np.argmin(vcol))
+            keep = np.ones(p0, dtype=bool)
+            keep[drop] = False
+            X0 = X0[:, keep] - C0[keep][None, :]
+            S_list = [S[np.ix_(keep, keep)] for S in S_list]
+            abs_T = _SweepDropTransform(drop_idx=drop, C_minus=C0[keep])
+        X_long = X0[pack_ind] if pack_ind is not None else X0
+        if by_arr is not None:
+            X_long = X_long * by_arr[:, None]
+        X3 = X_long.reshape(n, m, X_long.shape[1])
+        X_summed = 0.0 + X3[:, 0, :] if pack_ind is not None else X3[:, 0, :].copy()
+        for col in range(1, m):
+            X_summed = X_summed + X3[:, col, :]
+        if use_cons and sparse_cons != -1:
+            X_summed, S_list, abs_T = _absorb_sumzero(X_summed, S_list, C=C0)
         X_summed, S_list, keep_mask = _check_rank(X_summed, S_list)
         if b.spec is not None:
             b.spec.summation_dim = m
@@ -7849,6 +8334,7 @@ def materialize_smooths(
     tero: bool = False,
     knots: dict | None = None,
     xt: Mapping | None = None,
+    mod_con: int = 0,
 ) -> list[list[SmoothBlock]]:
     """Materialize each smooth in `expanded.smooths` to one or more blocks.
 
@@ -7875,6 +8361,9 @@ def materialize_smooths(
     identifiability constraint absorber to sweep-drop, the path
     ``bam(discrete=FALSE)`` follows. Stored in a context var consumed inside
     ``_apply_by_and_absorb`` and ``_summation_apply_blocks``.
+
+    ``mod_con`` is gam.setup's ``modCon``: 2 (bam) fits a smooth with a
+    separate prediction constraint (t2) in its prediction basis.
 
     ``knots`` (mgcv's ``gam(..., knots=list(...))``): a dict keyed by covariate
     name; each entry overrides that smooth's default knot placement. Threaded
@@ -8054,6 +8543,7 @@ def materialize_smooths(
 
     token = _SPARSE_CONS_CV.set(int(sparse_cons))
     tero_token = _TERO_CV.set(bool(tero))
+    mod_con_token = _MOD_CON_CV.set(int(mod_con))
     try:
         out: list[list[SmoothBlock]] = []
         for i, call in enumerate(calls):
@@ -8073,9 +8563,13 @@ def materialize_smooths(
                         "(summation convention) is not supported; use te()."
                     )
                 long_data, n_orig, m = long_form_view(data, mvars)
+                pack = _extract_data_pack(
+                    data, _smooth_term_vars(call), mvars, n_orig, m
+                )
+                build_data = long_data if pack is None else long_data[pack[0]]
                 ma_token = _MATRIX_ARG_CV.set(True)
                 try:
-                    blocks = _dispatch(call, long_data, matrix_arg=True)
+                    blocks = _dispatch(call, build_data, matrix_arg=True)
                 finally:
                     _MATRIX_ARG_CV.reset(ma_token)
                 blocks = _summation_apply_blocks(
@@ -8085,6 +8579,7 @@ def materialize_smooths(
                     mvars,
                     long_data,
                     no_outer_cons=(call.fn == "ti"),
+                    pack_ind=None if pack is None else pack[1],
                 )
             else:
                 blocks = _dispatch(call, data)
@@ -8092,6 +8587,7 @@ def materialize_smooths(
         return out
     finally:
         _TERO_CV.reset(tero_token)
+        _MOD_CON_CV.reset(mod_con_token)
         _SPARSE_CONS_CV.reset(token)
 
 
@@ -8266,13 +8762,27 @@ class Design:
 
 
 _LHS_FUNCS: dict[str, callable] = {
-    "log": lambda e: e.log(),
-    "log2": lambda e: e.log(2.0),
-    "log10": lambda e: e.log10(),
-    "exp": lambda e: e.exp(),
-    "sqrt": lambda e: e.sqrt(),
-    "abs": lambda e: e.abs(),
+    "log": np.log,
+    "log2": np.log2,
+    "log10": np.log10,
+    "exp": np.exp,
+    "sqrt": np.sqrt,
+    "abs": np.abs,
 }
+
+
+def _r_pow_vec(x, y) -> np.ndarray:
+    """R's ``x ^ y`` elementwise (``R_pow``), the exponent recycled."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if y.size == 1:
+        return _rpow(x, float(y.reshape(-1)[0]))
+    xb, yb = np.broadcast_arrays(x, y)
+    out = np.empty(xb.shape)
+    of = out.reshape(-1)
+    for i, (u, v) in enumerate(zip(xb.reshape(-1), yb.reshape(-1))):
+        of[i] = _r_pow_scalar(float(u), float(v))
+    return out
 
 
 def _lhs_referenced_cols(node, columns: set[str]) -> set[str]:
@@ -8307,28 +8817,29 @@ def _lhs_referenced_cols(node, columns: set[str]) -> set[str]:
     return out
 
 
-def _eval_lhs_expr(node, columns: set[str]) -> pl.Expr:
-    """Recursively evaluate an LHS AST as a polars expression."""
+def _eval_lhs_values(node, data: pl.DataFrame):
+    """An LHS AST's values in R's arithmetic: IEEE ``+ - * /``, ``R_pow``
+    for ``^``, libm for the functions (nulls read as NaN)."""
     if isinstance(node, Name):
-        if node.ident not in columns:
+        if node.ident not in data.columns:
             raise KeyError(f"LHS references unknown column {node.ident!r}")
-        return pl.col(node.ident)
+        return data[node.ident].to_numpy().astype(float)
     if isinstance(node, Literal):
         if node.kind != "num":
             raise NotImplementedError(f"LHS literal kind {node.kind!r} not supported")
-        return pl.lit(float(node.value))
+        return float(node.value)
     if isinstance(node, Paren):
-        return _eval_lhs_expr(node.expr, columns)
+        return _eval_lhs_values(node.expr, data)
     if isinstance(node, UnaryOp):
-        e = _eval_lhs_expr(node.operand, columns)
+        e = _eval_lhs_values(node.operand, data)
         if node.op == "-":
-            return -e
+            return -np.asarray(e, dtype=float)
         if node.op == "+":
             return e
         raise NotImplementedError(f"LHS unary op {node.op!r} not supported")
     if isinstance(node, BinOp):
-        L = _eval_lhs_expr(node.left, columns)
-        R = _eval_lhs_expr(node.right, columns)
+        L = np.asarray(_eval_lhs_values(node.left, data), dtype=float)
+        R = np.asarray(_eval_lhs_values(node.right, data), dtype=float)
         if node.op == "+":
             return L + R
         if node.op == "-":
@@ -8338,7 +8849,7 @@ def _eval_lhs_expr(node, columns: set[str]) -> pl.Expr:
         if node.op == "/":
             return L / R
         if node.op == "^":
-            return L**R
+            return _r_pow_vec(L, R)
         raise NotImplementedError(f"LHS binary op {node.op!r} not supported")
     if isinstance(node, Call):
         if node.kwargs:
@@ -8348,7 +8859,7 @@ def _eval_lhs_expr(node, columns: set[str]) -> pl.Expr:
         if node.fn == "I":
             if len(node.args) != 1:
                 raise ValueError("I() takes exactly one argument")
-            return _eval_lhs_expr(node.args[0], columns)
+            return _eval_lhs_values(node.args[0], data)
         if node.fn == "cbind":
             raise NotImplementedError(
                 "multi-column response cbind() (e.g. for binomial trials) "
@@ -8357,12 +8868,40 @@ def _eval_lhs_expr(node, columns: set[str]) -> pl.Expr:
         if node.fn in _LHS_FUNCS:
             if len(node.args) != 1:
                 raise ValueError(f"{node.fn}() takes exactly one argument on LHS")
-            return _LHS_FUNCS[node.fn](_eval_lhs_expr(node.args[0], columns))
+            v = np.asarray(_eval_lhs_values(node.args[0], data), dtype=float)
+            return _LHS_FUNCS[node.fn](v)
         raise NotImplementedError(
             f"LHS function {node.fn}() not supported "
             f"(allowed: I, {', '.join(sorted(_LHS_FUNCS))})"
         )
     raise NotImplementedError(f"LHS contains unsupported node {type(node).__name__}")
+
+
+def _eval_lhs_series(node, data: pl.DataFrame, name: str) -> pl.Series:
+    """The response an LHS expression gives on ``data`` as a Series called
+    ``name``: a column (possibly in ``I()``/parentheses) as it is, otherwise
+    :func:`_eval_lhs_values`'s doubles, null wherever a referenced column
+    is."""
+    inner = node
+    while isinstance(inner, Paren) or (
+        isinstance(inner, Call) and inner.fn == "I" and len(inner.args) == 1
+    ):
+        inner = inner.expr if isinstance(inner, Paren) else inner.args[0]
+    if isinstance(inner, Name):
+        if inner.ident not in data.columns:
+            raise KeyError(f"LHS references unknown column {inner.ident!r}")
+        return data[inner.ident].alias(name)
+    with np.errstate(all="ignore"):
+        v = _eval_lhs_values(node, data)
+    s = pl.Series(
+        name, np.broadcast_to(np.asarray(v, dtype=float), (len(data),)).copy()
+    )
+    null = np.zeros(len(data), dtype=bool)
+    for c in _lhs_referenced_cols(node, set(data.columns)):
+        null |= data[c].is_null().to_numpy()
+    if null.any():
+        s = s.scatter(np.flatnonzero(null), None)
+    return s
 
 
 def _na_mask_with_matrix_cols(
@@ -8482,9 +9021,7 @@ def prepare_design(
     if isinstance(f_parsed.lhs, Name):
         y = data_clean[f_parsed.lhs.ident]
     else:
-        y = data_clean.select(
-            _eval_lhs_expr(f_parsed.lhs, columns).alias(response_label)
-        )[response_label]
+        y = _eval_lhs_series(f_parsed.lhs, data_clean, response_label)
 
     with with_contrasts(contrasts):
         X_values, X_names, param_assign = _build_design(

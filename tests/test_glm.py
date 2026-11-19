@@ -27,13 +27,41 @@ dispatch paths.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import polars as pl
 import pytest
-from conftest import load_dataset, load_glm_oracle
+from conftest import (
+    FIXTURE_ROOT,
+    PINNED_ARITHMETIC,
+    load_dataset,
+    load_glm_oracle,
+    load_hex_fixture,
+)
 
-from hea.family import Binomial, Gamma, Gaussian, InverseGaussian, Poisson, Quasi
-from hea.models import glm
+from hea.family import (
+    Binomial,
+    Gamma,
+    Gaussian,
+    InverseGaussian,
+    Poisson,
+    Quasi,
+    power,
+)
+from hea.models import glm, lm
+
+
+def _with_r_warnings(fit, *messages):
+    """Run ``fit()`` and check it raises exactly R's warnings ``messages``
+    (glm.fit warns the same for the same data)."""
+    with warnings.catch_warnings(record=True) as got:
+        warnings.simplefilter("always")
+        m = fit()
+    seen = sorted({str(w.message) for w in got})
+    assert seen == sorted(messages), seen
+    return m
+
 
 EXPECTED = [
     ("gaussian_identity_iris", "gaussian", "identity"),
@@ -121,7 +149,18 @@ def _build_insurance_gaussian_log():
         load_dataset("MASS", "Insurance")["Claims"] > 0
     )
     off = np.log(d["Holders"].to_numpy().astype(float))
-    return glm("Claims ~ District + Group", d, family=Gaussian(link="log"), offset=off)
+    # the oracle starts glm.fit from lm(log(y + 1e-3) ~ District + Group)
+    d_start = d.with_columns(
+        (pl.col("Claims").cast(pl.Float64) + 1e-3).log().alias("logy")
+    )
+    start = np.asarray(lm("logy ~ District + Group", d_start).coef, dtype=float)
+    return glm(
+        "Claims ~ District + Group",
+        d,
+        family=Gaussian(link="log"),
+        offset=off,
+        start=start,
+    )
 
 
 def _build_trees(link: str):
@@ -137,12 +176,20 @@ def _build_quine(link: str):
 def _build_menarche(link: str):
     d = load_dataset("MASS", "menarche")
     d2 = d.with_columns([(d["Menarche"] / d["Total"]).alias("p")])
-    return glm(
-        "p ~ Age",
-        d2,
-        family=Binomial(link=link),
-        weights=d["Total"].to_numpy().astype(float),
-    )
+
+    def fit():
+        return glm(
+            "p ~ Age",
+            d2,
+            family=Binomial(link=link),
+            weights=d["Total"].to_numpy().astype(float),
+        )
+
+    if link == "cloglog":
+        return _with_r_warnings(
+            fit, "glm.fit: fitted probabilities numerically 0 or 1 occurred"
+        )
+    return fit()
 
 
 def _build_ig_insurance():
@@ -570,7 +617,13 @@ def test_factor_response_binomial_drops_unused_enum_levels():
     ]
     assert set(irisr["Species"].unique().to_list()) == {"setosa", "versicolor"}
 
-    m = glm("Species ~ Sepal.Width + Sepal.Length", data=irisr, family=Binomial())
+    m = _with_r_warnings(
+        lambda: glm(
+            "Species ~ Sepal.Width + Sepal.Length", data=irisr, family=Binomial()
+        ),
+        "glm.fit: algorithm did not converge",
+        "glm.fit: fitted probabilities numerically 0 or 1 occurred",
+    )
     np.testing.assert_allclose(
         m._bhat_arr,
         [-360.6100, -110.1258, 131.7941],
@@ -590,7 +643,13 @@ def test_factor_response_binomial_drops_unused_when_first_level_absent():
         .cast(pl.String)
         .cast(pl.Enum(["virginica", "setosa", "versicolor"]))
     )
-    m = glm("Species ~ Sepal.Width + Sepal.Length", data=irisr, family=Binomial())
+    m = _with_r_warnings(
+        lambda: glm(
+            "Species ~ Sepal.Width + Sepal.Length", data=irisr, family=Binomial()
+        ),
+        "glm.fit: algorithm did not converge",
+        "glm.fit: fitted probabilities numerically 0 or 1 occurred",
+    )
     np.testing.assert_allclose(
         m._bhat_arr,
         [-360.6100, -110.1258, 131.7941],
@@ -624,10 +683,27 @@ def test_quasi_poisson_matches_poisson_betas_with_estimated_dispersion():
     assert m_quasi.dispersion != 1.0
     assert m_quasi.dispersion > 1.0  # quine is overdispersed
 
+    # quasi starts from y + 0.1 at the zero counts only, poisson from y + 0.1
+    # everywhere, so the two IRLS runs end on different last steps and the
+    # covariances (from the last step's weights) agree only to that, in R
+    # as here; the quasi SEs are R's.
     np.testing.assert_allclose(
         m_quasi._se_bhat_arr,
         np.sqrt(m_quasi.dispersion) * m_pois._se_bhat_arr,
-        atol=1e-10,
+        rtol=1e-6,
+    )
+    np.testing.assert_allclose(
+        m_quasi._se_bhat_arr,
+        [
+            0.23471000417201979,
+            0.1543416136599528,
+            0.25434227033246415,
+            0.22649585974762856,
+            0.24560774111641531,
+            0.15197764987498516,
+            0.18884466824855917,
+        ],
+        rtol=1e-12,
     )
 
     assert np.isnan(m_quasi.aic) and np.isnan(m_quasi.bic) and np.isnan(m_quasi.loglike)
@@ -647,7 +723,10 @@ def test_quasibinomial_quasipoisson_constructors_through_glm():
     m_q = glm("Days ~ Sex + Age", d, family=Quasi(link="log", variance="mu"))
     m_qp = glm("Days ~ Sex + Age", d, family=quasipoisson)
     np.testing.assert_allclose(m_qp._bhat_arr, m_q._bhat_arr, atol=1e-10)
-    np.testing.assert_allclose(m_qp.dispersion, m_q.dispersion, atol=1e-12)
+    # quasipoisson starts like poisson, quasi(variance = "mu") from y + 0.1 at
+    # the zero counts only: R's dispersions differ by their last IRLS steps.
+    np.testing.assert_allclose(m_q.dispersion, 14.970477630167553, rtol=1e-12)
+    np.testing.assert_allclose(m_qp.dispersion, 14.970470794496475, rtol=1e-12)
     assert m_qp.family.name == "quasipoisson"
     assert np.isnan(m_qp.aic)
 
@@ -657,3 +736,66 @@ def test_quasibinomial_quasipoisson_constructors_through_glm():
     np.testing.assert_allclose(m_qb._bhat_arr, m_b._bhat_arr, atol=1e-8)
     assert m_qb.dispersion != 1.0 and m_qb._test_kind == "t"
     assert np.isnan(m_qb.aic)
+
+
+_GLM_FIT = FIXTURE_ROOT / "glm_fit"
+
+_GLM_FIT_CASES = {
+    "pois": ("yp ~ x1 + x2 + g", {"family": Poisson()}),
+    "pois_off": ("yp ~ x1 + x2 + offset(off)", {"family": Poisson()}),
+    "binom": ("yb ~ x1 + x2", {"family": Binomial()}),
+    "gamma": ("yg ~ x1 + g", {"family": Gamma(link="log")}),
+    "gauss_w": ("yn ~ x1 + x2", {"weights": "w"}),
+    "quasi_mu": ("yp ~ x1 + x2", {"family": Quasi(link="log", variance="mu")}),
+    "quasi_power": (
+        "yg ~ x1 + x2",
+        {"family": Quasi(link=power(1 / 3), variance="mu^2")},
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(_GLM_FIT_CASES))
+def test_glm_matches_r_exactly(case):
+    """glm is R's glm.fit (each IRLS step a Cdqrls fit, R's start and step
+    halving), glm's null-deviance refit with an offset, summary.glm's
+    dispersion from the working weights and residuals and its chol2inv
+    covariance, and predict.lm's standard errors."""
+    D = load_hex_fixture(_GLM_FIT / "data.txt")
+    df = pl.DataFrame(
+        {
+            "x1": D["x1"],
+            "x2": D["x2"],
+            "g": np.array(["a", "b", "c"])[D["g"].astype(int) - 1],
+            "off": D["off"],
+            "yp": D["yp"],
+            "yb": D["yb"],
+            "yg": D["yg"],
+            "yn": D["yn"],
+        }
+    )
+    formula, kw = _GLM_FIT_CASES[case]
+    kw = dict(kw)
+    if kw.get("weights") == "w":
+        kw["weights"] = D["w"]
+    m = glm(formula, df, **kw)
+    want = load_hex_fixture(_GLM_FIT / f"{case}.txt")
+    got = {
+        "coef": m._bhat_arr,
+        "se": m._se_bhat_arr,
+        "dispersion": m.dispersion,
+        "deviance": m.deviance,
+        "null_deviance": m.null_deviance,
+        "fitted": m.fitted_values,
+        "vcov": m.vcov,
+        "iter": float(m.iter),
+        "pse": m.predict(type="link", se_fit=True)["se.fit"].to_numpy(),
+    }
+    if not case.startswith("quasi"):
+        got["aic"] = m.aic
+    for name, value in got.items():
+        if PINNED_ARITHMETIC:
+            np.testing.assert_array_equal(value, want[name], err_msg=name)
+        else:
+            np.testing.assert_allclose(
+                value, want[name], rtol=1e-10, atol=1e-12, err_msg=name
+            )
