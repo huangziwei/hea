@@ -3,7 +3,7 @@
 //! `DLARFG` reflectors it is built from. Lower-triangle storage, the
 //! triangle `eigen(symmetric = TRUE)` reads.
 
-use super::aux::dlapy2;
+use super::auxiliary::dlapy2;
 use super::blas::{daxpy, ddot, dgemv, dnrm2, dscal, dsymv, dsyr2, dsyr2k};
 use super::{disnan, sign, EPS, SAFMIN};
 

@@ -2,7 +2,7 @@
 //! matrix by the MRRR algorithm (`DLARRE` representations and dqds
 //! eigenvalues, `DLARRV` vectors, `DLARRJ` refinement to relative accuracy).
 
-use super::aux::{dlae2, dlaev2, dlanst_m, dlasrt};
+use super::auxiliary::{dlae2, dlaev2, dlanst_m, dlasrt};
 use super::blas::{dcopy, dscal, dswap};
 use super::larrv::dlarrv;
 use super::lasq::dlasq2;

@@ -4,7 +4,7 @@
 //! `DLASD5`) and the subproblem tree `DLASDT`. Fused products follow
 //! gfortran's GIMPLE for R's libRlapack.
 
-use super::aux::{dlacpy, dlamrg, dlanst_m, dlapy2, dlartg, dlascl_g, dlaset, dlasr};
+use super::auxiliary::{dlacpy, dlamrg, dlanst_m, dlapy2, dlartg, dlascl_g, dlaset, dlasr};
 use super::bdsqr::dlasdq;
 use super::blas::{dcopy, dgemm, dnrm2, drot, dswap};
 use super::stedc::dlaed6;

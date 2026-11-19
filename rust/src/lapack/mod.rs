@@ -47,7 +47,7 @@ macro_rules! pm {
     };
 }
 
-pub(crate) mod aux;
+pub(crate) mod auxiliary;
 pub(crate) mod bdsqr;
 pub(crate) mod blas;
 pub(crate) mod chol;

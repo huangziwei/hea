@@ -8,7 +8,7 @@
 //! routines contains a fused product in R's libRlapack; the arithmetic is
 //! in the vendor BLAS they call.
 
-use super::aux::{dlacpy, dlascl_g, dlaset};
+use super::auxiliary::{dlacpy, dlascl_g, dlaset};
 use super::blas::{daxpy, dcopy, dgemm, dgemv, dger, dscal, dtrmm};
 use super::lasd::dbdsdc;
 use super::ormtr::{dlarf1f_left, dlarfb_lfc, dlarft_fc, dormqr_l};

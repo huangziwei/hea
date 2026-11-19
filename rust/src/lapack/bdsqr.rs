@@ -5,7 +5,7 @@
 //! divide-and-conquer leaf. Fused products follow gfortran's GIMPLE for
 //! R's libRlapack.
 
-use super::aux::{dlartg, dlascl_g, dlasr, dlasrt};
+use super::auxiliary::{dlartg, dlascl_g, dlasr, dlasrt};
 use super::blas::{dcopy, drot, dscal, dswap};
 use super::lasq::dlasq2;
 use super::{fma, lsame, sign, EPS, PREC, SAFMIN};

@@ -1,7 +1,7 @@
 //! `DSTEQR` (implicit QL/QR on a symmetric tridiagonal matrix) and `DSTERF`
 //! (its root-free eigenvalue-only variant, Pal-Walker-Kahan).
 
-use super::aux::{dlae2, dlaev2, dlanst_m, dlapy2, dlartg, dlascl_g, dlaset, dlasr, dlasrt};
+use super::auxiliary::{dlae2, dlaev2, dlanst_m, dlapy2, dlartg, dlascl_g, dlaset, dlasr, dlasrt};
 use super::blas::dswap;
 use super::{fma, lsame, sign, EPS, SAFMIN};
 

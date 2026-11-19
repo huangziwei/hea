@@ -1,7 +1,7 @@
 //! `DSTEDC`: eigenpairs of a symmetric tridiagonal matrix by Cuppen's divide
 //! and conquer (`DLAED0`-`DLAED6`), with `DSTEQR` below `SMLSIZ`.
 
-use super::aux::{dlacpy, dlamrg, dlanst_m, dlapy2, dlascl_g, dlaset};
+use super::auxiliary::{dlacpy, dlamrg, dlanst_m, dlapy2, dlascl_g, dlaset};
 use super::blas::{dcopy, dgemm, dnrm2, drot, dscal, dswap, idamax};
 use super::steqr::{dsteqr, dsterf};
 use super::{fma, lsame, sign, EPS, SAFMIN};

@@ -1,7 +1,7 @@
 //! `DLASQ2`-`DLASQ6`: all eigenvalues of the positive definite `L D L'`
 //! (in qd form) by the dqds algorithm with shifts, as `DLARRE` uses it.
 
-use super::aux::dlasrt;
+use super::auxiliary::dlasrt;
 use super::{disnan, fma, PREC, SAFMIN};
 
 /// The state `DLASQ3` threads through its calls (its in/out arguments).

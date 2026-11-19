@@ -3,7 +3,7 @@
 //! (`DLARRF`) and bisection (`DLARRB`, `DLANEG`) where Rayleigh quotient
 //! correction does not converge.
 
-use super::aux::dlaset;
+use super::auxiliary::dlaset;
 use super::blas::{dcopy, dscal};
 use super::{disnan, fma, PREC, SAFMIN};
 
